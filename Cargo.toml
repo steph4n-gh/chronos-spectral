@@ -1,0 +1,17 @@
+[package]
+name = "chronos_spectral"
+version = "0.1.0"
+edition = "2021"
+description = "Zero-allocation Non-Causal Spatiotemporal Wavefield & Biophysical Entrainment Tracker (wasm32 SIMD128)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

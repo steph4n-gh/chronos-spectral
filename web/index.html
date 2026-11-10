@@ -1,0 +1,1232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%2305080f'/><circle cx='16' cy='16' r='9' fill='none' stroke='%2300e5ff' stroke-width='3'/></svg>" />
+  <title>CHRONOS-SPECTRAL // Non-Causal Wavefield &amp; Phase-Cue Lab Deck</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --brand-color: #00e5ff;
+      --bg-void: #05080f;
+      --bg-panel: #0b111e;
+      --bg-card: #10192b;
+      --border-strong: #2c4268;
+      --border-accent: #00c4db;
+      --text-primary: #ecf4ff;
+      --text-secondary: #a8c0df;
+      --status-ok: #38f27a;
+      --status-warn: #ffd166;
+      --status-alert: #ff5d6c;
+      --font-mono: ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+      --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-void);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      accent-color: var(--brand-color);
+      min-block-size: 100dvh;
+      inline-size: 100%;
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    ::selection {
+      background-color: #00b4d8;
+      color: #03070e;
+    }
+
+    /* Top Command Header */
+    header.deck-header {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: safe center;
+      gap: 0.75rem 1.25rem;
+      padding-block: 0.65rem;
+      padding-inline: 1.1rem;
+      background-color: var(--bg-panel);
+      border-block-end: 1px solid var(--border-strong);
+    }
+
+    .brand-lockup {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      min-inline-size: 0;
+    }
+
+    .brand-badge {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      padding: 0.2rem 0.5rem;
+      border: 1px solid var(--border-accent);
+      color: var(--brand-color);
+      background-color: #061b26;
+      border-radius: 3px;
+    }
+
+    .brand-title {
+      font-family: var(--font-mono);
+      font-size: 0.96rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--text-primary);
+    }
+
+    .brand-subtitle {
+      font-size: 0.78rem;
+      color: var(--text-secondary);
+    }
+
+    .header-pills {
+      margin-inline-start: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+    }
+
+    .pill {
+      padding: 0.24rem 0.6rem;
+      border-radius: 4px;
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      color: var(--text-primary);
+      display: inline-flex;
+      align-items: center;
+      gap: 0.35rem;
+    }
+
+    .pill.ok {
+      border-color: #218c4a;
+      color: var(--status-ok);
+    }
+
+    .pill.warn {
+      border-color: #a87e1b;
+      color: var(--status-warn);
+    }
+
+    /* Main 3-Zone Command Deck Grid */
+    main.deck-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.85fr) minmax(330px, 0.95fr) minmax(310px, 0.85fr);
+      gap: 0.85rem;
+      padding: 0.85rem;
+      inline-size: 100%;
+      align-items: start;
+    }
+
+    @media (max-width: 1280px) {
+      main.deck-grid {
+        grid-template-columns: minmax(0, 1.4fr) minmax(320px, 1fr);
+      }
+      .control-column {
+        grid-column: span 2;
+      }
+    }
+
+    @media (max-width: 860px) {
+      main.deck-grid {
+        grid-template-columns: 1fr;
+      }
+      .control-column {
+        grid-column: span 1;
+      }
+    }
+
+    .deck-column {
+      display: flex;
+      flex-direction: column;
+      gap: 0.85rem;
+      min-inline-size: 0;
+    }
+
+    /* Containment isolation for high-frequency telemetry & control columns */
+    .isolated-region {
+      content-visibility: auto;
+      contain-intrinsic-size: auto 340px auto 720px;
+    }
+
+    @supports not (content-visibility: auto) {
+      .isolated-region {
+        contain: layout style paint;
+      }
+    }
+
+    .panel {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 0.8rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      overflow: clip;
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      border-block-end: 1px solid #1b2a44;
+      padding-block-end: 0.45rem;
+    }
+
+    .panel-title {
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--brand-color);
+    }
+
+    .panel-meta {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-secondary);
+    }
+
+    /* Block display + aspect-ratio on canvases prevents baseline gaps and layout shift */
+    canvas {
+      display: block;
+      inline-size: 100%;
+      block-size: auto;
+      background-color: #050811;
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+    }
+
+    #hudCanvas {
+      aspect-ratio: 16 / 9;
+    }
+
+    #pipCanvas {
+      aspect-ratio: 1 / 1;
+      max-inline-size: 192px;
+    }
+
+    #hilbertCanvas,
+    #spectralCanvas {
+      aspect-ratio: 2 / 1;
+    }
+
+    .pip-and-swap-row {
+      display: grid;
+      grid-template-columns: 192px minmax(0, 1fr);
+      gap: 0.85rem;
+      align-items: stretch;
+    }
+
+    @media (max-width: 560px) {
+      .pip-and-swap-row {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* Telemetry KPI Matrix */
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
+      gap: 0.5rem;
+      inline-size: 100%;
+    }
+
+    .kpi-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 0.5rem 0.6rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+    }
+
+    .kpi-label {
+      font-family: var(--font-mono);
+      font-size: 0.67rem;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .kpi-value {
+      font-family: var(--font-mono);
+      font-size: 1.02rem;
+      font-weight: 700;
+      color: var(--text-primary);
+    }
+
+    .kpi-value.accent { color: var(--brand-color); }
+    .kpi-value.ok     { color: var(--status-ok); }
+    .kpi-value.warn   { color: var(--status-warn); }
+    .kpi-value.alert  { color: var(--status-alert); }
+
+    /* Control Deck Styling */
+    .scrollable-controls {
+      max-block-size: calc(100dvh - 5.2rem);
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+      overscroll-behavior: contain;
+      scrollbar-width: thin;
+      scrollbar-color: #395884 #0b111e;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem;
+    }
+
+    button {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.45rem 0.68rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      cursor: pointer;
+      transition: background-color 0.14s ease, border-color 0.14s ease;
+      flex: 1 1 auto;
+    }
+
+    button:hover {
+      border-color: var(--border-accent);
+      background-color: #16243d;
+    }
+
+    button:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+    }
+
+    button[aria-pressed="true"],
+    button.active {
+      background-color: #083344;
+      border-color: var(--brand-color);
+      color: var(--brand-color);
+    }
+
+    button.action-btn {
+      background-color: #15253f;
+      border-color: #3f6294;
+    }
+
+    .file-upload-label {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.45rem 0.68rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      cursor: pointer;
+      text-align: center;
+      flex: 1 1 auto;
+    }
+
+    .file-upload-label:hover {
+      border-color: var(--border-accent);
+    }
+
+    #mp4Input {
+      display: none;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 0.32rem;
+    }
+
+    .slider-label-row {
+      display: flex;
+      justify-content: space-between;
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      color: var(--text-secondary);
+    }
+
+    .slider-val {
+      color: var(--text-primary);
+      font-weight: 700;
+    }
+
+    input[type="range"] {
+      inline-size: 100%;
+      cursor: pointer;
+    }
+
+    .toggle-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+
+    .toggle-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      color: var(--text-primary);
+      cursor: pointer;
+    }
+
+    .lab-desc {
+      font-size: 0.78rem;
+      line-height: 1.42;
+      color: var(--text-secondary);
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 0.55rem 0.65rem;
+    }
+
+    video#hiddenVideoSource {
+      display: none;
+    }
+
+    /* Fallback when accent-color is unsupported (per brand-consistent-forms guidance) */
+    @supports not (accent-color: #00e5ff) {
+      .toggle-item input[type="checkbox"] {
+        position: absolute !important;
+        clip-path: inset(50%) !important;
+        overflow: hidden !important;
+        width: 1px !important;
+        height: 1px !important;
+        margin: -1px !important;
+        padding: 0 !important;
+        border: 0 !important;
+        white-space: nowrap !important;
+      }
+      .toggle-item {
+        position: relative;
+        padding-inline-start: 1.65rem;
+      }
+      .toggle-item input[type="checkbox"] + span::before {
+        content: "";
+        position: absolute;
+        inset-inline-start: 0;
+        inset-block-start: 50%;
+        transform: translateY(-50%);
+        width: 1.05rem;
+        height: 1.05rem;
+        border: 2px solid var(--border-strong);
+        background-color: var(--bg-card);
+        border-radius: 3px;
+      }
+      .toggle-item input[type="checkbox"]:focus-visible + span::before {
+        outline: 2px solid var(--brand-color);
+        outline-offset: 2px;
+      }
+      .toggle-item input[type="checkbox"]:checked + span::before {
+        background-color: var(--brand-color);
+        border-color: var(--brand-color);
+      }
+      .toggle-item input[type="checkbox"]:checked + span::after {
+        content: "✓";
+        position: absolute;
+        inset-inline-start: 0.22rem;
+        inset-block-start: 50%;
+        transform: translateY(-50%);
+        color: #020810;
+        font-weight: 700;
+        font-size: 0.78rem;
+      }
+      input[type="range"] {
+        -webkit-appearance: none;
+        appearance: none;
+        background: transparent;
+      }
+      input[type="range"]::-webkit-slider-runnable-track {
+        height: 6px;
+        border-radius: 3px;
+        background: linear-gradient(to right, var(--brand-color) var(--progress, 50%), #253652 var(--progress, 50%));
+      }
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        height: 15px;
+        width: 15px;
+        border-radius: 50%;
+        background: var(--brand-color);
+        margin-top: -4.5px;
+      }
+      input[type="range"]::-moz-range-track {
+        height: 6px;
+        border-radius: 3px;
+        background: #253652;
+      }
+      input[type="range"]::-moz-range-progress {
+        height: 6px;
+        border-radius: 3px;
+        background: var(--brand-color);
+      }
+      input[type="range"]::-moz-range-thumb {
+        height: 15px;
+        width: 15px;
+        border-radius: 50%;
+        border: none;
+        background: var(--brand-color);
+      }
+    }
+
+    /* Forced Colors Mode accessibility support */
+    @media (forced-colors: active) {
+      .panel,
+      .kpi-card,
+      .pill,
+      button,
+      canvas {
+        border: 1px solid CanvasText;
+      }
+      button[aria-pressed="true"],
+      button.active {
+        outline: 2px solid Highlight;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="deck-header">
+    <div class="brand-lockup">
+      <span class="brand-badge">WASM32 + SIMD128</span>
+      <div>
+        <div class="brand-title">CHRONOS-SPECTRAL</div>
+        <div class="brand-subtitle">Non-Causal Spatiotemporal Wavefield &amp; Phase-Synchronized Telemetry Tracker</div>
+      </div>
+    </div>
+    <div class="header-pills">
+      <span class="pill ok" id="pillKernel">◆ KERNEL BOOTING</span>
+      <span class="pill" id="pillArena">WASM ARENA: 64 PAGES / 4.00 MB</span>
+      <span class="pill ok" id="pillPerf">KERNEL: -- ms</span>
+      <span class="pill" id="pillFps">FPS: --</span>
+    </div>
+  </header>
+
+  <main class="deck-grid">
+    <!-- Left Column: Main Delayed Wavefield OffscreenCanvas + Eulerian PiP & Swap Proof -->
+    <section class="deck-column">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Non-Causal Delayed Wavefield HUD [t − K]</span>
+          <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
+        </div>
+        <canvas id="hudCanvas" width="960" height="540" aria-label="Delayed non-causal wavefield tracking viewport"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">FISTA-Stabilized Eulerian Temporal-Contrast PiP &amp; Identity Audit</span>
+          <span class="panel-meta" id="mortonReadout">BINARY-PREFIX SIG: 0x00000000 (v₂ = --)</span>
+        </div>
+        <div class="pip-and-swap-row">
+          <canvas id="pipCanvas" width="192" height="192" aria-label="16x16 Eulerian temporal-contrast picture-in-picture"></canvas>
+          <div class="kpi-grid">
+            <div class="kpi-card">
+              <span class="kpi-label" id="lblPadicSwaps">Oracle ID Switches</span>
+              <span class="kpi-value ok" id="kpiPadicSwaps">◆ 0</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Kinematic Kalman Swaps</span>
+              <span class="kpi-value alert" id="kpiKalmanSwaps">▲ 0</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">ECA Clutter Supp.</span>
+              <span class="kpi-value accent" id="kpiClutterDb">WARMING</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Kernel + Lanczos</span>
+              <span class="kpi-value ok" id="kpiWasmMs">-- ms</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Locked Targets</span>
+              <span class="kpi-value" id="kpiTargets">0 / 8</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">Pillar Collisions</span>
+              <span class="kpi-value warn" id="kpiCollisions">0</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Middle Column: Hilbert Analytic Tremor Scope + Lanczos Spectral Graph Scope -->
+    <section class="deck-column isolated-region">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Equalized Hilbert Quadrature Scope (R_t vs H{R_t})</span>
+          <span class="panel-meta" id="hilbertMeta">φ = 0° | f = -- Hz</span>
+        </div>
+        <canvas id="hilbertCanvas" width="420" height="210" aria-label="Discrete Hilbert quadrature tremor phase portrait and waveform"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Pre-Assignment Shifted Lanczos Fiedler &amp; 12-Slot Ring</span>
+          <span class="panel-meta" id="spectralMeta">λ₂ = 0.0000 | Δλ = 0.000</span>
+        </div>
+        <canvas id="spectralCanvas" width="420" height="210" aria-label="Lanczos Fiedler eigenvector partition and 12-frame ring buffer"></canvas>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">Variational &amp; Kinematic Telemetry Matrix</span>
+          <span class="panel-meta" id="fistaGapMeta">DUAL GAP: 0.000</span>
+        </div>
+        <div class="kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">Tremor Freq</span>
+            <span class="kpi-value accent" id="kpiTremorHz">-- Hz</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Delayed Phase φ(t−K)</span>
+            <span class="kpi-value" id="kpiTremorPhi">--°</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Ballistic T-Apex</span>
+            <span class="kpi-value warn" id="kpiApexMs">-- ms</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label" id="lblReflexKpi">Stimulus Onset / Settle</span>
+            <span class="kpi-value ok" id="kpiSaccadeMs">-- ms</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Column: Sensor Input, Lab Modes, Synth & Kernel Controls -->
+    <aside class="deck-column isolated-region scrollable-controls control-column">
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">1. Optical Wavefield Input Source</span>
+          <span class="panel-meta">320×180 RAW RGBA</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Blind Pillar Bench</button>
+          <button type="button" id="btnSrcWebcam" aria-pressed="false">◉ Live Webcam</button>
+          <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
+          <input type="file" id="mp4Input" accept="video/*" />
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnAudioToggle" aria-pressed="false">♪ Enable WebAudio Synth</button>
+          <button type="button" id="btnResetArena" class="action-btn">↺ Reset Tracks</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">2. Biophysical &amp; Kinematic Lab Mode</span>
+          <span class="panel-meta" id="labBadge">MODE A</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" data-lab="0" class="lab-btn active" aria-pressed="true">A: Ballistic Apex</button>
+          <button type="button" data-lab="1" class="lab-btn" aria-pressed="false">B: Tremor &amp; Reflex</button>
+          <button type="button" data-lab="2" class="lab-btn" aria-pressed="false">C: Air-Percussion</button>
+        </div>
+        <p class="lab-desc" id="labDescription">
+          <strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and predicts Newtonian parabolic apex coordinates in physical units.
+        </p>
+        <div class="btn-row">
+          <button type="button" id="btnLabStimulus" class="action-btn">⚡ Launch Ballistic Arc Impulse</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">3. Predicted Present-Phase Strobe Offset</span>
+          <span class="panel-meta" id="phaseOffsetLabel">−π/2 LAG CUE</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" data-phase="-1.5707963" class="phase-btn active" aria-pressed="true">−π/2 Lag Cue</button>
+          <button type="button" data-phase="1.5707963" class="phase-btn" aria-pressed="false">+π/2 Lead Cue</button>
+          <button type="button" data-phase="0" class="phase-btn" aria-pressed="false">0° Peak Cue</button>
+          <button type="button" data-phase="3.1415926" class="phase-btn" aria-pressed="false">π Trough Cue</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">4. Kernel &amp; Variational Hyperparameters</span>
+          <span class="panel-meta">REAL-TIME</span>
+        </div>
+
+        <div class="control-group">
+          <div class="slider-label-row">
+            <label for="sliderK">Lookahead Delay K (Frames)</label>
+            <span class="slider-val" id="valK">8 frames (133 ms)</span>
+          </div>
+          <input type="range" id="sliderK" min="0" max="11" step="1" value="8" />
+        </div>
+
+        <div class="control-group">
+          <div class="slider-label-row">
+            <label for="sliderEca">ECA Guarded Regression Rate</label>
+            <span class="slider-val" id="valEca">0.035</span>
+          </div>
+          <input type="range" id="sliderEca" min="0.005" max="0.150" step="0.005" value="0.035" />
+        </div>
+
+        <div class="control-group">
+          <div class="slider-label-row">
+            <label for="sliderLambda">Dual FISTA L1 Penalty λ</label>
+            <span class="slider-val" id="valLambda">1.45</span>
+          </div>
+          <input type="range" id="sliderLambda" min="0.10" max="5.00" step="0.05" value="1.45" />
+        </div>
+
+        <div class="control-group">
+          <div class="slider-label-row">
+            <label for="sliderGain">Temporal Contrast Gain</label>
+            <span class="slider-val" id="valGain">25x</span>
+          </div>
+          <input type="range" id="sliderGain" min="5" max="60" step="1" value="25" />
+        </div>
+
+        <div class="toggle-list">
+          <label class="toggle-item" for="chkKalman">
+            <input type="checkbox" id="chkKalman" checked />
+            <span>Show Kinematic 2×2 Kalman Baseline</span>
+          </label>
+          <label class="toggle-item" for="chkEcaOverlay">
+            <input type="checkbox" id="chkEcaOverlay" />
+            <span>Overlay Live ECA Residual [Frame t]</span>
+          </label>
+          <label class="toggle-item" for="chkStrobe">
+            <input type="checkbox" id="chkStrobe" checked />
+            <span>Enable Present-Phase Strobe Cue</span>
+          </label>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <video id="hiddenVideoSource" playsinline muted loop></video>
+
+  <script type="module">
+    const hudEl = document.getElementById('hudCanvas');
+    const pipEl = document.getElementById('pipCanvas');
+    const hilbertEl = document.getElementById('hilbertCanvas');
+    const spectralEl = document.getElementById('spectralCanvas');
+
+    const hudOffscreen = hudEl.transferControlToOffscreen();
+    const pipOffscreen = pipEl.transferControlToOffscreen();
+    const hilbertOffscreen = hilbertEl.transferControlToOffscreen();
+    const spectralOffscreen = spectralEl.transferControlToOffscreen();
+
+    const worker = new Worker('./worker.js');
+    worker.postMessage(
+      {
+        type: 'init',
+        wasmUrl: './chronos_spectral.wasm',
+        hudCanvas: hudOffscreen,
+        pipCanvas: pipOffscreen,
+        hilbertCanvas: hilbertOffscreen,
+        spectralCanvas: spectralOffscreen,
+      },
+      [hudOffscreen, pipOffscreen, hilbertOffscreen, spectralOffscreen]
+    );
+
+    // ========================================================================
+    // Polyphonic Delayed-View Synchronized WebAudio Synthesizer
+    // ========================================================================
+    let audioCtx = null;
+    let audioEnabled = false;
+    let noiseBuffer = null;
+
+    function getAudioOutputLatencySec() {
+      if (!audioCtx) return 0.0;
+      return (audioCtx.outputLatency || 0.0) + (audioCtx.baseLatency || 0.0);
+    }
+
+    function syncAudioLatencyToWorker() {
+      worker.postMessage({
+        type: 'params',
+        audioOutLatencySec: audioEnabled ? getAudioOutputLatencySec() : 0.0,
+      });
+    }
+
+    function ensureAudioContext() {
+      if (!audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC({ latencyHint: 'interactive' });
+        noiseBuffer = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * 0.25), audioCtx.sampleRate);
+        const data = noiseBuffer.getChannelData(0);
+        for (let i = 0; i < data.length; i++) {
+          data[i] = Math.random() * 2.0 - 1.0;
+        }
+      }
+      if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+      }
+      syncAudioLatencyToWorker();
+    }
+
+    function playPhaseStrobePulse(resonant, tremorHz, amp) {
+      if (!audioEnabled || !audioCtx) return;
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = resonant ? 'triangle' : 'sine';
+      const baseFreq = resonant ? 528.0 : 264.0;
+      osc.frequency.setValueAtTime(baseFreq + Math.min(80, tremorHz * 4), t0);
+      osc.frequency.exponentialRampToValueAtTime(baseFreq * 0.5, t0 + 0.055);
+
+      const peak = Math.min(0.18, 0.05 + amp * 0.08);
+      gain.gain.setValueAtTime(0.0001, t0);
+      gain.gain.linearRampToValueAtTime(peak, t0 + 0.004);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.06);
+
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + 0.065);
+    }
+
+    function playDelayedSyncPercussion(zone, leadSec, velocity, sentPerfMs) {
+      if (!audioEnabled || !audioCtx) return;
+      const msgDelaySec = typeof sentPerfMs === 'number'
+        ? Math.max(0.0, (performance.now() - sentPerfMs) * 0.001)
+        : 0.0;
+      const netLeadSec = Math.max(0.0, Math.min(0.24, leadSec - msgDelaySec - getAudioOutputLatencySec()));
+      const when = audioCtx.currentTime + netLeadSec;
+      const vel = Math.max(0.2, Math.min(1.0, velocity));
+
+      if (zone === 0) {
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(155.0, when);
+        osc.frequency.exponentialRampToValueAtTime(42.0, when + 0.14);
+        gain.gain.setValueAtTime(0.38 * vel, when);
+        gain.gain.exponentialRampToValueAtTime(0.001, when + 0.22);
+        osc.connect(gain).connect(audioCtx.destination);
+        osc.start(when);
+        osc.stop(when + 0.23);
+      } else if (zone === 1) {
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = noiseBuffer;
+        const filter = audioCtx.createBiquadFilter();
+        filter.type = 'highpass';
+        filter.frequency.setValueAtTime(1100, when);
+        const nGain = audioCtx.createGain();
+        nGain.gain.setValueAtTime(0.26 * vel, when);
+        nGain.gain.exponentialRampToValueAtTime(0.001, when + 0.13);
+        noise.connect(filter).connect(nGain).connect(audioCtx.destination);
+        noise.start(when);
+        noise.stop(when + 0.14);
+
+        const body = audioCtx.createOscillator();
+        const bGain = audioCtx.createGain();
+        body.type = 'triangle';
+        body.frequency.setValueAtTime(210, when);
+        body.frequency.exponentialRampToValueAtTime(115, when + 0.07);
+        bGain.gain.setValueAtTime(0.22 * vel, when);
+        bGain.gain.exponentialRampToValueAtTime(0.001, when + 0.08);
+        body.connect(bGain).connect(audioCtx.destination);
+        body.start(when);
+        body.stop(when + 0.09);
+      } else if (zone === 2) {
+        const noise = audioCtx.createBufferSource();
+        noise.buffer = noiseBuffer;
+        const hp = audioCtx.createBiquadFilter();
+        hp.type = 'highpass';
+        hp.frequency.setValueAtTime(6200, when);
+        const gain = audioCtx.createGain();
+        gain.gain.setValueAtTime(0.22 * vel, when);
+        gain.gain.exponentialRampToValueAtTime(0.001, when + 0.065);
+        noise.connect(hp).connect(gain).connect(audioCtx.destination);
+        noise.start(when);
+        noise.stop(when + 0.07);
+      } else {
+        const carrier = audioCtx.createOscillator();
+        const mod = audioCtx.createOscillator();
+        const modGain = audioCtx.createGain();
+        const outGain = audioCtx.createGain();
+        carrier.type = 'sine';
+        carrier.frequency.setValueAtTime(330, when);
+        carrier.frequency.exponentialRampToValueAtTime(165, when + 0.16);
+        mod.frequency.setValueAtTime(495, when);
+        modGain.gain.setValueAtTime(140 * vel, when);
+        modGain.gain.exponentialRampToValueAtTime(1, when + 0.12);
+        outGain.gain.setValueAtTime(0.28 * vel, when);
+        outGain.gain.exponentialRampToValueAtTime(0.001, when + 0.18);
+        mod.connect(modGain).connect(carrier.frequency);
+        carrier.connect(outGain).connect(audioCtx.destination);
+        mod.start(when);
+        carrier.start(when);
+        mod.stop(when + 0.19);
+        carrier.stop(when + 0.19);
+      }
+    }
+
+    // ========================================================================
+    // Deduplicated Live Webcam & Uploaded MP4 Frame Pump
+    // ========================================================================
+    const videoEl = document.getElementById('hiddenVideoSource');
+    let activeMediaStream = null;
+    let videoPumpActive = false;
+    let lastMediaTime = -1;
+    let lastPumpPerfMs = 0;
+
+    function stopMediaCapture() {
+      videoPumpActive = false;
+      lastMediaTime = -1;
+      lastPumpPerfMs = 0;
+      videoEl.pause();
+      if (activeMediaStream) {
+        activeMediaStream.getTracks().forEach((t) => t.stop());
+        activeMediaStream = null;
+      }
+      videoEl.srcObject = null;
+    }
+
+    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
+      if (!videoPumpActive || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) return;
+      if (mediaTimeSec === lastMediaTime) return;
+
+      let dtSec = 1.0 / 60.0;
+      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.2) {
+        dtSec = Math.max(0.004, mediaTimeSec - lastMediaTime);
+      } else if (lastPumpPerfMs > 0) {
+        dtSec = Math.min(0.05, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
+      }
+      lastMediaTime = mediaTimeSec;
+      lastPumpPerfMs = nowPerfMs;
+
+      try {
+        const bitmap = await createImageBitmap(videoEl, {
+          resizeWidth: 320,
+          resizeHeight: 180,
+          resizeQuality: 'low',
+        });
+        worker.postMessage({ type: 'video_frame', bitmap, dtSec }, [bitmap]);
+      } catch (_err) {
+        // Ignore transient decode race during source switch
+      }
+    }
+
+    function startVideoPump() {
+      videoPumpActive = true;
+      lastMediaTime = -1;
+      lastPumpPerfMs = 0;
+
+      if (typeof videoEl.requestVideoFrameCallback === 'function') {
+        const onVideoFrame = async (now, metadata) => {
+          if (!videoPumpActive) return;
+          await forwardUniqueVideoFrame(metadata.mediaTime, now);
+          if (videoPumpActive) videoEl.requestVideoFrameCallback(onVideoFrame);
+        };
+        videoEl.requestVideoFrameCallback(onVideoFrame);
+      } else {
+        const onRafFallback = async (now) => {
+          if (!videoPumpActive) return;
+          await forwardUniqueVideoFrame(videoEl.currentTime, now);
+          if (videoPumpActive) requestAnimationFrame(onRafFallback);
+        };
+        requestAnimationFrame(onRafFallback);
+      }
+    }
+
+    // ========================================================================
+    // UI Bindings & Telemetry DOM Updates
+    // ========================================================================
+    const dom = {
+      pillKernel: document.getElementById('pillKernel'),
+      pillArena: document.getElementById('pillArena'),
+      pillPerf: document.getElementById('pillPerf'),
+      pillFps: document.getElementById('pillFps'),
+      hudSourceLabel: document.getElementById('hudSourceLabel'),
+      mortonReadout: document.getElementById('mortonReadout'),
+      lblPadicSwaps: document.getElementById('lblPadicSwaps'),
+      kpiPadicSwaps: document.getElementById('kpiPadicSwaps'),
+      kpiKalmanSwaps: document.getElementById('kpiKalmanSwaps'),
+      kpiClutterDb: document.getElementById('kpiClutterDb'),
+      kpiWasmMs: document.getElementById('kpiWasmMs'),
+      kpiTargets: document.getElementById('kpiTargets'),
+      kpiCollisions: document.getElementById('kpiCollisions'),
+      hilbertMeta: document.getElementById('hilbertMeta'),
+      spectralMeta: document.getElementById('spectralMeta'),
+      fistaGapMeta: document.getElementById('fistaGapMeta'),
+      kpiTremorHz: document.getElementById('kpiTremorHz'),
+      kpiTremorPhi: document.getElementById('kpiTremorPhi'),
+      kpiApexMs: document.getElementById('kpiApexMs'),
+      lblReflexKpi: document.getElementById('lblReflexKpi'),
+      kpiSaccadeMs: document.getElementById('kpiSaccadeMs'),
+      labBadge: document.getElementById('labBadge'),
+      labDescription: document.getElementById('labDescription'),
+      btnLabStimulus: document.getElementById('btnLabStimulus'),
+      phaseOffsetLabel: document.getElementById('phaseOffsetLabel'),
+    };
+
+    worker.onmessage = (ev) => {
+      const m = ev.data;
+      if (m.type === 'ready') {
+        dom.pillKernel.textContent = '◆ WASM KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
+        dom.pillArena.textContent = `WASM ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
+      } else if (m.type === 'audio_strobe') {
+        playPhaseStrobePulse(m.resonant, m.freqHz, m.amp);
+      } else if (m.type === 'audio_percussion') {
+        playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentPerfMs);
+      } else if (m.type === 'telemetry') {
+        const underBudget = m.wasmMeanMs < 0.25;
+        dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${m.wasmMeanMs.toFixed(3)} ms`;
+        dom.pillPerf.className = `pill ${underBudget ? 'ok' : 'warn'}`;
+        dom.pillFps.textContent = `FPS: ${m.fps.toFixed(0)}`;
+
+        // Separate independent testbench 1-to-1 oracle count from live internal signature audit
+        if (m.sourceMode === 'testbench') {
+          dom.lblPadicSwaps.textContent = 'Oracle ID Switches';
+          dom.kpiPadicSwaps.textContent = `◆ ${m.oracleSwaps}`;
+        } else {
+          dom.lblPadicSwaps.textContent = '2-Adic Fiedler Audit';
+          dom.kpiPadicSwaps.textContent = `◆ ${m.padicSwaps}`;
+        }
+
+        dom.kpiKalmanSwaps.textContent = `▲ ${m.kalmanSwaps}`;
+        dom.kpiClutterDb.textContent = m.clutterDbValid
+          ? `${m.clutterDb.toFixed(1)} dB`
+          : 'WARMING';
+        dom.kpiWasmMs.textContent = `${m.wasmMeanMs.toFixed(3)} ms`;
+        dom.kpiTargets.textContent = `${m.activeTargets} / 8`;
+        dom.kpiCollisions.textContent = `${m.inPillarCollisions}`;
+
+        dom.mortonReadout.textContent = `BINARY-PREFIX SIG: ${m.primarySigHex} (v₂ = ${m.primaryPadicVal})`;
+        if (m.lookaheadK < 7) {
+          dom.hilbertMeta.textContent = 'HILBERT GATED (K<7)';
+          dom.kpiTremorHz.textContent = 'GATED (K<7)';
+          dom.kpiTremorPhi.textContent = 'GATED';
+        } else if (m.phaseValid) {
+          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | f = ${m.tremorFreqHz.toFixed(1)} Hz`;
+          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(1)} Hz` : '-- Hz';
+          dom.kpiTremorPhi.textContent = `${m.tremorPhaseDeg.toFixed(0)}°`;
+        } else {
+          dom.hilbertMeta.textContent = 'STENCIL OCCLUDED (HOLD)';
+          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(1)} Hz` : 'OCCLUDED';
+          dom.kpiTremorPhi.textContent = 'HOLD';
+        }
+        dom.spectralMeta.textContent = `λ₂ = ${m.lambda2.toFixed(4)} | Δλ = ${m.spectralGap.toFixed(3)}`;
+        dom.fistaGapMeta.textContent = `DUAL GAP: ${m.fistaDualityGap.toFixed(3)}`;
+        dom.kpiApexMs.textContent = m.apexMs > 1 ? `${m.apexMs.toFixed(0)} ms` : 'STEADY';
+
+        if (m.stimulusArmed) {
+          dom.lblReflexKpi.textContent = 'Stimulus Armed';
+          dom.kpiSaccadeMs.textContent = 'AWAITING';
+        } else if (m.saccadeLatencyMs > 0) {
+          dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
+          dom.kpiSaccadeMs.textContent = `${m.saccadeLatencyMs.toFixed(1)} ms`;
+        } else {
+          dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
+          dom.kpiSaccadeMs.textContent = 'READY';
+        }
+      }
+    };
+
+    // Source Switching
+    const btnTestbench = document.getElementById('btnSrcTestbench');
+    const btnWebcam = document.getElementById('btnSrcWebcam');
+    const mp4Input = document.getElementById('mp4Input');
+
+    function setSourceButtons(activeBtn) {
+      [btnTestbench, btnWebcam].forEach((b) => {
+        const on = b === activeBtn;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+
+    btnTestbench.addEventListener('click', () => {
+      stopMediaCapture();
+      setSourceButtons(btnTestbench);
+      dom.hudSourceLabel.textContent = 'SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)';
+      worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
+    });
+
+    btnWebcam.addEventListener('click', async () => {
+      try {
+        stopMediaCapture();
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
+          audio: false,
+        });
+        activeMediaStream = stream;
+        videoEl.srcObject = stream;
+        await videoEl.play();
+        setSourceButtons(btnWebcam);
+        dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (320×180 DEDUPLICATED)';
+        worker.postMessage({ type: 'set_source', sourceMode: 'webcam' });
+        startVideoPump();
+      } catch (err) {
+        dom.hudSourceLabel.textContent = `WEBCAM UNAVAILABLE: ${err.message}`;
+      }
+    });
+
+    mp4Input.addEventListener('change', async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      if (!file) return;
+      stopMediaCapture();
+      setSourceButtons(null);
+      videoEl.src = URL.createObjectURL(file);
+      videoEl.loop = true;
+      await videoEl.play();
+      dom.hudSourceLabel.textContent = `SOURCE: MP4 FILE (${file.name})`;
+      worker.postMessage({ type: 'set_source', sourceMode: 'video' });
+      startVideoPump();
+    });
+
+    // Audio & Reset Buttons
+    const btnAudio = document.getElementById('btnAudioToggle');
+    btnAudio.addEventListener('click', () => {
+      ensureAudioContext();
+      audioEnabled = !audioEnabled;
+      syncAudioLatencyToWorker();
+      btnAudio.classList.toggle('active', audioEnabled);
+      btnAudio.setAttribute('aria-pressed', String(audioEnabled));
+      btnAudio.textContent = audioEnabled ? '♪ WebAudio Synth: ON' : '♪ Enable WebAudio Synth';
+    });
+
+    document.getElementById('btnResetArena').addEventListener('click', () => {
+      worker.postMessage({ type: 'lab_action', action: 'reset' });
+    });
+
+    // Lab Modes (A, B, C)
+    const LAB_COPY = [
+      {
+        badge: 'MODE A',
+        html: '<strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and predicts Newtonian parabolic apex coordinates in physical units.',
+        btn: '⚡ Launch Ballistic Arc Impulse',
+        action: 'ballistic_toss',
+      },
+      {
+        badge: 'MODE B',
+        html: '<strong>Mode B — Tremor Quadrature &amp; Stimulus Onset:</strong> Revises non-causal 2D principal-axis residuals R(t) = Y_raw − X_FISTA, equalizes 15-tap Hilbert phase, and timestamps stimulus-to-onset latency.',
+        btn: '⚡ Arm &amp; Trigger Saccade Stimulus',
+        action: 'saccade_step',
+      },
+      {
+        badge: 'MODE C',
+        html: '<strong>Mode C — Delayed-Sync Air-Percussion Synth:</strong> Deduplicates sparse second-difference impulses (‖D₂X‖) on physical event time and synchronizes polyphonic WebAudio voices + pad flashes at t − K.',
+        btn: '⚡ Snap Air-Percussion L1 Strike',
+        action: 'air_strike',
+      },
+    ];
+
+    let currentLabMode = 0;
+    document.querySelectorAll('.lab-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        currentLabMode = Number(btn.dataset.lab);
+        document.querySelectorAll('.lab-btn').forEach((b) => {
+          const on = b === btn;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-pressed', String(on));
+        });
+        const info = LAB_COPY[currentLabMode];
+        dom.labBadge.textContent = info.badge;
+        dom.labDescription.innerHTML = info.html;
+        dom.btnLabStimulus.textContent = info.btn;
+        if (currentLabMode === 2 && !audioEnabled) {
+          ensureAudioContext();
+          audioEnabled = true;
+          syncAudioLatencyToWorker();
+          btnAudio.classList.add('active');
+          btnAudio.setAttribute('aria-pressed', 'true');
+          btnAudio.textContent = '♪ WebAudio Synth: ON';
+        }
+        worker.postMessage({ type: 'params', labMode: currentLabMode });
+      });
+    });
+
+    dom.btnLabStimulus.addEventListener('click', () => {
+      worker.postMessage({ type: 'lab_action', action: LAB_COPY[currentLabMode].action });
+    });
+
+    // Phase-Lock Offset Buttons
+    document.querySelectorAll('.phase-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const rad = parseFloat(btn.dataset.phase);
+        document.querySelectorAll('.phase-btn').forEach((b) => {
+          const on = b === btn;
+          b.classList.toggle('active', on);
+          b.setAttribute('aria-pressed', String(on));
+        });
+        dom.phaseOffsetLabel.textContent = btn.textContent.toUpperCase();
+        worker.postMessage({ type: 'params', phaseOffsetRad: rad });
+      });
+    });
+
+    // Hyperparameter Sliders & Toggles
+    const sliderK = document.getElementById('sliderK');
+    const sliderEca = document.getElementById('sliderEca');
+    const sliderLambda = document.getElementById('sliderLambda');
+    const sliderGain = document.getElementById('sliderGain');
+
+    function syncRangeFallbackProgress(input) {
+      if (!CSS.supports('accent-color', '#00e5ff')) {
+        const min = parseFloat(input.min) || 0;
+        const max = parseFloat(input.max) || 100;
+        const val = parseFloat(input.value) || 0;
+        const pct = ((val - min) / (max - min)) * 100;
+        input.style.setProperty('--progress', `${pct}%`);
+      }
+    }
+
+    [sliderK, sliderEca, sliderLambda, sliderGain].forEach(syncRangeFallbackProgress);
+
+    sliderK.addEventListener('input', () => {
+      const k = parseInt(sliderK.value, 10);
+      document.getElementById('valK').textContent = `${k} frames (${Math.round(k * 16.67)} ms)`;
+      syncRangeFallbackProgress(sliderK);
+      worker.postMessage({ type: 'params', lookaheadK: k });
+    });
+
+    sliderEca.addEventListener('input', () => {
+      const v = parseFloat(sliderEca.value);
+      document.getElementById('valEca').textContent = v.toFixed(3);
+      syncRangeFallbackProgress(sliderEca);
+      worker.postMessage({ type: 'params', ecaAdaptRate: v });
+    });
+
+    sliderLambda.addEventListener('input', () => {
+      const v = parseFloat(sliderLambda.value);
+      document.getElementById('valLambda').textContent = v.toFixed(2);
+      syncRangeFallbackProgress(sliderLambda);
+      worker.postMessage({ type: 'params', fistaLambda: v });
+    });
+
+    sliderGain.addEventListener('input', () => {
+      const v = parseFloat(sliderGain.value);
+      document.getElementById('valGain').textContent = `${v.toFixed(0)}x`;
+      syncRangeFallbackProgress(sliderGain);
+      worker.postMessage({ type: 'params', eulerianGain: v });
+    });
+
+    document.getElementById('chkKalman').addEventListener('change', (e) => {
+      worker.postMessage({ type: 'params', showKalmanBaseline: e.target.checked });
+    });
+    document.getElementById('chkEcaOverlay').addEventListener('change', (e) => {
+      worker.postMessage({ type: 'params', showEcaOverlay: e.target.checked });
+    });
+    document.getElementById('chkStrobe').addEventListener('change', (e) => {
+      worker.postMessage({ type: 'params', strobeEnabled: e.target.checked });
+    });
+  </script>
+</body>
+</html>
