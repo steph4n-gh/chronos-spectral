@@ -74,14 +74,14 @@ const { instance } = await WebAssembly.instantiate(wasmBytes, {});
 const exp = instance.exports;
 const mem = exp.memory;
 
-if (mem.buffer.byteLength !== 64 * 65536) {
-  throw new Error(`Expected 64 pages (4194304 B), got ${mem.buffer.byteLength}`);
+if (mem.buffer.byteLength !== 256 * 65536) {
+  throw new Error(`Expected 256 pages (16777216 B), got ${mem.buffer.byteLength}`);
 }
 
 const telem = new Float32Array(mem.buffer, exp.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
 const laplacian = new Float32Array(mem.buffer, exp.chronos_get_laplacian_ptr(), 256);
 const fiedler = new Float32Array(mem.buffer, exp.chronos_get_fiedler_ptr(), 16);
-const pipBuf = new Uint8Array(mem.buffer, exp.chronos_get_pip_rgba_ptr(), 1024);
+const pipBuf = new Uint8Array(mem.buffer, exp.chronos_get_pip_rgba_ptr(), 4096);
 
 // Exact production pre-allocated Shifted Lanczos + Invariant-Subspace Restart solver from web/worker.js
 const activeNodeIdx = new Int32Array(GRAPH_NODES);
@@ -421,8 +421,7 @@ function runTwinGrayAblation(spectralGamma) {
   exp.chronos_init();
   exp.chronos_set_spectral_weight(spectralGamma);
   prevFiedlerTrack.fill(0.0);
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), BYTES));
   const buf = new Uint8Array(BYTES);
 
   let crossLaneHijacks = 0;
@@ -472,8 +471,7 @@ console.log(`  [PASS] Gate B (Twin-Gray Spectral Ablation): gamma=0 cross-lane h
 exp.chronos_init();
 prevFiedlerTrack.fill(0.0);
 {
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), BYTES));
   const buf = new Uint8Array(BYTES);
   let maxGapVis = 0.0;
   let maxGapAllOcc = 0.0;
@@ -511,8 +509,7 @@ function runAntiDiagonalHilbertCheck(fps, lookaheadKVal) {
   exp.chronos_init();
   exp.chronos_set_params(lookaheadKVal, 0.035, 2.2, 25.0, -Math.PI * 0.5, 1);
   prevFiedlerTrack.fill(0.0);
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), BYTES));
   const buf = new Uint8Array(BYTES);
 
   let sumR2 = 0.0, sumH2 = 0.0, validFrames = 0;
@@ -565,8 +562,7 @@ for (const testK of [10, 11]) {
   exp.chronos_init();
   exp.chronos_set_params(testK, 0.035, 1.45, 25.0, -Math.PI * 0.5, 2);
   prevFiedlerTrack.fill(0.0);
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), BYTES));
   const buf = new Uint8Array(BYTES);
 
   let strikeCount = 0;
@@ -598,8 +594,7 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup): 1 impul
 // ----------------------------------------------------------------------------
 {
   exp.chronos_init();
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), BYTES));
   const ecaRes = new Float32Array(mem.buffer, exp.chronos_get_eca_res_ptr(), PIXELS);
 
   // Frame 0: seed structured static clutter
@@ -646,79 +641,190 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup): 1 impul
   console.log(`  [PASS] Gate F (Rank-2 ECA Offset Cancellation & 1000-Triple Ultrametric Check): maxAffineRes=${maxAffineRes.toExponential(2)}`);
 }
 
+// ----------------------------------------------------------------------------
+// Gate G: Live Dual-Resolution Arena Switch (320x180 SD <-> 640x360 HD, 0 memory.grow)
+// ----------------------------------------------------------------------------
+{
+  exp.chronos_init();
+  if (exp.chronos_get_resolution() !== 0 || exp.chronos_get_frame_w() !== 320 || exp.chronos_get_frame_h() !== 180 || exp.chronos_get_pip_dim() !== 16) {
+    throw new Error('Gate G: Unexpected initial SD dimensions');
+  }
+  exp.chronos_set_resolution(1);
+  if (exp.chronos_get_resolution() !== 1 || exp.chronos_get_frame_w() !== 640 || exp.chronos_get_frame_h() !== 360 || exp.chronos_get_pip_dim() !== 32) {
+    throw new Error('Gate G: Unexpected HD dimensions after chronos_set_resolution(1)');
+  }
+  const hdBytes = 640 * 360 * 4;
+  const hdRing = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), hdBytes));
+  const hdFrame = new Uint8Array(hdBytes);
+  for (let i = 0; i < 640 * 360; i++) {
+    hdFrame[i * 4] = 22;
+    hdFrame[i * 4 + 1] = 28;
+    hdFrame[i * 4 + 2] = 38;
+    hdFrame[i * 4 + 3] = 255;
+  }
+  for (let f = 0; f < 24; f++) {
+    const cx = 120 + f * 7;
+    const cy = 180;
+    hdRing[f % 12].set(hdFrame);
+    const dst = hdRing[f % 12];
+    for (let py = cy - 16; py <= cy + 16; py++) {
+      for (let px = cx - 16; px <= cx + 16; px++) {
+        if ((px - cx) ** 2 + (py - cy) ** 2 <= 240) {
+          const idx = (py * 640 + px) * 4;
+          dst[idx] = 248; dst[idx + 1] = 64; dst[idx + 2] = 72; dst[idx + 3] = 255;
+        }
+      }
+    }
+    exp.chronos_pre_tick(1 / 60);
+    solveShiftedLanczosFiedler();
+    exp.chronos_post_tick(1 / 60);
+  }
+  if (mem.buffer.byteLength !== 256 * 65536) {
+    throw new Error(`Gate G: Arena grew unexpectedly to ${mem.buffer.byteLength}`);
+  }
+  if (telem[30] !== 640 || telem[31] !== 360 || pipBuf[4095] !== 255) {
+    throw new Error(`Gate G: Expected HD telemetry (640x360) and 32x32 PiP alpha=255, got ${telem[30]}x${telem[31]}, alpha=${pipBuf[4095]}`);
+  }
+  exp.chronos_set_resolution(0);
+  if (exp.chronos_get_frame_w() !== 320 || exp.chronos_get_pip_dim() !== 16) {
+    throw new Error('Gate G: Failed to restore 320x180 SD mode');
+  }
+  console.log('  [PASS] Gate G (Dual-Resolution 320x180 SD <-> 640x360 HD Switch): 256 static pages, 32x32 PiP verified');
+}
+
 console.log('');
-console.log('[4/5] Running 5-Trial Deterministic Blind Pixel Pillar Benchmark (Full Production Pre-Tick + Lanczos + Post-Tick)...');
+console.log('[4/5] Running 5x2 Interleaved Blind Pixel Pillar Benchmark (320x180 SD vs 640x360 HD)...');
 
 const TRIALS = 5;
 const FRAMES_PER_TRIAL = 480;
-const pillars = [
+const basePillars = [
   { x0: 88, x1: 136, y0: 14, y1: 166 },
   { x0: 184, x1: 232, y0: 14, y1: 166 },
 ];
 
-const frameBuf = new Uint8Array(BYTES);
+function buildStaticGridBg(w, h, s) {
+  const out = new Uint8Array(w * h * 4);
+  const gStep = 24 * s;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = (y * w + x) * 4;
+      const grid = (x % gStep === 0 || y % gStep === 0) ? 14 : 0;
+      const base = 18 + ((((x / s) | 0) * 7 + ((y / s) | 0) * 11) >> 6) + grid;
+      out[idx] = base;
+      out[idx + 1] = base + 4;
+      out[idx + 2] = base + 10;
+      out[idx + 3] = 255;
+    }
+  }
+  return out;
+}
+
+function stampDiscScaled(buf, w, h, s, cx, cy, r, g, b, cr, cg, cb) {
+  const rad = 8 * s;
+  const outerR2 = 60 * s * s;
+  const innerR2 = 14 * s * s;
+  const x0 = Math.max(0, Math.floor(cx - rad)), x1 = Math.min(w - 1, Math.ceil(cx + rad));
+  const y0 = Math.max(0, Math.floor(cy - rad)), y1 = Math.min(h - 1, Math.ceil(cy + rad));
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      const r2 = (px - cx) ** 2 + (py - cy) ** 2;
+      if (r2 <= outerR2) {
+        const idx = (py * w + px) * 4;
+        const c = r2 <= innerR2;
+        buf[idx] = c ? cr : r;
+        buf[idx + 1] = c ? cg : g;
+        buf[idx + 2] = c ? cb : b;
+        buf[idx + 3] = 255;
+      }
+    }
+  }
+}
+
+const bgByMode = [buildStaticGridBg(320, 180, 1), buildStaticGridBg(640, 360, 2)];
+const workBufByMode = [new Uint8Array(320 * 180 * 4), new Uint8Array(640 * 360 * 4)];
 const oracleTrackOwner = new Int16Array(65536);
 const oracleCandTrackSlot = new Int32Array(32);
 const oracleCandDiscIdx = new Int32Array(32);
 const oracleCandDist = new Float32Array(32);
 
-const trialMeans = [];
-const trialP50s = [];
-const trialP99s = [];
-let totalCollisions = 0;
-let totalKalmanSwaps = 0;
-let totalPadicSwaps = 0;
-let totalOracleSwaps = 0;
-let visibleDiscChecks = 0;
-let lockedDiscChecks = 0;
-let finalClutterDb = 0;
-let finalEvalRatio = 0;
-let finalActiveTargets = 0;
-let pipChecksum = 0;
+function makeBenchAccumulator(mode, label, budgetMs) {
+  return {
+    mode,
+    label,
+    budgetMs,
+    trialMeans: [],
+    trialP50s: [],
+    trialP99s: [],
+    totalCollisions: 0,
+    totalKalmanSwaps: 0,
+    totalPadicSwaps: 0,
+    totalOracleSwaps: 0,
+    visibleDiscChecks: 0,
+    lockedDiscChecks: 0,
+    finalClutterDb: 0,
+    finalEvalRatio: 0,
+    finalActiveTargets: 0,
+    pipChecksum: 0,
+  };
+}
 
-for (let t = 0; t < TRIALS; t++) {
+const benchStats = [
+  makeBenchAccumulator(0, '320x180 SD (16x16 Patch/PiP)', 0.25),
+  makeBenchAccumulator(1, '640x360 HD (32x32 Foveated)', 1.00),
+];
+
+function runSinglePillarTrial(acc) {
+  const mode = acc.mode;
+  const s = mode === 1 ? 2 : 1;
+  const fw = 320 * s;
+  const fh = 180 * s;
+  const fBytes = fw * fh * 4;
+  const bg = bgByMode[mode];
+  const frameBuf = workBufByMode[mode];
+
   exp.chronos_init();
+  exp.chronos_set_resolution(mode);
   prevFiedlerTrack.fill(0.0);
   oracleTrackOwner.fill(-1);
 
-  const slot0Ptr = exp.chronos_get_ingest_rgba_ptr();
-  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, slot0Ptr + s * BYTES, BYTES));
+  const ringViews = Array.from({ length: 12 }, (_, slot) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(slot), fBytes));
 
   const discs = [
-    { id: 0, x: 52,  y: 56,  vx: 3.0,  r: 248, g: 58,  b: 68,  cr: 255, cg: 230, cb: 110 },
-    { id: 1, x: 172, y: 56,  vx: -3.0, r: 30,  g: 225, b: 250, cr: 15,  cg: 45,  cb: 85  },
-    { id: 2, x: 148, y: 124, vx: 3.0,  r: 50,  g: 242, b: 112, cr: 235, cg: 255, cb: 235 },
-    { id: 3, x: 268, y: 124, vx: -3.0, r: 232, g: 64,  b: 248, cr: 90,  cg: 245, cb: 255 },
+    { id: 0, x: 52 * s,  y: 56 * s,  vx: 3.0 * s,  r: 248, g: 58,  b: 68,  cr: 255, cg: 230, cb: 110 },
+    { id: 1, x: 172 * s, y: 56 * s,  vx: -3.0 * s, r: 30,  g: 225, b: 250, cr: 15,  cg: 45,  cb: 85  },
+    { id: 2, x: 148 * s, y: 124 * s, vx: 3.0 * s,  r: 50,  g: 242, b: 112, cr: 235, cg: 255, cb: 235 },
+    { id: 3, x: 268 * s, y: 124 * s, vx: -3.0 * s, r: 232, g: 64,  b: 248, cr: 90,  cg: 245, cb: 255 },
   ];
 
   const frameLatencies = [];
   let collisions = 0;
 
   for (let f = 0; f < FRAMES_PER_TRIAL; f++) {
-    frameBuf.set(staticBg);
+    frameBuf.set(bg);
     for (const d of discs) {
       d.x += d.vx;
-      d.ry = d.y + 0.9 * Math.sin(2 * Math.PI * 9.5 * (f / 60) + d.id * 1.2);
-      if (d.x < 18) { d.x = 18; d.vx = Math.abs(d.vx); }
-      if (d.x > W - 18) { d.x = W - 18; d.vx = -Math.abs(d.vx); }
+      d.ry = d.y + 0.9 * s * Math.sin(2 * Math.PI * 9.5 * (f / 60) + d.id * 1.2);
+      if (d.x < 18 * s) { d.x = 18 * s; d.vx = Math.abs(d.vx); }
+      if (d.x > fw - 18 * s) { d.x = fw - 18 * s; d.vx = -Math.abs(d.vx); }
     }
     for (const [i, j] of [[0, 1], [2, 3]]) {
       const a = discs[i], b = discs[j];
       const dx = b.x - a.x;
-      if (Math.abs(dx) < 14.0 && (a.vx - b.vx) * dx > 0) {
+      if (Math.abs(dx) < 14.0 * s && (a.vx - b.vx) * dx > 0) {
         const tmp = a.vx; a.vx = b.vx; b.vx = tmp;
         const mx = 0.5 * (a.x + b.x);
-        if ((mx >= 88 && mx <= 136) || (mx >= 184 && mx <= 232)) collisions++;
+        if ((mx >= 88 * s && mx <= 136 * s) || (mx >= 184 * s && mx <= 232 * s)) collisions++;
       }
     }
     for (const d of discs) {
-      stampDisc(frameBuf, d.x, d.ry, d.r, d.g, d.b, d.cr, d.cg, d.cb);
+      stampDiscScaled(frameBuf, fw, fh, s, d.x, d.ry, d.r, d.g, d.b, d.cr, d.cg, d.cb);
     }
-    for (const p of pillars) {
-      for (let py = p.y0; py < p.y1; py++) {
-        for (let px = p.x0; px < p.x1; px++) {
-          const idx = (py * W + px) * 4;
-          const v = (px === p.x0 || px === p.x1 - 1) ? 58 : 34 + ((py >> 3) & 3);
+    for (const p of basePillars) {
+      const x0 = p.x0 * s, x1 = p.x1 * s, y0 = p.y0 * s, y1 = p.y1 * s;
+      for (let py = y0; py < y1; py++) {
+        for (let px = x0; px < x1; px++) {
+          const idx = (py * fw + px) * 4;
+          const v = (px === x0 || px === x1 - 1) ? 58 : 34 + (((py / s) >> 3) & 3);
           frameBuf[idx] = v; frameBuf[idx + 1] = v + 5; frameBuf[idx + 2] = v + 12; frameBuf[idx + 3] = 255;
         }
       }
@@ -733,22 +839,22 @@ for (let t = 0; t < TRIALS; t++) {
     exp.chronos_post_tick(1 / 60);
     const dt = performance.now() - t0;
 
-    pipChecksum = (pipChecksum + pipBuf[512]) | 0;
+    acc.pipChecksum = (acc.pipChecksum + pipBuf[mode === 1 ? 2048 : 512]) | 0;
     if (f >= 16) frameLatencies.push(dt);
 
     // Strict 1-to-1 nearest-match Oracle & visible lock coverage audit
     let nPairs = 0;
     for (let di = 0; di < discs.length; di++) {
       const d = discs[di];
-      const occ = (d.x > 82 && d.x < 142) || (d.x > 178 && d.x < 238);
+      const occ = (d.x > 82 * s && d.x < 142 * s) || (d.x > 178 * s && d.x < 238 * s);
       if (occ) continue;
-      if (f >= 20) visibleDiscChecks++;
+      if (f >= 20) acc.visibleDiscChecks++;
 
       for (let m = 0; m < 8; m++) {
         const base = 32 + m * 56;
         if (telem[base] < 0.5 || telem[base + 44 + 11] < 0.5) continue;
         const dist = Math.hypot(telem[base + 8] - d.x, telem[base + 9] - d.ry);
-        if (dist < 16.0) {
+        if (dist < 16.0 * s) {
           oracleCandTrackSlot[nPairs] = m;
           oracleCandDiscIdx[nPairs] = di;
           oracleCandDist[nPairs] = dist;
@@ -775,67 +881,78 @@ for (let t = 0; t < TRIALS; t++) {
       if ((usedTracks & (1 << m)) !== 0 || (usedDiscs & (1 << di)) !== 0) continue;
       usedTracks |= 1 << m;
       usedDiscs |= 1 << di;
-      if (f >= 20) lockedDiscChecks++;
+      if (f >= 20) acc.lockedDiscChecks++;
 
       const tid = Math.round(telem[32 + m * 56 + 1]);
       const discId = discs[di].id;
       const prevOwner = oracleTrackOwner[tid];
       if (prevOwner === -1) oracleTrackOwner[tid] = discId;
       else if (prevOwner !== discId) {
-        totalOracleSwaps++;
+        acc.totalOracleSwaps++;
         oracleTrackOwner[tid] = discId;
       }
     }
   }
 
   frameLatencies.sort((a, b) => a - b);
-  trialMeans.push(frameLatencies.reduce((a, b) => a + b, 0) / frameLatencies.length);
-  trialP50s.push(frameLatencies[Math.floor(frameLatencies.length * 0.5)]);
-  trialP99s.push(frameLatencies[Math.floor(frameLatencies.length * 0.99)]);
+  acc.trialMeans.push(frameLatencies.reduce((a, b) => a + b, 0) / frameLatencies.length);
+  acc.trialP50s.push(frameLatencies[Math.floor(frameLatencies.length * 0.5)]);
+  acc.trialP99s.push(frameLatencies[Math.floor(frameLatencies.length * 0.99)]);
 
-  totalCollisions += collisions;
-  totalPadicSwaps += Math.round(telem[5]);
-  totalKalmanSwaps += Math.round(telem[6]);
-  finalClutterDb = telem[4];
-  finalEvalRatio = telem[23];
-  finalActiveTargets = Math.round(telem[3]);
+  acc.totalCollisions += collisions;
+  acc.totalPadicSwaps += Math.round(telem[5]);
+  acc.totalKalmanSwaps += Math.round(telem[6]);
+  acc.finalClutterDb = telem[4];
+  acc.finalEvalRatio = telem[23];
+  acc.finalActiveTargets = Math.round(telem[3]);
 }
 
-trialMeans.sort((a, b) => a - b);
-trialP50s.sort((a, b) => a - b);
-trialP99s.sort((a, b) => a - b);
+// Interleave SD and HD across 5 pairs (SD, HD, SD, HD, ...) to cancel thermal / scheduler drift
+for (let t = 0; t < TRIALS; t++) {
+  runSinglePillarTrial(benchStats[0]);
+  runSinglePillarTrial(benchStats[1]);
+}
 
-const medMean = trialMeans[Math.floor(TRIALS / 2)];
-const minMean = trialMeans[0];
-const maxMean = trialMeans[TRIALS - 1];
-const medP50 = trialP50s[Math.floor(TRIALS / 2)];
-const medP99 = trialP99s[Math.floor(TRIALS / 2)];
-const coveragePct = (100.0 * lockedDiscChecks) / Math.max(1, visibleDiscChecks);
+for (const acc of benchStats) {
+  acc.trialMeans.sort((a, b) => a - b);
+  acc.trialP50s.sort((a, b) => a - b);
+  acc.trialP99s.sort((a, b) => a - b);
 
-console.log(`  Trials: ${TRIALS} x ${FRAMES_PER_TRIAL} blind frames (${TRIALS * FRAMES_PER_TRIAL} total frames, PiP guard=${pipChecksum})`);
-console.log(`  Full Compute Tick   : median-of-means = ${medMean.toFixed(4)} ms (range ${minMean.toFixed(4)}..${maxMean.toFixed(4)} ms | p50=${medP50.toFixed(4)} ms, p99=${medP99.toFixed(4)} ms)`);
-console.log(`  Uncensored ECA Supp.: ${finalClutterDb.toFixed(2)} dB over ${(finalEvalRatio * 100).toFixed(1)}% stationary background (> 60 dB target)`);
-console.log(`  Auto-Locked Targets : ${finalActiveTargets} / 4 physical discs (${coveragePct.toFixed(1)}% visible-frame lock coverage)`);
-console.log(`  In-Pillar Collisions: ${totalCollisions} across ${TRIALS} trials`);
-console.log(`  1-to-1 Oracle Swaps : ${totalOracleSwaps} (Internal Wasm Conflict Audit: ${totalPadicSwaps})`);
-console.log(`  2x2 Kalman Swaps    : ${totalKalmanSwaps} (Proves causal kinematic drift hijack)`);
+  acc.medMean = acc.trialMeans[Math.floor(TRIALS / 2)];
+  acc.minMean = acc.trialMeans[0];
+  acc.maxMean = acc.trialMeans[TRIALS - 1];
+  acc.medP50 = acc.trialP50s[Math.floor(TRIALS / 2)];
+  acc.medP99 = acc.trialP99s[Math.floor(TRIALS / 2)];
+  acc.coveragePct = (100.0 * acc.lockedDiscChecks) / Math.max(1, acc.visibleDiscChecks);
 
-if (totalPadicSwaps !== 0 || totalOracleSwaps !== 0) {
-  throw new Error(`2-Adic ID Swap invariant violated: wasm=${totalPadicSwaps}, oracle=${totalOracleSwaps}`);
+  console.log(`  --- ${acc.label} (${TRIALS} interleaved trials x ${FRAMES_PER_TRIAL} frames, PiP guard=${acc.pipChecksum}) ---`);
+  console.log(`  Full Compute Tick   : median-of-means = ${acc.medMean.toFixed(4)} ms (range ${acc.minMean.toFixed(4)}..${acc.maxMean.toFixed(4)} ms | p50=${acc.medP50.toFixed(4)} ms, p99=${acc.medP99.toFixed(4)} ms)`);
+  console.log(`  Uncensored ECA Supp.: ${acc.finalClutterDb.toFixed(2)} dB over ${(acc.finalEvalRatio * 100).toFixed(1)}% stationary background (> 60 dB target)`);
+  console.log(`  Auto-Locked Targets : ${acc.finalActiveTargets} / 4 physical discs (${acc.coveragePct.toFixed(1)}% visible-frame lock coverage)`);
+  console.log(`  In-Pillar Collisions: ${acc.totalCollisions} across ${TRIALS} trials`);
+  console.log(`  1-to-1 Oracle Swaps : ${acc.totalOracleSwaps} (Internal Wasm Conflict Audit: ${acc.totalPadicSwaps})`);
+  console.log(`  2x2 Kalman Swaps    : ${acc.totalKalmanSwaps} (Proves causal kinematic drift hijack)`);
+
+  if (acc.totalPadicSwaps !== 0 || acc.totalOracleSwaps !== 0) {
+    throw new Error(`[${acc.label}] 2-Adic ID Swap invariant violated: wasm=${acc.totalPadicSwaps}, oracle=${acc.totalOracleSwaps}`);
+  }
+  if (acc.coveragePct < 90.0) {
+    throw new Error(`[${acc.label}] Expected >= 90% visible disc lock coverage, got ${acc.coveragePct.toFixed(1)}%`);
+  }
+  if (acc.totalKalmanSwaps === 0) {
+    throw new Error(`[${acc.label}] Expected > 0 Causal Kalman ID swaps during in-pillar collisions`);
+  }
+  if (acc.finalClutterDb < 60.0) {
+    throw new Error(`[${acc.label}] Expected > 60 dB uncensored ECA clutter suppression, got ${acc.finalClutterDb.toFixed(2)} dB`);
+  }
+  if (acc.medMean >= acc.budgetMs) {
+    throw new Error(`[${acc.label}] Per-frame compute budget exceeded: ${acc.medMean.toFixed(4)} ms >= ${acc.budgetMs.toFixed(2)} ms`);
+  }
 }
-if (coveragePct < 90.0) {
-  throw new Error(`Expected >= 90% visible disc lock coverage, got ${coveragePct.toFixed(1)}%`);
-}
-if (totalKalmanSwaps === 0) {
-  throw new Error('Expected > 0 Causal Kalman ID swaps during in-pillar collisions');
-}
-if (finalClutterDb < 60.0) {
-  throw new Error(`Expected > 60 dB uncensored ECA clutter suppression, got ${finalClutterDb.toFixed(2)} dB`);
-}
-if (medMean >= 0.25) {
-  throw new Error(`Per-frame compute budget exceeded: ${medMean.toFixed(4)} ms >= 0.25 ms`);
-}
-console.log('  [PASS] ALL MATHEMATICAL & LATENCY INVARIANTS VERIFIED (< 0.25 ms, 0 SWAPS, > 60 dB)');
+
+const hdRatio = benchStats[1].medMean / Math.max(1e-6, benchStats[0].medMean);
+console.log(`  Scaling Limiter     : HD/SD compute ratio = ${hdRatio.toFixed(2)}x for 4.00x pixel count (planar SIMD128 RGBA/ECA memory bandwidth scales 4x; 2x2-pooled 32x32 patch SAD + Lanczos scale sub-linearly)`);
+console.log('  [PASS] ALL SD (< 0.25 ms) & HD (< 1.00 ms) MATHEMATICAL & LATENCY INVARIANTS VERIFIED');
 EOF
 
 if [ "${1:-}" = "--check" ]; then

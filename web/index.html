@@ -570,7 +570,7 @@
     </div>
     <div class="header-pills">
       <span class="pill ok" id="pillKernel">◆ KERNEL BOOTING</span>
-      <span class="pill" id="pillArena">WASM ARENA: 64 PAGES / 4.00 MB</span>
+      <span class="pill" id="pillArena">WASM ARENA: 256 PAGES / 16.00 MB</span>
       <span class="pill ok" id="pillPerf">KERNEL: -- ms</span>
       <span class="pill" id="pillFps">FPS: --</span>
     </div>
@@ -673,7 +673,11 @@
       <div class="panel">
         <div class="panel-header">
           <span class="panel-title">1. Optical Wavefield Input Source</span>
-          <span class="panel-meta">320×180 RAW RGBA</span>
+          <span class="panel-meta" id="inputResMeta">320×180 SD RGBA</span>
+        </div>
+        <div class="btn-row" role="group" aria-label="Wavefield spatial resolution">
+          <button type="button" id="btnResSd" class="res-btn active" data-res="0" aria-pressed="true">320×180 SD (16×16 PiP)</button>
+          <button type="button" id="btnResHd" class="res-btn" data-res="1" aria-pressed="false">640×360 HD (32×32 PiP)</button>
         </div>
         <div class="btn-row">
           <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Blind Pillar Bench</button>
@@ -969,6 +973,9 @@
     let videoPumpActive = false;
     let lastMediaTime = -1;
     let lastPumpPerfMs = 0;
+    let activeResMode = 0;
+    let activeFrameW = 320;
+    let activeFrameH = 180;
 
     function stopMediaCapture() {
       videoPumpActive = false;
@@ -1009,8 +1016,8 @@
 
       try {
         const bitmap = await createImageBitmap(videoEl, {
-          resizeWidth: 320,
-          resizeHeight: 180,
+          resizeWidth: activeFrameW,
+          resizeHeight: activeFrameH,
           resizeQuality: 'low',
         });
         worker.postMessage({ type: 'video_frame', bitmap, dtSec }, [bitmap]);
@@ -1049,6 +1056,7 @@
       pillArena: document.getElementById('pillArena'),
       pillPerf: document.getElementById('pillPerf'),
       pillFps: document.getElementById('pillFps'),
+      inputResMeta: document.getElementById('inputResMeta'),
       hudSourceLabel: document.getElementById('hudSourceLabel'),
       mortonReadout: document.getElementById('mortonReadout'),
       lblPadicSwaps: document.getElementById('lblPadicSwaps'),
@@ -1106,17 +1114,35 @@
       return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     }
 
+    function applyResolutionUi(mode, w, h, pDim) {
+      activeResMode = mode ? 1 : 0;
+      activeFrameW = w || (activeResMode ? 640 : 320);
+      activeFrameH = h || (activeResMode ? 360 : 180);
+      const pipSz = pDim || (activeResMode ? 32 : 16);
+      dom.inputResMeta.textContent = `${activeFrameW}×${activeFrameH} ${activeResMode ? 'HD' : 'SD'} RGBA`;
+      pipEl.setAttribute('aria-label', `${pipSz}x${pipSz} Eulerian temporal-contrast picture-in-picture`);
+      document.querySelectorAll('.res-btn').forEach((b) => {
+        const on = Number(b.dataset.res) === activeResMode;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+    }
+
     worker.onmessage = (ev) => {
       const m = ev.data;
       if (m.type === 'ready') {
         dom.pillKernel.textContent = '◆ WASM KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
         dom.pillArena.textContent = `WASM ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
+        applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
+      } else if (m.type === 'resolution_changed') {
+        applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
       } else if (m.type === 'audio_strobe') {
         playPhaseStrobePulse(m.resonant, m.freqHz, m.amp);
       } else if (m.type === 'audio_percussion') {
         playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentPerfMs);
       } else if (m.type === 'telemetry') {
-        const underBudget = m.wasmMeanMs < 0.25;
+        const budgetMs = m.resMode === 1 ? 1.0 : 0.25;
+        const underBudget = m.wasmMeanMs < budgetMs;
         dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${m.wasmMeanMs.toFixed(3)} ms`;
         dom.pillPerf.className = `pill ${underBudget ? 'ok' : 'warn'}`;
         dom.pillFps.textContent = `FPS: ${m.fps.toFixed(0)}`;
@@ -1218,6 +1244,18 @@
         }
       }
     };
+
+    // Spatial Resolution Switching (320x180 SD vs 640x360 HD)
+    document.querySelectorAll('.res-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const mode = Number(btn.dataset.res) ? 1 : 0;
+        if (mode === activeResMode) return;
+        applyResolutionUi(mode, mode ? 640 : 320, mode ? 360 : 180, mode ? 32 : 16);
+        lastMediaTime = -1;
+        lastPumpPerfMs = 0;
+        worker.postMessage({ type: 'set_resolution', resMode: mode });
+      });
+    });
 
     // Source Switching
     const btnTestbench = document.getElementById('btnSrcTestbench');

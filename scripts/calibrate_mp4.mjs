@@ -25,7 +25,7 @@ function decodeMp4Frames(mp4Path, w, h) {
   const raw = execFileSync(
     'ffmpeg',
     ['-v', 'error', '-i', mp4Path, '-vf', `scale=${w}:${h}`, '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
-    { maxBuffer: 256 * 1024 * 1024 }
+    { maxBuffer: 1024 * 1024 * 1024 }
   );
   const frameBytes = w * h * 4;
   const numFrames = Math.floor(raw.length / frameBytes);

@@ -2,14 +2,16 @@
 
 pub mod simd_ops;
 
-use core::arch::wasm32::{f32x4_extract_lane, f32x4_floor, f32x4_splat, f32x4_sqrt};
+use core::arch::wasm32::{f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_mul, f32x4_splat, f32x4_sqrt, v128, v128_load, v128_store};
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
 pub use simd_ops::{eca_subspace_project_simd128, padic_ultrametric_val, sad16x16_patch_simd128};
 use simd_ops::{
     compute_motion_grid_and_heal_bg_simd128, eca_subspace_project_masked_simd128,
-    haar_morton_signature_simd128, padic_distance_from_val, patch16x16_ac_energy_simd128,
-    rgba_to_planar_simd128, ssd16x16_photometric_simd128, update_stat_streak_and_mask_simd128,
+    haar_morton_signature_scaled_simd128, haar_morton_signature_simd128, hsum_f32x4,
+    load_pooled4_f32, padic_distance_from_val, patch16x16_ac_energy_simd128,
+    rgba_to_planar_simd128, sad_patch_scaled_simd128, ssd16x16_photometric_simd128,
+    update_stat_streak_and_mask_simd128,
 };
 
 #[inline(always)]
@@ -27,17 +29,30 @@ fn panic(_info: &PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
 
-pub const FRAME_W: usize = 320;
-pub const FRAME_H: usize = 180;
-pub const FRAME_PIXELS: usize = FRAME_W * FRAME_H; // 57,600
-pub const FRAME_RGBA_BYTES: usize = FRAME_PIXELS * 4; // 230,400
+pub const SD_FRAME_W: usize = 320;
+pub const SD_FRAME_H: usize = 180;
+pub const MAX_FRAME_W: usize = 640;
+pub const MAX_FRAME_H: usize = 360;
+pub const MAX_FRAME_PIXELS: usize = MAX_FRAME_W * MAX_FRAME_H; // 230,400
+pub const MAX_FRAME_RGBA_BYTES: usize = MAX_FRAME_PIXELS * 4; // 921,600
 pub const RING_LEN: usize = 12;
 pub const MAX_TARGETS: usize = 8;
 pub const GRAPH_NODES: usize = 16;
-pub const GRID_W: usize = 20;
-pub const GRID_H: usize = 11;
-pub const GRID_CELLS: usize = GRID_W * GRID_H; // 220
+pub const MAX_GRID_W: usize = 40;
+pub const MAX_GRID_H: usize = 22;
+pub const MAX_GRID_CELLS: usize = MAX_GRID_W * MAX_GRID_H; // 880
+pub const MAX_PIP_DIM: usize = 32;
+pub const MAX_PIP_PIXELS: usize = MAX_PIP_DIM * MAX_PIP_DIM; // 1,024
 pub const TELEMETRY_LEN: usize = 576;
+
+#[inline(always)]
+fn mode_dims(res_mode: u32) -> (usize, usize, usize, usize, usize, usize, f32) {
+    if res_mode == 1 {
+        (640, 360, 40, 22, 2, 32, 2.0)
+    } else {
+        (SD_FRAME_W, SD_FRAME_H, 20, 11, 1, 16, 1.0)
+    }
+}
 
 const PI: f32 = 3.14159265358979323846;
 const TWO_PI: f32 = 6.28318530717958647692;
@@ -285,19 +300,19 @@ pub struct CausalKalmanTrack {
 
 #[repr(C, align(16))]
 pub struct Arena {
-    // 1. 12-Frame Circular RGBA Display & Lossless Pixel Ring Buffer (2,764,800 B)
-    pub rgba_ring: [[u8; FRAME_RGBA_BYTES]; RING_LEN],
+    // 1. 12-Frame Circular RGBA Display & Lossless Pixel Ring Buffer (up to 640x360: 11,059,200 B)
+    pub rgba_ring: [[u8; MAX_FRAME_RGBA_BYTES]; RING_LEN],
 
-    // 2. Per-Frame Planar SIMD128 Luma & Opponent Chroma Buffers (691,200 B)
-    pub luma: [f32; FRAME_PIXELS],
-    pub chroma_rg: [f32; FRAME_PIXELS],
-    pub chroma_by: [f32; FRAME_PIXELS],
+    // 2. Per-Frame Planar SIMD128 Luma & Opponent Chroma Buffers (2,764,800 B)
+    pub luma: [f32; MAX_FRAME_PIXELS],
+    pub chroma_rg: [f32; MAX_FRAME_PIXELS],
+    pub chroma_by: [f32; MAX_FRAME_PIXELS],
 
-    // 3. Guarded Rank-2 ECA Background Model X = [b, 1], Residual, & Independent Prior Masks (576,000 B)
-    pub bg_luma: [f32; FRAME_PIXELS],
-    pub eca_res: [f32; FRAME_PIXELS],
-    pub bg_stat_streak: [u8; FRAME_PIXELS],
-    pub bg_eval_mask: [u8; FRAME_PIXELS],
+    // 3. Guarded Rank-2 ECA Background Model X = [b, 1], Residual, & Independent Prior Masks (2,304,000 B)
+    pub bg_luma: [f32; MAX_FRAME_PIXELS],
+    pub eca_res: [f32; MAX_FRAME_PIXELS],
+    pub bg_stat_streak: [u8; MAX_FRAME_PIXELS],
+    pub bg_eval_mask: [u8; MAX_FRAME_PIXELS],
 
     // 4. Multi-Target 2-Adic + Spectral + FISTA State (8 targets)
     pub targets: [TargetTrack; MAX_TARGETS],
@@ -308,22 +323,23 @@ pub struct Arena {
     pub fiedler_vec: [f32; GRAPH_NODES],
     pub prev_fiedler_track: [f32; MAX_TARGETS],
 
-    // 6. FISTA-Stabilized Eulerian Temporal-Contrast PiP Buffers
-    pub pip_rgba: [u8; 16 * 16 * 4],
-    pub pip_ref_luma: [f32; 256],
+    // 6. FISTA-Stabilized Eulerian Temporal-Contrast PiP Buffers (16x16 SD / 32x32 HD)
+    pub pip_rgba: [u8; MAX_PIP_PIXELS * 4],
+    pub pip_ref_luma: [f32; MAX_PIP_PIXELS],
     pub pip_target_id: u32,
 
-    // 7. Connected-Component Seeder Workspace (20x11 grid = 220 cells)
-    pub cc_energy: [f32; GRID_CELLS],
-    pub cc_queue: [u16; GRID_CELLS],
-    pub cc_visited: [u8; GRID_CELLS],
+    // 7. Connected-Component Seeder Workspace (20x11 SD = 220 cells / 40x22 HD = 880 cells)
+    pub cc_energy: [f32; MAX_GRID_CELLS],
+    pub cc_queue: [u16; MAX_GRID_CELLS],
+    pub cc_visited: [u8; MAX_GRID_CELLS],
     pub peaks: [CandidatePeak; MAX_TARGETS],
     pub num_peaks: usize,
 
     // 8. Exported Flat Telemetry Vector (zero-marshaling Float32Array view)
     pub telemetry: [f32; TELEMETRY_LEN],
 
-    // 9. Scalar Control, Spectral & Timing State
+    // 9. Scalar Control, Resolution Mode, Spectral & Timing State
+    pub res_mode: u32,
     pub frame_idx: u32,
     pub next_track_id: u32,
     pub lookahead_k: u32,
@@ -350,8 +366,8 @@ pub struct Arena {
     pub stimulus_armed: u32,
 }
 
-// Compile-time structural bound: Arena + 4 KiB stack + .rodata <= 64 pages (4,194,304 B)
-const _: () = assert!(core::mem::size_of::<Arena>() <= 4_140_000);
+// Compile-time structural bound: Arena + 16 KiB stack + .rodata <= 256 pages (16,777,216 B)
+const _: () = assert!(core::mem::size_of::<Arena>() <= 16_720_000);
 
 static mut ARENA: Arena = unsafe { core::mem::zeroed() };
 
@@ -364,23 +380,39 @@ unsafe fn arena_mut() -> &'static mut Arena {
 // Helper Kernels: Patch Copy, Bilinear Subpixel Sampling, Connected Components
 // ============================================================================
 
-unsafe fn capture_template_16x16(
-    luma: &[f32; FRAME_PIXELS],
-    rg: &[f32; FRAME_PIXELS],
-    by: &[f32; FRAME_PIXELS],
+unsafe fn capture_template_scaled(
+    luma: &[f32; MAX_FRAME_PIXELS],
+    rg: &[f32; MAX_FRAME_PIXELS],
+    by: &[f32; MAX_FRAME_PIXELS],
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
     cx: usize,
     cy: usize,
     t: &mut TargetTrack,
 ) {
-    let x0 = cx.min(FRAME_W - 16);
-    let y0 = cy.min(FRAME_H - 16);
+    let patch_dim = 16 * scale_px;
+    let x0 = cx.min(frame_w - patch_dim);
+    let y0 = cy.min(frame_h - patch_dim);
+    let cstep = 4 * scale_px;
     for ry in 0..16usize {
-        let src_row = (y0 + ry) * FRAME_W + x0;
+        let src_row = (y0 + ry * scale_px) * frame_w + x0;
         let dst_row = ry * 16;
-        for rx in 0..16usize {
-            t.tpl_luma[dst_row + rx] = luma[src_row + rx];
-            t.tpl_rg[dst_row + rx] = rg[src_row + rx];
-            t.tpl_by[dst_row + rx] = by[src_row + rx];
+        for vec_idx in 0..4usize {
+            let ioff = src_row + vec_idx * cstep;
+            let doff = dst_row + vec_idx * 4;
+            v128_store(
+                t.tpl_luma.as_mut_ptr().add(doff) as *mut v128,
+                load_pooled4_f32(luma.as_ptr().add(ioff), frame_w, scale_px),
+            );
+            v128_store(
+                t.tpl_rg.as_mut_ptr().add(doff) as *mut v128,
+                load_pooled4_f32(rg.as_ptr().add(ioff), frame_w, scale_px),
+            );
+            v128_store(
+                t.tpl_by.as_mut_ptr().add(doff) as *mut v128,
+                load_pooled4_f32(by.as_ptr().add(ioff), frame_w, scale_px),
+            );
         }
     }
     t.curr_sig = haar_morton_signature_simd128(
@@ -393,33 +425,65 @@ unsafe fn capture_template_16x16(
     );
 }
 
-unsafe fn blend_template_16x16(
-    luma: &[f32; FRAME_PIXELS],
-    rg: &[f32; FRAME_PIXELS],
-    by: &[f32; FRAME_PIXELS],
+unsafe fn blend_template_scaled(
+    luma: &[f32; MAX_FRAME_PIXELS],
+    rg: &[f32; MAX_FRAME_PIXELS],
+    by: &[f32; MAX_FRAME_PIXELS],
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
     cx: usize,
     cy: usize,
     alpha: f32,
     t: &mut TargetTrack,
 ) {
-    let x0 = cx.min(FRAME_W - 16);
-    let y0 = cy.min(FRAME_H - 16);
-    let inv_a = 1.0 - alpha;
+    let patch_dim = 16 * scale_px;
+    let x0 = cx.min(frame_w - patch_dim);
+    let y0 = cy.min(frame_h - patch_dim);
+    let cstep = 4 * scale_px;
+    let v_a = f32x4_splat(alpha);
+    let v_ia = f32x4_splat(1.0 - alpha);
     for ry in 0..16usize {
-        let src_row = (y0 + ry) * FRAME_W + x0;
+        let src_row = (y0 + ry * scale_px) * frame_w + x0;
         let dst_row = ry * 16;
-        for rx in 0..16usize {
-            t.tpl_luma[dst_row + rx] = inv_a * t.tpl_luma[dst_row + rx] + alpha * luma[src_row + rx];
-            t.tpl_rg[dst_row + rx] = inv_a * t.tpl_rg[dst_row + rx] + alpha * rg[src_row + rx];
-            t.tpl_by[dst_row + rx] = inv_a * t.tpl_by[dst_row + rx] + alpha * by[src_row + rx];
+        for vec_idx in 0..4usize {
+            let ioff = src_row + vec_idx * cstep;
+            let doff = dst_row + vec_idx * 4;
+
+            let tl = v128_load(t.tpl_luma.as_ptr().add(doff) as *const v128);
+            let il = load_pooled4_f32(luma.as_ptr().add(ioff), frame_w, scale_px);
+            v128_store(
+                t.tpl_luma.as_mut_ptr().add(doff) as *mut v128,
+                f32x4_add(f32x4_mul(v_ia, tl), f32x4_mul(v_a, il)),
+            );
+
+            let trg = v128_load(t.tpl_rg.as_ptr().add(doff) as *const v128);
+            let irg = load_pooled4_f32(rg.as_ptr().add(ioff), frame_w, scale_px);
+            v128_store(
+                t.tpl_rg.as_mut_ptr().add(doff) as *mut v128,
+                f32x4_add(f32x4_mul(v_ia, trg), f32x4_mul(v_a, irg)),
+            );
+
+            let tby = v128_load(t.tpl_by.as_ptr().add(doff) as *const v128);
+            let iby = load_pooled4_f32(by.as_ptr().add(ioff), frame_w, scale_px);
+            v128_store(
+                t.tpl_by.as_mut_ptr().add(doff) as *mut v128,
+                f32x4_add(f32x4_mul(v_ia, tby), f32x4_mul(v_a, iby)),
+            );
         }
     }
 }
 
 #[inline(always)]
-fn sample_rgba_bilinear(rgba: &[u8; FRAME_RGBA_BYTES], fx: f32, fy: f32) -> (f32, f32, f32, f32) {
-    let x = fx.clamp(0.0, (FRAME_W - 2) as f32);
-    let y = fy.clamp(0.0, (FRAME_H - 2) as f32);
+fn sample_rgba_bilinear(
+    rgba: &[u8; MAX_FRAME_RGBA_BYTES],
+    frame_w: usize,
+    frame_h: usize,
+    fx: f32,
+    fy: f32,
+) -> (f32, f32, f32, f32) {
+    let x = fx.clamp(0.0, (frame_w - 2) as f32);
+    let y = fy.clamp(0.0, (frame_h - 2) as f32);
     let ix = x as usize;
     let iy = y as usize;
     let tx = x - ix as f32;
@@ -430,9 +494,9 @@ fn sample_rgba_bilinear(rgba: &[u8; FRAME_RGBA_BYTES], fx: f32, fy: f32) -> (f32
     let w01 = (1.0 - tx) * ty * (1.0 / 255.0);
     let w11 = tx * ty * (1.0 / 255.0);
 
-    let i00 = (iy * FRAME_W + ix) * 4;
+    let i00 = (iy * frame_w + ix) * 4;
     let i10 = i00 + 4;
-    let i01 = i00 + FRAME_W * 4;
+    let i01 = i00 + frame_w * 4;
     let i11 = i01 + 4;
 
     let r = rgba[i00] as f32 * w00
@@ -451,9 +515,15 @@ fn sample_rgba_bilinear(rgba: &[u8; FRAME_RGBA_BYTES], fx: f32, fy: f32) -> (f32
     (r, g, b, luma)
 }
 
-/// Extract Connected Components / Energy Peaks over the 20x11 ECA motion-residual grid.
+/// Extract Connected Components / Energy Peaks over the active ECA motion-residual grid
+/// (`20x11` in 320x180 SD, `40x22` in 640x360 HD).
 unsafe fn extract_connected_component_peaks(a: &mut Arena) {
-    for i in 0..GRID_CELLS {
+    let (frame_w, frame_h, grid_w, grid_h, scale_px, _pip_dim, s) = mode_dims(a.res_mode);
+    let grid_cells = grid_w * grid_h;
+    let patch_dim = 16 * scale_px;
+    let half_patch = 8.0 * s;
+
+    for i in 0..grid_cells {
         a.cc_visited[i] = 0;
     }
     for p in 0..MAX_TARGETS {
@@ -464,21 +534,24 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
 
     let mut sum_e = 0.0f32;
     let mut max_e = 0.0f32;
-    for i in 0..GRID_CELLS {
+    for i in 0..grid_cells {
         let e = a.cc_energy[i];
         sum_e += e;
         if e > max_e {
             max_e = e;
         }
     }
-    let mean_e = sum_e / (GRID_CELLS as f32);
+    let mean_e = sum_e / (grid_cells as f32);
     let seed_thresh = (mean_e * 2.6).max(2.2);
 
     if max_e < seed_thresh {
         return;
     }
 
-    for start_idx in 0..GRID_CELLS {
+    let min_split_cells = 8 * scale_px * scale_px;
+    let min_dg2 = 5 * (scale_px as i32) * (scale_px as i32);
+
+    for start_idx in 0..grid_cells {
         if a.cc_visited[start_idx] != 0 || a.cc_energy[start_idx] < seed_thresh {
             continue;
         }
@@ -502,8 +575,8 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             q_head += 1;
             comp_cells += 1;
 
-            let gx = cur % GRID_W;
-            let gy = cur / GRID_W;
+            let gx = cur % grid_w;
+            let gy = cur / grid_w;
             let e = a.cc_energy[cur];
             sum_w += e;
             sum_wx += e * ((gx * 16 + 8) as f32);
@@ -516,16 +589,16 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             }
 
             let y_min = gy.saturating_sub(1);
-            let y_max = (gy + 1).min(GRID_H - 1);
+            let y_max = (gy + 1).min(grid_h - 1);
             let x_min = gx.saturating_sub(1);
-            let x_max = (gx + 1).min(GRID_W - 1);
+            let x_max = (gx + 1).min(grid_w - 1);
 
             for ny in y_min..=y_max {
                 for nx in x_min..=x_max {
-                    let nidx = ny * GRID_W + nx;
+                    let nidx = ny * grid_w + nx;
                     if a.cc_visited[nidx] == 0 && a.cc_energy[nidx] >= seed_thresh * 0.65 {
                         a.cc_visited[nidx] = 1;
-                        if q_tail < GRID_CELLS {
+                        if q_tail < grid_cells {
                             a.cc_queue[q_tail] = nidx as u16;
                             q_tail += 1;
                         }
@@ -534,37 +607,37 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             }
         }
 
-        if comp_cells == 0 || comp_cells > (GRID_CELLS * 65) / 100 {
+        if comp_cells == 0 || comp_cells > (grid_cells * 65) / 100 {
             continue;
         }
 
-        // Split multi-target or extended foreground components (`comp_cells >= 8`) into up to
-        // 3 distinct local 3x3 grid maxima separated by >= 2 grid cells, preventing nearby
-        // crossing targets from collapsing into a single midpoint centroid.
+        // Split multi-target or extended foreground components into up to 3 distinct local 3x3
+        // grid maxima separated by scale-invariant screen distance, preventing nearby crossing
+        // targets from collapsing into a single midpoint centroid.
         let mut sub_roots = [(0usize, 0usize, 0.0f32); 3];
         let mut num_sub = 0usize;
 
-        if comp_cells >= 8 {
+        if comp_cells >= min_split_cells {
             for qi in 0..q_tail {
                 let cell = a.cc_queue[qi] as usize;
                 let ce = a.cc_energy[cell];
                 if ce < seed_thresh * 1.15 {
                     continue;
                 }
-                let cgx = cell % GRID_W;
-                let cgy = cell / GRID_W;
+                let cgx = cell % grid_w;
+                let cgy = cell / grid_w;
                 let mut is_local_max = true;
                 let ny0 = cgy.saturating_sub(1);
-                let ny1 = (cgy + 1).min(GRID_H - 1);
+                let ny1 = (cgy + 1).min(grid_h - 1);
                 let nx0 = cgx.saturating_sub(1);
-                let nx1 = (cgx + 1).min(GRID_W - 1);
+                let nx1 = (cgx + 1).min(grid_w - 1);
                 'nbr: for ny in ny0..=ny1 {
                     for nx in nx0..=nx1 {
                         if nx == cgx && ny == cgy {
                             continue;
                         }
-                        let ne = a.cc_energy[ny * GRID_W + nx];
-                        if ne > ce || (ne == ce && (ny * GRID_W + nx) < cell) {
+                        let ne = a.cc_energy[ny * grid_w + nx];
+                        if ne > ce || (ne == ce && (ny * grid_w + nx) < cell) {
                             is_local_max = false;
                             break 'nbr;
                         }
@@ -573,14 +646,13 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
                 if !is_local_max {
                     continue;
                 }
-                // Insert in descending energy order if separated by >= 2 grid cells (`dg2 >= 5`)
                 let mut too_close_grid = false;
-                for s in 0..num_sub {
-                    let dgx = cgx as i32 - sub_roots[s].0 as i32;
-                    let dgy = cgy as i32 - sub_roots[s].1 as i32;
-                    if dgx * dgx + dgy * dgy < 5 {
-                        if ce > sub_roots[s].2 {
-                            sub_roots[s] = (cgx, cgy, ce);
+                for sr in 0..num_sub {
+                    let dgx = cgx as i32 - sub_roots[sr].0 as i32;
+                    let dgy = cgy as i32 - sub_roots[sr].1 as i32;
+                    if dgx * dgx + dgy * dgy < min_dg2 {
+                        if ce > sub_roots[sr].2 {
+                            sub_roots[sr] = (cgx, cgy, ce);
                         }
                         too_close_grid = true;
                         break;
@@ -592,9 +664,9 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
                         num_sub += 1;
                     } else {
                         let mut min_s = 0usize;
-                        for s in 1..3 {
-                            if sub_roots[s].2 < sub_roots[min_s].2 {
-                                min_s = s;
+                        for sr in 1..3 {
+                            if sub_roots[sr].2 < sub_roots[min_s].2 {
+                                min_s = sr;
                             }
                         }
                         if ce > sub_roots[min_s].2 {
@@ -610,31 +682,35 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             num_sub = 1;
         }
 
-        for s in 0..num_sub {
-            let (sgx, sgy, sub_e) = sub_roots[s];
+        let r_margin = 10.0 * s;
+        let c_margin = 9.0 * s;
+        let centroid_win = 12 * scale_px;
+
+        for sr in 0..num_sub {
+            let (sgx, sgy, sub_e) = sub_roots[sr];
             let rough_x = if num_sub == 1 {
                 (0.5 * (sum_wx / sum_w.max(1e-5)) + 0.5 * ((sgx * 16 + 8) as f32))
-                    .clamp(10.0, (FRAME_W - 11) as f32)
+                    .clamp(r_margin, (frame_w as f32) - r_margin - 1.0)
             } else {
-                ((sgx * 16 + 8) as f32).clamp(10.0, (FRAME_W - 11) as f32)
+                ((sgx * 16 + 8) as f32).clamp(r_margin, (frame_w as f32) - r_margin - 1.0)
             };
             let rough_y = if num_sub == 1 {
                 (0.5 * (sum_wy / sum_w.max(1e-5)) + 0.5 * ((sgy * 16 + 8) as f32))
-                    .clamp(10.0, (FRAME_H - 11) as f32)
+                    .clamp(r_margin, (frame_h as f32) - r_margin - 1.0)
             } else {
-                ((sgy * 16 + 8) as f32).clamp(10.0, (FRAME_H - 11) as f32)
+                ((sgy * 16 + 8) as f32).clamp(r_margin, (frame_h as f32) - r_margin - 1.0)
             };
 
-            let rx0 = (rough_x as usize).saturating_sub(12).max(2);
-            let rx1 = ((rough_x as usize) + 12).min(FRAME_W - 3);
-            let ry0 = (rough_y as usize).saturating_sub(12).max(2);
-            let ry1 = ((rough_y as usize) + 12).min(FRAME_H - 3);
+            let rx0 = (rough_x as usize).saturating_sub(centroid_win).max(2);
+            let rx1 = ((rough_x as usize) + centroid_win).min(frame_w - 3);
+            let ry0 = (rough_y as usize).saturating_sub(centroid_win).max(2);
+            let ry1 = ((rough_y as usize) + centroid_win).min(frame_h - 3);
 
             let mut pw = 0.0f32;
             let mut pwx = 0.0f32;
             let mut pwy = 0.0f32;
             for py in ry0..=ry1 {
-                let row = py * FRAME_W;
+                let row = py * frame_w;
                 for px in rx0..=rx1 {
                     let r = a.eca_res[row + px];
                     if r > 0.05 {
@@ -648,28 +724,29 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
 
             let (cx, cy) = if pw > 1e-4 {
                 (
-                    (pwx / pw).clamp(9.0, (FRAME_W - 10) as f32),
-                    (pwy / pw).clamp(9.0, (FRAME_H - 10) as f32),
+                    (pwx / pw).clamp(c_margin, (frame_w as f32) - c_margin - 1.0),
+                    (pwy / pw).clamp(c_margin, (frame_h as f32) - c_margin - 1.0),
                 )
             } else {
                 (rough_x, rough_y)
             };
 
-            let tlx = ((cx - 8.0).max(0.0) as usize).min(FRAME_W - 16);
-            let tly = ((cy - 8.0).max(0.0) as usize).min(FRAME_H - 16);
-            let sig = haar_morton_signature_simd128(
+            let tlx = ((cx - half_patch).max(0.0) as usize).min(frame_w - patch_dim);
+            let tly = ((cy - half_patch).max(0.0) as usize).min(frame_h - patch_dim);
+            let sig = haar_morton_signature_scaled_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 tlx,
                 tly,
+                scale_px,
             );
 
             let cand = CandidatePeak {
                 x: cx,
                 y: cy,
-                energy: if num_sub == 1 { sum_w } else { sub_e * 2.2 },
+                energy: if num_sub == 1 { sum_w } else { sub_e * 2.2 * s * s },
                 sig,
                 valid: 1,
                 _pad: [0; 3],
@@ -894,6 +971,9 @@ fn solve_noncausal_fista_target(
     frame_idx: u32,
     stimulus_armed: u32,
     stimulus_frame: u32,
+    frame_w: usize,
+    frame_h: usize,
+    scale_f: f32,
 ) -> bool {
     let mut yx = [0.0f32; RING_LEN];
     let mut yy = [0.0f32; RING_LEN];
@@ -924,6 +1004,7 @@ fn solve_noncausal_fista_target(
     } else {
         // Scan for occluded intervals (u0, u1) pinned on both sides by visible detections:
         // Two-Point Boundary-Value Cubic Hermite Spline Bridge
+        let tail_margin = 4.0 * scale_f;
         let mut u = 0usize;
         while u < RING_LEN {
             if vis[u] == 0 {
@@ -984,8 +1065,8 @@ fn solve_noncausal_fista_target(
                     };
                     for k in gap_start..RING_LEN {
                         let dt = (k - u0) as f32;
-                        yx[k] = (yx[u0] + dt * v_tail_x).clamp(4.0, (FRAME_W - 4) as f32);
-                        yy[k] = (yy[u0] + dt * v_tail_y).clamp(4.0, (FRAME_H - 4) as f32);
+                        yx[k] = (yx[u0] + dt * v_tail_x).clamp(tail_margin, (frame_w as f32) - tail_margin);
+                        yy[k] = (yy[u0] + dt * v_tail_y).clamp(tail_margin, (frame_h as f32) - tail_margin);
                         weff[k] = 0.60;
                     }
                 } else if gap_end < RING_LEN {
@@ -1041,7 +1122,8 @@ fn solve_noncausal_fista_target(
         }
     }
     let step_dual = 1.0 / l_gersh;
-    let lam = lambda.max(0.02);
+    // Scale-covariant dual box [-s * lambda, s * lambda] ensures X_HD(t) = s * X_SD(t)
+    let lam = (lambda * scale_f).max(0.02 * scale_f);
 
     // Shift warm-started dual variables left by 1 frame and project onto [-lam, lam]
     let mut ux = [0.0f32; 10];
@@ -1165,12 +1247,12 @@ fn solve_noncausal_fista_target(
     let v_phys_y = v_frame_y * fps;
     let a_phys_y = a_frame_y * fps * fps;
 
-    if vis_count > 0 && vis[11] != 0 && v_phys_y < -20.0 && a_phys_y > 120.0 {
+    if vis_count > 0 && vis[11] != 0 && v_phys_y < -20.0 * scale_f && a_phys_y > 120.0 * scale_f {
         let t_apex_sec = (-v_phys_y / a_phys_y).min(0.75);
         t.apex_frames = t_apex_sec * fps;
-        t.apex_x = (xk[11] + v_phys_x * t_apex_sec).clamp(8.0, (FRAME_W - 8) as f32);
+        t.apex_x = (xk[11] + v_phys_x * t_apex_sec).clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
         t.apex_y = (yk[11] + v_phys_y * t_apex_sec + 0.5 * a_phys_y * t_apex_sec * t_apex_sec)
-            .clamp(6.0, (FRAME_H - 6) as f32);
+            .clamp(6.0 * scale_f, (frame_h as f32) - 6.0 * scale_f);
     } else {
         t.apex_frames = 0.0;
         t.apex_x = xk[11];
@@ -1179,13 +1261,16 @@ fn solve_noncausal_fista_target(
 
     // Mode B: Stimulus-to-onset reflex latency (when stimulus armed) + spontaneous step settle duration
     let mut consumed_stimulus = false;
+    let stim_disp2 = (8.0 * scale_f) * (8.0 * scale_f);
+    let step_disp2 = (18.0 * scale_f) * (18.0 * scale_f);
+    let settle_thresh = 38.0 * scale_f;
     if vis[11] != 0 {
         if stimulus_armed != 0 && frame_idx > stimulus_frame {
             let elapsed_stim = frame_idx - stimulus_frame;
             if elapsed_stim <= 90 {
                 let sdx = xk[11] - t.stim_ref_x;
                 let sdy = yk[11] - t.stim_ref_y;
-                if sdx * sdx + sdy * sdy > 8.0 * 8.0 {
+                if sdx * sdx + sdy * sdy > stim_disp2 {
                     t.saccade_latency_ms = (elapsed_stim as f32) * (1000.0 / fps.max(24.0));
                     consumed_stimulus = true;
                 }
@@ -1195,7 +1280,7 @@ fn solve_noncausal_fista_target(
         let jump_dx = xk[11] - t.step_ref_x;
         let jump_dy = yk[11] - t.step_ref_y;
         let min_rearm = ((0.40 * fps) as u32).max(12);
-        if (jump_dx * jump_dx + jump_dy * jump_dy) > 18.0 * 18.0
+        if (jump_dx * jump_dx + jump_dy * jump_dy) > step_disp2
             && frame_idx.saturating_sub(t.step_onset_frame) > min_rearm
         {
             t.step_onset_frame = frame_idx;
@@ -1205,7 +1290,7 @@ fn solve_noncausal_fista_target(
             let settle_speed_px_s = v_phys_x.abs() + v_phys_y.abs();
             let elapsed_frames = frame_idx.saturating_sub(t.step_onset_frame);
             let max_settle_frames = ((0.50 * fps) as u32).max(15);
-            if elapsed_frames >= 2 && elapsed_frames <= max_settle_frames && settle_speed_px_s < 38.0 {
+            if elapsed_frames >= 2 && elapsed_frames <= max_settle_frames && settle_speed_px_s < settle_thresh {
                 t.step_settle_ms = (elapsed_frames as f32) * (1000.0 / fps.max(24.0));
                 if t.saccade_latency_ms <= 0.0 {
                     t.saccade_latency_ms = t.step_settle_ms;
@@ -1226,6 +1311,7 @@ pub unsafe extern "C" fn chronos_init() {
     let a = arena_mut();
     core::ptr::write_bytes(a as *mut Arena as *mut u8, 0, 1);
     *a = core::mem::zeroed();
+    a.res_mode = 0;
     a.lookahead_k = 8;
     a.eca_adapt_rate = 0.035;
     a.fista_lambda = 1.45;
@@ -1247,7 +1333,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
         a.kalman[m] = core::mem::zeroed();
         a.prev_fiedler_track[m] = 0.0;
     }
-    for i in 0..FRAME_PIXELS {
+    for i in 0..MAX_FRAME_PIXELS {
         a.bg_luma[i] = 0.0;
         a.eca_res[i] = 0.0;
         a.bg_stat_streak[i] = 0;
@@ -1259,7 +1345,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     for i in 0..GRAPH_NODES {
         a.fiedler_vec[i] = 0.0;
     }
-    for i in 0..256 {
+    for i in 0..MAX_PIP_PIXELS {
         a.pip_ref_luma[i] = 0.0;
     }
     a.num_peaks = 0;
@@ -1279,6 +1365,42 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.has_strobed = 0;
     a.stimulus_frame = 0;
     a.stimulus_armed = 0;
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_resolution(mode: u32) {
+    let a = arena_mut();
+    let next_mode = if mode != 0 { 1 } else { 0 };
+    if a.res_mode != next_mode {
+        a.res_mode = next_mode;
+        chronos_reset_tracks();
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_resolution() -> u32 {
+    arena_mut().res_mode
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_frame_w() -> u32 {
+    mode_dims(arena_mut().res_mode).0 as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_frame_h() -> u32 {
+    mode_dims(arena_mut().res_mode).1 as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_pip_dim() -> u32 {
+    mode_dims(arena_mut().res_mode).5 as u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_ring_slot_ptr(slot: u32) -> *mut u8 {
+    let a = arena_mut();
+    a.rgba_ring[(slot as usize) % RING_LEN].as_mut_ptr()
 }
 
 #[no_mangle]
@@ -1408,6 +1530,8 @@ pub unsafe extern "C" fn chronos_get_telemetry_ptr() -> *const f32 {
 #[no_mangle]
 pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
     let a = arena_mut();
+    let (frame_w, frame_h, grid_w, grid_h, _scale_px, _pip_dim, s) = mode_dims(a.res_mode);
+    let frame_pixels = frame_w * frame_h;
     let f_idx = a.frame_idx;
     let slot_in = (f_idx as usize) % RING_LEN;
     let slot_prev = if f_idx == 0 {
@@ -1425,7 +1549,7 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
         a.luma.as_mut_ptr(),
         a.chroma_rg.as_mut_ptr(),
         a.chroma_by.as_mut_ptr(),
-        FRAME_PIXELS,
+        frame_pixels,
     );
 
     // 2. Construct independent stationary-clutter evaluation mask strictly from raw frame-to-frame
@@ -1436,7 +1560,7 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
             a.rgba_ring[slot_prev].as_ptr(),
             a.bg_stat_streak.as_mut_ptr(),
             a.bg_eval_mask.as_mut_ptr(),
-            FRAME_PIXELS,
+            frame_pixels,
         );
     }
 
@@ -1452,14 +1576,14 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
             core::ptr::null()
         },
         a.eca_res.as_mut_ptr(),
-        FRAME_PIXELS,
+        frame_pixels,
         a.eca_adapt_rate,
         &mut err2,
         &mut sig2,
         &mut eval_count,
     );
 
-    a.clutter_eval_ratio = (eval_count as f32) * (1.0 / (FRAME_PIXELS as f32));
+    a.clutter_eval_ratio = (eval_count as f32) * (1.0 / (frame_pixels as f32));
     if eval_count >= 1024 && sig2 > 1e-3 {
         if a.clutter_db_valid == 0 {
             a.eca_err2_ema = err2;
@@ -1484,6 +1608,10 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
             a.bg_luma.as_mut_ptr(),
             a.eca_res.as_ptr(),
             a.cc_energy.as_mut_ptr(),
+            frame_w,
+            frame_h,
+            grid_w,
+            grid_h,
         );
         extract_connected_component_peaks(a);
     } else {
@@ -1530,6 +1658,8 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
         }
     }
 
+    let lap_sigma = 28.0 * s;
+    let inv_2sig2 = 1.0 / (2.0 * lap_sigma * lap_sigma);
     for i in 0..GRAPH_NODES {
         if !node_active[i] {
             continue;
@@ -1548,8 +1678,7 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
 
             let dx = node_x[i] - node_x[j];
             let dy = node_y[i] - node_y[j];
-            // Sharper spatial Gaussian (sigma = 28 px) cleanly partitions nearby twin clusters
-            let kin_aff = fast_expf(-(dx * dx + dy * dy) * (1.0 / (2.0 * 28.0 * 28.0)));
+            let kin_aff = fast_expf(-(dx * dx + dy * dy) * inv_2sig2);
 
             // Macro-geometric spatial coupling (0.08 * kin_aff) + 2-adic ultrametric affinity
             let w = 1e-3 + 0.08 * kin_aff + padic_aff * (0.12 + 0.80 * kin_aff);
@@ -1567,6 +1696,16 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
 #[no_mangle]
 pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let a = arena_mut();
+    let (frame_w, frame_h, _grid_w, _grid_h, scale_px, pip_dim, s) = mode_dims(a.res_mode);
+    let s2 = s * s;
+    let patch_dim = 16 * scale_px;
+    let half_patch = 8.0 * s;
+    let max_tlx_f = (frame_w - patch_dim - 1) as f32;
+    let max_tly_f = (frame_h - patch_dim - 1) as f32;
+    let max_tlx_i = (frame_w - patch_dim - 1) as i32;
+    let max_tly_i = (frame_h - patch_dim - 1) as i32;
+    let s_i32 = scale_px as i32;
+
     let f_idx = a.frame_idx;
     let safe_dt = if dt_sec.is_finite() {
         dt_sec.clamp(0.002, 0.15)
@@ -1602,6 +1741,14 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let mut peak_claimed = [0u8; MAX_TARGETS];
     // (match_cx, match_cy, total_cost, raw_patch_cost, best_sig, best_val, is_visible)
     let mut track_matched_pos = [(0.0f32, 0.0f32, 1e9f32, 1e9f32, 0u32, 0u32, false); MAX_TARGETS];
+    let spec_lookup_r2 = (24.0 * s) * (24.0 * s);
+    let fine_steps_sd = [3i32, 1i32];
+    let fine_steps_hd = [6i32, 2i32, 1i32];
+    let fine_steps: &[i32] = if scale_px == 2 {
+        &fine_steps_hd
+    } else {
+        &fine_steps_sd
+    };
 
     for m in 0..MAX_TARGETS {
         if a.targets[m].active == 0 {
@@ -1641,7 +1788,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let ref_x = if coasting == 0 { pred_cx } else { a.targets[m].entry_x };
             let ref_y = if coasting == 0 { pred_cy } else { a.targets[m].entry_y };
             let dist2 = (px - ref_x) * (px - ref_x) + (py - ref_y) * (py - ref_y);
-            let max_r2 = if coasting == 0 { 48.0 * 48.0 } else { 180.0 * 180.0 };
+            let max_r2 = if coasting == 0 {
+                (48.0 * s) * (48.0 * s)
+            } else {
+                (180.0 * s) * (180.0 * s)
+            };
             if dist2 <= max_r2 {
                 seeds_x[n_seeds] = px;
                 seeds_y[n_seeds] = py;
@@ -1651,27 +1802,27 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
         let mut best_total_cost = 1e9f32;
         let mut best_raw_cost = 1e9f32;
-        let mut best_tlx = ((pred_cx - 8.0).clamp(1.0, (FRAME_W - 17) as f32)) as usize;
-        let mut best_tly = ((pred_cy - 8.0).clamp(1.0, (FRAME_H - 17) as f32)) as usize;
+        let mut best_tlx = ((pred_cx - half_patch).clamp(1.0, max_tlx_f)) as usize;
+        let mut best_tly = ((pred_cy - half_patch).clamp(1.0, max_tly_f)) as usize;
         let mut best_sig = a.targets[m].curr_sig;
 
-        // Helper closure-equivalent logic: evaluate spectral distance to nearest candidate peak
-        for s in 0..n_seeds {
-            let base_tlx = ((seeds_x[s] - 8.0).clamp(2.0, (FRAME_W - 18) as f32)) as i32;
-            let base_tly = ((seeds_y[s] - 8.0).clamp(2.0, (FRAME_H - 18) as f32)) as i32;
+        // Coarse search across kinematic prediction, entry anchor, and candidate ECA peaks
+        for seed_idx in 0..n_seeds {
+            let base_tlx = ((seeds_x[seed_idx] - half_patch).clamp(2.0, max_tlx_f - 1.0)) as i32;
+            let base_tly = ((seeds_y[seed_idx] - half_patch).clamp(2.0, max_tly_f - 1.0)) as i32;
 
-            let step = if s == 0 { 6i32 } else { 4i32 };
+            let step = if seed_idx == 0 { 6 * s_i32 } else { 4 * s_i32 };
             for dy in [-step, 0, step] {
                 for dx in [-step, 0, step] {
-                    let cx = (base_tlx + dx).clamp(1, (FRAME_W - 17) as i32) as usize;
-                    let cy = (base_tly + dy).clamp(1, (FRAME_H - 17) as i32) as usize;
+                    let cx = (base_tlx + dx).clamp(1, max_tlx_i) as usize;
+                    let cy = (base_tly + dy).clamp(1, max_tly_i) as usize;
                     let mut csig = 0u32;
-                    let raw_cost = sad16x16_patch_simd128(
+                    let raw_cost = sad_patch_scaled_simd128(
                         a.luma.as_ptr(),
                         a.chroma_rg.as_ptr(),
                         a.chroma_by.as_ptr(),
                         a.eca_res.as_ptr(),
-                        FRAME_W,
+                        frame_w,
                         cx,
                         cy,
                         a.targets[m].tpl_luma.as_ptr(),
@@ -1679,6 +1830,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         a.targets[m].tpl_by.as_ptr(),
                         anchor_sig,
                         &mut csig,
+                        scale_px,
                     );
                     if has_opposite_chroma_pole(anchor_sig, csig) {
                         continue;
@@ -1686,10 +1838,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
                     let mut spec_pen = 0.0f32;
                     if eff_spec_gamma > 0.0 && a.num_peaks > 0 {
-                        let cand_px = (cx as f32) + 8.0;
-                        let cand_py = (cy as f32) + 8.0;
+                        let cand_px = (cx as f32) + half_patch;
+                        let cand_py = (cy as f32) + half_patch;
                         let mut near_p: Option<usize> = None;
-                        let mut near_d2 = 24.0 * 24.0;
+                        let mut near_d2 = spec_lookup_r2;
                         for p in 0..a.num_peaks {
                             let pdx = cand_px - a.peaks[p].x;
                             let pdy = cand_py - a.peaks[p].y;
@@ -1717,8 +1869,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
         }
 
-        // Fine 3px -> 1px hierarchical refinement around winning patch
-        for step in [3i32, 1i32] {
+        // Hierarchical fine refinement (`3 -> 1` in SD, `6 -> 2 -> 1` in HD) around winning patch
+        for &step in fine_steps {
             let center_x = best_tlx as i32;
             let center_y = best_tly as i32;
             for dy in [-step, 0, step] {
@@ -1726,15 +1878,15 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     if dx == 0 && dy == 0 {
                         continue;
                     }
-                    let cx = (center_x + dx).clamp(1, (FRAME_W - 17) as i32) as usize;
-                    let cy = (center_y + dy).clamp(1, (FRAME_H - 17) as i32) as usize;
+                    let cx = (center_x + dx).clamp(1, max_tlx_i) as usize;
+                    let cy = (center_y + dy).clamp(1, max_tly_i) as usize;
                     let mut csig = 0u32;
-                    let raw_cost = sad16x16_patch_simd128(
+                    let raw_cost = sad_patch_scaled_simd128(
                         a.luma.as_ptr(),
                         a.chroma_rg.as_ptr(),
                         a.chroma_by.as_ptr(),
                         a.eca_res.as_ptr(),
-                        FRAME_W,
+                        frame_w,
                         cx,
                         cy,
                         a.targets[m].tpl_luma.as_ptr(),
@@ -1742,6 +1894,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         a.targets[m].tpl_by.as_ptr(),
                         anchor_sig,
                         &mut csig,
+                        scale_px,
                     );
                     if has_opposite_chroma_pole(anchor_sig, csig) {
                         continue;
@@ -1749,10 +1902,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
                     let mut spec_pen = 0.0f32;
                     if eff_spec_gamma > 0.0 && a.num_peaks > 0 {
-                        let cand_px = (cx as f32) + 8.0;
-                        let cand_py = (cy as f32) + 8.0;
+                        let cand_px = (cx as f32) + half_patch;
+                        let cand_py = (cy as f32) + half_patch;
                         let mut near_p: Option<usize> = None;
-                        let mut near_d2 = 24.0 * 24.0;
+                        let mut near_d2 = spec_lookup_r2;
                         for p in 0..a.num_peaks {
                             let pdx = cand_px - a.peaks[p].x;
                             let pdy = cand_py - a.peaks[p].y;
@@ -1783,14 +1936,18 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let best_val = padic_ultrametric_val(anchor_sig, best_sig);
         let d2 = padic_distance_from_val(best_val);
 
-        let mut eca_sum = 0.0f32;
+        let mut acc_eca = f32x4_splat(0.0);
+        let cstep = 4 * scale_px;
         for ry in 0..16usize {
-            let r_off = (best_tly + ry) * FRAME_W + best_tlx;
-            for rx in 0..16usize {
-                eca_sum += a.eca_res[r_off + rx];
+            let r_off = (best_tly + ry * scale_px) * frame_w + best_tlx;
+            for vec_idx in 0..4usize {
+                acc_eca = f32x4_add(
+                    acc_eca,
+                    load_pooled4_f32(a.eca_res.as_ptr().add(r_off + vec_idx * cstep), frame_w, scale_px),
+                );
             }
         }
-        let eca_mean = eca_sum * (1.0 / 256.0);
+        let eca_mean = hsum_f32x4(acc_eca) * (1.0 / 256.0);
         let app_err = best_raw_cost - 0.55 * d2 + 0.18 * eca_mean.min(0.35);
 
         let is_visible = best_total_cost < 1e8
@@ -1803,42 +1960,45 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let mut sub_dy = 0.0f32;
         if is_visible
             && best_tlx >= 2
-            && best_tlx + 17 < FRAME_W
+            && best_tlx + patch_dim + 1 < frame_w
             && best_tly >= 2
-            && best_tly + 17 < FRAME_H
+            && best_tly + patch_dim + 1 < frame_h
         {
             let c_0 = ssd16x16_photometric_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 best_tlx,
                 best_tly,
                 a.targets[m].tpl_luma.as_ptr(),
                 a.targets[m].tpl_rg.as_ptr(),
                 a.targets[m].tpl_by.as_ptr(),
+                scale_px,
             );
             let c_xm = ssd16x16_photometric_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 best_tlx - 1,
                 best_tly,
                 a.targets[m].tpl_luma.as_ptr(),
                 a.targets[m].tpl_rg.as_ptr(),
                 a.targets[m].tpl_by.as_ptr(),
+                scale_px,
             );
             let c_xp = ssd16x16_photometric_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 best_tlx + 1,
                 best_tly,
                 a.targets[m].tpl_luma.as_ptr(),
                 a.targets[m].tpl_rg.as_ptr(),
                 a.targets[m].tpl_by.as_ptr(),
+                scale_px,
             );
             let denom_x = 2.0 * (c_xm - 2.0 * c_0 + c_xp);
             if denom_x > 1e-5 {
@@ -1849,23 +2009,25 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 best_tlx,
                 best_tly - 1,
                 a.targets[m].tpl_luma.as_ptr(),
                 a.targets[m].tpl_rg.as_ptr(),
                 a.targets[m].tpl_by.as_ptr(),
+                scale_px,
             );
             let c_yp = ssd16x16_photometric_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 best_tlx,
                 best_tly + 1,
                 a.targets[m].tpl_luma.as_ptr(),
                 a.targets[m].tpl_rg.as_ptr(),
                 a.targets[m].tpl_by.as_ptr(),
+                scale_px,
             );
             let denom_y = 2.0 * (c_ym - 2.0 * c_0 + c_yp);
             if denom_y > 1e-5 {
@@ -1873,8 +2035,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
         }
 
-        let match_cx = (best_tlx as f32) + 8.0 + sub_dx;
-        let match_cy = (best_tly as f32) + 8.0 + sub_dy;
+        let match_cx = (best_tlx as f32) + half_patch + sub_dx;
+        let match_cy = (best_tly as f32) + half_patch + sub_dy;
         track_matched_pos[m] = (
             match_cx,
             match_cy,
@@ -1889,6 +2051,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     // Spatial conflict resolution ordered by spectrally-regularized `best_total_cost`
     // Also record pairwise spatial interaction history (`proximity_mask`) so internal swap
     // auditing only attributes cross-track identity swaps between tracks that physically met.
+    let prox_now_r2 = (54.0 * s) * (54.0 * s);
+    let prox_coast_r2 = (96.0 * s) * (96.0 * s);
     for i in 0..MAX_TARGETS {
         if a.targets[i].active == 0 {
             continue;
@@ -1901,9 +2065,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let dy = a.targets[i].pos_y - a.targets[j].pos_y;
             let pdx = a.targets[i].pred_cx - a.targets[j].pred_cx;
             let pdy = a.targets[i].pred_cy - a.targets[j].pred_cy;
-            let close_now = (dx * dx + dy * dy < 54.0 * 54.0) || (pdx * pdx + pdy * pdy < 54.0 * 54.0);
+            let close_now = (dx * dx + dy * dy < prox_now_r2) || (pdx * pdx + pdy * pdy < prox_now_r2);
             let close_coast = (a.targets[i].coasting > 0 || a.targets[j].coasting > 0)
-                && (dx * dx + dy * dy < 96.0 * 96.0);
+                && (dx * dx + dy * dy < prox_coast_r2);
             if close_now || close_coast {
                 a.targets[i].proximity_mask |= 1u8 << j;
                 a.targets[j].proximity_mask |= 1u8 << i;
@@ -1922,6 +2086,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
     }
 
+    let conflict_r2 = (11.0 * s) * (11.0 * s);
+    let claim_r2 = (22.0 * s) * (22.0 * s);
+    let v_clamp = 18.0 * s;
+    let iso_r2 = (32.0 * s) * (32.0 * s);
+
     for idx in 0..MAX_TARGETS {
         let m = order[idx];
         if a.targets[m].active == 0 {
@@ -1935,7 +2104,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 if a.targets[pm].active != 0 && track_matched_pos[pm].6 {
                     let dx = mcx - track_matched_pos[pm].0;
                     let dy = mcy - track_matched_pos[pm].1;
-                    if dx * dx + dy * dy < 11.0 * 11.0 {
+                    if dx * dx + dy * dy < conflict_r2 {
                         vis = false;
                         track_matched_pos[m].6 = false;
                         break;
@@ -1948,7 +2117,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             for p in 0..a.num_peaks {
                 let dx = a.peaks[p].x - mcx;
                 let dy = a.peaks[p].y - mcy;
-                if dx * dx + dy * dy < 22.0 * 22.0 {
+                if dx * dx + dy * dy < claim_r2 {
                     peak_claimed[p] = 1;
                 }
             }
@@ -1972,12 +2141,12 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.targets[m].reemerged_last = 1;
             } else if a.targets[m].reemerged_last != 0 {
                 // Second visible frame after occlusion: lock directly onto observed post-emergence velocity
-                a.targets[m].vel_x = inst_vx.clamp(-18.0, 18.0);
-                a.targets[m].vel_y = inst_vy.clamp(-18.0, 18.0);
+                a.targets[m].vel_x = inst_vx.clamp(-v_clamp, v_clamp);
+                a.targets[m].vel_y = inst_vy.clamp(-v_clamp, v_clamp);
                 a.targets[m].reemerged_last = 0;
             } else {
-                a.targets[m].vel_x = (0.62 * a.targets[m].vel_x + 0.38 * inst_vx).clamp(-18.0, 18.0);
-                a.targets[m].vel_y = (0.62 * a.targets[m].vel_y + 0.38 * inst_vy).clamp(-18.0, 18.0);
+                a.targets[m].vel_x = (0.62 * a.targets[m].vel_x + 0.38 * inst_vx).clamp(-v_clamp, v_clamp);
+                a.targets[m].vel_y = (0.62 * a.targets[m].vel_y + 0.38 * inst_vy).clamp(-v_clamp, v_clamp);
             }
 
             a.targets[m].pos_x = mcx;
@@ -2000,19 +2169,22 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     if o != m && a.targets[o].active != 0 {
                         let dx = a.targets[o].pos_x - mcx;
                         let dy = a.targets[o].pos_y - mcy;
-                        if dx * dx + dy * dy < 32.0 * 32.0 {
+                        if dx * dx + dy * dy < iso_r2 {
                             isolated = false;
                             break;
                         }
                     }
                 }
                 if isolated {
-                    let tlx = ((mcx - 8.0).clamp(0.0, (FRAME_W - 16) as f32)) as usize;
-                    let tly = ((mcy - 8.0).clamp(0.0, (FRAME_H - 16) as f32)) as usize;
-                    blend_template_16x16(
+                    let tlx = ((mcx - half_patch).clamp(0.0, (frame_w - patch_dim) as f32)) as usize;
+                    let tly = ((mcy - half_patch).clamp(0.0, (frame_h - patch_dim) as f32)) as usize;
+                    blend_template_scaled(
                         &a.luma,
                         &a.chroma_rg,
                         &a.chroma_by,
+                        frame_w,
+                        frame_h,
+                        scale_px,
                         tlx,
                         tly,
                         0.02,
@@ -2067,10 +2239,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
             let coast_x = (a.targets[m].entry_x
                 + (a.targets[m].coasting as f32) * a.targets[m].entry_vx)
-                .clamp(8.0, (FRAME_W - 8) as f32);
+                .clamp(half_patch, (frame_w as f32) - half_patch);
             let coast_y = (a.targets[m].entry_y
                 + (a.targets[m].coasting as f32) * a.targets[m].entry_vy)
-                .clamp(8.0, (FRAME_H - 8) as f32);
+                .clamp(half_patch, (frame_h as f32) - half_patch);
 
             a.targets[m].ring_raw_x[slot_in] = coast_x;
             a.targets[m].ring_raw_y[slot_in] = coast_y;
@@ -2094,24 +2266,26 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     // 4. Kinematic-Only Constant-Velocity 2x2 Covariance Kalman Baseline
     // ------------------------------------------------------------------------
     let mut kal_peak_used = [0u8; MAX_TARGETS];
+    let kal_margin = 6.0 * s;
+    let kal_gate_d2 = (64.0 * s) * (64.0 * s);
     for m in 0..MAX_TARGETS {
         if a.kalman[m].active == 0 {
             continue;
         }
         let dt_f = dt_frames_60;
-        let pred_x = (a.kalman[m].x + a.kalman[m].vx * dt_f).clamp(6.0, (FRAME_W - 6) as f32);
-        let pred_y = (a.kalman[m].y + a.kalman[m].vy * dt_f).clamp(6.0, (FRAME_H - 6) as f32);
+        let pred_x = (a.kalman[m].x + a.kalman[m].vx * dt_f).clamp(kal_margin, (frame_w as f32) - kal_margin);
+        let pred_y = (a.kalman[m].y + a.kalman[m].vy * dt_f).clamp(kal_margin, (frame_h as f32) - kal_margin);
 
         // Exact P^- = F P F^T + Q for F = [[1, dt_f], [0, 1]]
         let p_xx_m = a.kalman[m].p_xx
             + 2.0 * dt_f * a.kalman[m].p_xv
             + dt_f * dt_f * a.kalman[m].p_vv
-            + 0.25 * dt_f;
+            + 0.25 * s2 * dt_f;
         let p_xv_m = a.kalman[m].p_xv + dt_f * a.kalman[m].p_vv;
-        let p_vv_m = a.kalman[m].p_vv + 0.04 * dt_f;
+        let p_vv_m = a.kalman[m].p_vv + 0.04 * s2 * dt_f;
 
         let mut best_p: Option<usize> = None;
-        let mut best_d2 = 64.0 * 64.0;
+        let mut best_d2 = kal_gate_d2;
         for p in 0..a.num_peaks {
             if kal_peak_used[p] != 0 {
                 continue;
@@ -2129,9 +2303,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             kal_peak_used[p] = 1;
             let zx = a.peaks[p].x;
             let zy = a.peaks[p].y;
-            let e_conf = (a.peaks[p].energy * (1.0 / 52.0)).clamp(0.12, 1.0);
+            let e_conf = (a.peaks[p].energy * (1.0 / (52.0 * s2))).clamp(0.12, 1.0);
             let e_conf2 = e_conf * e_conf;
-            let r_meas = 4.0 / (e_conf2 * e_conf2);
+            let r_meas = (4.0 * s2) / (e_conf2 * e_conf2);
             let s_innov = p_xx_m + r_meas;
             let k_x = p_xx_m / s_innov;
             let k_v = p_xv_m / s_innov;
@@ -2140,11 +2314,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let innov_y = zy - pred_y;
             a.kalman[m].x = pred_x + k_x * innov_x;
             a.kalman[m].y = pred_y + k_x * innov_y;
-            a.kalman[m].vx = (a.kalman[m].vx + k_v * innov_x).clamp(-18.0, 18.0);
-            a.kalman[m].vy = (a.kalman[m].vy + k_v * innov_y).clamp(-18.0, 18.0);
-            a.kalman[m].p_xx = ((1.0 - k_x) * p_xx_m).max(1e-3);
+            a.kalman[m].vx = (a.kalman[m].vx + k_v * innov_x).clamp(-v_clamp, v_clamp);
+            a.kalman[m].vy = (a.kalman[m].vy + k_v * innov_y).clamp(-v_clamp, v_clamp);
+            a.kalman[m].p_xx = ((1.0 - k_x) * p_xx_m).max(1e-3 * s2);
             a.kalman[m].p_xv = (1.0 - k_x) * p_xv_m;
-            a.kalman[m].p_vv = (p_vv_m - k_v * p_xv_m).max(1e-4);
+            a.kalman[m].p_vv = (p_vv_m - k_v * p_xv_m).max(1e-4 * s2);
             a.kalman[m].coasting = 0;
 
             let ksig = a.peaks[p].sig;
@@ -2184,9 +2358,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         } else {
             a.kalman[m].x = pred_x;
             a.kalman[m].y = pred_y;
-            a.kalman[m].p_xx = p_xx_m.min(400.0);
-            a.kalman[m].p_xv = p_xv_m.clamp(-80.0, 80.0);
-            a.kalman[m].p_vv = p_vv_m.min(64.0);
+            a.kalman[m].p_xx = p_xx_m.min(400.0 * s2);
+            a.kalman[m].p_xv = p_xv_m.clamp(-80.0 * s2, 80.0 * s2);
+            a.kalman[m].p_vv = p_vv_m.min(64.0 * s2);
             a.kalman[m].coasting += 1;
         }
 
@@ -2198,8 +2372,15 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     // 5. Auto-Seed New Moving Physical Targets from Unclaimed ECA Peaks
     // ------------------------------------------------------------------------
     if f_idx >= 4 {
+        let seed_close_r2 = (28.0 * s) * (28.0 * s);
+        let seed_chroma_r2 = (72.0 * s) * (72.0 * s);
+        let seed_neutral_r2 = (46.0 * s) * (46.0 * s);
+        let core_lo = 2 * scale_px;
+        let core_hi = 14 * scale_px;
+        let min_patch_eca = 144.0 * s2 * 0.055;
+
         for p in 0..a.num_peaks {
-            if peak_claimed[p] != 0 || a.peaks[p].energy < 3.6 {
+            if peak_claimed[p] != 0 || a.peaks[p].energy < 3.6 * s {
                 continue;
             }
             let px = a.peaks[p].x;
@@ -2213,18 +2394,18 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     let dx = a.targets[m].pos_x - px;
                     let dy = a.targets[m].pos_y - py;
                     let dist2 = dx * dx + dy * dy;
-                    if dist2 < 28.0 * 28.0 {
+                    if dist2 < seed_close_r2 {
                         too_close = true;
                         break;
                     }
                     let val = padic_ultrametric_val(a.targets[m].anchor_sig, psig);
                     let same_chroma = peak_chromatic && !has_opposite_chroma_pole(a.targets[m].anchor_sig, psig) && val >= 5;
-                    if same_chroma && dist2 < 72.0 * 72.0 {
+                    if same_chroma && dist2 < seed_chroma_r2 {
                         too_close = true;
                         break;
                     }
                     let same_neutral_body = !peak_chromatic && ((a.targets[m].anchor_sig & (1 << 31)) == 0) && val >= 8;
-                    if same_neutral_body && dist2 < 46.0 * 46.0 {
+                    if same_neutral_body && dist2 < seed_neutral_r2 {
                         too_close = true;
                         break;
                     }
@@ -2232,7 +2413,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         let edx = a.targets[m].entry_x - px;
                         let edy = a.targets[m].entry_y - py;
                         if !has_opposite_chroma_pole(a.targets[m].anchor_sig, psig)
-                            || (edy.abs() < 24.0 && edx.abs() < 120.0)
+                            || (edy.abs() < 24.0 * s && edx.abs() < 120.0 * s)
                         {
                             too_close = true;
                             break;
@@ -2244,25 +2425,26 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 continue;
             }
 
-            let check_tlx = ((px - 8.0).clamp(1.0, (FRAME_W - 17) as f32)) as usize;
-            let check_tly = ((py - 8.0).clamp(1.0, (FRAME_H - 17) as f32)) as usize;
+            let check_tlx = ((px - half_patch).clamp(1.0, max_tlx_f)) as usize;
+            let check_tly = ((py - half_patch).clamp(1.0, max_tly_f)) as usize;
             let mut patch_eca = 0.0f32;
-            for ry in 2..14usize {
-                let roff = (check_tly + ry) * FRAME_W + check_tlx;
-                for rx in 2..14usize {
+            for ry in core_lo..core_hi {
+                let roff = (check_tly + ry) * frame_w + check_tlx;
+                for rx in core_lo..core_hi {
                     patch_eca += a.eca_res[roff + rx];
                 }
             }
-            if patch_eca < (144.0 * 0.055) {
+            if patch_eca < min_patch_eca {
                 continue;
             }
             let ac_energy = patch16x16_ac_energy_simd128(
                 a.luma.as_ptr(),
                 a.chroma_rg.as_ptr(),
                 a.chroma_by.as_ptr(),
-                FRAME_W,
+                frame_w,
                 check_tlx,
                 check_tly,
+                scale_px,
             );
             if ac_energy < 0.00055 {
                 continue;
@@ -2280,11 +2462,21 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 for o in 0..MAX_TARGETS {
                     a.targets[o].proximity_mask &= clear_bit;
                 }
-                let tlx = ((px - 8.0).clamp(1.0, (FRAME_W - 17) as f32)) as usize;
-                let tly = ((py - 8.0).clamp(1.0, (FRAME_H - 17) as f32)) as usize;
+                let tlx = check_tlx;
+                let tly = check_tly;
 
                 a.targets[m] = core::mem::zeroed();
-                capture_template_16x16(&a.luma, &a.chroma_rg, &a.chroma_by, tlx, tly, &mut a.targets[m]);
+                capture_template_scaled(
+                    &a.luma,
+                    &a.chroma_rg,
+                    &a.chroma_by,
+                    frame_w,
+                    frame_h,
+                    scale_px,
+                    tlx,
+                    tly,
+                    &mut a.targets[m],
+                );
 
                 let tid = a.next_track_id;
                 a.next_track_id += 1;
@@ -2310,13 +2502,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.targets[m].axis_y = 1.0; // Default vertical principal tremor axis
 
                 // Only birth slot `slot_in` has observed visibility; pre-birth history is marked 0!
-                for s in 0..RING_LEN {
-                    a.targets[m].ring_raw_x[s] = px;
-                    a.targets[m].ring_raw_y[s] = py;
-                    a.targets[m].ring_sig[s] = a.targets[m].anchor_sig;
-                    a.targets[m].ring_vis[s] = if s == slot_in { 1 } else { 0 };
-                    a.targets[m].fista_x[s] = px;
-                    a.targets[m].fista_y[s] = py;
+                for sr in 0..RING_LEN {
+                    a.targets[m].ring_raw_x[sr] = px;
+                    a.targets[m].ring_raw_y[sr] = py;
+                    a.targets[m].ring_sig[sr] = a.targets[m].anchor_sig;
+                    a.targets[m].ring_vis[sr] = if sr == slot_in { 1 } else { 0 };
+                    a.targets[m].fista_x[sr] = px;
+                    a.targets[m].fista_y[sr] = py;
                 }
 
                 a.kalman[m] = CausalKalmanTrack {
@@ -2329,9 +2521,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     y: py,
                     vx: 0.0,
                     vy: 0.0,
-                    p_xx: 10.0,
+                    p_xx: 10.0 * s2,
                     p_xv: 0.0,
-                    p_vv: 16.0,
+                    p_vv: 16.0 * s2,
                     coasting: 0,
                     ring_x: [px; RING_LEN],
                     ring_y: [py; RING_LEN],
@@ -2375,6 +2567,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             f_idx,
             a.stimulus_armed,
             a.stimulus_frame,
+            frame_w,
+            frame_h,
+            s,
         );
         if consumed {
             any_consumed_stimulus = true;
@@ -2540,7 +2735,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let phi = fast_atan2f(hilb, r_disp);
             let amp = wasm_sqrtf(r_disp * r_disp + hilb * hilb);
 
-            if a.targets[m].prev_phase_valid != 0 && amp > 0.025 {
+            if a.targets[m].prev_phase_valid != 0 && amp > 0.025 * s {
                 // Signed unwrapped phase difference (no max(0) upward noise bias)
                 let dphi = wrap_pi(phi - prev_phi);
                 let inst_omega = dphi * fps;
@@ -2552,7 +2747,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 }
                 a.targets[m].tremor_freq_hz =
                     (a.targets[m].tremor_omega_ema.abs() / TWO_PI).clamp(0.0, 30.0);
-            } else if amp <= 0.015 {
+            } else if amp <= 0.015 * s {
                 a.targets[m].tremor_omega_ema *= 0.85;
                 if a.targets[m].tremor_omega_ema.abs() < 0.5 {
                     a.targets[m].tremor_freq_hz = 0.0;
@@ -2609,7 +2804,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
         a.targets[m].l1_impulse_mag = max_z;
 
-        if max_z > 0.85 && (f_idx as usize) + strike_u >= (RING_LEN - 1) {
+        if max_z > 0.85 * s && (f_idx as usize) + strike_u >= (RING_LEN - 1) {
             let event_frame = ((f_idx as usize) + strike_u - (RING_LEN - 1)) as u32;
             let min_refractory_frames = ((0.13 * fps) as u32).max(6);
             let allowed = a.targets[m].has_struck == 0
@@ -2622,11 +2817,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
                 let sx_pos = a.targets[m].fista_x[strike_u];
                 let sy_pos = a.targets[m].fista_y[strike_u];
-                let qx = if sx_pos >= (FRAME_W as f32 * 0.5) { 1u8 } else { 0u8 };
-                let qy = if sy_pos >= (FRAME_H as f32 * 0.5) { 2u8 } else { 0u8 };
+                let qx = if sx_pos >= (frame_w as f32 * 0.5) { 1u8 } else { 0u8 };
+                let qy = if sy_pos >= (frame_h as f32 * 0.5) { 2u8 } else { 0u8 };
                 let zone = qx + qy;
                 let lead_frames = (strike_u.saturating_sub(u_disp)) as f32;
-                let vel = (max_z / 5.0).clamp(0.2, 1.0);
+                let vel = (max_z / (5.0 * s)).clamp(0.2, 1.0);
 
                 a.targets[m].strike_zone = zone;
                 a.targets[m].strike_lead_frames = lead_frames;
@@ -2656,6 +2851,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     // 7. FISTA-Stabilized Eulerian Temporal-Contrast PiP & Present-Phase Strobe
     // ------------------------------------------------------------------------
     let mut strobe_fired = 0.0f32;
+    let pip_center_off = 0.5 * (pip_dim as f32) - 0.5;
 
     if primary_idx >= 0 {
         let pm = primary_idx as usize;
@@ -2666,12 +2862,12 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         a.pip_target_id = tid;
         let gain = a.eulerian_gain;
 
-        for py in 0..16usize {
-            for px in 0..16usize {
-                let sx = fx - 7.5 + (px as f32);
-                let sy = fy - 7.5 + (py as f32);
-                let (r, g, b, luma) = sample_rgba_bilinear(&a.rgba_ring[slot_disp], sx, sy);
-                let idx = py * 16 + px;
+        for py in 0..pip_dim {
+            for px in 0..pip_dim {
+                let sx = fx - pip_center_off + (px as f32);
+                let sy = fy - pip_center_off + (py as f32);
+                let (r, g, b, luma) = sample_rgba_bilinear(&a.rgba_ring[slot_disp], frame_w, frame_h, sx, sy);
+                let idx = py * pip_dim + px;
 
                 if reset_ref {
                     a.pip_ref_luma[idx] = luma;
@@ -2706,7 +2902,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             if prev_err < 0.0
                 && curr_err >= 0.0
                 && (curr_err - prev_err) < 1.8
-                && a.targets[pm].tremor_amp > 0.025
+                && a.targets[pm].tremor_amp > 0.025 * s
                 && strobe_ready
             {
                 strobe_fired = 1.0;
@@ -2715,7 +2911,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
         }
     } else {
-        for i in 0..256usize {
+        for i in 0..(pip_dim * pip_dim) {
             let off = i * 4;
             a.pip_rgba[off] = 8;
             a.pip_rgba[off + 1] = 14;
@@ -2780,6 +2976,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     a.telemetry[23] = a.clutter_eval_ratio;
     a.telemetry[24] = a.fiedler_gap;
     a.telemetry[29] = a.stimulus_armed as f32;
+    a.telemetry[30] = frame_w as f32;
+    a.telemetry[31] = frame_h as f32;
 
     for m in 0..MAX_TARGETS {
         let base = 32 + m * 56;

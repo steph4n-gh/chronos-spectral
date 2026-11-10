@@ -4,21 +4,29 @@
 // Lanczos Fiedler Eigensolver, Blind Pixel Pillar Testbench, and OffscreenCanvas HUD.
 // ============================================================================
 
-const FRAME_W = 320;
-const FRAME_H = 180;
-const FRAME_PIXELS = FRAME_W * FRAME_H;
-const FRAME_BYTES = FRAME_PIXELS * 4;
+const MAX_FRAME_W = 640;
+const MAX_FRAME_H = 360;
+const MAX_FRAME_BYTES = MAX_FRAME_W * MAX_FRAME_H * 4;
 const RING_LEN = 12;
 const MAX_TARGETS = 8;
 const GRAPH_NODES = 16;
 const TELEMETRY_LEN = 576;
 
+let resMode = 0; // 0: 320x180 SD (16x16 patch/PiP), 1: 640x360 HD (32x32 foveated patch/PiP)
+let frameW = 320;
+let frameH = 180;
+let framePixels = frameW * frameH;
+let frameBytes = framePixels * 4;
+let pipDim = 16;
+let resScale = 1;
+
 let wasmExports = null;
 let wasmMemory = null;
 
-// Pre-allocated permanent views into 64-page (4 MB) static Wasm linear memory
+// Pre-allocated permanent views into 256-page (16 MB) static Wasm linear memory
 const ringSlotU8 = new Array(RING_LEN);
 const ringSlotImgData = new Array(RING_LEN);
+const ecaOverlayBackingBuf = new Uint8ClampedArray(MAX_FRAME_BYTES);
 let ecaResView = null;
 let pipImgData = null;
 let laplacianView = null;
@@ -123,7 +131,7 @@ let recElapsedSec = 0.0;
 // Blind Pixel Pillar Testbench Physics & 1-to-1 Ground-Truth Swap Oracle
 // ============================================================================
 
-const PILLARS = [
+const BASE_PILLARS = [
   { x0: 88, x1: 136, y0: 14, y1: 166 },
   { x0: 184, x1: 232, y0: 14, y1: 166 },
 ];
@@ -153,10 +161,11 @@ const TARGET_COLORS = [
 ];
 
 function resetTestbenchState() {
-  simDiscs[0].x = 52;  simDiscs[0].y = 56;  simDiscs[0].baseY = 56;  simDiscs[0].vx = 3.0;  simDiscs[0].vy = 0; simDiscs[0].ballistic = false;
-  simDiscs[1].x = 172; simDiscs[1].y = 56;  simDiscs[1].baseY = 56;  simDiscs[1].vx = -3.0; simDiscs[1].vy = 0; simDiscs[1].ballistic = false;
-  simDiscs[2].x = 148; simDiscs[2].y = 124; simDiscs[2].baseY = 124; simDiscs[2].vx = 3.0;  simDiscs[2].vy = 0; simDiscs[2].ballistic = false;
-  simDiscs[3].x = 268; simDiscs[3].y = 124; simDiscs[3].baseY = 124; simDiscs[3].vx = -3.0; simDiscs[3].vy = 0; simDiscs[3].ballistic = false;
+  const s = resScale;
+  simDiscs[0].x = 52 * s;  simDiscs[0].y = 56 * s;  simDiscs[0].baseY = 56 * s;  simDiscs[0].vx = 3.0 * s;  simDiscs[0].vy = 0; simDiscs[0].ballistic = false;
+  simDiscs[1].x = 172 * s; simDiscs[1].y = 56 * s;  simDiscs[1].baseY = 56 * s;  simDiscs[1].vx = -3.0 * s; simDiscs[1].vy = 0; simDiscs[1].ballistic = false;
+  simDiscs[2].x = 148 * s; simDiscs[2].y = 124 * s; simDiscs[2].baseY = 124 * s; simDiscs[2].vx = 3.0 * s;  simDiscs[2].vy = 0; simDiscs[2].ballistic = false;
+  simDiscs[3].x = 268 * s; simDiscs[3].y = 124 * s; simDiscs[3].baseY = 124 * s; simDiscs[3].vx = -3.0 * s; simDiscs[3].vy = 0; simDiscs[3].ballistic = false;
   oracleTrackOwner.fill(-1);
   prevFiedlerTrack.fill(0.0);
   flashQueueFrame.fill(-1);
@@ -171,6 +180,7 @@ function resetTestbenchState() {
 
 function stepAndRenderBlindPillarScene(dtSec) {
   const ctx = simCtx;
+  const s = resScale;
   const stepScale = Math.min(2.0, Math.max(0.25, dtSec * 60.0));
   simTimeSec += dtSec;
 
@@ -179,32 +189,33 @@ function stepAndRenderBlindPillarScene(dtSec) {
     pendingSaccadeFrames--;
     if (pendingSaccadeFrames === 0) {
       const d0 = simDiscs[0];
-      d0.x = d0.x < 160 ? Math.min(84, d0.x + 30) : Math.max(145, d0.x - 30);
+      d0.x = d0.x < 160 * s ? Math.min(84 * s, d0.x + 30 * s) : Math.max(145 * s, d0.x - 30 * s);
     }
   }
   if (pendingAirSnapFrames > 0) {
     pendingAirSnapFrames--;
     if (pendingAirSnapFrames === 0) {
       for (let i = 0; i < simDiscs.length; i++) {
-        simDiscs[i].vx = Math.sign(simDiscs[i].vx || 1) * 3.0;
+        simDiscs[i].vx = Math.sign(simDiscs[i].vx || 1) * 3.0 * s;
       }
     }
   }
 
   // 1. Static structured aerospace grid clutter (tests uncensored >60 dB ECA cancellation)
   ctx.fillStyle = '#121722';
-  ctx.fillRect(0, 0, FRAME_W, FRAME_H);
+  ctx.fillRect(0, 0, frameW, frameH);
 
+  const gridStep = 24 * s;
   ctx.strokeStyle = '#1d2536';
-  ctx.lineWidth = 1;
+  ctx.lineWidth = s;
   ctx.beginPath();
-  for (let x = 24; x < FRAME_W; x += 24) {
+  for (let x = gridStep; x < frameW; x += gridStep) {
     ctx.moveTo(x + 0.5, 0);
-    ctx.lineTo(x + 0.5, FRAME_H);
+    ctx.lineTo(x + 0.5, frameH);
   }
-  for (let y = 24; y < FRAME_H; y += 24) {
+  for (let y = gridStep; y < frameH; y += gridStep) {
     ctx.moveTo(0, y + 0.5);
-    ctx.lineTo(FRAME_W, y + 0.5);
+    ctx.lineTo(frameW, y + 0.5);
   }
   ctx.stroke();
 
@@ -215,52 +226,54 @@ function stepAndRenderBlindPillarScene(dtSec) {
     d.x += d.vx * stepScale;
 
     if (d.ballistic) {
-      // Physical downward gravity = 792 px/s^2 (0.22 px/frame^2 at 60Hz)
+      // Physical downward gravity = 792 * s px/s^2 (0.22 * s px/frame^2 at 60Hz)
       const vyPrev = d.vy;
-      d.vy += 0.22 * stepScale;
+      d.vy += 0.22 * s * stepScale;
       d.y += 0.5 * (vyPrev + d.vy) * stepScale;
-      if (d.y >= 152) {
-        d.y = 152;
+      if (d.y >= 152 * s) {
+        d.y = 152 * s;
         d.vy = -Math.abs(d.vy) * 0.86;
-        if (Math.abs(d.vy) < 1.2) {
+        if (Math.abs(d.vy) < 1.2 * s) {
           d.ballistic = false;
           d.vy = 0;
           d.y = d.baseY;
         }
       }
-      if (d.y < 16) {
-        d.y = 16;
+      if (d.y < 16 * s) {
+        d.y = 16 * s;
         d.vy = Math.abs(d.vy) * 0.5;
       }
     } else {
-      const tremor = 0.95 * Math.sin(2.0 * Math.PI * 9.5 * tSec + i * 1.3);
+      const tremor = 0.95 * s * Math.sin(2.0 * Math.PI * 9.5 * tSec + i * 1.3);
       d.y = d.baseY + tremor;
     }
 
-    if (d.x < 18) {
-      d.x = 18;
+    const wallMargin = 18 * s;
+    if (d.x < wallMargin) {
+      d.x = wallMargin;
       d.vx = Math.abs(d.vx);
-    } else if (d.x > FRAME_W - 18) {
-      d.x = FRAME_W - 18;
+    } else if (d.x > frameW - wallMargin) {
+      d.x = frameW - wallMargin;
       d.vx = -Math.abs(d.vx);
     }
   }
 
   // Pairwise elastic collisions on upper lane (0,1) and lower lane (2,3)
+  const hitThresh = 14.5 * s;
   for (let lane = 0; lane < 2; lane++) {
     const a = simDiscs[lane * 2];
     const b = simDiscs[lane * 2 + 1];
     if (a.ballistic || b.ballistic) continue;
     const dx = b.x - a.x;
     const dy = b.y - a.y;
-    if (Math.abs(dx) < 14.5 && Math.abs(dy) < 14.5 && (a.vx - b.vx) * dx > 0) {
+    if (Math.abs(dx) < hitThresh && Math.abs(dy) < hitThresh && (a.vx - b.vx) * dx > 0) {
       const tmp = a.vx;
       a.vx = b.vx;
       b.vx = tmp;
       const midX = 0.5 * (a.x + b.x);
       if (
-        (midX >= PILLARS[0].x0 && midX <= PILLARS[0].x1) ||
-        (midX >= PILLARS[1].x0 && midX <= PILLARS[1].x1)
+        (midX >= BASE_PILLARS[0].x0 * s && midX <= BASE_PILLARS[0].x1 * s) ||
+        (midX >= BASE_PILLARS[1].x0 * s && midX <= BASE_PILLARS[1].x1 * s)
       ) {
         inPillarCollisions++;
       }
@@ -272,32 +285,35 @@ function stepAndRenderBlindPillarScene(dtSec) {
     const d = simDiscs[i];
     ctx.fillStyle = d.r;
     ctx.beginPath();
-    ctx.arc(d.x, d.y, 7.6, 0, Math.PI * 2);
+    ctx.arc(d.x, d.y, 7.6 * s, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.fillStyle = d.core;
     ctx.beginPath();
-    ctx.arc(d.x, d.y, 3.4, 0, Math.PI * 2);
+    ctx.arc(d.x, d.y, 3.4 * s, 0, Math.PI * 2);
     ctx.fill();
   }
 
   // 4. Draw 100% OPAQUE occlusion pillars ON TOP (wipes out underlying disc pixels completely)
-  for (let p = 0; p < PILLARS.length; p++) {
-    const pil = PILLARS[p];
-    const pw = pil.x1 - pil.x0;
-    const ph = pil.y1 - pil.y0;
+  for (let p = 0; p < BASE_PILLARS.length; p++) {
+    const pil = BASE_PILLARS[p];
+    const px0 = pil.x0 * s;
+    const py0 = pil.y0 * s;
+    const pw = (pil.x1 - pil.x0) * s;
+    const ph = (pil.y1 - pil.y0) * s;
     ctx.fillStyle = '#222a3a';
-    ctx.fillRect(pil.x0, pil.y0, pw, ph);
+    ctx.fillRect(px0, py0, pw, ph);
     ctx.strokeStyle = '#36435c';
-    ctx.lineWidth = 1;
-    ctx.strokeRect(pil.x0 + 0.5, pil.y0 + 0.5, pw - 1, ph - 1);
+    ctx.lineWidth = s;
+    ctx.strokeRect(px0 + 0.5 * s, py0 + 0.5 * s, pw - s, ph - s);
   }
 
-  return ctx.getImageData(0, 0, FRAME_W, FRAME_H).data;
+  return ctx.getImageData(0, 0, frameW, frameH).data;
 }
 
 /// Strict 1-to-1 Nearest-Match Ground-Truth Identity Oracle (no & 255 wrap, no multi-disc aliasing).
 function auditOracleSwaps() {
+  const s = resScale;
   let nPairs = 0;
   for (let m = 0; m < MAX_TARGETS; m++) {
     const base = 32 + m * 56;
@@ -311,12 +327,12 @@ function auditOracleSwaps() {
     for (let i = 0; i < simDiscs.length; i++) {
       const d = simDiscs[i];
       const occluded =
-        (d.x > PILLARS[0].x0 - 6 && d.x < PILLARS[0].x1 + 6) ||
-        (d.x > PILLARS[1].x0 - 6 && d.x < PILLARS[1].x1 + 6);
+        (d.x > (BASE_PILLARS[0].x0 - 6) * s && d.x < (BASE_PILLARS[0].x1 + 6) * s) ||
+        (d.x > (BASE_PILLARS[1].x0 - 6) * s && d.x < (BASE_PILLARS[1].x1 + 6) * s);
       if (occluded) continue;
 
       const dist = Math.hypot(ix - d.x, iy - d.y);
-      if (dist < 16.0) {
+      if (dist < 16.0 * s) {
         oracleCandTrackSlot[nPairs] = m;
         oracleCandDiscIdx[nPairs] = i;
         oracleCandDist[nPairs] = dist;
@@ -643,8 +659,8 @@ function renderMainHud(dispSlot) {
   if (!hudCtx) return;
   const W = hudCanvas.width;   // 960
   const H = hudCanvas.height;  // 540
-  const sx = W / FRAME_W;      // 3.0
-  const sy = H / FRAME_H;      // 3.0
+  const sx = W / frameW;       // 3.0 in SD, 1.5 in HD
+  const sy = H / frameH;       // 3.0 in SD, 1.5 in HD
   const fIdx = Math.round(telemView[0]);
 
   // Activate any Mode C pad flashes whose scheduled presentation frame has arrived at t - K
@@ -662,7 +678,7 @@ function renderMainHud(dispSlot) {
 
   // 2. Optional Live ECA Motion-Residual Overlay (explicitly labeled as frame `t`)
   if (showEcaOverlay && ecaResView) {
-    for (let i = 0; i < FRAME_PIXELS; i++) {
+    for (let i = 0; i < framePixels; i++) {
       const res = ecaResView[i];
       const off = i * 4;
       if (res > 0.025) {
@@ -685,12 +701,12 @@ function renderMainHud(dispSlot) {
     hudCtx.strokeStyle = 'rgba(116, 152, 210, 0.45)';
     hudCtx.setLineDash([6, 4]);
     hudCtx.lineWidth = 1.5;
-    for (let p = 0; p < PILLARS.length; p++) {
-      const pil = PILLARS[p];
-      const px = pil.x0 * sx;
-      const py = pil.y0 * sy;
-      const pw = (pil.x1 - pil.x0) * sx;
-      const ph = (pil.y1 - pil.y0) * sy;
+    for (let p = 0; p < BASE_PILLARS.length; p++) {
+      const pil = BASE_PILLARS[p];
+      const px = pil.x0 * resScale * sx;
+      const py = pil.y0 * resScale * sy;
+      const pw = (pil.x1 - pil.x0) * resScale * sx;
+      const ph = (pil.y1 - pil.y0) * resScale * sy;
       hudCtx.strokeRect(px, py, pw, ph);
       hudCtx.fillStyle = 'rgba(140, 175, 235, 0.72)';
       hudCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -876,11 +892,11 @@ function renderMainHud(dispSlot) {
   const shownSwaps = sourceMode === 'testbench' ? oraclePadicSwaps : Math.round(telemView[5]);
 
   hudCtx.fillStyle = 'rgba(6, 10, 18, 0.80)';
-  hudCtx.fillRect(10, 10, 490, 24);
+  hudCtx.fillRect(10, 10, 560, 24);
   hudCtx.fillStyle = '#8ef9f3';
   hudCtx.font = '600 11px ui-monospace, SFMono-Regular, Menlo, monospace';
   hudCtx.fillText(
-    `VIEW [t - ${effK}] | ECA ${clutterStr} | ID SWITCHES: ${shownSwaps} | KALMAN: ${Math.round(telemView[6])}${ecaTag}`,
+    `VIEW [t - ${effK}] ${frameW}x${frameH} | ECA ${clutterStr} | ID SWITCHES: ${shownSwaps} | KALMAN: ${Math.round(telemView[6])}${ecaTag}`,
     18,
     26
   );
@@ -909,7 +925,7 @@ function renderEulerianPip() {
   pipCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
   const pid = Math.round(telemView[8]);
   pipCtx.fillText(
-    pid >= 0 ? `X_FISTA CO-REG | ${eulerianGain.toFixed(0)}x CONTRAST` : 'AWAITING TARGET LOCK',
+    pid >= 0 ? `X_FISTA ${pipDim}x${pipDim} | ${eulerianGain.toFixed(0)}x CONTRAST` : 'AWAITING TARGET LOCK',
     10,
     H - 9
   );
@@ -947,7 +963,8 @@ function renderHilbertScope() {
   hilbertCtx.stroke();
   hilbertCtx.setLineDash([]);
 
-  const scale = rad / 0.85;
+  const invRes = 1.0 / resScale;
+  const scale = (rad / 0.85) * invRes;
   hilbertCtx.strokeStyle = '#38f27a';
   hilbertCtx.lineWidth = 1.6;
   hilbertCtx.beginPath();
@@ -997,7 +1014,7 @@ function renderHilbertScope() {
   for (let i = 0; i < SCOPE_HIST; i++) {
     const idx = (scopeWriteIdx + i) % SCOPE_HIST;
     const wx = waveX0 + (i / (SCOPE_HIST - 1)) * waveW;
-    const wy = waveMidY - Math.max(-1, Math.min(1, histTremorR[idx] * 1.3)) * waveAmp;
+    const wy = waveMidY - Math.max(-1, Math.min(1, histTremorR[idx] * invRes * 1.3)) * waveAmp;
     if (i === 0) hilbertCtx.moveTo(wx, wy);
     else hilbertCtx.lineTo(wx, wy);
   }
@@ -1009,7 +1026,7 @@ function renderHilbertScope() {
   for (let i = 0; i < SCOPE_HIST; i++) {
     const idx = (scopeWriteIdx + i) % SCOPE_HIST;
     const wx = waveX0 + (i / (SCOPE_HIST - 1)) * waveW;
-    const wy = waveMidY - Math.max(-1, Math.min(1, histTremorH[idx] * 1.3)) * waveAmp;
+    const wy = waveMidY - Math.max(-1, Math.min(1, histTremorH[idx] * invRes * 1.3)) * waveAmp;
     if (i === 0) hilbertCtx.moveTo(wx, wy);
     else hilbertCtx.lineTo(wx, wy);
   }
@@ -1153,8 +1170,14 @@ function processIngestedFrame(rawPixels, dtSec) {
   sourceFps = 0.90 * sourceFps + 0.10 * instSourceFps;
 
   const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
-  const slotIdx = ((ptr - ringSlotU8[0].byteOffset) / FRAME_BYTES) | 0;
-  ringSlotU8[slotIdx >= 0 && slotIdx < RING_LEN ? slotIdx : 0].set(rawPixels);
+  let slotIdx = 0;
+  for (let s = 0; s < RING_LEN; s++) {
+    if (ringSlotU8[s].byteOffset === ptr) {
+      slotIdx = s;
+      break;
+    }
+  }
+  ringSlotU8[slotIdx].set(rawPixels);
 
   // Measure full production compute path: Wasm Pre-Tick + Shifted Lanczos Fiedler + Wasm Post-Tick
   const t0 = performance.now();
@@ -1230,8 +1253,8 @@ function processIngestedFrame(rawPixels, dtSec) {
 
     recSlab[ro + 0] = Math.round(telemView[0]);
     recSlab[ro + 1] = recElapsedSec;
-    recSlab[ro + 2] = FRAME_W;
-    recSlab[ro + 3] = FRAME_H;
+    recSlab[ro + 2] = frameW;
+    recSlab[ro + 3] = frameH;
     recSlab[ro + 4] = Math.round(telemView[1]);
     recSlab[ro + 5] = labMode;
     recSlab[ro + 6] = wasmMs;
@@ -1335,11 +1358,62 @@ function processIngestedFrame(rawPixels, dtSec) {
       apexMs,
       arenaBytes: Math.round(telemView[20]),
       memoryPages: wasmMemory.buffer.byteLength / 65536,
+      resMode,
+      frameW,
+      frameH,
+      pipDim,
       recActive,
       recFrames: recCount,
       recDurationSec: recElapsedSec,
     });
   }
+}
+
+function configureResolutionViews(mode) {
+  const targetMode = mode ? 1 : 0;
+  wasmExports.chronos_set_resolution(targetMode);
+  resMode = wasmExports.chronos_get_resolution();
+  frameW = wasmExports.chronos_get_frame_w();
+  frameH = wasmExports.chronos_get_frame_h();
+  pipDim = wasmExports.chronos_get_pip_dim();
+  resScale = resMode === 1 ? 2 : 1;
+  framePixels = frameW * frameH;
+  frameBytes = framePixels * 4;
+
+  dispStageCanvas.width = frameW;
+  dispStageCanvas.height = frameH;
+  pipStageCanvas.width = pipDim;
+  pipStageCanvas.height = pipDim;
+  simCanvas.width = frameW;
+  simCanvas.height = frameH;
+  ecaStageCanvas.width = frameW;
+  ecaStageCanvas.height = frameH;
+
+  ecaOverlayBuf = ecaOverlayBackingBuf.subarray(0, frameBytes);
+  ecaOverlayImgData = new ImageData(ecaOverlayBuf, frameW, frameH);
+
+  for (let s = 0; s < RING_LEN; s++) {
+    const byteOff = wasmExports.chronos_get_ring_slot_ptr(s);
+    ringSlotU8[s] = new Uint8Array(wasmMemory.buffer, byteOff, frameBytes);
+    ringSlotImgData[s] = new ImageData(
+      new Uint8ClampedArray(wasmMemory.buffer, byteOff, frameBytes),
+      frameW,
+      frameH
+    );
+  }
+
+  ecaResView = new Float32Array(wasmMemory.buffer, wasmExports.chronos_get_eca_res_ptr(), framePixels);
+  const pipBytes = pipDim * pipDim * 4;
+  pipImgData = new ImageData(
+    new Uint8ClampedArray(wasmMemory.buffer, wasmExports.chronos_get_pip_rgba_ptr(), pipBytes),
+    pipDim,
+    pipDim
+  );
+
+  wasmTimeHist.fill(0.0);
+  timeHistIdx = 0;
+  tickCounter = 0;
+  resetTestbenchState();
 }
 
 let rafHandle = 0;
@@ -1399,17 +1473,15 @@ self.onmessage = async (ev) => {
     hilbertCtx = hilbertCanvas.getContext('2d', { alpha: false });
     spectralCtx = spectralCanvas.getContext('2d', { alpha: false });
 
-    dispStageCanvas = new OffscreenCanvas(FRAME_W, FRAME_H);
+    dispStageCanvas = new OffscreenCanvas(frameW, frameH);
     dispStageCtx = dispStageCanvas.getContext('2d');
-    pipStageCanvas = new OffscreenCanvas(16, 16);
+    pipStageCanvas = new OffscreenCanvas(pipDim, pipDim);
     pipStageCtx = pipStageCanvas.getContext('2d');
-    simCanvas = new OffscreenCanvas(FRAME_W, FRAME_H);
+    simCanvas = new OffscreenCanvas(frameW, frameH);
     simCtx = simCanvas.getContext('2d', { willReadFrequently: true });
 
-    ecaStageCanvas = new OffscreenCanvas(FRAME_W, FRAME_H);
+    ecaStageCanvas = new OffscreenCanvas(frameW, frameH);
     ecaStageCtx = ecaStageCanvas.getContext('2d');
-    ecaOverlayBuf = new Uint8ClampedArray(FRAME_BYTES);
-    ecaOverlayImgData = new ImageData(ecaOverlayBuf, FRAME_W, FRAME_H);
 
     const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm');
     const wasmBytes = await resp.arrayBuffer();
@@ -1427,23 +1499,6 @@ self.onmessage = async (ev) => {
       labMode
     );
 
-    const slot0Ptr = wasmExports.chronos_get_ingest_rgba_ptr();
-    for (let s = 0; s < RING_LEN; s++) {
-      const byteOff = slot0Ptr + s * FRAME_BYTES;
-      ringSlotU8[s] = new Uint8Array(wasmMemory.buffer, byteOff, FRAME_BYTES);
-      ringSlotImgData[s] = new ImageData(
-        new Uint8ClampedArray(wasmMemory.buffer, byteOff, FRAME_BYTES),
-        FRAME_W,
-        FRAME_H
-      );
-    }
-
-    ecaResView = new Float32Array(wasmMemory.buffer, wasmExports.chronos_get_eca_res_ptr(), FRAME_PIXELS);
-    pipImgData = new ImageData(
-      new Uint8ClampedArray(wasmMemory.buffer, wasmExports.chronos_get_pip_rgba_ptr(), 1024),
-      16,
-      16
-    );
     laplacianView = new Float32Array(
       wasmMemory.buffer,
       wasmExports.chronos_get_laplacian_ptr(),
@@ -1460,14 +1515,29 @@ self.onmessage = async (ev) => {
       TELEMETRY_LEN
     );
 
-    resetTestbenchState();
+    configureResolutionViews(msg.resMode || 0);
     running = true;
     self.postMessage({
       type: 'ready',
       memoryBytes: wasmMemory.buffer.byteLength,
       pages: wasmMemory.buffer.byteLength / 65536,
+      resMode,
+      frameW,
+      frameH,
+      pipDim,
     });
     scheduleNextWorkerTick();
+  } else if (msg.type === 'set_resolution') {
+    if (wasmExports) {
+      configureResolutionViews(msg.resMode ? 1 : 0);
+      self.postMessage({
+        type: 'resolution_changed',
+        resMode,
+        frameW,
+        frameH,
+        pipDim,
+      });
+    }
   } else if (msg.type === 'params') {
     if (typeof msg.lookaheadK === 'number') lookaheadK = msg.lookaheadK;
     if (typeof msg.ecaAdaptRate === 'number') ecaAdaptRate = msg.ecaAdaptRate;
@@ -1507,8 +1577,8 @@ self.onmessage = async (ev) => {
   } else if (msg.type === 'video_frame') {
     const bmp = msg.bitmap;
     if (wasmExports && sourceMode !== 'testbench') {
-      simCtx.drawImage(bmp, 0, 0, FRAME_W, FRAME_H);
-      const rawPixels = simCtx.getImageData(0, 0, FRAME_W, FRAME_H).data;
+      simCtx.drawImage(bmp, 0, 0, frameW, frameH);
+      const rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
       processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 60.0);
     }
     bmp.close();
@@ -1519,10 +1589,10 @@ self.onmessage = async (ev) => {
         pendingSaccadeFrames = 9; // ~150 ms deterministic simulated stimulus-to-onset latency
       }
     } else if (msg.action === 'ballistic_toss' && sourceMode === 'testbench') {
-      simDiscs[0].x = 24;
-      simDiscs[0].y = 148;
-      simDiscs[0].vx = 3.8;
-      simDiscs[0].vy = -6.8;
+      simDiscs[0].x = 24 * resScale;
+      simDiscs[0].y = 148 * resScale;
+      simDiscs[0].vx = 3.8 * resScale;
+      simDiscs[0].vy = -6.8 * resScale;
       simDiscs[0].ballistic = true;
     } else if (msg.action === 'air_strike' && sourceMode === 'testbench') {
       for (let i = 0; i < simDiscs.length; i++) {
@@ -1574,10 +1644,12 @@ self.onmessage = async (ev) => {
         columns: REC_COLUMNS,
         buffer: ordered.buffer,
         meta: {
-          schemaVersion: '1.0.0',
+          schemaVersion: '1.1.0',
           sourceMode,
-          frameW: FRAME_W,
-          frameH: FRAME_H,
+          resMode,
+          frameW,
+          frameH,
+          pipDim,
           lookaheadK,
           ecaAdaptRate,
           fistaLambda,
