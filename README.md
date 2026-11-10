@@ -22,44 +22,56 @@ Compile `web/chronos_spectral.wasm`, run `--check`, and launch the interactive l
 
 ## Spatial resolution modes
 
-| Mode | Frame size | Patch & PiP | Coarse-to-fine steps | Apple M4 Pro median tick | Frame budget |
+| Mode | Frame size | Patch & PiP | Coarse-to-fine proposal | Apple M4 Pro median tick | Frame budget |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `0` (`SD`) | `320x180` (`57,600` px) | `16x16` native | `[3, 1]` px | `0.162 ms` | `< 0.25 ms` |
-| `1` (`HD`) | `640x360` (`230,400` px) | `32x32` (`2x2` SIMD128 pooled) | `[6, 2, 1]` px | `0.566 ms` | `< 1.00 ms` |
+| `0` (`SD`) | `320x180` (`57,600` px) | `16x16` native | `160x90` pyramid + `[2, 1]` px + 2D IC-LK | `0.222 ms` | `< 0.25 ms` |
+| `1` (`HD`) | `640x360` (`230,400` px) | `32x32` (`2x2` SIMD128 pooled) | `160x90` pyramid + `[4, 1]` px + 2D IC-LK | `0.687 ms` | `< 1.00 ms` |
+
+## Real-camera MP4 ground-truth benchmark
+
+`scripts/calibrate_mp4.mjs` evaluates CLEAR-MOT ground-truth trajectories (`scripts/gt_mp4_reference.json`) across all 5 sample H.264 clips (`--gate` enforces `Recall >= 78%`, `Teleports == 0`, `StaticPins <= 1`, and `Hijacks <= 16` per clip in both SD and HD):
+
+| Sample clip | `320x180` SD Recall | SD RMSE | SD Hijacks / Teleports | `640x360` HD Recall | HD RMSE | HD Hijacks / Teleports |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `juggling_ballistic.mp4` | `93.3%` (`237/254`) | `5.58 px` | `8` / `0` | `82.3%` (`209/254`) | `10.67 px` | `7` / `0` |
+| `pets_pedestrian_occlusion.mp4` | `94.9%` (`779/821`) | `6.78 px` | `14` / `0` | `97.9%` (`804/821`) | `12.69 px` | `11` / `0` |
+| `newton_cradle_impulses.mp4` | `80.1%` (`346/432`) | `8.08 px` | `5` / `0` | `86.1%` (`372/432`) | `13.42 px` | `0` / `0` |
+| `cup_hand_tremor.mp4` | `100.0%` (`195/195`) | `14.11 px` | `0` / `0` | `100.0%` (`195/195`) | `27.99 px` | `0` / `0` |
+| `webcam_book_occlusion.mp4` | `97.8%` (`272/278`) | `20.64 px` | `0` / `0` | `95.7%` (`266/278`) | `45.96 px` | `0` / `0` |
 
 ## Repository layout
 
 - `Cargo.toml` configures the `cdylib` release artifact with `opt-level = 3`, fat LTO, `codegen-units = 1`, and `panic = "abort"`.
 - `.cargo/config.toml` sets `target = "wasm32-unknown-unknown"`, enables `+simd128`, sets a 16 KiB stack, and pins `WebAssembly.Memory` to 256 fixed pages (`16,777,216` bytes).
-- `src/lib.rs` defines the static `Arena`, C ABI entrypoints, dual-resolution geometry scaling, Track-Peak graph Laplacian builder, Dual Projected-FISTA trend filter, $2 \times 2$ Kalman baseline, 15-tap equalized Hilbert quadrature filter, and 576-float telemetry buffer.
-- `src/simd_ops.rs` implements `v128` kernels for RGBA-to-planar conversion, guarded rank-2 Extensive Cancellation Algorithm clutter projection, temporal stationarity masks, `2x2` SIMD128 box-pooled `32x32` Haar-Morton signatures, clamped DC-compensated patch SAD, and sub-pixel photometric SSD.
+- `src/lib.rs` defines the static `Arena`, C ABI entrypoints, `M-of-N` track confirmation and static-pin reaper, P-N dual-anchor templates, `160x90` pyramid candidate proposer, Jonker-Volgenant `8x32` global bipartite matcher, non-causal backward `rgba_ring` gap re-tracker, Track-Peak graph Laplacian builder, Dual Projected-FISTA trend filter, $2 \times 2$ Kalman baseline, 15-tap equalized Hilbert quadrature filter, and 480-float telemetry buffer.
+- `src/simd_ops.rs` implements `v128` kernels for RGBA-to-planar conversion, stationarity-masked rank-2 Extensive Cancellation Algorithm clutter projection, `160x90` multi-channel box pyramids, 2D Shi-Tomasi structure-tensor cornerness, `2x2` SIMD128 box-pooled `32x32` Haar-Morton signatures, foreground-weighted patch SAD and anchor L1 drift locks, and 2D weighted Inverse-Compositional Lucas-Kanade (IC-LK) sub-pixel refinement.
 - `web/worker.js` runs the V8 Web Worker loop, `OffscreenCanvas` HUD scopes, Blind Pixel Pillar physics testbench, 1-to-1 identity swap oracle, shifted Lanczos Fiedler eigensolver, and zero-GC 18,000-frame `Float64Array` telemetry recorder.
 - `web/index.html` provides the browser telemetry controls, SD/HD resolution toggle, built-in calibration MP4 selector, CSV/JSON session exporter, `requestVideoFrameCallback` media ingestion, and WebAudio polyphonic synthesizer.
 - `web/samples/` stores 5 open-licensed real-camera H.264 calibration MP4 clips documented in `web/samples/ATTRIBUTION.md`.
-- `scripts/calibrate_mp4.mjs` decodes `web/samples/*.mp4` via `ffmpeg` into raw RGBA buffers and validates lock persistence, ECA suppression, and zero NaNs across SD and HD modes.
+- `scripts/calibrate_mp4.mjs` decodes `web/samples/*.mp4` via `ffmpeg` into raw RGBA buffers and validates CLEAR-MOT ground-truth metrics (`scripts/gt_mp4_reference.json`), ECA suppression, and zero NaNs across SD and HD modes.
 - `scripts/e2e_browser.mjs` drives headless Chrome over the DevTools Protocol (CDP) with HTTP `206 Partial Content` byte-range streaming to test SD/HD switching, MP4 playback, Lab Modes A/B/C, and 38-column CSV/JSON telemetry exports.
 - `.github/workflows/ci.yml` executes `./build.sh --e2e` on every push and pull request against `main`.
 
 ## Mathematical subsystems
 
-### Non-causal 12-frame lookahead buffer
+### Non-causal 12-frame lookahead buffer & backward ring re-tracking
 
-`Arena.rgba_ring` stores 12 frames up to `640x360` RGBA resolution. `chronos_pre_tick` ingests incoming frames at `frame_idx % 12` while `chronos_post_tick` renders delayed display slot `(frame_idx + 12 - eff_k) % 12` for lookahead `K` from `0` through `11`. When an active target enters an opaque occlusion zone and re-emerges within the 12-frame window, the tracker replaces blind forward coasting with two-point Hermite boundary splines before proximal smoothing.
+`Arena.rgba_ring` stores 12 frames up to `640x360` RGBA resolution. `chronos_pre_tick` ingests incoming frames at `frame_idx % 12` while `chronos_post_tick` renders delayed display slot `(frame_idx + 12 - eff_k) % 12` for lookahead `K` from `0` through `11`. When a confirmed target re-emerges from occlusion or finishes `M-of-N` confirmation, `backtrack_gap_in_rgba_ring` unpacks historical ROIs from `rgba_ring` (`t - 1 .. t - K`) to recover missed visible sub-pixel detections before pinning residual opaque gaps with two-point Hermite boundary splines.
 
 ### Rank-2 Extensive Cancellation Algorithm clutter suppression
 
-`eca_subspace_project_masked_simd128` in `src/simd_ops.rs` projects each incoming luma frame orthogonally against the mean-centered rank-2 background subspace $X = [b - \bar{b}\mathbf{1},\, \mathbf{1}]$, cancelling both static spatial structure and global camera auto-exposure offsets. `update_stat_streak_and_mask_simd128` tracks raw RGB pixel invariance across 12 consecutive frames to measure uncensored clutter attenuation in decibels prior to background adaptation (`> 64 dB` on the Blind Pixel Pillar scene and `48-55 dB` on compressed H.264 camera feeds).
+`eca_subspace_project_masked_simd128` in `src/simd_ops.rs` projects each incoming luma frame orthogonally against the mean-centered rank-2 background subspace $X = [b - \bar{b}\mathbf{1},\, \mathbf{1}]$, cancelling both static spatial structure and global camera auto-exposure offsets while guarding stationary background learning (`0.15x` rate on unverified moving pixels) against foreground absorption. `update_stat_streak_and_mask_simd128` tracks raw RGB pixel invariance across 12 consecutive frames to measure uncensored clutter attenuation in decibels prior to background adaptation (`> 64 dB` on the Blind Pixel Pillar scene and `48-55 dB` on compressed H.264 camera feeds).
 
-### Morton 2-adic signatures and spectral Fiedler association
+### Foreground-masked P-N templates, 2-adic signatures, and Jonker-Volgenant spectral assignment
 
-`haar_morton_signature_scaled_simd128` maps each `16x16` (SD) or `32x32` (HD `2x2`-pooled) target patch into a 32-bit signature:
+`capture_template_scaled` weights each target patch by radial Gaussian times observed ECA motion mask (`sum(tpl_weight) = 1.0`, suppressing outer square-patch background corners by `> 12x`) alongside an immutable birth anchor (`anchor_luma/rg/by`) that blocks cumulative P-N template drift. `haar_morton_signature_scaled_simd128` maps each `16x16` (SD) or `32x32` (HD `2x2`-pooled) target patch into a 32-bit signature:
 
 - Bit `31` gates chromatic confidence on opponent saturation.
 - Bits `30..27` encode opponent `R-G` and `B-Y` thermometer polarity with a `0.055` deadzone.
 - Bits `23..16` encode orthogonal 2D Haar quadrant wavelets.
 - Bits `15..0` encode Morton-interleaved sub-block polarity relative to parent quadrants.
 
-`padic_ultrametric_val` calls `(code_a ^ code_b).leading_zeros()`, which compiles to `i32.clz` and induces a binary-prefix ultrametric satisfying $d_2(A, C) \le \max(d_2(A, B), d_2(B, C))$. Before patch assignment, `chronos_pre_tick` splits merged blobs via `3x3` local sub-peaks, gates textured peaks on AC patch variance, and writes a `16x16` Track-Peak Laplacian. `solveShiftedLanczosFiedler` in `web/worker.js` computes the Fiedler vector $v_2$ and eigengap $\lambda_3 - \lambda_2$, weighting candidate association by $\gamma_{\text{eff}}(v_m - v_{8+p})^2$.
+`padic_ultrametric_val` calls `(code_a ^ code_b).leading_zeros()`, which compiles to `i32.clz` and induces a binary-prefix ultrametric satisfying $d_2(A, C) \le \max(d_2(A, B), d_2(B, C))$. Candidate seeds must pass `patch16x16_shi_tomasi_simd128` 2D structure-tensor eigenvalue checks ($\lambda_{\min}$ vs $\lambda_{\max}$) and `3`-of-`8` tentative confirmation before entering telemetry. `propose_track_candidates_pyr` searches a `160x90` SIMD128 multi-channel pyramid around second-order ballistic predictions, `solve_jv_assign_8x32` solves global minimum-cost bipartite matching (including per-track coasting null columns and Fiedler spectral penalties $\gamma_{\text{eff}}(v_m - v_{8+p})^2$), and `refine_subpixel_ic_lk_weighted` extracts sub-pixel displacements via 2D weighted Inverse-Compositional Lucas-Kanade.
 
 ### Certified Dual Projected-FISTA trend filter
 

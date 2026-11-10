@@ -114,6 +114,7 @@ pub unsafe fn eca_subspace_project_masked_simd128(
     out_eval_count: *mut u32,
 ) -> f32 {
     let guard_thresh = f32x4_splat(0.045);
+    let guard_stat = f32x4_splat(0.15);
     let one_vec = f32x4_splat(1.0);
 
     let mut acc_raw_b2 = f32x4_splat(0.0);
@@ -121,21 +122,39 @@ pub unsafe fn eca_subspace_project_masked_simd128(
     let mut acc_sum_b = f32x4_splat(0.0);
     let mut acc_sum_y = f32x4_splat(0.0);
 
-    // Pass 1: Guarded clutter-region means (bar_b, bar_y) over Omega = {|y - b| < 0.045}
+    // Pass 1: Guarded clutter-region means (bar_b, bar_y) over Omega, widening guard to 0.15 on
+    // verified prior-stationary background (`eval_mask_ptr`) so camera auto-exposure steps cancel cleanly.
     let mut i = 0usize;
-    while i + 4 <= len {
-        let y = v128_load(luma_ptr.add(i) as *const v128);
-        let b = v128_load(bg_luma_ptr.add(i) as *const v128);
+    if !eval_mask_ptr.is_null() {
+        while i + 4 <= len {
+            let y = v128_load(luma_ptr.add(i) as *const v128);
+            let b = v128_load(bg_luma_ptr.add(i) as *const v128);
+            acc_raw_b2 = f32x4_add(acc_raw_b2, f32x4_mul(b, b));
 
-        acc_raw_b2 = f32x4_add(acc_raw_b2, f32x4_mul(b, b));
+            let raw_m4 = v128_load32_zero(eval_mask_ptr.add(i) as *const u32);
+            let mask_vec = i32x4_extend_low_i16x8(i16x8_extend_low_i8x16(raw_m4));
+            let eff_guard = v128_bitselect(guard_stat, guard_thresh, mask_vec);
 
-        let pre_diff = f32x4_abs(f32x4_sub(y, b));
-        let in_omega = f32x4_lt(pre_diff, guard_thresh);
-        acc_cnt = f32x4_add(acc_cnt, v128_and(one_vec, in_omega));
-        acc_sum_b = f32x4_add(acc_sum_b, v128_and(b, in_omega));
-        acc_sum_y = f32x4_add(acc_sum_y, v128_and(y, in_omega));
+            let pre_diff = f32x4_abs(f32x4_sub(y, b));
+            let in_omega = f32x4_lt(pre_diff, eff_guard);
+            acc_cnt = f32x4_add(acc_cnt, v128_and(one_vec, in_omega));
+            acc_sum_b = f32x4_add(acc_sum_b, v128_and(b, in_omega));
+            acc_sum_y = f32x4_add(acc_sum_y, v128_and(y, in_omega));
+            i += 4;
+        }
+    } else {
+        while i + 4 <= len {
+            let y = v128_load(luma_ptr.add(i) as *const v128);
+            let b = v128_load(bg_luma_ptr.add(i) as *const v128);
+            acc_raw_b2 = f32x4_add(acc_raw_b2, f32x4_mul(b, b));
 
-        i += 4;
+            let pre_diff = f32x4_abs(f32x4_sub(y, b));
+            let in_omega = f32x4_lt(pre_diff, guard_thresh);
+            acc_cnt = f32x4_add(acc_cnt, v128_and(one_vec, in_omega));
+            acc_sum_b = f32x4_add(acc_sum_b, v128_and(b, in_omega));
+            acc_sum_y = f32x4_add(acc_sum_y, v128_and(y, in_omega));
+            i += 4;
+        }
     }
 
     let raw_b2 = hsum_f32x4(acc_raw_b2);
@@ -173,17 +192,35 @@ pub unsafe fn eca_subspace_project_masked_simd128(
         let mut acc_vbb = f32x4_splat(0.0);
         let mut acc_cby = f32x4_splat(0.0);
         let mut m = 0usize;
-        while m + 4 <= len {
-            let y = v128_load(luma_ptr.add(m) as *const v128);
-            let b = v128_load(bg_luma_ptr.add(m) as *const v128);
-            let pre_diff = f32x4_abs(f32x4_sub(y, b));
-            let in_omega = f32x4_lt(pre_diff, guard_thresh);
+        if !eval_mask_ptr.is_null() {
+            while m + 4 <= len {
+                let y = v128_load(luma_ptr.add(m) as *const v128);
+                let b = v128_load(bg_luma_ptr.add(m) as *const v128);
+                let raw_m4 = v128_load32_zero(eval_mask_ptr.add(m) as *const u32);
+                let mask_vec = i32x4_extend_low_i16x8(i16x8_extend_low_i8x16(raw_m4));
+                let eff_guard = v128_bitselect(guard_stat, guard_thresh, mask_vec);
+                let pre_diff = f32x4_abs(f32x4_sub(y, b));
+                let in_omega = f32x4_lt(pre_diff, eff_guard);
 
-            let db = v128_and(f32x4_sub(b, v_mb), in_omega);
-            let dy = v128_and(f32x4_sub(y, v_my), in_omega);
-            acc_vbb = f32x4_add(acc_vbb, f32x4_mul(db, db));
-            acc_cby = f32x4_add(acc_cby, f32x4_mul(db, dy));
-            m += 4;
+                let db = v128_and(f32x4_sub(b, v_mb), in_omega);
+                let dy = v128_and(f32x4_sub(y, v_my), in_omega);
+                acc_vbb = f32x4_add(acc_vbb, f32x4_mul(db, db));
+                acc_cby = f32x4_add(acc_cby, f32x4_mul(db, dy));
+                m += 4;
+            }
+        } else {
+            while m + 4 <= len {
+                let y = v128_load(luma_ptr.add(m) as *const v128);
+                let b = v128_load(bg_luma_ptr.add(m) as *const v128);
+                let pre_diff = f32x4_abs(f32x4_sub(y, b));
+                let in_omega = f32x4_lt(pre_diff, guard_thresh);
+
+                let db = v128_and(f32x4_sub(b, v_mb), in_omega);
+                let dy = v128_and(f32x4_sub(y, v_my), in_omega);
+                acc_vbb = f32x4_add(acc_vbb, f32x4_mul(db, db));
+                acc_cby = f32x4_add(acc_cby, f32x4_mul(db, dy));
+                m += 4;
+            }
         }
 
         let vbb = hsum_f32x4(acc_vbb);
@@ -876,4 +913,637 @@ pub unsafe extern "C" fn sad16x16_patch_simd128(
         out_cand_sig,
         1,
     )
+}
+
+/// Unpack a rectangular ROI `(roi_x, roi_y, roi_w, roi_h)` (`roi_w` multiple of 4) from a buffered
+/// RGBA8 ring slot into contiguous planar `roi_luma`, `roi_rg`, `roi_by` buffers for non-causal
+/// backward re-tracking across `rgba_ring`.
+pub unsafe fn rgba_roi_to_planar_simd128(
+    rgba_ptr: *const u8,
+    frame_stride: usize,
+    roi_x: usize,
+    roi_y: usize,
+    roi_w: usize,
+    roi_h: usize,
+    roi_luma: *mut f32,
+    roi_rg: *mut f32,
+    roi_by: *mut f32,
+) {
+    let mask_ff = u32x4_splat(0xFF);
+    let inv_255 = f32x4_splat(1.0 / 255.0);
+    let wr = f32x4_splat(0.299);
+    let wg = f32x4_splat(0.587);
+    let wb = f32x4_splat(0.114);
+
+    for ry in 0..roi_h {
+        let src_row_px = (roi_y + ry) * frame_stride + roi_x;
+        let dst_row = ry * roi_w;
+        let mut rx = 0usize;
+        while rx + 4 <= roi_w {
+            let px = v128_load(rgba_ptr.add((src_row_px + rx) * 4) as *const v128);
+            let r_u32 = v128_and(px, mask_ff);
+            let g_u32 = v128_and(u32x4_shr(px, 8), mask_ff);
+            let b_u32 = v128_and(u32x4_shr(px, 16), mask_ff);
+
+            let r = f32x4_mul(f32x4_convert_u32x4(r_u32), inv_255);
+            let g = f32x4_mul(f32x4_convert_u32x4(g_u32), inv_255);
+            let b = f32x4_mul(f32x4_convert_u32x4(b_u32), inv_255);
+
+            let y = f32x4_add(f32x4_add(f32x4_mul(wr, r), f32x4_mul(wg, g)), f32x4_mul(wb, b));
+            let rg = f32x4_sub(r, g);
+            let by = f32x4_sub(b, y);
+
+            v128_store(roi_luma.add(dst_row + rx) as *mut v128, y);
+            v128_store(roi_rg.add(dst_row + rx) as *mut v128, rg);
+            v128_store(roi_by.add(dst_row + rx) as *mut v128, by);
+            rx += 4;
+        }
+    }
+}
+
+#[inline(always)]
+unsafe fn pool_plane_to_160x90_simd128(src: *const f32, dst: *mut f32, scale_px: usize) {
+    if scale_px <= 1 {
+        // 320x180 -> 160x90 exact 2x2 SIMD128 box downsample
+        for py in 0..90usize {
+            let src_row = (py * 2) * 320;
+            let dst_row = py * 160;
+            let mut px = 0usize;
+            while px + 4 <= 160 {
+                let v = load_pooled4_f32(src.add(src_row + px * 2), 320, 2);
+                v128_store(dst.add(dst_row + px) as *mut v128, v);
+                px += 4;
+            }
+        }
+    } else {
+        // 640x360 -> 160x90 exact 4x4 register-only SIMD128 box downsample
+        let q = f32x4_splat(0.25);
+        for py in 0..90usize {
+            let r0 = (py * 4) * 640;
+            let r2 = (py * 4 + 2) * 640;
+            let dst_row = py * 160;
+            let mut px = 0usize;
+            while px + 4 <= 160 {
+                let sx = px * 4;
+                let top_a = load_pooled4_f32(src.add(r0 + sx), 640, 2);
+                let top_b = load_pooled4_f32(src.add(r0 + sx + 8), 640, 2);
+                let bot_a = load_pooled4_f32(src.add(r2 + sx), 640, 2);
+                let bot_b = load_pooled4_f32(src.add(r2 + sx + 8), 640, 2);
+                let s_a = f32x4_add(top_a, bot_a);
+                let s_b = f32x4_add(top_b, bot_b);
+                let evens = i32x4_shuffle::<0, 2, 4, 6>(s_a, s_b);
+                let odds = i32x4_shuffle::<1, 3, 5, 7>(s_a, s_b);
+                let v = f32x4_mul(f32x4_add(evens, odds), q);
+                v128_store(dst.add(dst_row + px) as *mut v128, v);
+                px += 4;
+            }
+        }
+    }
+}
+
+/// Build the 160x90 multi-channel SIMD128 pyramid (`luma`, `rg`, `by`, `eca_res`) in linear memory.
+pub unsafe fn build_pyramid_160x90_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    eca_ptr: *const f32,
+    pyr_luma: *mut f32,
+    pyr_rg: *mut f32,
+    pyr_by: *mut f32,
+    pyr_eca: *mut f32,
+    scale_px: usize,
+) {
+    pool_plane_to_160x90_simd128(luma_ptr, pyr_luma, scale_px);
+    pool_plane_to_160x90_simd128(rg_ptr, pyr_rg, scale_px);
+    pool_plane_to_160x90_simd128(by_ptr, pyr_by, scale_px);
+    pool_plane_to_160x90_simd128(eca_ptr, pyr_eca, scale_px);
+}
+
+/// Radially-apodized SIMD128 2D Structure Tensor (Shi-Tomasi minor/major eigenvalues) over Luma + Chroma.
+/// Returns `(lambda_min, lambda_max)`:
+/// - Rejects flat walls/compression blocks (`lambda_min` small) AND 1D aperture edges like forearms,
+///   room moldings, book straight borders, and vertical support posts (`lambda_min / lambda_max` small).
+pub unsafe fn patch16x16_shi_tomasi_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+    scale_px: usize,
+) -> (f32, f32) {
+    let mut acc_jxx = f32x4_splat(0.0);
+    let mut acc_jxy = f32x4_splat(0.0);
+    let mut acc_jyy = f32x4_splat(0.0);
+    let cstep = 4 * scale_px;
+    let chroma_w = f32x4_splat(1.25);
+
+    for ry in 2..14usize {
+        let wy = if (4..12).contains(&ry) { 1.0 } else { 0.30 };
+        let row_c = (cy + ry * scale_px) * stride + cx;
+        let row_m = (cy + (ry - 1) * scale_px) * stride + cx;
+        let row_p = (cy + (ry + 1) * scale_px) * stride + cx;
+
+        for vec_idx in 0..4usize {
+            let wx = if vec_idx == 1 || vec_idx == 2 { 1.0 } else { 0.35 };
+            let vw = f32x4_splat(wx * wy);
+            let off = vec_idx * cstep;
+
+            let lx_p = load_pooled4_f32(luma_ptr.add(row_c + off + scale_px), stride, scale_px);
+            let lx_m = load_pooled4_f32(luma_ptr.add(row_c + off - scale_px), stride, scale_px);
+            let ly_p = load_pooled4_f32(luma_ptr.add(row_p + off), stride, scale_px);
+            let ly_m = load_pooled4_f32(luma_ptr.add(row_m + off), stride, scale_px);
+            let gx_l = f32x4_sub(lx_p, lx_m);
+            let gy_l = f32x4_sub(ly_p, ly_m);
+
+            let rgx = f32x4_sub(
+                load_pooled4_f32(rg_ptr.add(row_c + off + scale_px), stride, scale_px),
+                load_pooled4_f32(rg_ptr.add(row_c + off - scale_px), stride, scale_px),
+            );
+            let rgy = f32x4_sub(
+                load_pooled4_f32(rg_ptr.add(row_p + off), stride, scale_px),
+                load_pooled4_f32(rg_ptr.add(row_m + off), stride, scale_px),
+            );
+
+            let byx = f32x4_sub(
+                load_pooled4_f32(by_ptr.add(row_c + off + scale_px), stride, scale_px),
+                load_pooled4_f32(by_ptr.add(row_c + off - scale_px), stride, scale_px),
+            );
+            let byy = f32x4_sub(
+                load_pooled4_f32(by_ptr.add(row_p + off), stride, scale_px),
+                load_pooled4_f32(by_ptr.add(row_m + off), stride, scale_px),
+            );
+
+            let gxx = f32x4_add(
+                f32x4_mul(gx_l, gx_l),
+                f32x4_mul(chroma_w, f32x4_add(f32x4_mul(rgx, rgx), f32x4_mul(byx, byx))),
+            );
+            let gxy = f32x4_add(
+                f32x4_mul(gx_l, gy_l),
+                f32x4_mul(chroma_w, f32x4_add(f32x4_mul(rgx, rgy), f32x4_mul(byx, byy))),
+            );
+            let gyy = f32x4_add(
+                f32x4_mul(gy_l, gy_l),
+                f32x4_mul(chroma_w, f32x4_add(f32x4_mul(rgy, rgy), f32x4_mul(byy, byy))),
+            );
+
+            acc_jxx = f32x4_add(acc_jxx, f32x4_mul(vw, gxx));
+            acc_jxy = f32x4_add(acc_jxy, f32x4_mul(vw, gxy));
+            acc_jyy = f32x4_add(acc_jyy, f32x4_mul(vw, gyy));
+        }
+    }
+
+    let inv_n = 1.0 / 128.0;
+    let jxx = hsum_f32x4(acc_jxx) * inv_n;
+    let jxy = hsum_f32x4(acc_jxy) * inv_n;
+    let jyy = hsum_f32x4(acc_jyy) * inv_n;
+
+    let tr = jxx + jyy;
+    let diff = jxx - jyy;
+    let disc = f32x4_extract_lane::<0>(f32x4_sqrt(f32x4_splat((diff * diff + 4.0 * jxy * jxy).max(0.0))));
+    let lam_max = 0.5 * (tr + disc);
+    let lam_min = (0.5 * (tr - disc)).max(0.0);
+    (lam_min, lam_max)
+}
+
+/// Fast 8x8 foreground-weighted coarse SAD on the 160x90 SIMD128 pyramid (`16` v128 vectors total).
+#[inline]
+pub unsafe fn sad8x8_pyr160_simd128(
+    pyr_luma: *const f32,
+    pyr_rg: *const f32,
+    pyr_by: *const f32,
+    pyr_eca: *const f32,
+    px: usize,
+    py: usize,
+    tpl8_luma: *const f32,
+    tpl8_rg: *const f32,
+    tpl8_by: *const f32,
+    tpl8_w: *const f32,
+) -> f32 {
+    let mut sum_w_diff = f32x4_splat(0.0);
+    for ry in 0..8usize {
+        let irow = (py + ry) * 160 + px;
+        let trow = ry * 8;
+        for v in 0..2usize {
+            let ioff = irow + v * 4;
+            let toff = trow + v * 4;
+            let vw = v128_load(tpl8_w.add(toff) as *const v128);
+            let il = v128_load(pyr_luma.add(ioff) as *const v128);
+            let tl = v128_load(tpl8_luma.add(toff) as *const v128);
+            sum_w_diff = f32x4_add(sum_w_diff, f32x4_mul(vw, f32x4_sub(il, tl)));
+        }
+    }
+    let dc = hsum_f32x4(sum_w_diff).clamp(-0.14, 0.14) * 0.70;
+    let v_dc = f32x4_splat(dc);
+
+    let mut acc_l = f32x4_splat(0.0);
+    let mut acc_c = f32x4_splat(0.0);
+    let mut acc_e = f32x4_splat(0.0);
+    for ry in 0..8usize {
+        let irow = (py + ry) * 160 + px;
+        let trow = ry * 8;
+        for v in 0..2usize {
+            let ioff = irow + v * 4;
+            let toff = trow + v * 4;
+            let vw = v128_load(tpl8_w.add(toff) as *const v128);
+
+            let dl = f32x4_abs(f32x4_sub(
+                f32x4_sub(v128_load(pyr_luma.add(ioff) as *const v128), v_dc),
+                v128_load(tpl8_luma.add(toff) as *const v128),
+            ));
+            acc_l = f32x4_add(acc_l, f32x4_mul(vw, dl));
+
+            let drg = f32x4_abs(f32x4_sub(
+                v128_load(pyr_rg.add(ioff) as *const v128),
+                v128_load(tpl8_rg.add(toff) as *const v128),
+            ));
+            let dby = f32x4_abs(f32x4_sub(
+                v128_load(pyr_by.add(ioff) as *const v128),
+                v128_load(tpl8_by.add(toff) as *const v128),
+            ));
+            acc_c = f32x4_add(acc_c, f32x4_mul(vw, f32x4_add(drg, dby)));
+            acc_e = f32x4_add(acc_e, f32x4_mul(vw, v128_load(pyr_eca.add(ioff) as *const v128)));
+        }
+    }
+    let sad_l = hsum_f32x4(acc_l);
+    let sad_c = hsum_f32x4(acc_c);
+    let mot = hsum_f32x4(acc_e).min(0.35);
+    sad_l + 1.85 * sad_c - 0.16 * mot
+}
+
+/// Foreground-Masked SIMD128 Patch Tracker Cost (`tpl_weight` normalized to sum = 1.0):
+/// Suppresses static background clutter in outer patch corners by >12x while computing weighted
+/// DC-compensated Luma/Chroma SAD, weighted ECA motion reward, and 2-adic ultrametric valuation.
+#[inline]
+pub unsafe fn sad_patch_weighted_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    eca_res_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+    tpl_luma: *const f32,
+    tpl_rg: *const f32,
+    tpl_by: *const f32,
+    tpl_weight: *const f32,
+    tpl_sig: u32,
+    out_cand_sig: *mut u32,
+    out_weighted_eca: *mut f32,
+    scale_px: usize,
+) -> f32 {
+    let mut sum_w_diff = f32x4_splat(0.0);
+    let cstep = 4 * scale_px;
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+            let il = load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px);
+            let tl = v128_load(tpl_luma.add(toff) as *const v128);
+            sum_w_diff = f32x4_add(sum_w_diff, f32x4_mul(vw, f32x4_sub(il, tl)));
+        }
+    }
+    let dc_shift = hsum_f32x4(sum_w_diff).clamp(-0.12, 0.12) * 0.40;
+    let v_dc = f32x4_splat(dc_shift);
+
+    let mut acc_sad_l = f32x4_splat(0.0);
+    let mut acc_sad_c = f32x4_splat(0.0);
+    let mut acc_eca = f32x4_splat(0.0);
+
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+
+            let il = f32x4_sub(load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px), v_dc);
+            let tl = v128_load(tpl_luma.add(toff) as *const v128);
+            acc_sad_l = f32x4_add(acc_sad_l, f32x4_mul(vw, f32x4_abs(f32x4_sub(il, tl))));
+
+            let irg = load_pooled4_f32(rg_ptr.add(ioff), stride, scale_px);
+            let trg = v128_load(tpl_rg.add(toff) as *const v128);
+            let iby = load_pooled4_f32(by_ptr.add(ioff), stride, scale_px);
+            let tby = v128_load(tpl_by.add(toff) as *const v128);
+
+            let diff_c = f32x4_add(f32x4_abs(f32x4_sub(irg, trg)), f32x4_abs(f32x4_sub(iby, tby)));
+            acc_sad_c = f32x4_add(acc_sad_c, f32x4_mul(vw, diff_c));
+
+            if !eca_res_ptr.is_null() {
+                let eca = load_pooled4_f32(eca_res_ptr.add(ioff), stride, scale_px);
+                acc_eca = f32x4_add(acc_eca, f32x4_mul(vw, eca));
+            }
+        }
+    }
+
+    let sad_l = hsum_f32x4(acc_sad_l);
+    let sad_c = hsum_f32x4(acc_sad_c);
+    let w_eca = hsum_f32x4(acc_eca);
+    if !out_weighted_eca.is_null() {
+        *out_weighted_eca = w_eca;
+    }
+    let motion_reward = w_eca.min(0.85);
+
+    let cand_sig = haar_morton_signature_scaled_simd128(luma_ptr, rg_ptr, by_ptr, stride, cx, cy, scale_px);
+    if !out_cand_sig.is_null() {
+        *out_cand_sig = cand_sig;
+    }
+
+    let val = padic_ultrametric_val(tpl_sig, cand_sig);
+    let d2 = padic_distance_from_val(val);
+
+    sad_l + 1.85 * sad_c + 0.55 * d2 - 0.16 * motion_reward
+}
+
+/// Pinned-Anchor P-N Drift-Lock distance: computes foreground-weighted L1 photometric divergence
+/// against the immutable birth anchor template (`anchor_luma`, `anchor_rg`, `anchor_by`).
+#[inline]
+pub unsafe fn weighted_anchor_l1_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+    anchor_luma: *const f32,
+    anchor_rg: *const f32,
+    anchor_by: *const f32,
+    tpl_weight: *const f32,
+    scale_px: usize,
+) -> f32 {
+    let mut sum_w_diff = f32x4_splat(0.0);
+    let cstep = 4 * scale_px;
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+            let il = load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px);
+            let al = v128_load(anchor_luma.add(toff) as *const v128);
+            sum_w_diff = f32x4_add(sum_w_diff, f32x4_mul(vw, f32x4_sub(il, al)));
+        }
+    }
+    let dc = hsum_f32x4(sum_w_diff).clamp(-0.16, 0.16) * 0.75;
+    let v_dc = f32x4_splat(dc);
+
+    let mut acc_l = f32x4_splat(0.0);
+    let mut acc_c = f32x4_splat(0.0);
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+            let dl = f32x4_abs(f32x4_sub(
+                f32x4_sub(load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px), v_dc),
+                v128_load(anchor_luma.add(toff) as *const v128),
+            ));
+            acc_l = f32x4_add(acc_l, f32x4_mul(vw, dl));
+            let dc_rg = f32x4_abs(f32x4_sub(
+                load_pooled4_f32(rg_ptr.add(ioff), stride, scale_px),
+                v128_load(anchor_rg.add(toff) as *const v128),
+            ));
+            let dc_by = f32x4_abs(f32x4_sub(
+                load_pooled4_f32(by_ptr.add(ioff), stride, scale_px),
+                v128_load(anchor_by.add(toff) as *const v128),
+            ));
+            acc_c = f32x4_add(acc_c, f32x4_mul(vw, f32x4_add(dc_rg, dc_by)));
+        }
+    }
+    hsum_f32x4(acc_l) + 1.65 * hsum_f32x4(acc_c)
+}
+
+/// Foreground-weighted continuous Photometric SSD (`tpl_weight` sum = 1.0) for sub-pixel refinement.
+pub unsafe fn ssd16x16_weighted_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+    tpl_luma: *const f32,
+    tpl_rg: *const f32,
+    tpl_by: *const f32,
+    tpl_weight: *const f32,
+    scale_px: usize,
+) -> f32 {
+    let mut sum_w_diff = f32x4_splat(0.0);
+    let cstep = 4 * scale_px;
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+            let il = load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px);
+            let tl = v128_load(tpl_luma.add(toff) as *const v128);
+            sum_w_diff = f32x4_add(sum_w_diff, f32x4_mul(vw, f32x4_sub(il, tl)));
+        }
+    }
+    let dc_shift = hsum_f32x4(sum_w_diff).clamp(-0.12, 0.12) * 0.40;
+    let v_dc = f32x4_splat(dc_shift);
+
+    let mut acc_ssd_l = f32x4_splat(0.0);
+    let mut acc_ssd_c = f32x4_splat(0.0);
+
+    for ry in 0..16usize {
+        let img_row = (cy + ry * scale_px) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * cstep;
+            let toff = tpl_row + vec_idx * 4;
+            let vw = v128_load(tpl_weight.add(toff) as *const v128);
+
+            let dl = f32x4_sub(
+                f32x4_sub(load_pooled4_f32(luma_ptr.add(ioff), stride, scale_px), v_dc),
+                v128_load(tpl_luma.add(toff) as *const v128),
+            );
+            acc_ssd_l = f32x4_add(acc_ssd_l, f32x4_mul(vw, f32x4_mul(dl, dl)));
+
+            let drg = f32x4_sub(
+                load_pooled4_f32(rg_ptr.add(ioff), stride, scale_px),
+                v128_load(tpl_rg.add(toff) as *const v128),
+            );
+            let dby = f32x4_sub(
+                load_pooled4_f32(by_ptr.add(ioff), stride, scale_px),
+                v128_load(tpl_by.add(toff) as *const v128),
+            );
+            acc_ssd_c = f32x4_add(
+                acc_ssd_c,
+                f32x4_mul(vw, f32x4_add(f32x4_mul(drg, drg), f32x4_mul(dby, dby))),
+            );
+        }
+    }
+
+    hsum_f32x4(acc_ssd_l) + 1.85 * hsum_f32x4(acc_ssd_c)
+}
+
+#[inline(always)]
+unsafe fn sample_plane_bilinear(ptr: *const f32, stride: usize, fx: f32, fy: f32) -> f32 {
+    let ix = fx as usize;
+    let iy = fy as usize;
+    let tx = fx - (ix as f32);
+    let ty = fy - (iy as f32);
+    let base = iy * stride + ix;
+    let p00 = *ptr.add(base);
+    let p10 = *ptr.add(base + 1);
+    let p01 = *ptr.add(base + stride);
+    let p11 = *ptr.add(base + stride + 1);
+    let top = p00 + tx * (p10 - p00);
+    let bot = p01 + tx * (p11 - p01);
+    top + ty * (bot - top)
+}
+
+/// 2D Foreground-Weighted Inverse-Compositional Lucas-Kanade (IC-LK) Sub-Pixel Refinement
+/// with separable weighted parabolic SSD fallback when template Hessian is ill-conditioned.
+pub unsafe fn refine_subpixel_ic_lk_weighted(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    stride: usize,
+    best_tlx: usize,
+    best_tly: usize,
+    tpl_luma: *const f32,
+    tpl_rg: *const f32,
+    tpl_by: *const f32,
+    tpl_weight: *const f32,
+    scale_px: usize,
+) -> (f32, f32) {
+    let s_f = scale_px as f32;
+    let center_off = 0.5 * ((scale_px - 1) as f32);
+
+    // Precompute 2x2 weighted template gradient Hessian H over interior 14x14 texels
+    let mut h_xx = 0.0f32;
+    let mut h_xy = 0.0f32;
+    let mut h_yy = 0.0f32;
+    let mut sum_w_tl = 0.0f32;
+    let mut sum_w_in = 0.0f32;
+
+    for ry in 1..15usize {
+        let trow = ry * 16;
+        for rx in 1..15usize {
+            let idx = trow + rx;
+            let w = *tpl_weight.add(idx);
+            sum_w_tl += w * (*tpl_luma.add(idx));
+            sum_w_in += w;
+
+            let gtx = 0.5 * (*tpl_luma.add(idx + 1) - *tpl_luma.add(idx - 1)) / s_f;
+            let gty = 0.5 * (*tpl_luma.add(idx + 16) - *tpl_luma.add(idx - 16)) / s_f;
+            let grgx = 0.5 * (*tpl_rg.add(idx + 1) - *tpl_rg.add(idx - 1)) / s_f;
+            let grgy = 0.5 * (*tpl_rg.add(idx + 16) - *tpl_rg.add(idx - 16)) / s_f;
+            let gbyx = 0.5 * (*tpl_by.add(idx + 1) - *tpl_by.add(idx - 1)) / s_f;
+            let gbyy = 0.5 * (*tpl_by.add(idx + 16) - *tpl_by.add(idx - 16)) / s_f;
+
+            h_xx += w * (gtx * gtx + 1.4 * (grgx * grgx + gbyx * gbyx));
+            h_xy += w * (gtx * gty + 1.4 * (grgx * grgy + gbyx * gbyy));
+            h_yy += w * (gty * gty + 1.4 * (grgy * grgy + gbyy * gbyy));
+        }
+    }
+
+    let det = h_xx * h_yy - h_xy * h_xy;
+    let tr = h_xx + h_yy;
+    let max_shift = 0.62 * s_f;
+
+    // Require genuine 2D Hessian conditioning (det > 1e-7 and condition ratio healthy)
+    if det > 1e-7 && det > 0.02 * tr * tr && sum_w_in > 0.25 {
+        let inv_det = 1.0 / det;
+        let inv_win = 1.0 / sum_w_in;
+        let mut dx = 0.0f32;
+        let mut dy = 0.0f32;
+
+        for _iter in 0..2usize {
+            let mut sum_w_il = 0.0f32;
+            for ry in 1..15usize {
+                let fy = (best_tly + ry * scale_px) as f32 + center_off + dy;
+                let trow = ry * 16;
+                for rx in 1..15usize {
+                    let fx = (best_tlx + rx * scale_px) as f32 + center_off + dx;
+                    let w = *tpl_weight.add(trow + rx);
+                    sum_w_il += w * sample_plane_bilinear(luma_ptr, stride, fx, fy);
+                }
+            }
+            let dc = ((sum_w_il - sum_w_tl) * inv_win).clamp(-0.14, 0.14) * 0.70;
+
+            let mut bx = 0.0f32;
+            let mut by = 0.0f32;
+            for ry in 1..15usize {
+                let fy = (best_tly + ry * scale_px) as f32 + center_off + dy;
+                let trow = ry * 16;
+                for rx in 1..15usize {
+                    let idx = trow + rx;
+                    let fx = (best_tlx + rx * scale_px) as f32 + center_off + dx;
+                    let w = *tpl_weight.add(idx);
+
+                    let err_l = (sample_plane_bilinear(luma_ptr, stride, fx, fy) - dc) - *tpl_luma.add(idx);
+                    let err_rg = sample_plane_bilinear(rg_ptr, stride, fx, fy) - *tpl_rg.add(idx);
+                    let err_by = sample_plane_bilinear(by_ptr, stride, fx, fy) - *tpl_by.add(idx);
+
+                    let gtx = 0.5 * (*tpl_luma.add(idx + 1) - *tpl_luma.add(idx - 1)) / s_f;
+                    let gty = 0.5 * (*tpl_luma.add(idx + 16) - *tpl_luma.add(idx - 16)) / s_f;
+                    let grgx = 0.5 * (*tpl_rg.add(idx + 1) - *tpl_rg.add(idx - 1)) / s_f;
+                    let grgy = 0.5 * (*tpl_rg.add(idx + 16) - *tpl_rg.add(idx - 16)) / s_f;
+                    let gbyx = 0.5 * (*tpl_by.add(idx + 1) - *tpl_by.add(idx - 1)) / s_f;
+                    let gbyy = 0.5 * (*tpl_by.add(idx + 16) - *tpl_by.add(idx - 16)) / s_f;
+
+                    bx += w * (gtx * err_l + 1.4 * (grgx * err_rg + gbyx * err_by));
+                    by += w * (gty * err_l + 1.4 * (grgy * err_rg + gbyy * err_by));
+                }
+            }
+
+            // Inverse-compositional Gauss-Newton step: I(x + p + dp) ~ T(x) => dp = -H^-1 b
+            let step_x = -(h_yy * bx - h_xy * by) * inv_det;
+            let step_y = -(-h_xy * bx + h_xx * by) * inv_det;
+            dx = (dx + step_x).clamp(-max_shift, max_shift);
+            dy = (dy + step_y).clamp(-max_shift, max_shift);
+            if step_x.abs() < 0.015 && step_y.abs() < 0.015 {
+                break;
+            }
+        }
+        if dx.is_finite() && dy.is_finite() {
+            return (dx, dy);
+        }
+    }
+
+    // Fallback: Separable foreground-weighted parabolic SSD
+    let c_0 = ssd16x16_weighted_simd128(
+        luma_ptr, rg_ptr, by_ptr, stride, best_tlx, best_tly,
+        tpl_luma, tpl_rg, tpl_by, tpl_weight, scale_px,
+    );
+    let c_xm = ssd16x16_weighted_simd128(
+        luma_ptr, rg_ptr, by_ptr, stride, best_tlx - 1, best_tly,
+        tpl_luma, tpl_rg, tpl_by, tpl_weight, scale_px,
+    );
+    let c_xp = ssd16x16_weighted_simd128(
+        luma_ptr, rg_ptr, by_ptr, stride, best_tlx + 1, best_tly,
+        tpl_luma, tpl_rg, tpl_by, tpl_weight, scale_px,
+    );
+    let mut sub_dx = 0.0f32;
+    let denom_x = 2.0 * (c_xm - 2.0 * c_0 + c_xp);
+    if denom_x > 1e-5 {
+        sub_dx = ((c_xm - c_xp) / denom_x).clamp(-0.48, 0.48);
+    }
+
+    let c_ym = ssd16x16_weighted_simd128(
+        luma_ptr, rg_ptr, by_ptr, stride, best_tlx, best_tly - 1,
+        tpl_luma, tpl_rg, tpl_by, tpl_weight, scale_px,
+    );
+    let c_yp = ssd16x16_weighted_simd128(
+        luma_ptr, rg_ptr, by_ptr, stride, best_tlx, best_tly + 1,
+        tpl_luma, tpl_rg, tpl_by, tpl_weight, scale_px,
+    );
+    let mut sub_dy = 0.0f32;
+    let denom_y = 2.0 * (c_ym - 2.0 * c_0 + c_yp);
+    if denom_y > 1e-5 {
+        sub_dy = ((c_ym - c_yp) / denom_y).clamp(-0.48, 0.48);
+    }
+    (sub_dx, sub_dy)
 }

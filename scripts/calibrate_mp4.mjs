@@ -513,13 +513,17 @@ for (const clip of CLIPS) {
   console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicAudit=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
 
   if (strictGate) {
+    const gtFailed =
+      gtTotal > 0 &&
+      (gtRecallPct < 78.0 || teleportJumps > 0 || staticPins > 1 || gtHijacks > 16);
     if (
       nanDetected ||
       maxEigRes > 1e-5 ||
       persistentTracks < 3 ||
       lockPct < 90.0 ||
       lastClutterDb < 44.0 ||
-      padicSwaps >= kalmanSwaps
+      padicSwaps >= kalmanSwaps ||
+      gtFailed
     ) {
       allPassed = false;
       console.error(`  [FAIL] Calibration invariant missed on ${clip.file}`);
