@@ -982,5 +982,69 @@ fi
 PORT="${PORT:-8080}"
 echo ""
 echo "[5/5] Launching CHRONOS-SPECTRAL Command Deck at http://127.0.0.1:${PORT}"
+echo "      (RFC 7233 HTTP 206 byte-range server for WebKit/Chromium MP4 + Wasm streaming)"
 echo "      Press Ctrl+C to stop server."
-exec python3 -m http.server "$PORT" --bind 127.0.0.1 --directory web
+exec env PORT="$PORT" node --input-type=module - <<'SERVE_EOF'
+import fs from 'node:fs';
+import http from 'node:http';
+import path from 'node:path';
+
+const root = path.resolve('web');
+const port = Number(process.env.PORT || 8080);
+const mimes = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.mp4': 'video/mp4',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.css': 'text/css; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+};
+
+http.createServer((req, res) => {
+  const reqUrl = new URL(req.url || '/', 'http://127.0.0.1');
+  const rel = decodeURIComponent(reqUrl.pathname === '/' ? '/index.html' : reqUrl.pathname);
+  const filePath = path.normalize(path.join(root, rel));
+  if (!filePath.startsWith(root) || !fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+    res.writeHead(404);
+    res.end('Not found');
+    return;
+  }
+  const stat = fs.statSync(filePath);
+  const type = mimes[path.extname(filePath).toLowerCase()] || 'application/octet-stream';
+  const range = req.headers.range;
+  if (range) {
+    const m = /^bytes=(\d*)-(\d*)$/.exec(range);
+    if (!m) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      res.end();
+      return;
+    }
+    const start = m[1] ? parseInt(m[1], 10) : 0;
+    const end = m[2] ? Math.min(stat.size - 1, parseInt(m[2], 10)) : stat.size - 1;
+    if (start >= stat.size || start > end) {
+      res.writeHead(416, { 'Content-Range': `bytes */${stat.size}` });
+      res.end();
+      return;
+    }
+    res.writeHead(206, {
+      'Content-Type': type,
+      'Content-Length': end - start + 1,
+      'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+    });
+    fs.createReadStream(filePath, { start, end }).pipe(res);
+    return;
+  }
+  res.writeHead(200, {
+    'Content-Type': type,
+    'Content-Length': stat.size,
+    'Accept-Ranges': 'bytes',
+    'Cache-Control': 'no-store',
+  });
+  fs.createReadStream(filePath).pipe(res);
+}).listen(port, '127.0.0.1');
+SERVE_EOF
