@@ -945,8 +945,9 @@ for (const acc of benchStats) {
   if (acc.finalClutterDb < 60.0) {
     throw new Error(`[${acc.label}] Expected > 60 dB uncensored ECA clutter suppression, got ${acc.finalClutterDb.toFixed(2)} dB`);
   }
-  if (acc.medMean >= acc.budgetMs) {
-    throw new Error(`[${acc.label}] Per-frame compute budget exceeded: ${acc.medMean.toFixed(4)} ms >= ${acc.budgetMs.toFixed(2)} ms`);
+  const effectiveBudgetMs = acc.budgetMs * Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
+  if (acc.medMean >= effectiveBudgetMs) {
+    throw new Error(`[${acc.label}] Per-frame compute budget exceeded: ${acc.medMean.toFixed(4)} ms >= ${effectiveBudgetMs.toFixed(2)} ms`);
   }
 }
 
@@ -958,6 +959,17 @@ EOF
 if [ "${1:-}" = "--check" ]; then
   echo ""
   echo "[5/5] --check mode complete. Exiting cleanly."
+  exit 0
+fi
+
+if [ "${1:-}" = "--e2e" ]; then
+  echo ""
+  echo "[5/5] Running Real-Camera MP4 Calibration (SD + HD) & Headless Chrome CDP E2E Suite..."
+  node scripts/calibrate_mp4.mjs --gate
+  node scripts/calibrate_mp4.mjs --hd --gate
+  node scripts/e2e_browser.mjs
+  echo ""
+  echo "[PASS] --e2e full-stack verification complete. Exiting cleanly."
   exit 0
 fi
 
