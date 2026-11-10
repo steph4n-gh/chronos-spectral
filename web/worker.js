@@ -99,6 +99,26 @@ const jacobiV = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
 const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
 const eigVecBuf = new Float64Array(GRAPH_NODES);
 
+// Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz)
+const REC_COLS = 38;
+const REC_MAX_FRAMES = 18000;
+const REC_COLUMNS = [
+  'frame_idx', 'elapsed_sec', 'frame_w', 'frame_h', 'lookahead_k', 'lab_mode',
+  'wasm_tick_ms', 'active_targets', 'clutter_db', 'clutter_eval_ratio',
+  'padic_swaps', 'oracle_swaps', 'kalman_swaps', 'in_pillar_collisions',
+  'fiedler_lambda2', 'spectral_gap', 'fista_duality_gap',
+  'primary_track_id', 'primary_sig_u32', 'primary_padic_val',
+  'disp_raw_x', 'disp_raw_y', 'disp_fista_x', 'disp_fista_y',
+  'disp_kalman_x', 'disp_kalman_y', 'disp_vis', 'disp_bridged',
+  'tremor_r', 'tremor_h', 'tremor_phase_deg', 'tremor_freq_hz', 'tremor_amp',
+  'phase_valid', 'strobe_fired', 'perc_mask', 'apex_ms', 'saccade_latency_ms',
+];
+const recSlab = new Float64Array(REC_MAX_FRAMES * REC_COLS);
+let recActive = false;
+let recHead = 0;
+let recCount = 0;
+let recElapsedSec = 0.0;
+
 // ============================================================================
 // Blind Pixel Pillar Testbench Physics & 1-to-1 Ground-Truth Swap Oracle
 // ============================================================================
@@ -1201,6 +1221,66 @@ function processIngestedFrame(rawPixels, dtSec) {
   renderHilbertScope();
   renderSpectralAndRingScope();
 
+  // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity)
+  if (recActive) {
+    const effRateRec = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
+    const pSlot = Math.round(telemView[8]);
+    const ro = recHead * REC_COLS;
+    recElapsedSec += safeDt;
+
+    recSlab[ro + 0] = Math.round(telemView[0]);
+    recSlab[ro + 1] = recElapsedSec;
+    recSlab[ro + 2] = FRAME_W;
+    recSlab[ro + 3] = FRAME_H;
+    recSlab[ro + 4] = Math.round(telemView[1]);
+    recSlab[ro + 5] = labMode;
+    recSlab[ro + 6] = wasmMs;
+    recSlab[ro + 7] = Math.round(telemView[3]);
+    recSlab[ro + 8] = telemView[4];
+    recSlab[ro + 9] = telemView[23];
+    recSlab[ro + 10] = Math.round(telemView[5]);
+    recSlab[ro + 11] = oraclePadicSwaps;
+    recSlab[ro + 12] = Math.round(telemView[6]);
+    recSlab[ro + 13] = inPillarCollisions;
+    recSlab[ro + 14] = lambda2;
+    recSlab[ro + 15] = telemView[24];
+    recSlab[ro + 16] = telemView[25];
+
+    if (pSlot >= 0) {
+      const b = 32 + pSlot * 56;
+      const hi = Math.round(telemView[b + 12]) & 0xffff;
+      const lo = Math.round(telemView[b + 13]) & 0xffff;
+      recSlab[ro + 17] = Math.round(telemView[b + 1]);
+      recSlab[ro + 18] = hi * 65536.0 + lo;
+      recSlab[ro + 19] = Math.round(telemView[b + 14]);
+      recSlab[ro + 20] = telemView[b + 4];
+      recSlab[ro + 21] = telemView[b + 5];
+      recSlab[ro + 22] = telemView[b + 2];
+      recSlab[ro + 23] = telemView[b + 3];
+      recSlab[ro + 24] = telemView[b + 6];
+      recSlab[ro + 25] = telemView[b + 7];
+      recSlab[ro + 26] = telemView[b + 10];
+      recSlab[ro + 27] = telemView[b + 11];
+      recSlab[ro + 36] = telemView[b + 17] * (1000.0 / effRateRec);
+    } else {
+      for (let c = 17; c <= 27; c++) recSlab[ro + c] = 0.0;
+      recSlab[ro + 36] = 0.0;
+    }
+
+    recSlab[ro + 28] = telemView[9];
+    recSlab[ro + 29] = telemView[10];
+    recSlab[ro + 30] = telemView[11] * (180.0 / Math.PI);
+    recSlab[ro + 31] = telemView[13];
+    recSlab[ro + 32] = telemView[12];
+    recSlab[ro + 33] = telemView[26] > 0.5 ? 1 : 0;
+    recSlab[ro + 34] = telemView[14] > 0.5 ? 1 : 0;
+    recSlab[ro + 35] = Math.round(telemView[15]);
+    recSlab[ro + 37] = telemView[19];
+
+    recHead = (recHead + 1) % REC_MAX_FRAMES;
+    if (recCount < REC_MAX_FRAMES) recCount++;
+  }
+
   tickCounter++;
   if (tickCounter % 3 === 0) {
     let sumMs = 0.0;
@@ -1255,6 +1335,9 @@ function processIngestedFrame(rawPixels, dtSec) {
       apexMs,
       arenaBytes: Math.round(telemView[20]),
       memoryPages: wasmMemory.buffer.byteLength / 65536,
+      recActive,
+      recFrames: recCount,
+      recDurationSec: recElapsedSec,
     });
   }
 }
@@ -1450,5 +1533,60 @@ self.onmessage = async (ev) => {
       if (wasmExports) wasmExports.chronos_reset_tracks();
       resetTestbenchState();
     }
+  } else if (msg.type === 'rec_control') {
+    if (msg.action === 'start') {
+      if (msg.clear) {
+        recHead = 0;
+        recCount = 0;
+        recElapsedSec = 0.0;
+      }
+      recActive = true;
+    } else if (msg.action === 'stop') {
+      recActive = false;
+    } else if (msg.action === 'clear') {
+      recActive = false;
+      recHead = 0;
+      recCount = 0;
+      recElapsedSec = 0.0;
+    }
+    self.postMessage({
+      type: 'rec_state',
+      recActive,
+      recFrames: recCount,
+      recDurationSec: recElapsedSec,
+    });
+  } else if (msg.type === 'export_telemetry') {
+    const rows = recCount;
+    const ordered = new Float64Array(rows * REC_COLS);
+    if (rows > 0) {
+      const oldest = rows < REC_MAX_FRAMES ? 0 : recHead;
+      for (let i = 0; i < rows; i++) {
+        const srcOff = ((oldest + i) % REC_MAX_FRAMES) * REC_COLS;
+        ordered.set(recSlab.subarray(srcOff, srcOff + REC_COLS), i * REC_COLS);
+      }
+    }
+    self.postMessage(
+      {
+        type: 'telemetry_export_data',
+        format: msg.format || 'csv',
+        rows,
+        cols: REC_COLS,
+        columns: REC_COLUMNS,
+        buffer: ordered.buffer,
+        meta: {
+          schemaVersion: '1.0.0',
+          sourceMode,
+          frameW: FRAME_W,
+          frameH: FRAME_H,
+          lookaheadK,
+          ecaAdaptRate,
+          fistaLambda,
+          eulerianGain,
+          phaseOffsetRad,
+          labMode,
+        },
+      },
+      [ordered.buffer]
+    );
   }
 };

@@ -784,6 +784,21 @@
           </label>
         </div>
       </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <span class="panel-title">5. Session Telemetry Recorder</span>
+          <span class="panel-meta" id="recStatusLabel" role="status">IDLE (0 FRAMES)</span>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnRecToggle" aria-pressed="false">● Start Recording</button>
+          <button type="button" id="btnRecClear" class="action-btn">✕ Clear</button>
+        </div>
+        <div class="btn-row">
+          <button type="button" id="btnExportCsv" class="action-btn">↓ Export CSV</button>
+          <button type="button" id="btnExportJson" class="action-btn">↓ Export JSON</button>
+        </div>
+      </div>
     </aside>
   </main>
 
@@ -1055,7 +1070,41 @@
       labDescription: document.getElementById('labDescription'),
       btnLabStimulus: document.getElementById('btnLabStimulus'),
       phaseOffsetLabel: document.getElementById('phaseOffsetLabel'),
+      recStatusLabel: document.getElementById('recStatusLabel'),
     };
+
+    let uiRecActive = false;
+
+    function updateRecorderUi(active, frames, durationSec) {
+      uiRecActive = Boolean(active);
+      const btnRec = document.getElementById('btnRecToggle');
+      btnRec.classList.toggle('active', uiRecActive);
+      btnRec.setAttribute('aria-pressed', String(uiRecActive));
+      btnRec.textContent = uiRecActive ? '■ Pause Recording' : '● Start Recording';
+      const dur = typeof durationSec === 'number' ? durationSec.toFixed(1) : '0.0';
+      dom.recStatusLabel.textContent = uiRecActive
+        ? `● REC ${frames} FRAMES (${dur}s)`
+        : frames > 0
+        ? `PAUSED (${frames} FRAMES / ${dur}s)`
+        : 'IDLE (0 FRAMES)';
+    }
+
+    function triggerBlobDownload(filename, mimeType, textContent) {
+      window.__lastTelemetryExport = { filename, mimeType, length: textContent.length, preview: textContent.slice(0, 512), fullText: textContent };
+      const blob = new Blob([textContent], { type: mimeType });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
+
+    function formatExportTimestamp() {
+      return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    }
 
     worker.onmessage = (ev) => {
       const m = ev.data;
@@ -1116,6 +1165,56 @@
         } else {
           dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
           dom.kpiSaccadeMs.textContent = 'READY';
+        }
+        updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+      } else if (m.type === 'rec_state') {
+        updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+      } else if (m.type === 'telemetry_export_data') {
+        const { format, rows, cols, columns, buffer, meta } = m;
+        if (rows === 0) {
+          dom.recStatusLabel.textContent = 'EMPTY BUFFER (RECORD FIRST)';
+          return;
+        }
+        const data = new Float64Array(buffer);
+        const stamp = formatExportTimestamp();
+        if (format === 'json') {
+          const records = new Array(rows);
+          for (let r = 0; r < rows; r++) {
+            const obj = {};
+            const base = r * cols;
+            for (let c = 0; c < cols; c++) {
+              const v = data[base + c];
+              obj[columns[c]] = Number.isInteger(v) ? v : Number(v.toFixed(6));
+            }
+            records[r] = obj;
+          }
+          const payload = JSON.stringify(
+            {
+              exportedAt: new Date().toISOString(),
+              meta,
+              frameCount: rows,
+              columns,
+              frames: records,
+            },
+            null,
+            2
+          );
+          triggerBlobDownload(`chronos-telemetry-${stamp}.json`, 'application/json;charset=utf-8', payload);
+          dom.recStatusLabel.textContent = `EXPORTED ${rows} FRAMES (JSON)`;
+        } else {
+          const lines = new Array(rows + 1);
+          lines[0] = columns.join(',');
+          for (let r = 0; r < rows; r++) {
+            const base = r * cols;
+            const rowStr = new Array(cols);
+            for (let c = 0; c < cols; c++) {
+              const v = data[base + c];
+              rowStr[c] = Number.isInteger(v) ? String(v) : v.toFixed(6);
+            }
+            lines[r + 1] = rowStr.join(',');
+          }
+          triggerBlobDownload(`chronos-telemetry-${stamp}.csv`, 'text/csv;charset=utf-8', lines.join('\n') + '\n');
+          dom.recStatusLabel.textContent = `EXPORTED ${rows} FRAMES (CSV)`;
         }
       }
     };
@@ -1333,6 +1432,24 @@
     });
     document.getElementById('chkStrobe').addEventListener('change', (e) => {
       worker.postMessage({ type: 'params', strobeEnabled: e.target.checked });
+    });
+
+    // Session Telemetry Recorder Controls
+    document.getElementById('btnRecToggle').addEventListener('click', () => {
+      worker.postMessage({
+        type: 'rec_control',
+        action: uiRecActive ? 'stop' : 'start',
+        clear: false,
+      });
+    });
+    document.getElementById('btnRecClear').addEventListener('click', () => {
+      worker.postMessage({ type: 'rec_control', action: 'clear' });
+    });
+    document.getElementById('btnExportCsv').addEventListener('click', () => {
+      worker.postMessage({ type: 'export_telemetry', format: 'csv' });
+    });
+    document.getElementById('btnExportJson').addEventListener('click', () => {
+      worker.postMessage({ type: 'export_telemetry', format: 'json' });
     });
   </script>
 </body>
