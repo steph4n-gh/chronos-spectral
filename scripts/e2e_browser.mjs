@@ -274,6 +274,12 @@ async function main() {
 
     const { targetId } = await cdp.send('Target.createTarget', { url: appUrl });
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
+    cdp.on('Target.attachedToTarget', (params) => {
+      if (params && params.sessionId) {
+        cdp.send('Runtime.enable', {}, params.sessionId).catch(() => {});
+      }
+    });
+    await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, sessionId);
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send('Browser.setDownloadBehavior', {
@@ -291,7 +297,7 @@ async function main() {
         const arena = document.getElementById('pillArena')?.textContent || '';
         const resMeta = document.getElementById('inputResMeta')?.textContent || '';
         const targets = document.getElementById('kpiTargets')?.textContent || '';
-        const swaps = document.getElementById('kpiPadicSwaps')?.textContent || '';
+        const swaps = (document.getElementById('kpiPadicSwaps')?.textContent || '').trim();
         const collisions = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10);
         return {
           ok: kernel.includes('0 HEAP ALLOC / 0 IMPORTS') &&
@@ -299,7 +305,7 @@ async function main() {
               resMeta === '320×180 SD RGBA' &&
               targets === '4 / 8' &&
               collisions >= 2 &&
-              swaps.includes('0'),
+              swaps === '◆ 0',
           kernel, arena, resMeta, targets, swaps, collisions,
         };
       })()`
@@ -316,14 +322,14 @@ async function main() {
         const resMeta = document.getElementById('inputResMeta')?.textContent || '';
         const pipAria = document.getElementById('pipCanvas')?.getAttribute('aria-label') || '';
         const targets = document.getElementById('kpiTargets')?.textContent || '';
-        const swaps = document.getElementById('kpiPadicSwaps')?.textContent || '';
+        const swaps = (document.getElementById('kpiPadicSwaps')?.textContent || '').trim();
         const collisions = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10);
         return {
           ok: resMeta === '640×360 HD RGBA' &&
               pipAria.startsWith('32x32') &&
               targets === '4 / 8' &&
               collisions >= 1 &&
-              swaps.includes('0'),
+              swaps === '◆ 0',
           resMeta, pipAria, targets, swaps, collisions,
         };
       })()`
@@ -425,7 +431,26 @@ async function main() {
         };
       })()`
     );
-    console.log(`  [PASS] Step 4 (Telemetry Export): CSV (${csvExport.rows}x${csvExport.cols}, ${csvExport.frameW}x${csvExport.frameH}) & JSON (${jsonExport.frameCount} frames, schema v${jsonExport.meta.schemaVersion})`);
+    // Verify real browser download files landed on disk in downloadDir
+    const deadlineDl = Date.now() + 5000;
+    let downloadedCsv = null;
+    let downloadedJson = null;
+    while (Date.now() < deadlineDl) {
+      const files = fs.readdirSync(downloadDir).filter((f) => !f.endsWith('.crdownload'));
+      downloadedCsv = files.find((f) => f.endsWith('.csv')) || null;
+      downloadedJson = files.find((f) => f.endsWith('.json')) || null;
+      if (downloadedCsv && downloadedJson) break;
+      await new Promise((r) => setTimeout(r, 80));
+    }
+    if (!downloadedCsv || !downloadedJson) {
+      throw new Error(`Expected .csv and .json files on disk in ${downloadDir}, found: ${fs.readdirSync(downloadDir).join(', ')}`);
+    }
+    const diskCsvLines = fs.readFileSync(path.join(downloadDir, downloadedCsv), 'utf8').trim().split('\n');
+    const diskJsonObj = JSON.parse(fs.readFileSync(path.join(downloadDir, downloadedJson), 'utf8'));
+    if (diskCsvLines.length - 1 !== csvExport.rows || diskJsonObj.frameCount !== jsonExport.frameCount) {
+      throw new Error('Downloaded disk file row counts did not match exported telemetry payload');
+    }
+    console.log(`  [PASS] Step 4 (Telemetry Export & Disk Download): CSV (${csvExport.rows}x${csvExport.cols}, ${downloadedCsv}) & JSON (${jsonExport.frameCount} frames, ${downloadedJson})`);
 
     // 5. Lab Modes B & C + Return to 320x180 SD Cleanly
     await cdp.evalJs(
@@ -449,19 +474,49 @@ async function main() {
       'Mode B deterministic saccade onset latency readout',
       `(() => {
         const val = document.getElementById('kpiSaccadeMs')?.textContent || '';
-        return { ok: val.endsWith(' ms'), val };
+        const ms = parseFloat(val);
+        return { ok: val.endsWith(' ms') && Number.isFinite(ms) && ms >= 10 && ms <= 600, val, ms };
       })()`
     );
 
     await cdp.evalJs(
       sessionId,
       `(() => {
+        document.getElementById('btnRecClear').click();
+        document.getElementById('btnRecToggle').click();
         document.querySelector('.lab-btn[data-lab="2"]').click();
         document.getElementById('btnLabStimulus').click();
-        document.getElementById('btnResSd').click();
         return true;
       })()`
     );
+    const modeCState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Mode C air-percussion badge, WebAudio auto-enable, and L1 strike telemetry',
+      `(() => {
+        const badge = document.getElementById('labBadge')?.textContent || '';
+        const audioPressed = document.getElementById('btnAudioToggle')?.getAttribute('aria-pressed') || '';
+        const recTxt = document.getElementById('recStatusLabel')?.textContent || '';
+        const m = recTxt.match(/REC\\s+(\\d+)\\s+FRAMES/);
+        const count = m ? parseInt(m[1], 10) : 0;
+        return { ok: badge === 'MODE C' && audioPressed === 'true' && count >= 12, badge, audioPressed, count };
+      })()`
+    );
+    await cdp.evalJs(sessionId, `window.__lastTelemetryExport = null; document.getElementById('btnRecToggle').click(); document.getElementById('btnExportJson').click(); true;`);
+    const modeCStrikeCheck = await waitForCondition(
+      cdp,
+      sessionId,
+      'Mode C perc_mask > 0 in recorded frames',
+      `(() => {
+        const ex = window.__lastTelemetryExport;
+        if (!ex || !ex.filename.endsWith('.json')) return { ok: false };
+        const parsed = JSON.parse(ex.fullText);
+        const strikes = parsed.frames.filter((f) => f.perc_mask > 0).length;
+        return { ok: strikes >= 1, strikes };
+      })()`
+    );
+
+    await cdp.evalJs(sessionId, `document.getElementById('btnResSd').click(); true;`);
     const backSd = await waitForCondition(
       cdp,
       sessionId,
@@ -472,7 +527,7 @@ async function main() {
         return { ok: resMeta === '320×180 SD RGBA' && pipAria.startsWith('16x16'), resMeta, pipAria };
       })()`
     );
-    console.log(`  [PASS] Step 5 (Lab Modes B/C & SD Round-Trip): saccade=${modeBState.val}, returned=${backSd.resMeta}`);
+    console.log(`  [PASS] Step 5 (Lab Modes B/C & SD Round-Trip): saccade=${modeBState.val}, modeC_strikes=${modeCStrikeCheck.strikes}, returned=${backSd.resMeta}`);
 
     if (pageErrors.length > 0) {
       throw new Error(`Browser reported ${pageErrors.length} error(s):\n${pageErrors.join('\n')}`);

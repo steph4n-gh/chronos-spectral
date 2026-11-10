@@ -1,7 +1,15 @@
 #!/usr/bin/env node
+// ============================================================================
+// CHRONOS-SPECTRAL // Streaming Real-Camera MP4 Calibration & Diagnostic Suite
+// Streams raw RGBA frames one-by-one from ffmpeg (O(1) single-frame memory,
+// zero whole-video buffering) through the exact production Wasm + 20-sweep
+// Jacobi Lanczos solver, verifying 576-float finiteness, eigen-residuals,
+// ECA clutter suppression, persistent lock stability, and swap ordering.
+// ============================================================================
+
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
@@ -21,17 +29,51 @@ const CLIPS = [
   { file: 'webcam_book_occlusion.mp4', fps: 25, labMode: 0, desc: 'Grayscale Webcam Face + Book Occlusion' },
 ];
 
-function decodeMp4Frames(mp4Path, w, h) {
-  const raw = execFileSync(
-    'ffmpeg',
-    ['-v', 'error', '-i', mp4Path, '-vf', `scale=${w}:${h}`, '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
-    { maxBuffer: 1024 * 1024 * 1024 }
-  );
+function streamMp4Frames(mp4Path, w, h, onFrame) {
   const frameBytes = w * h * 4;
-  const numFrames = Math.floor(raw.length / frameBytes);
-  return { raw, frameBytes, numFrames };
+  const frameScratch = new Uint8Array(frameBytes);
+  let carry = 0;
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(
+      'ffmpeg',
+      ['-v', 'error', '-i', mp4Path, '-vf', `scale=${w}:${h}`, '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
+      { stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    let stderrText = '';
+    let frameCount = 0;
+
+    proc.stderr.on('data', (chunk) => {
+      stderrText += chunk.toString('utf8');
+    });
+
+    proc.stdout.on('data', (chunk) => {
+      let offset = 0;
+      while (offset < chunk.length) {
+        const needed = frameBytes - carry;
+        const take = Math.min(needed, chunk.length - offset);
+        frameScratch.set(chunk.subarray(offset, offset + take), carry);
+        carry += take;
+        offset += take;
+        if (carry === frameBytes) {
+          onFrame(frameScratch, frameCount++);
+          carry = 0;
+        }
+      }
+    });
+
+    proc.on('error', reject);
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        reject(new Error(`ffmpeg exited with code ${code}: ${stderrText}`));
+      } else {
+        resolve({ numFrames: frameCount, frameBytes });
+      }
+    });
+  });
 }
 
+/// Exact production Shifted Lanczos + Invariant-Subspace Restart + 20-Sweep Symmetric Jacobi solver (matches web/worker.js).
 function createLanczosSolver(exp, laplacian, fiedler) {
   const activeNodeIdx = new Int32Array(GRAPH_NODES);
   const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
@@ -78,7 +120,7 @@ function createLanczosSolver(exp, laplacian, fiedler) {
     fiedler.fill(0.0);
     if (n < 2) {
       exp.chronos_set_fiedler_spectrum(0.0, 0.0);
-      return 0.0;
+      return { lambda2: 0.0, resNorm: 0.0 };
     }
     let mu = 0.0;
     for (let a = 0; a < n; a++) {
@@ -143,113 +185,131 @@ function createLanczosSolver(exp, laplacian, fiedler) {
         wm /= n;
         for (let a = 0; a < n; a++) lanczosW[a] -= wm;
       }
-      let beta = 0.0;
-      for (let a = 0; a < n; a++) beta += lanczosW[a] * lanczosW[a];
-      beta = Math.sqrt(beta);
+
+      let beta2 = 0.0;
+      for (let a = 0; a < n; a++) beta2 += lanczosW[a] * lanczosW[a];
+      const beta = Math.sqrt(Math.max(0.0, beta2));
       actualM = j + 1;
 
-      if (j + 1 < mSteps) {
-        const nextOff = (j + 1) * GRAPH_NODES;
-        if (beta < 1e-7) {
-          lanczosBeta[j] = 0.0;
-          if (!findOrthogonalBasisSeed(n, actualM, nextOff)) break;
-        } else {
-          lanczosBeta[j] = beta;
-          const invB = 1.0 / beta;
-          for (let a = 0; a < n; a++) lanczosQ[nextOff + a] = lanczosW[a] * invB;
-        }
-      } else {
+      if (j + 1 >= mSteps) {
         lanczosBeta[j] = 0.0;
+        break;
+      }
+      const nextOff = (j + 1) * GRAPH_NODES;
+      if (beta < 1e-8) {
+        lanczosBeta[j] = 0.0;
+        if (!findOrthogonalBasisSeed(n, j + 1, nextOff)) break;
+      } else {
+        lanczosBeta[j] = beta;
+        const invBeta = 1.0 / beta;
+        for (let a = 0; a < n; a++) lanczosQ[nextOff + a] = lanczosW[a] * invBeta;
       }
     }
 
-    const m = actualM;
     jacobiA.fill(0.0);
     jacobiV.fill(0.0);
-    for (let r = 0; r < m; r++) {
-      jacobiV[r * MAX_KRYLOV + r] = 1.0;
-      jacobiA[r * MAX_KRYLOV + r] = lanczosAlpha[r];
-      if (r + 1 < m) {
-        jacobiA[r * MAX_KRYLOV + (r + 1)] = lanczosBeta[r];
-        jacobiA[(r + 1) * MAX_KRYLOV + r] = lanczosBeta[r];
+    for (let r = 0; r < actualM; r++) {
+      jacobiV[r * actualM + r] = 1.0;
+      jacobiA[r * actualM + r] = lanczosAlpha[r];
+      if (r + 1 < actualM) {
+        const b = lanczosBeta[r];
+        jacobiA[r * actualM + (r + 1)] = b;
+        jacobiA[(r + 1) * actualM + r] = b;
       }
     }
-    for (let sweep = 0; sweep < 24; sweep++) {
+
+    for (let sweep = 0; sweep < 20; sweep++) {
       let maxOff = 0.0;
-      let p = 0, q = 1;
-      for (let r = 0; r < m; r++) {
-        for (let c = r + 1; c < m; c++) {
-          const v = Math.abs(jacobiA[r * MAX_KRYLOV + c]);
-          if (v > maxOff) { maxOff = v; p = r; q = c; }
+      for (let p = 0; p < actualM; p++) {
+        for (let q = p + 1; q < actualM; q++) {
+          const apq = jacobiA[p * actualM + q];
+          const absApq = Math.abs(apq);
+          if (absApq > maxOff) maxOff = absApq;
+          if (absApq < 1e-12) continue;
+
+          const app = jacobiA[p * actualM + p];
+          const aqq = jacobiA[q * actualM + q];
+          const tau = (aqq - app) / (2.0 * apq);
+          const t = tau >= 0.0
+            ? 1.0 / (tau + Math.sqrt(1.0 + tau * tau))
+            : -1.0 / (-tau + Math.sqrt(1.0 + tau * tau));
+          const c = 1.0 / Math.sqrt(1.0 + t * t);
+          const s = t * c;
+
+          jacobiA[p * actualM + p] = app - t * apq;
+          jacobiA[q * actualM + q] = aqq + t * apq;
+          jacobiA[p * actualM + q] = 0.0;
+          jacobiA[q * actualM + p] = 0.0;
+
+          for (let k = 0; k < actualM; k++) {
+            if (k !== p && k !== q) {
+              const akp = jacobiA[k * actualM + p];
+              const akq = jacobiA[k * actualM + q];
+              const nkp = c * akp - s * akq;
+              const nkq = s * akp + c * akq;
+              jacobiA[k * actualM + p] = nkp;
+              jacobiA[p * actualM + k] = nkp;
+              jacobiA[k * actualM + q] = nkq;
+              jacobiA[q * actualM + k] = nkq;
+            }
+            const vkp = jacobiV[k * actualM + p];
+            const vkq = jacobiV[k * actualM + q];
+            jacobiV[k * actualM + p] = c * vkp - s * vkq;
+            jacobiV[k * actualM + q] = s * vkp + c * vkq;
+          }
         }
       }
       if (maxOff < 1e-11) break;
-      const app = jacobiA[p * MAX_KRYLOV + p];
-      const aqq = jacobiA[q * MAX_KRYLOV + q];
-      const apq = jacobiA[p * MAX_KRYLOV + q];
-      const tau = (aqq - app) / (2.0 * apq);
-      const t = tau >= 0.0 ? 1.0 / (tau + Math.hypot(1.0, tau)) : -1.0 / (-tau + Math.hypot(1.0, tau));
-      const cs = 1.0 / Math.hypot(1.0, t);
-      const sn = t * cs;
-      for (let k = 0; k < m; k++) {
-        if (k !== p && k !== q) {
-          const akp = jacobiA[k * MAX_KRYLOV + p];
-          const akq = jacobiA[k * MAX_KRYLOV + q];
-          jacobiA[k * MAX_KRYLOV + p] = cs * akp - sn * akq;
-          jacobiA[p * MAX_KRYLOV + k] = jacobiA[k * MAX_KRYLOV + p];
-          jacobiA[k * MAX_KRYLOV + q] = sn * akp + cs * akq;
-          jacobiA[q * MAX_KRYLOV + k] = jacobiA[k * MAX_KRYLOV + q];
-        }
-      }
-      jacobiA[p * MAX_KRYLOV + p] = cs * cs * app - 2.0 * sn * cs * apq + sn * sn * aqq;
-      jacobiA[q * MAX_KRYLOV + q] = sn * sn * app + 2.0 * sn * cs * apq + cs * cs * aqq;
-      jacobiA[p * MAX_KRYLOV + q] = 0.0;
-      jacobiA[q * MAX_KRYLOV + p] = 0.0;
-      for (let k = 0; k < m; k++) {
-        const vkp = jacobiV[k * MAX_KRYLOV + p];
-        const vkq = jacobiV[k * MAX_KRYLOV + q];
-        jacobiV[k * MAX_KRYLOV + p] = cs * vkp - sn * vkq;
-        jacobiV[k * MAX_KRYLOV + q] = sn * vkp + cs * vkq;
+    }
+
+    let bestCol = 0;
+    let thetaMax = -1e30;
+    let thetaSecond = -1e30;
+    for (let c = 0; c < actualM; c++) {
+      const val = jacobiA[c * actualM + c];
+      if (val > thetaMax) {
+        thetaSecond = thetaMax;
+        thetaMax = val;
+        bestCol = c;
+      } else if (val > thetaSecond) {
+        thetaSecond = val;
       }
     }
 
-    let bestIdx = 0;
-    let bestTheta = -1e30;
-    let secondTheta = -1e30;
-    for (let r = 0; r < m; r++) {
-      const th = jacobiA[r * MAX_KRYLOV + r];
-      if (th > bestTheta) { secondTheta = bestTheta; bestTheta = th; bestIdx = r; }
-      else if (th > secondTheta) { secondTheta = th; }
-    }
-    const lambda2 = Math.max(0.0, mu - bestTheta);
-    const lambda3 = secondTheta > -1e20 ? Math.max(lambda2, mu - secondTheta) : lambda2;
+    const lambda2 = Math.max(0.0, mu - thetaMax);
+    const lambda3 = actualM >= 2 ? Math.max(lambda2, mu - thetaSecond) : lambda2;
     const spectralGap = Math.max(0.0, lambda3 - lambda2);
 
-    let vNorm2 = 0.0;
+    let dotPrev = 0.0;
     for (let a = 0; a < n; a++) {
-      let s = 0.0;
-      for (let j = 0; j < m; j++) s += lanczosQ[j * GRAPH_NODES + a] * jacobiV[j * MAX_KRYLOV + bestIdx];
-      eigVecBuf[a] = s;
-      vNorm2 += s * s;
+      let comp = 0.0;
+      for (let j = 0; j < actualM; j++) {
+        comp += lanczosQ[j * GRAPH_NODES + a] * jacobiV[j * actualM + bestCol];
+      }
+      eigVecBuf[a] = comp;
+      const nodeIdx = activeNodeIdx[a];
+      if (nodeIdx < MAX_TARGETS) dotPrev += comp * prevFiedlerTrack[nodeIdx];
     }
-    const invV = 1.0 / Math.sqrt(Math.max(vNorm2, 1e-18));
-    let temporalDot = 0.0;
+
+    const signFix = (dotPrev < -1e-4 || (Math.abs(dotPrev) <= 1e-4 && eigVecBuf[0] < 0.0)) ? -1.0 : 1.0;
+    for (let a = 0; a < n; a++) {
+      const nodeIdx = activeNodeIdx[a];
+      const val = eigVecBuf[a] * signFix;
+      fiedler[nodeIdx] = val;
+      if (nodeIdx < MAX_TARGETS) prevFiedlerTrack[nodeIdx] = val;
+    }
+
+    let res2 = 0.0;
     for (let a = 0; a < n; a++) {
       const ia = activeNodeIdx[a];
-      const val = eigVecBuf[a] * invV;
-      eigVecBuf[a] = val;
-      if (ia < MAX_TARGETS) temporalDot += val * prevFiedlerTrack[ia];
+      let lv = 0.0;
+      for (let b = 0; b < n; b++) lv += laplacian[ia * GRAPH_NODES + activeNodeIdx[b]] * eigVecBuf[b];
+      const diff = lv - lambda2 * eigVecBuf[a];
+      res2 += diff * diff;
     }
-    const sign = temporalDot < -1e-6 ? -1.0 : 1.0;
-    for (let i = 0; i < MAX_TARGETS; i++) prevFiedlerTrack[i] = 0.0;
-    for (let a = 0; a < n; a++) {
-      const ia = activeNodeIdx[a];
-      const val = sign * eigVecBuf[a];
-      fiedler[ia] = val;
-      if (ia < MAX_TARGETS) prevFiedlerTrack[ia] = val;
-    }
+
     exp.chronos_set_fiedler_spectrum(lambda2, spectralGap);
-    return lambda2;
+    return { lambda2, resNorm: Math.sqrt(res2) };
   };
 }
 
@@ -279,15 +339,15 @@ for (const clip of CLIPS) {
   }
   const w = typeof exp.chronos_get_frame_w === 'function' ? exp.chronos_get_frame_w() : 320;
   const h = typeof exp.chronos_get_frame_h === 'function' ? exp.chronos_get_frame_h() : 180;
+  const frameBytes = w * h * 4;
 
   exp.chronos_set_params(8, 0.035, 1.45, 25.0, -Math.PI * 0.5, clip.labMode);
 
   const telem = new Float32Array(mem.buffer, exp.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
   const laplacian = new Float32Array(mem.buffer, exp.chronos_get_laplacian_ptr(), 256);
   const fiedler = new Float32Array(mem.buffer, exp.chronos_get_fiedler_ptr(), 16);
+  const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), frameBytes));
   const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
-
-  const { raw, frameBytes, numFrames } = decodeMp4Frames(mp4Path, w, h);
   const dtSec = 1.0 / clip.fps;
 
   const trackAges = new Map();
@@ -302,20 +362,20 @@ for (const clip of CLIPS) {
   let apexFrames = 0;
   let phaseValidFrames = 0;
   let percTriggers = 0;
+  let maxEigRes = 0.0;
   let nanDetected = false;
 
-  for (let f = 0; f < numFrames; f++) {
-    const ingestPtr = exp.chronos_get_ingest_rgba_ptr();
-    const dst = new Uint8Array(mem.buffer, ingestPtr, frameBytes);
-    dst.set(raw.subarray(f * frameBytes, (f + 1) * frameBytes));
+  const { numFrames } = await streamMp4Frames(mp4Path, w, h, (frameRgba, f) => {
+    ringViews[f % 12].set(frameRgba);
 
     const t0 = performance.now();
     exp.chronos_pre_tick(dtSec);
-    solveLanczos();
+    const { resNorm } = solveLanczos();
     exp.chronos_post_tick(dtSec);
     sumTickMs += performance.now() - t0;
 
-    for (let i = 0; i < 32; i++) {
+    if (resNorm > maxEigRes) maxEigRes = resNorm;
+    for (let i = 0; i < TELEMETRY_LEN; i++) {
       if (!Number.isFinite(telem[i])) nanDetected = true;
     }
 
@@ -341,24 +401,31 @@ for (const clip of CLIPS) {
         if (telem[base + 17] > 1.0) apexFrames++;
       }
     }
-  }
+  });
 
   const totalSpawned = trackAges.size;
   const persistentTracks = [...trackAges.values()].filter((c) => c >= 15).length;
   const maxTrackLife = totalSpawned > 0 ? Math.max(...trackAges.values()) : 0;
-  const meanTickMs = sumTickMs / numFrames;
-  const lockPct = (100.0 * framesWithTargets) / numFrames;
+  const meanTickMs = sumTickMs / Math.max(1, numFrames);
+  const lockPct = (100.0 * framesWithTargets) / Math.max(1, numFrames);
   const padicSwaps = Math.round(telem[5]);
   const kalmanSwaps = Math.round(telem[6]);
 
   console.log(`\n[${clip.file}] (${numFrames} frames @ ${clip.fps}fps) — ${clip.desc}`);
-  console.log(`  Compute Tick  : ${meanTickMs.toFixed(3)} ms/frame | NaNs: ${nanDetected ? 'FAIL' : '0'}`);
+  console.log(`  Compute Tick  : ${meanTickMs.toFixed(3)} ms/frame | NaNs: ${nanDetected ? 'FAIL' : '0'} | max ||Lv-lv||: ${maxEigRes.toExponential(2)}`);
   console.log(`  ECA Clutter   : ${lastClutterDb.toFixed(2)} dB (peak ${maxClutterDb.toFixed(2)} dB, bg mask ${(lastEvalRatio * 100).toFixed(1)}%)`);
   console.log(`  Target Locks  : ${lockPct.toFixed(1)}% frames locked | avg ${(sumActiveTargets / numFrames).toFixed(2)} (max ${maxActiveTargets}) | spawned=${totalSpawned} (persistent>=15f: ${persistentTracks}, longest=${maxTrackLife}f)`);
-  console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicSwaps=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
+  console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicAudit=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
 
   if (strictGate) {
-    if (nanDetected || persistentTracks < 1 || lockPct < 50.0) {
+    if (
+      nanDetected ||
+      maxEigRes > 1e-5 ||
+      persistentTracks < 3 ||
+      lockPct < 90.0 ||
+      lastClutterDb < 44.0 ||
+      padicSwaps >= kalmanSwaps
+    ) {
       allPassed = false;
       console.error(`  [FAIL] Calibration invariant missed on ${clip.file}`);
     }

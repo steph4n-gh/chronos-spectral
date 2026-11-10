@@ -820,6 +820,12 @@
     const spectralOffscreen = spectralEl.transferControlToOffscreen();
 
     const worker = new Worker('./worker.js');
+    worker.addEventListener('error', (err) => {
+      console.error('Worker uncaught error:', err.message || err);
+    });
+    worker.addEventListener('messageerror', (err) => {
+      console.error('Worker messageerror:', err);
+    });
     worker.postMessage(
       {
         type: 'init',

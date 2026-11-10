@@ -460,8 +460,8 @@ function runTwinGrayAblation(spectralGamma) {
 
 const ablZero = runTwinGrayAblation(0.0);
 const ablSpec = runTwinGrayAblation(0.55);
-if (ablSpec.crossLaneHijacks > ablZero.crossLaneHijacks || ablSpec.crossLaneHijacks !== 0) {
-  throw new Error(`Gate B (Spectral Ablation) failed: gamma=0 hijacks=${ablZero.crossLaneHijacks}, gamma=0.55 hijacks=${ablSpec.crossLaneHijacks}`);
+if (ablZero.crossLaneHijacks < 1 || ablSpec.crossLaneHijacks !== 0) {
+  throw new Error(`Gate B (Spectral Ablation) failed: expected gamma=0 hijacks>=1 and gamma=0.55 hijacks=0, got gamma=0:${ablZero.crossLaneHijacks}, gamma=0.55:${ablSpec.crossLaneHijacks}`);
 }
 console.log(`  [PASS] Gate B (Twin-Gray Spectral Ablation): gamma=0 cross-lane hijacks=${ablZero.crossLaneHijacks} vs gamma=0.55 hijacks=${ablSpec.crossLaneHijacks} (l2=${ablSpec.lambda2.toFixed(4)}, gap=${ablSpec.gap.toFixed(4)})`);
 
@@ -584,10 +584,14 @@ for (const testK of [10, 11]) {
   }
 }
 exp.chronos_reset_tracks();
-if (Math.round(telem[3]) !== 0 && exp.chronos_post_tick) {
-  // Verify reset clears active target state on next readout
+if (exp.chronos_get_ingest_rgba_ptr() !== exp.chronos_get_ring_slot_ptr(0)) {
+  throw new Error('Gate E (Reset Hygiene) failed: frame_idx / ingest slot did not reset to slot 0');
 }
-console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup): 1 impulse -> 1 trigger (0 sliding re-triggers)`);
+exp.chronos_post_tick(1 / 60);
+if (Math.round(telem[3]) !== 0 || Math.round(telem[5]) !== 0 || Math.round(telem[6]) !== 0) {
+  throw new Error(`Gate E (Reset Hygiene) failed: expected 0 active targets & swaps after reset, got active=${telem[3]}, swaps=${telem[5]}/${telem[6]}`);
+}
+console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset Hygiene): 1 impulse -> 1 trigger, clean state reset`);
 
 // ----------------------------------------------------------------------------
 // Gate F: Rank-2 ECA Affine Illumination Cancellation & 2-Adic Strong Triangle Inequality
@@ -945,15 +949,17 @@ for (const acc of benchStats) {
   if (acc.finalClutterDb < 60.0) {
     throw new Error(`[${acc.label}] Expected > 60 dB uncensored ECA clutter suppression, got ${acc.finalClutterDb.toFixed(2)} dB`);
   }
-  const effectiveBudgetMs = acc.budgetMs * Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
+  const budgetScale = Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
+  const effectiveBudgetMs = acc.budgetMs * budgetScale;
   if (acc.medMean >= effectiveBudgetMs) {
     throw new Error(`[${acc.label}] Per-frame compute budget exceeded: ${acc.medMean.toFixed(4)} ms >= ${effectiveBudgetMs.toFixed(2)} ms`);
   }
 }
 
+const outScale = Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
 const hdRatio = benchStats[1].medMean / Math.max(1e-6, benchStats[0].medMean);
 console.log(`  Scaling Limiter     : HD/SD compute ratio = ${hdRatio.toFixed(2)}x for 4.00x pixel count (planar SIMD128 RGBA/ECA memory bandwidth scales 4x; 2x2-pooled 32x32 patch SAD + Lanczos scale sub-linearly)`);
-console.log('  [PASS] ALL SD (< 0.25 ms) & HD (< 1.00 ms) MATHEMATICAL & LATENCY INVARIANTS VERIFIED');
+console.log(`  [PASS] ALL SD (< ${(0.25 * outScale).toFixed(2)} ms) & HD (< ${(1.00 * outScale).toFixed(2)} ms) MATHEMATICAL & LATENCY INVARIANTS VERIFIED`);
 EOF
 
 if [ "${1:-}" = "--check" ]; then
