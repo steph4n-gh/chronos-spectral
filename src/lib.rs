@@ -8,8 +8,8 @@ use core::ptr::addr_of_mut;
 pub use simd_ops::{eca_subspace_project_simd128, padic_ultrametric_val, sad16x16_patch_simd128};
 use simd_ops::{
     compute_motion_grid_and_heal_bg_simd128, eca_subspace_project_masked_simd128,
-    haar_morton_signature_simd128, padic_distance_from_val, rgba_to_planar_simd128,
-    ssd16x16_photometric_simd128, update_stat_streak_and_mask_simd128,
+    haar_morton_signature_simd128, padic_distance_from_val, patch16x16_ac_energy_simd128,
+    rgba_to_planar_simd128, ssd16x16_photometric_simd128, update_stat_streak_and_mask_simd128,
 };
 
 #[inline(always)]
@@ -208,7 +208,8 @@ pub struct TargetTrack {
     pub has_struck: u8,
     pub strike_fired: u8,
     pub strike_zone: u8,
-    pub _pad1: [u8; 2],
+    pub proximity_mask: u8,
+    pub _pad1: u8,
 
     pub track_id: u32,
     pub birth_frame: u32,
@@ -533,79 +534,162 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             }
         }
 
-        if comp_cells == 0 || comp_cells > 85 {
+        if comp_cells == 0 || comp_cells > (GRID_CELLS * 65) / 100 {
             continue;
         }
 
-        let rough_x = (0.5 * (sum_wx / sum_w.max(1e-5)) + 0.5 * ((best_gx * 16 + 8) as f32))
-            .clamp(10.0, (FRAME_W - 11) as f32);
-        let rough_y = (0.5 * (sum_wy / sum_w.max(1e-5)) + 0.5 * ((best_gy * 16 + 8) as f32))
-            .clamp(10.0, (FRAME_H - 11) as f32);
+        // Split multi-target or extended foreground components (`comp_cells >= 8`) into up to
+        // 3 distinct local 3x3 grid maxima separated by >= 2 grid cells, preventing nearby
+        // crossing targets from collapsing into a single midpoint centroid.
+        let mut sub_roots = [(0usize, 0usize, 0.0f32); 3];
+        let mut num_sub = 0usize;
 
-        let rx0 = (rough_x as usize).saturating_sub(12).max(2);
-        let rx1 = ((rough_x as usize) + 12).min(FRAME_W - 3);
-        let ry0 = (rough_y as usize).saturating_sub(12).max(2);
-        let ry1 = ((rough_y as usize) + 12).min(FRAME_H - 3);
-
-        let mut pw = 0.0f32;
-        let mut pwx = 0.0f32;
-        let mut pwy = 0.0f32;
-        for py in ry0..=ry1 {
-            let row = py * FRAME_W;
-            for px in rx0..=rx1 {
-                let r = a.eca_res[row + px];
-                if r > 0.05 {
-                    let w = r * r;
-                    pw += w;
-                    pwx += w * (px as f32);
-                    pwy += w * (py as f32);
+        if comp_cells >= 8 {
+            for qi in 0..q_tail {
+                let cell = a.cc_queue[qi] as usize;
+                let ce = a.cc_energy[cell];
+                if ce < seed_thresh * 1.15 {
+                    continue;
+                }
+                let cgx = cell % GRID_W;
+                let cgy = cell / GRID_W;
+                let mut is_local_max = true;
+                let ny0 = cgy.saturating_sub(1);
+                let ny1 = (cgy + 1).min(GRID_H - 1);
+                let nx0 = cgx.saturating_sub(1);
+                let nx1 = (cgx + 1).min(GRID_W - 1);
+                'nbr: for ny in ny0..=ny1 {
+                    for nx in nx0..=nx1 {
+                        if nx == cgx && ny == cgy {
+                            continue;
+                        }
+                        let ne = a.cc_energy[ny * GRID_W + nx];
+                        if ne > ce || (ne == ce && (ny * GRID_W + nx) < cell) {
+                            is_local_max = false;
+                            break 'nbr;
+                        }
+                    }
+                }
+                if !is_local_max {
+                    continue;
+                }
+                // Insert in descending energy order if separated by >= 2 grid cells (`dg2 >= 5`)
+                let mut too_close_grid = false;
+                for s in 0..num_sub {
+                    let dgx = cgx as i32 - sub_roots[s].0 as i32;
+                    let dgy = cgy as i32 - sub_roots[s].1 as i32;
+                    if dgx * dgx + dgy * dgy < 5 {
+                        if ce > sub_roots[s].2 {
+                            sub_roots[s] = (cgx, cgy, ce);
+                        }
+                        too_close_grid = true;
+                        break;
+                    }
+                }
+                if !too_close_grid {
+                    if num_sub < 3 {
+                        sub_roots[num_sub] = (cgx, cgy, ce);
+                        num_sub += 1;
+                    } else {
+                        let mut min_s = 0usize;
+                        for s in 1..3 {
+                            if sub_roots[s].2 < sub_roots[min_s].2 {
+                                min_s = s;
+                            }
+                        }
+                        if ce > sub_roots[min_s].2 {
+                            sub_roots[min_s] = (cgx, cgy, ce);
+                        }
+                    }
                 }
             }
         }
 
-        let (cx, cy) = if pw > 1e-4 {
-            (
-                (pwx / pw).clamp(9.0, (FRAME_W - 10) as f32),
-                (pwy / pw).clamp(9.0, (FRAME_H - 10) as f32),
-            )
-        } else {
-            (rough_x, rough_y)
-        };
+        if num_sub == 0 {
+            sub_roots[0] = (best_gx, best_gy, sum_w);
+            num_sub = 1;
+        }
 
-        let tlx = ((cx - 8.0).max(0.0) as usize).min(FRAME_W - 16);
-        let tly = ((cy - 8.0).max(0.0) as usize).min(FRAME_H - 16);
-        let sig = haar_morton_signature_simd128(
-            a.luma.as_ptr(),
-            a.chroma_rg.as_ptr(),
-            a.chroma_by.as_ptr(),
-            FRAME_W,
-            tlx,
-            tly,
-        );
+        for s in 0..num_sub {
+            let (sgx, sgy, sub_e) = sub_roots[s];
+            let rough_x = if num_sub == 1 {
+                (0.5 * (sum_wx / sum_w.max(1e-5)) + 0.5 * ((sgx * 16 + 8) as f32))
+                    .clamp(10.0, (FRAME_W - 11) as f32)
+            } else {
+                ((sgx * 16 + 8) as f32).clamp(10.0, (FRAME_W - 11) as f32)
+            };
+            let rough_y = if num_sub == 1 {
+                (0.5 * (sum_wy / sum_w.max(1e-5)) + 0.5 * ((sgy * 16 + 8) as f32))
+                    .clamp(10.0, (FRAME_H - 11) as f32)
+            } else {
+                ((sgy * 16 + 8) as f32).clamp(10.0, (FRAME_H - 11) as f32)
+            };
 
-        let cand = CandidatePeak {
-            x: cx,
-            y: cy,
-            energy: sum_w,
-            sig,
-            valid: 1,
-            _pad: [0; 3],
-        };
+            let rx0 = (rough_x as usize).saturating_sub(12).max(2);
+            let rx1 = ((rough_x as usize) + 12).min(FRAME_W - 3);
+            let ry0 = (rough_y as usize).saturating_sub(12).max(2);
+            let ry1 = ((rough_y as usize) + 12).min(FRAME_H - 3);
 
-        if a.num_peaks < MAX_TARGETS {
-            a.peaks[a.num_peaks] = cand;
-            a.num_peaks += 1;
-        } else {
-            let mut min_slot = 0usize;
-            let mut min_val = a.peaks[0].energy;
-            for k in 1..MAX_TARGETS {
-                if a.peaks[k].energy < min_val {
-                    min_val = a.peaks[k].energy;
-                    min_slot = k;
+            let mut pw = 0.0f32;
+            let mut pwx = 0.0f32;
+            let mut pwy = 0.0f32;
+            for py in ry0..=ry1 {
+                let row = py * FRAME_W;
+                for px in rx0..=rx1 {
+                    let r = a.eca_res[row + px];
+                    if r > 0.05 {
+                        let w = r * r;
+                        pw += w;
+                        pwx += w * (px as f32);
+                        pwy += w * (py as f32);
+                    }
                 }
             }
-            if cand.energy > min_val {
-                a.peaks[min_slot] = cand;
+
+            let (cx, cy) = if pw > 1e-4 {
+                (
+                    (pwx / pw).clamp(9.0, (FRAME_W - 10) as f32),
+                    (pwy / pw).clamp(9.0, (FRAME_H - 10) as f32),
+                )
+            } else {
+                (rough_x, rough_y)
+            };
+
+            let tlx = ((cx - 8.0).max(0.0) as usize).min(FRAME_W - 16);
+            let tly = ((cy - 8.0).max(0.0) as usize).min(FRAME_H - 16);
+            let sig = haar_morton_signature_simd128(
+                a.luma.as_ptr(),
+                a.chroma_rg.as_ptr(),
+                a.chroma_by.as_ptr(),
+                FRAME_W,
+                tlx,
+                tly,
+            );
+
+            let cand = CandidatePeak {
+                x: cx,
+                y: cy,
+                energy: if num_sub == 1 { sum_w } else { sub_e * 2.2 },
+                sig,
+                valid: 1,
+                _pad: [0; 3],
+            };
+
+            if a.num_peaks < MAX_TARGETS {
+                a.peaks[a.num_peaks] = cand;
+                a.num_peaks += 1;
+            } else {
+                let mut min_slot = 0usize;
+                let mut min_val = a.peaks[0].energy;
+                for k in 1..MAX_TARGETS {
+                    if a.peaks[k].energy < min_val {
+                        min_val = a.peaks[k].energy;
+                        min_slot = k;
+                    }
+                }
+                if cand.energy > min_val {
+                    a.peaks[min_slot] = cand;
+                }
             }
         }
     }
@@ -1485,12 +1569,12 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let a = arena_mut();
     let f_idx = a.frame_idx;
     let safe_dt = if dt_sec.is_finite() {
-        dt_sec.clamp(0.002, 0.1)
+        dt_sec.clamp(0.002, 0.15)
     } else {
         1.0 / 60.0
     };
-    let fps = (1.0 / safe_dt).clamp(24.0, 240.0);
-    let dt_frames_60 = (safe_dt * 60.0).clamp(0.25, 2.5);
+    let fps = (1.0 / safe_dt).clamp(8.0, 240.0);
+    let dt_frames_60 = (safe_dt * 60.0).clamp(0.25, 6.5);
 
     let slot_in = (f_idx as usize) % RING_LEN;
     let eff_k = (a.lookahead_k.min(f_idx) as usize).min(RING_LEN - 1);
@@ -1803,6 +1887,30 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     }
 
     // Spatial conflict resolution ordered by spectrally-regularized `best_total_cost`
+    // Also record pairwise spatial interaction history (`proximity_mask`) so internal swap
+    // auditing only attributes cross-track identity swaps between tracks that physically met.
+    for i in 0..MAX_TARGETS {
+        if a.targets[i].active == 0 {
+            continue;
+        }
+        for j in (i + 1)..MAX_TARGETS {
+            if a.targets[j].active == 0 {
+                continue;
+            }
+            let dx = a.targets[i].pos_x - a.targets[j].pos_x;
+            let dy = a.targets[i].pos_y - a.targets[j].pos_y;
+            let pdx = a.targets[i].pred_cx - a.targets[j].pred_cx;
+            let pdy = a.targets[i].pred_cy - a.targets[j].pred_cy;
+            let close_now = (dx * dx + dy * dy < 54.0 * 54.0) || (pdx * pdx + pdy * pdy < 54.0 * 54.0);
+            let close_coast = (a.targets[i].coasting > 0 || a.targets[j].coasting > 0)
+                && (dx * dx + dy * dy < 96.0 * 96.0);
+            if close_now || close_coast {
+                a.targets[i].proximity_mask |= 1u8 << j;
+                a.targets[j].proximity_mask |= 1u8 << i;
+            }
+        }
+    }
+
     let mut order = [0usize, 1, 2, 3, 4, 5, 6, 7];
     for i in 0..MAX_TARGETS {
         for j in (i + 1)..MAX_TARGETS {
@@ -1914,14 +2022,22 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
 
             // Internal self-audit for cross-target chromatic/2-adic signature inversion
+            // Restricted to tracks with recorded spatial proximity and adjusted for the 5-bit
+            // canonical neutral prefix (`0_01_01`) when `bit 31 == 0`.
             let own_val = padic_ultrametric_val(a.targets[m].anchor_sig, msig);
             let mut other_best_slot = a.targets[m].owner_slot as usize;
             let mut other_best_val = own_val;
+            let cand_chromatic = (msig & (1 << 31)) != 0;
+            let min_swap_val = if cand_chromatic { 6 } else { 12 };
             for o in 0..MAX_TARGETS {
-                if o != m && a.targets[o].active != 0 {
+                if o != m
+                    && a.targets[o].active != 0
+                    && (a.targets[m].proximity_mask & (1u8 << o)) != 0
+                {
                     let v = padic_ultrametric_val(a.targets[o].anchor_sig, msig);
-                    if (has_opposite_chroma_pole(a.targets[m].anchor_sig, msig) && v >= 5)
-                        || (v > other_best_val + 4 && v >= 6)
+                    if !has_opposite_chroma_pole(a.targets[o].anchor_sig, msig)
+                        && ((has_opposite_chroma_pole(a.targets[m].anchor_sig, msig) && v >= 5)
+                            || (v > other_best_val + 4 && v >= min_swap_val))
                     {
                         other_best_val = v;
                         other_best_slot = o;
@@ -1966,6 +2082,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             if (a.targets[m].age < 6 && a.targets[m].coasting >= 3) || a.targets[m].coasting > 75 {
                 a.targets[m].active = 0;
                 a.kalman[m].active = 0;
+                let clear_bit = !(1u8 << m);
+                for o in 0..MAX_TARGETS {
+                    a.targets[o].proximity_mask &= clear_bit;
+                }
             }
         }
     }
@@ -2103,6 +2223,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         too_close = true;
                         break;
                     }
+                    let same_neutral_body = !peak_chromatic && ((a.targets[m].anchor_sig & (1 << 31)) == 0) && val >= 8;
+                    if same_neutral_body && dist2 < 46.0 * 46.0 {
+                        too_close = true;
+                        break;
+                    }
                     if a.targets[m].coasting > 0 && a.targets[m].coasting <= 32 {
                         let edx = a.targets[m].entry_x - px;
                         let edy = a.targets[m].entry_y - py;
@@ -2131,6 +2256,17 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             if patch_eca < (144.0 * 0.055) {
                 continue;
             }
+            let ac_energy = patch16x16_ac_energy_simd128(
+                a.luma.as_ptr(),
+                a.chroma_rg.as_ptr(),
+                a.chroma_by.as_ptr(),
+                FRAME_W,
+                check_tlx,
+                check_tly,
+            );
+            if ac_energy < 0.00055 {
+                continue;
+            }
 
             let mut free_slot: Option<usize> = None;
             for m in 0..MAX_TARGETS {
@@ -2140,6 +2276,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 }
             }
             if let Some(m) = free_slot {
+                let clear_bit = !(1u8 << m);
+                for o in 0..MAX_TARGETS {
+                    a.targets[o].proximity_mask &= clear_bit;
+                }
                 let tlx = ((px - 8.0).clamp(1.0, (FRAME_W - 17) as f32)) as usize;
                 let tly = ((py - 8.0).clamp(1.0, (FRAME_H - 17) as f32)) as usize;
 

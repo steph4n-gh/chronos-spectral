@@ -282,7 +282,7 @@
       overflow-y: auto;
       scrollbar-gutter: stable;
       overscroll-behavior: contain;
-      scrollbar-width: thin;
+      scrollbar-width: auto;
       scrollbar-color: #395884 #0b111e;
     }
 
@@ -346,8 +346,62 @@
       border-color: var(--border-accent);
     }
 
-    #mp4Input {
-      display: none;
+    .visually-hidden {
+      position: absolute;
+      clip-path: inset(50%);
+      overflow: hidden;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      border: 0;
+      white-space: nowrap;
+    }
+
+    .file-upload-wrap {
+      position: relative;
+      display: flex;
+      flex: 1 1 auto;
+    }
+
+    .file-upload-wrap input[type="file"]:focus-visible + .file-upload-label {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+      border-color: var(--brand-color);
+    }
+
+    .select-field {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+    }
+
+    .select-field label {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      color: var(--text-secondary);
+    }
+
+    .select-field select {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 0.45rem 0.6rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      cursor: pointer;
+      inline-size: 100%;
+    }
+
+    .select-field select:hover {
+      border-color: var(--border-accent);
+    }
+
+    .select-field select:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
     }
 
     .control-group {
@@ -624,8 +678,21 @@
         <div class="btn-row">
           <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Blind Pillar Bench</button>
           <button type="button" id="btnSrcWebcam" aria-pressed="false">◉ Live Webcam</button>
-          <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
-          <input type="file" id="mp4Input" accept="video/*" />
+          <div class="file-upload-wrap">
+            <input type="file" id="mp4Input" name="mp4File" accept="video/*" class="visually-hidden" />
+            <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
+          </div>
+        </div>
+        <div class="select-field">
+          <label for="sampleVideoSelect">Built-in real-camera calibration MP4s</label>
+          <select id="sampleVideoSelect" name="sampleVideo">
+            <option value="">Select calibration MP4 clip...</option>
+            <option value="./samples/juggling_ballistic.mp4" data-fps="60" data-lab="0">Juggling Chalkboard (60 fps, Mode A Ballistic)</option>
+            <option value="./samples/pets_pedestrian_occlusion.mp4" data-fps="10" data-lab="0">PETS2009 Pedestrians (10 fps, Lamp-Post Occlusion)</option>
+            <option value="./samples/newton_cradle_impulses.mp4" data-fps="60" data-lab="2">Steel Newton Cradle (60 fps, Mode C Impulses)</option>
+            <option value="./samples/cup_hand_tremor.mp4" data-fps="26.78" data-lab="1">Handheld Cup (27 fps, Mode B Postural Tremor)</option>
+            <option value="./samples/webcam_book_occlusion.mp4" data-fps="25" data-lab="0">Monochrome Webcam (25 fps, Book Occlusion)</option>
+          </select>
         </div>
         <div class="btn-row">
           <button type="button" id="btnAudioToggle" aria-pressed="false">♪ Enable WebAudio Synth</button>
@@ -883,6 +950,7 @@
     // ========================================================================
     const videoEl = document.getElementById('hiddenVideoSource');
     let activeMediaStream = null;
+    let currentObjectUrl = null;
     let videoPumpActive = false;
     let lastMediaTime = -1;
     let lastPumpPerfMs = 0;
@@ -896,18 +964,30 @@
         activeMediaStream.getTracks().forEach((t) => t.stop());
         activeMediaStream = null;
       }
+      if (currentObjectUrl) {
+        URL.revokeObjectURL(currentObjectUrl);
+        currentObjectUrl = null;
+      }
       videoEl.srcObject = null;
+      videoEl.removeAttribute('src');
     }
 
     async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
       if (!videoPumpActive || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) return;
       if (mediaTimeSec === lastMediaTime) return;
 
+      // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
+      if (lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
+        worker.postMessage({ type: 'lab_action', action: 'reset' });
+        lastMediaTime = -1;
+        lastPumpPerfMs = 0;
+      }
+
       let dtSec = 1.0 / 60.0;
-      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.2) {
+      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.25) {
         dtSec = Math.max(0.004, mediaTimeSec - lastMediaTime);
       } else if (lastPumpPerfMs > 0) {
-        dtSec = Math.min(0.05, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
+        dtSec = Math.min(0.15, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
       }
       lastMediaTime = mediaTimeSec;
       lastPumpPerfMs = nowPerfMs;
@@ -1044,6 +1124,7 @@
     const btnTestbench = document.getElementById('btnSrcTestbench');
     const btnWebcam = document.getElementById('btnSrcWebcam');
     const mp4Input = document.getElementById('mp4Input');
+    const sampleVideoSelect = document.getElementById('sampleVideoSelect');
 
     function setSourceButtons(activeBtn) {
       [btnTestbench, btnWebcam].forEach((b) => {
@@ -1055,6 +1136,7 @@
 
     btnTestbench.addEventListener('click', () => {
       stopMediaCapture();
+      sampleVideoSelect.value = '';
       setSourceButtons(btnTestbench);
       dom.hudSourceLabel.textContent = 'SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)';
       worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
@@ -1063,6 +1145,7 @@
     btnWebcam.addEventListener('click', async () => {
       try {
         stopMediaCapture();
+        sampleVideoSelect.value = '';
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
           audio: false,
@@ -1071,8 +1154,8 @@
         videoEl.srcObject = stream;
         await videoEl.play();
         setSourceButtons(btnWebcam);
-        dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (320×180 DEDUPLICATED)';
-        worker.postMessage({ type: 'set_source', sourceMode: 'webcam' });
+        dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
+        worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
         startVideoPump();
       } catch (err) {
         dom.hudSourceLabel.textContent = `WEBCAM UNAVAILABLE: ${err.message}`;
@@ -1083,12 +1166,36 @@
       const file = ev.target.files && ev.target.files[0];
       if (!file) return;
       stopMediaCapture();
+      sampleVideoSelect.value = '';
       setSourceButtons(null);
-      videoEl.src = URL.createObjectURL(file);
+      currentObjectUrl = URL.createObjectURL(file);
+      videoEl.src = currentObjectUrl;
       videoEl.loop = true;
       await videoEl.play();
       dom.hudSourceLabel.textContent = `SOURCE: MP4 FILE (${file.name})`;
-      worker.postMessage({ type: 'set_source', sourceMode: 'video' });
+      worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+      startVideoPump();
+    });
+
+    sampleVideoSelect.addEventListener('change', async () => {
+      const url = sampleVideoSelect.value;
+      if (!url) return;
+      const opt = sampleVideoSelect.selectedOptions[0];
+      const fpsHint = parseFloat(opt.dataset.fps || '30');
+      const targetLab = parseInt(opt.dataset.lab || '0', 10);
+
+      stopMediaCapture();
+      setSourceButtons(null);
+      videoEl.src = url;
+      videoEl.loop = true;
+      await videoEl.play();
+
+      const targetBtn = document.querySelector(`.lab-btn[data-lab="${targetLab}"]`);
+      if (targetBtn && currentLabMode !== targetLab) {
+        targetBtn.click();
+      }
+      dom.hudSourceLabel.textContent = `SOURCE: SAMPLE MP4 (${opt.textContent.split(' (')[0].toUpperCase()})`;
+      worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint });
       startVideoPump();
     });
 

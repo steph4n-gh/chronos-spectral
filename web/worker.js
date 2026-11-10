@@ -1172,7 +1172,7 @@ function processIngestedFrame(rawPixels, dtSec) {
   const percMask = Math.round(telemView[15]);
   if (percMask !== 0 && labMode === 2) {
     const fIdx = Math.round(telemView[0]);
-    const effSampleRate = Math.max(24.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
+    const effSampleRate = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
     for (let m = 0; m < MAX_TARGETS; m++) {
       const ebase = 512 + m * 8;
       if (telemView[ebase] > 0.5) {
@@ -1211,7 +1211,7 @@ function processIngestedFrame(rawPixels, dtSec) {
       if (wasmTimeHist[i] > maxMs) maxMs = wasmTimeHist[i];
     }
     const meanMs = sumMs / Math.max(1, count);
-    const effSampleRate = Math.max(24.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
+    const effSampleRate = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
 
     const pIdx = Math.round(telemView[8]);
     let pSigHex = '0x00000000';
@@ -1412,6 +1412,11 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'set_source') {
     sourceMode = msg.sourceMode;
+    if (typeof msg.fpsHint === 'number' && msg.fpsHint >= 8.0) {
+      sourceFps = msg.fpsHint;
+    } else if (sourceMode !== 'testbench') {
+      sourceFps = 30.0;
+    }
     if (wasmExports) {
       wasmExports.chronos_reset_tracks();
     }

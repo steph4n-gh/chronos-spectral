@@ -615,8 +615,53 @@ pub unsafe fn haar_morton_signature_simd128(
     sig
 }
 
-/// Continuous SIMD128 16x16 Photometric SSD (Luma + Opponent Chroma) without discrete
-/// signature jumps or motion-reward discontinuities. Used for smooth sub-pixel registration.
+/// SIMD128 16x16 spatial AC texture variance (Luma + Opponent Chroma).
+/// Rejects flat H.264 macroblocks, uniform shadows, and aperture-ambiguous regions before seeding.
+#[inline]
+pub unsafe fn patch16x16_ac_energy_simd128(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+) -> f32 {
+    let mut sum_l = f32x4_splat(0.0);
+    let mut sum_l2 = f32x4_splat(0.0);
+    let mut sum_rg = f32x4_splat(0.0);
+    let mut sum_rg2 = f32x4_splat(0.0);
+    let mut sum_by = f32x4_splat(0.0);
+    let mut sum_by2 = f32x4_splat(0.0);
+
+    for ry in 0..16usize {
+        let img_row = (cy + ry) * stride + cx;
+        for vec_idx in 0..4usize {
+            let ioff = img_row + vec_idx * 4;
+            let vl = v128_load(luma_ptr.add(ioff) as *const v128);
+            let vrg = v128_load(rg_ptr.add(ioff) as *const v128);
+            let vby = v128_load(by_ptr.add(ioff) as *const v128);
+            sum_l = f32x4_add(sum_l, vl);
+            sum_l2 = f32x4_add(sum_l2, f32x4_mul(vl, vl));
+            sum_rg = f32x4_add(sum_rg, vrg);
+            sum_rg2 = f32x4_add(sum_rg2, f32x4_mul(vrg, vrg));
+            sum_by = f32x4_add(sum_by, vby);
+            sum_by2 = f32x4_add(sum_by2, f32x4_mul(vby, vby));
+        }
+    }
+
+    let inv_n = 1.0 / 256.0;
+    let ml = hsum_f32x4(sum_l) * inv_n;
+    let mrg = hsum_f32x4(sum_rg) * inv_n;
+    let mby = hsum_f32x4(sum_by) * inv_n;
+
+    let var_l = (hsum_f32x4(sum_l2) * inv_n - ml * ml).max(0.0);
+    let var_rg = (hsum_f32x4(sum_rg2) * inv_n - mrg * mrg).max(0.0);
+    let var_by = (hsum_f32x4(sum_by2) * inv_n - mby * mby).max(0.0);
+    var_l + 1.5 * (var_rg + var_by)
+}
+
+/// Continuous SIMD128 16x16 Photometric SSD (Luma + Opponent Chroma) with clamped partial-DC
+/// illumination compensation (`+/-0.14`) and without discrete signature jumps.
 pub unsafe fn ssd16x16_photometric_simd128(
     luma_ptr: *const f32,
     rg_ptr: *const f32,
@@ -628,6 +673,19 @@ pub unsafe fn ssd16x16_photometric_simd128(
     tpl_rg: *const f32,
     tpl_by: *const f32,
 ) -> f32 {
+    let mut sum_il = f32x4_splat(0.0);
+    let mut sum_tl = f32x4_splat(0.0);
+    for ry in 0..16usize {
+        let img_row = (cy + ry) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            sum_il = f32x4_add(sum_il, v128_load(luma_ptr.add(img_row + vec_idx * 4) as *const v128));
+            sum_tl = f32x4_add(sum_tl, v128_load(tpl_luma.add(tpl_row + vec_idx * 4) as *const v128));
+        }
+    }
+    let dc_shift = ((hsum_f32x4(sum_il) - hsum_f32x4(sum_tl)) * (1.0 / 256.0)).clamp(-0.14, 0.14) * 0.70;
+    let v_dc = f32x4_splat(dc_shift);
+
     let mut acc_ssd_l = f32x4_splat(0.0);
     let mut acc_ssd_c = f32x4_splat(0.0);
 
@@ -640,7 +698,7 @@ pub unsafe fn ssd16x16_photometric_simd128(
             let toff = tpl_row + vec_idx * 4;
 
             let dl = f32x4_sub(
-                v128_load(luma_ptr.add(ioff) as *const v128),
+                f32x4_sub(v128_load(luma_ptr.add(ioff) as *const v128), v_dc),
                 v128_load(tpl_luma.add(toff) as *const v128),
             );
             acc_ssd_l = f32x4_add(acc_ssd_l, f32x4_mul(dl, dl));
@@ -664,7 +722,7 @@ pub unsafe fn ssd16x16_photometric_simd128(
 }
 
 /// 16x16 Optical Patch Tracker Cost using SIMD128:
-/// Combines Luma SAD, Chroma (R-G, B-Y) SAD, ECA motion-residual reward,
+/// Combines clamped DC-compensated Luma SAD, Chroma (R-G, B-Y) SAD, ECA motion-residual reward,
 /// and binary-prefix 2-adic ultrametric valuation penalty.
 #[no_mangle]
 pub unsafe extern "C" fn sad16x16_patch_simd128(
@@ -681,6 +739,19 @@ pub unsafe extern "C" fn sad16x16_patch_simd128(
     tpl_sig: u32,
     out_cand_sig: *mut u32,
 ) -> f32 {
+    let mut sum_il = f32x4_splat(0.0);
+    let mut sum_tl = f32x4_splat(0.0);
+    for ry in 0..16usize {
+        let img_row = (cy + ry) * stride + cx;
+        let tpl_row = ry * 16;
+        for vec_idx in 0..4usize {
+            sum_il = f32x4_add(sum_il, v128_load(luma_ptr.add(img_row + vec_idx * 4) as *const v128));
+            sum_tl = f32x4_add(sum_tl, v128_load(tpl_luma.add(tpl_row + vec_idx * 4) as *const v128));
+        }
+    }
+    let dc_shift = ((hsum_f32x4(sum_il) - hsum_f32x4(sum_tl)) * (1.0 / 256.0)).clamp(-0.14, 0.14) * 0.70;
+    let v_dc = f32x4_splat(dc_shift);
+
     let mut acc_sad_l = f32x4_splat(0.0);
     let mut acc_sad_c = f32x4_splat(0.0);
     let mut acc_eca = f32x4_splat(0.0);
@@ -693,7 +764,7 @@ pub unsafe extern "C" fn sad16x16_patch_simd128(
             let ioff = img_row + vec_idx * 4;
             let toff = tpl_row + vec_idx * 4;
 
-            let il = v128_load(luma_ptr.add(ioff) as *const v128);
+            let il = f32x4_sub(v128_load(luma_ptr.add(ioff) as *const v128), v_dc);
             let tl = v128_load(tpl_luma.add(toff) as *const v128);
             acc_sad_l = f32x4_add(acc_sad_l, f32x4_abs(f32x4_sub(il, tl)));
 
