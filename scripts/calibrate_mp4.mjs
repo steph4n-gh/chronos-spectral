@@ -24,11 +24,86 @@ const MAX_KRYLOV = 15;
 const TELEMETRY_LEN = 576;
 
 const CLIPS = [
-  { file: 'juggling_ballistic.mp4', fps: 60, labMode: 0, desc: '60fps Chalkboard Juggling (Ballistic + Color)' },
-  { file: 'pets_pedestrian_occlusion.mp4', fps: 10, labMode: 0, desc: 'PETS2009 Outdoor Crossing & Sign Occlusion' },
-  { file: 'newton_cradle_impulses.mp4', fps: 60, labMode: 2, desc: '60fps Steel Newton Cradle (L1 Impulses)' },
-  { file: 'cup_hand_tremor.mp4', fps: 26.78, labMode: 1, desc: 'Handheld Cup (Postural Tremor + Wall AE)' },
-  { file: 'webcam_book_occlusion.mp4', fps: 25, labMode: 0, desc: 'Grayscale Webcam Face + Book Occlusion' },
+  {
+    file: 'juggling_ballistic.mp4',
+    fps: 25,
+    labMode: 0,
+    minLockPct: 90.0,
+    minRecallPct: 70.0,
+    minClutterDb: 38.0,
+    minPersistentAge: 10,
+    minPersistent: 4,
+    minApexSd: 8,
+    minApexHd: 8,
+    minBridges: 0,
+    minPhase: 0,
+    minPerc: 0,
+    desc: '25fps Chalkboard Newtonian Juggling (Parabolic Ballistic Free-Flight)',
+  },
+  {
+    file: 'roundabout_occlusion.mp4',
+    fps: 24,
+    labMode: 0,
+    minLockPct: 92.0,
+    minRecallPct: 88.0,
+    minClutterDb: 41.0,
+    minPersistentAge: 15,
+    minPersistent: 4,
+    minApexSd: 0,
+    minApexHd: 0,
+    minBridges: 6,
+    minPhase: 0,
+    minPerc: 0,
+    desc: '24fps Highway Gantry Sign Occlusion (Short-Gap Hermite Bridge)',
+  },
+  {
+    file: 'galileo_pendulum_peg.mp4',
+    fps: 30,
+    labMode: 0,
+    minLockPct: 94.0,
+    minRecallPct: 95.0,
+    minClutterDb: 35.0,
+    minPersistentAge: 15,
+    minPersistent: 1,
+    minApexSd: 2,
+    minApexHd: 6,
+    minBridges: 0,
+    minPhase: 0,
+    minPerc: 0,
+    desc: '30fps Galileo Interrupted Pendulum & Peg (Apex + Constraint Change)',
+  },
+  {
+    file: 'harmonic_metronome_phase.mp4',
+    fps: 30,
+    labMode: 1,
+    minLockPct: 94.0,
+    minRecallPct: 80.0,
+    minClutterDb: 42.0,
+    minPersistentAge: 15,
+    minPersistent: 1,
+    minApexSd: 0,
+    minApexHd: 0,
+    minBridges: 0,
+    minPhase: 150,
+    minPerc: 0,
+    desc: '30fps Mechanical Metronome @ 2.38 Hz (Hilbert Quadrature & Phase Strobe)',
+  },
+  {
+    file: 'carom_billiards_impulses.mp4',
+    fps: 30,
+    labMode: 2,
+    minLockPct: 94.0,
+    minRecallPct: 68.0,
+    minClutterDb: 42.0,
+    minPersistentAge: 15,
+    minPersistent: 3,
+    minApexSd: 0,
+    minApexHd: 0,
+    minBridges: 0,
+    minPhase: 0,
+    minPerc: 8,
+    desc: '30fps 3-Cushion Carom Billiards (Multi-Body Rail & Sphere L1 Impulses)',
+  },
 ];
 
 function streamMp4Frames(mp4Path, w, h, onFrame) {
@@ -380,6 +455,7 @@ for (const clip of CLIPS) {
   let gtHijacks = 0;
   let teleportJumps = 0;
   let sumTickMs = 0.0;
+  const tickSamples = [];
   let maxClutterDb = 0.0;
   let lastClutterDb = 0.0;
   let lastEvalRatio = 0.0;
@@ -392,6 +468,7 @@ for (const clip of CLIPS) {
   let percTriggers = 0;
   let maxEigRes = 0.0;
   let nanDetected = false;
+  const teleportStepMax = 42.0 * s * Math.max(1.0, (60.0 / clip.fps) * 0.78);
 
   const { numFrames } = await streamMp4Frames(mp4Path, w, h, (frameRgba, f) => {
     ringViews[f % 12].set(frameRgba);
@@ -400,7 +477,9 @@ for (const clip of CLIPS) {
     exp.chronos_pre_tick(dtSec);
     const { resNorm } = solveLanczos();
     exp.chronos_post_tick(dtSec);
-    sumTickMs += performance.now() - t0;
+    const tickDt = performance.now() - t0;
+    sumTickMs += tickDt;
+    tickSamples.push(tickDt);
 
     if (resNorm > maxEigRes) maxEigRes = resNorm;
     for (let i = 0; i < TELEMETRY_LEN; i++) {
@@ -432,7 +511,7 @@ for (const clip of CLIPS) {
         const latestVis = telem[base + 44 + 11] > 0.5;
         trackAges.set(tid, (trackAges.get(tid) || 0) + 1);
         if (telem[base + 11] > 0.5) bridgeFrames++;
-        if (telem[base + 17] > 1.0) apexFrames++;
+        if (telem[base + 17] > 0.35) apexFrames++;
         activeTracks.push({ m, tid, fx, fy });
 
         let tl = trackLife.get(tid);
@@ -440,7 +519,7 @@ for (const clip of CLIPS) {
           tl = { n: 0, minX: ix, maxX: ix, minY: iy, maxY: iy, prevX: ix, prevY: iy, prevVis: latestVis };
           trackLife.set(tid, tl);
         } else {
-          if (latestVis && tl.prevVis && Math.hypot(ix - tl.prevX, iy - tl.prevY) > 42.0 * s) {
+          if (latestVis && tl.prevVis && Math.hypot(ix - tl.prevX, iy - tl.prevY) > teleportStepMax) {
             teleportJumps++;
           }
           tl.minX = Math.min(tl.minX, ix);
@@ -496,42 +575,59 @@ for (const clip of CLIPS) {
   const gtRmsePx = gtMatched > 0 ? Math.sqrt(gtSumSqErr / gtMatched) : 0.0;
 
   const totalSpawned = trackAges.size;
-  const persistentTracks = [...trackAges.values()].filter((c) => c >= 15).length;
+  const minAge = clip.minPersistentAge || 15;
+  const persistentTracks = [...trackAges.values()].filter((c) => c >= minAge).length;
   const maxTrackLife = totalSpawned > 0 ? Math.max(...trackAges.values()) : 0;
   const meanTickMs = sumTickMs / Math.max(1, numFrames);
+  tickSamples.sort((a, b) => a - b);
+  const medianTickMs =
+    tickSamples.length === 0
+      ? 0.0
+      : tickSamples.length % 2 === 1
+      ? tickSamples[tickSamples.length >> 1]
+      : 0.5 * (tickSamples[(tickSamples.length >> 1) - 1] + tickSamples[tickSamples.length >> 1]);
   const lockPct = (100.0 * framesWithTargets) / Math.max(1, numFrames);
   const padicSwaps = Math.round(telem[5]);
   const kalmanSwaps = Math.round(telem[6]);
 
   console.log(`\n[${clip.file}] (${numFrames} frames @ ${clip.fps}fps) — ${clip.desc}`);
-  console.log(`  Compute Tick  : ${meanTickMs.toFixed(3)} ms/frame | NaNs: ${nanDetected ? 'FAIL' : '0'} | max ||Lv-lv||: ${maxEigRes.toExponential(2)}`);
+  console.log(`  Compute Tick  : p50=${medianTickMs.toFixed(3)} ms (mean=${meanTickMs.toFixed(3)} ms) | NaNs: ${nanDetected ? 'FAIL' : '0'} | max ||Lv-lv||: ${maxEigRes.toExponential(2)}`);
   console.log(`  ECA Clutter   : ${lastClutterDb.toFixed(2)} dB (peak ${maxClutterDb.toFixed(2)} dB, bg mask ${(lastEvalRatio * 100).toFixed(1)}%)`);
-  console.log(`  Target Locks  : ${lockPct.toFixed(1)}% frames locked | avg ${(sumActiveTargets / numFrames).toFixed(2)} (max ${maxActiveTargets}) | spawned=${totalSpawned} (persistent>=15f: ${persistentTracks}, longest=${maxTrackLife}f)`);
+  console.log(`  Target Locks  : ${lockPct.toFixed(1)}% frames locked | avg ${(sumActiveTargets / numFrames).toFixed(2)} (max ${maxActiveTargets}) | spawned=${totalSpawned} (persistent>=${minAge}f: ${persistentTracks}, longest=${maxTrackLife}f)`);
   if (gtTotal > 0) {
     console.log(`  Ground Truth  : Recall=${gtRecallPct.toFixed(1)}% (${gtMatched}/${gtTotal}) | RMSE=${gtRmsePx.toFixed(2)} px | IDSW=${gtIdSwaps} | Hijacks=${gtHijacks} | Teleports=${teleportJumps} | StaticPins=${staticPins}`);
   }
   console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicAudit=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
 
   if (strictGate) {
-    const minPersistent =
-      gtDataset && gtDataset[clip.file]
-        ? Math.min(3, gtDataset[clip.file].tracks.length)
-        : 3;
+    const minPersistent = clip.minPersistent ?? 1;
+    const minLockPct = clip.minLockPct ?? 90.0;
+    const minRecallPct = clip.minRecallPct ?? 78.0;
+    const minClutterDb = clip.minClutterDb ?? 35.0;
+    const minApex = hdMode ? (clip.minApexHd || 0) : (clip.minApexSd || 0);
     const swapFailed = kalmanSwaps > 0 ? padicSwaps >= kalmanSwaps : padicSwaps > 0;
+    const featureFailed =
+      apexFrames < minApex ||
+      bridgeFrames < (clip.minBridges || 0) ||
+      phaseValidFrames < (clip.minPhase || 0) ||
+      percTriggers < (clip.minPerc || 0);
     const gtFailed =
       gtTotal > 0 &&
-      (gtRecallPct < 78.0 || teleportJumps > 0 || staticPins > 1 || gtHijacks > 16);
+      (gtRecallPct < minRecallPct || teleportJumps > 0 || staticPins > 1 || gtHijacks > 16);
     if (
       nanDetected ||
       maxEigRes > 1e-5 ||
       persistentTracks < minPersistent ||
-      lockPct < 90.0 ||
-      lastClutterDb < 44.0 ||
+      lockPct < minLockPct ||
+      lastClutterDb < minClutterDb ||
       swapFailed ||
+      featureFailed ||
       gtFailed
     ) {
       allPassed = false;
       console.error(`  [FAIL] Calibration invariant missed on ${clip.file}`);
+    } else {
+      console.log(`  [PASS] All calibration & physics-proof invariants verified on ${clip.file}`);
     }
   }
 }

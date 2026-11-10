@@ -22,34 +22,34 @@ Compile `web/chronos_spectral.wasm`, run `--check`, and launch the interactive l
 
 ## Spatial resolution modes
 
-| Mode | Frame size | Patch & PiP | Coarse-to-fine proposal | Apple M4 Pro median tick | Frame budget |
+| Mode | Frame size | Split PiP (`1x` vs `25x Δ`) | Coarse-to-fine proposal | Apple M4 Pro median tick | Frame budget |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| `0` (`SD`) | `320x180` (`57,600` px) | `16x16` native | `160x90` pyramid + `[2, 1]` px + 2D IC-LK | `0.222 ms` | `< 0.25 ms` |
-| `1` (`HD`) | `640x360` (`230,400` px) | `32x32` (`2x2` SIMD128 pooled) | `160x90` pyramid + `[4, 1]` px + 2D IC-LK | `0.687 ms` | `< 1.00 ms` |
+| `0` (`SD`) | `320x180` (`57,600` px) | `16x16` native | `160x90` pyramid + `[2, 1]` px + 2D IC-LK | `0.200 ms` (`p50 = 0.189 ms`) | `< 0.25 ms` |
+| `1` (`HD`) | `640x360` (`230,400` px) | `32x32` (`2x2` SIMD128 pooled) | `160x90` pyramid + `[4, 1]` px + 2D IC-LK | `0.635 ms` (`p50 = 0.608 ms`) | `< 1.00 ms` |
 
 ## Real-camera MP4 ground-truth benchmark
 
-`scripts/calibrate_mp4.mjs` evaluates CLEAR-MOT ground-truth trajectories (`scripts/gt_mp4_reference.json`) across all 5 sample H.264 clips (`--gate` enforces `Recall >= 78%`, `Teleports == 0`, `StaticPins <= 1`, and `Hijacks <= 16` per clip in both SD and HD):
+`scripts/calibrate_mp4.mjs` evaluates pixel-domain CLEAR-MOT ground-truth trajectories (`scripts/gt_mp4_reference.json`) and mode-specific physics-proof invariants across all 5 open-licensed H.264 sample clips (`--gate` enforces per-clip recall, `Teleports == 0`, `StaticPins <= 1`, `Hijacks <= 16`, and active Mode A/B/C mathematical proof outputs in both SD and HD):
 
-| Sample clip | `320x180` SD Recall | SD RMSE | SD Hijacks / Teleports | `640x360` HD Recall | HD RMSE | HD Hijacks / Teleports |
+| Sample clip | Mathematical proof target | `320x180` SD Recall / RMSE | SD Hijacks / Teleports | `640x360` HD Recall / RMSE | HD Hijacks / Teleports | Verified HD physics proof |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `juggling_ballistic.mp4` | `93.3%` (`237/254`) | `5.58 px` | `8` / `0` | `82.3%` (`209/254`) | `10.67 px` | `7` / `0` |
-| `pets_pedestrian_occlusion.mp4` | `94.9%` (`779/821`) | `6.78 px` | `14` / `0` | `97.9%` (`804/821`) | `12.69 px` | `11` / `0` |
-| `newton_cradle_impulses.mp4` | `80.1%` (`346/432`) | `8.08 px` | `5` / `0` | `86.1%` (`372/432`) | `13.42 px` | `0` / `0` |
-| `cup_hand_tremor.mp4` | `100.0%` (`195/195`) | `14.11 px` | `0` / `0` | `100.0%` (`195/195`) | `27.99 px` | `0` / `0` |
-| `webcam_book_occlusion.mp4` | `97.8%` (`272/278`) | `20.64 px` | `0` / `0` | `95.7%` (`266/278`) | `45.96 px` | `0` / `0` |
+| `juggling_ballistic.mp4` (`25 fps`) | Mode A Newtonian parabolic apex | `72.4%` / `6.32 px` | `1` / `0` | `75.9%` / `13.99 px` | `2` / `0` | `9f` parabolic apex + `14f` bridges |
+| `roundabout_occlusion.mp4` (`24 fps`) | Mode A `< K` overhead gantry occlusion | `93.3%` / `8.91 px` | `4` / `0` | `94.3%` / `19.37 px` | `3` / `0` | `12f` Hermite bridges (`3` vs `35` swaps) |
+| `galileo_pendulum_peg.mp4` (`30 fps`) | Mode A/B peg-interrupted pendulum | `100.0%` / `7.86 px` | `0` / `0` | `100.0%` / `3.20 px` | `0` / `0` | `8f` apex + `185f` Hilbert (`0` IDSW) |
+| `harmonic_metronome_phase.mp4` (`30 fps`) | Mode B `2.38 Hz` Hilbert quadrature | `93.1%` / `9.52 px` | `0` / `0` | `84.4%` / `18.00 px` | `0` / `0` | `178f` equalized Hilbert phase |
+| `carom_billiards_impulses.mp4` (`30 fps`) | Mode C 3-cushion sphere/rail impulses | `77.6%` / `9.56 px` | `3` / `0` | `69.4%` / `5.52 px` | `2` / `0` | `15+` L1 impact shockwaves (`0` swaps) |
 
 ## Repository layout
 
 - `Cargo.toml` configures the `cdylib` release artifact with `opt-level = 3`, fat LTO, `codegen-units = 1`, and `panic = "abort"`.
 - `.cargo/config.toml` sets `target = "wasm32-unknown-unknown"`, enables `+simd128`, sets a 16 KiB stack, and pins `WebAssembly.Memory` to 256 fixed pages (`16,777,216` bytes).
-- `src/lib.rs` defines the static `Arena`, C ABI entrypoints, `M-of-N` track confirmation and static-pin reaper, P-N dual-anchor templates, `160x90` pyramid candidate proposer, Jonker-Volgenant `8x32` global bipartite matcher, non-causal backward `rgba_ring` gap re-tracker, Track-Peak graph Laplacian builder, Dual Projected-FISTA trend filter, $2 \times 2$ Kalman baseline, 15-tap equalized Hilbert quadrature filter, and 480-float telemetry buffer.
+- `src/lib.rs` defines the static `Arena`, C ABI entrypoints, `M-of-N` track confirmation and static-pin reaper, isoluminant chromatic seeding, viewport-exit ring drain, P-N dual-anchor templates, `160x90` pyramid candidate proposer, Jonker-Volgenant `8x32` global bipartite matcher, non-causal backward `rgba_ring` gap re-tracker, Track-Peak graph Laplacian builder, Dual Projected-FISTA trend filter, $2 \times 2$ Kalman baseline, 15-tap equalized Hilbert quadrature filter, and 576-float telemetry buffer.
 - `src/simd_ops.rs` implements `v128` kernels for RGBA-to-planar conversion, stationarity-masked rank-2 Extensive Cancellation Algorithm clutter projection, `160x90` multi-channel box pyramids, 2D Shi-Tomasi structure-tensor cornerness, `2x2` SIMD128 box-pooled `32x32` Haar-Morton signatures, foreground-weighted patch SAD and anchor L1 drift locks, and 2D weighted Inverse-Compositional Lucas-Kanade (IC-LK) sub-pixel refinement.
-- `web/worker.js` runs the V8 Web Worker loop, `OffscreenCanvas` HUD scopes, Blind Pixel Pillar physics testbench, 1-to-1 identity swap oracle, shifted Lanczos Fiedler eigensolver, and zero-GC 18,000-frame `Float64Array` telemetry recorder.
-- `web/index.html` provides the browser telemetry controls, SD/HD resolution toggle, built-in calibration MP4 selector, CSV/JSON session exporter, `requestVideoFrameCallback` media ingestion, and WebAudio polyphonic synthesizer.
-- `web/samples/` stores 5 open-licensed real-camera H.264 calibration MP4 clips documented in `web/samples/ATTRIBUTION.md`.
-- `scripts/calibrate_mp4.mjs` decodes `web/samples/*.mp4` via `ffmpeg` into raw RGBA buffers and validates CLEAR-MOT ground-truth metrics (`scripts/gt_mp4_reference.json`), ECA suppression, and zero NaNs across SD and HD modes.
-- `scripts/e2e_browser.mjs` drives headless Chrome over the DevTools Protocol (CDP) with HTTP `206 Partial Content` byte-range streaming to test SD/HD switching, MP4 playback, Lab Modes A/B/C, and 38-column CSV/JSON telemetry exports.
+- `web/worker.js` runs the V8 Web Worker loop, `OffscreenCanvas` HUD scopes (frozen Mode A apex crosshairs with live `APEX Δ` error scoring, split `1x RAW [t-K]` vs `25x TEMPORAL Δ` PiP, auto-ranging Hilbert quadrature orbit with `COH %`, localized Mode C impact shockwave rings, and chronological `t-11 -> VIEW [t-K] -> NOW [t]` timeline), 5-scenario Blind Pixel Pillar physics testbench, 1-to-1 identity swap oracle, shifted Lanczos Fiedler eigensolver, and zero-GC 18,000-frame `Float64Array` telemetry recorder.
+- `web/index.html` provides the browser telemetry controls, SD/HD resolution toggle, built-in real-camera physics/traffic MP4 selector, frame-accurate MP4 transport (`Pause/Play`, `-1f`, `+1f`, `Replay`), click-to-pin `[FOCUS]` target selector, CSV/JSON session exporter, `requestVideoFrameCallback` media ingestion, and WebAudio polyphonic synthesizer.
+- `web/samples/` stores 5 open-licensed real-camera H.264 physics and traffic calibration MP4 clips documented in `web/samples/ATTRIBUTION.md`.
+- `scripts/calibrate_mp4.mjs` decodes `web/samples/*.mp4` via `ffmpeg` into raw RGBA buffers and validates CLEAR-MOT ground-truth metrics (`scripts/gt_mp4_reference.json`), physics-proof invariants, ECA suppression, and zero NaNs across SD and HD modes.
+- `scripts/e2e_browser.mjs` drives headless Chrome over the DevTools Protocol (CDP) with HTTP `206 Partial Content` byte-range streaming to test SD/HD switching, multi-clip MP4 physics proofs, frame transport + focus pinning, Lab Modes A/B/C, and 38-column CSV/JSON telemetry exports.
 - `.github/workflows/ci.yml` executes `./build.sh --e2e` on every push and pull request against `main`.
 
 ## Mathematical subsystems
@@ -98,6 +98,7 @@ During active recording, `web/worker.js` appends 38 numeric columns per frame in
 - `chronos_get_ring_slot_ptr(slot)` returns the linear-memory byte offset of RGBA ring slot `slot % 12`.
 - `chronos_set_params(lookahead_k, eca_adapt_rate, fista_lambda, eulerian_gain, phase_offset_rad, lab_mode)` updates runtime controls.
 - `chronos_set_spectral_weight(gamma)` and `chronos_set_audio_latency(latency_sec)` configure spectral coupling and phase lead compensation.
+- `chronos_set_focus_target(track_id)` and `chronos_get_focus_target()` pin or query the user-selected `[FOCUS]` track (`0` = automatic mode-aware selection) for the split Eulerian PiP and Hilbert/kinematic scopes.
 - `chronos_trigger_stimulus()` arms Mode B step-response onset latency measurement.
 - `chronos_pre_tick(dt_sec)` unpacks RGBA pixels, updates ECA residuals, extracts candidate peaks, and writes the `16x16` Laplacian.
 - `chronos_set_fiedler_spectrum(lambda2, spectral_gap)` stores external Lanczos eigenvalues prior to `chronos_post_tick(dt_sec)`.

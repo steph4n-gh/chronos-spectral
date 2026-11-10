@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='4' fill='%2305080f'/><circle cx='16' cy='16' r='9' fill='none' stroke='%2300e5ff' stroke-width='3'/></svg>" />
-  <title>CHRONOS-SPECTRAL // Non-Causal Wavefield &amp; Phase-Cue Lab Deck</title>
+  <title>CHRONOS-SPECTRAL | Non-Causal Wavefield &amp; Phase-Cue Lab Deck</title>
   <style>
     :root {
       color-scheme: dark;
@@ -29,6 +29,10 @@
       padding: 0;
     }
 
+    [hidden] {
+      display: none !important;
+    }
+
     body {
       background-color: var(--bg-void);
       color: var(--text-primary);
@@ -45,13 +49,13 @@
       color: #03070e;
     }
 
-    /* Top Command Header */
+    /* Top Command Header (compact < 12% viewport height) */
     header.deck-header {
       display: flex;
       flex-wrap: wrap;
       align-items: safe center;
-      gap: 0.75rem 1.25rem;
-      padding-block: 0.65rem;
+      gap: 0.65rem 1.15rem;
+      padding-block: 0.55rem;
       padding-inline: 1.1rem;
       background-color: var(--bg-panel);
       border-block-end: 1px solid var(--border-strong);
@@ -76,16 +80,17 @@
       border-radius: 3px;
     }
 
-    .brand-title {
+    h1.brand-title {
       font-family: var(--font-mono);
       font-size: 0.96rem;
       font-weight: 700;
       letter-spacing: 0.05em;
       color: var(--text-primary);
+      line-height: 1.2;
     }
 
     .brand-subtitle {
-      font-size: 0.78rem;
+      font-size: 0.76rem;
       color: var(--text-secondary);
     }
 
@@ -95,7 +100,7 @@
       flex-wrap: wrap;
       gap: 0.5rem;
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.74rem;
     }
 
     .pill {
@@ -122,7 +127,7 @@
     /* Main 3-Zone Command Deck Grid */
     main.deck-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.85fr) minmax(330px, 0.95fr) minmax(310px, 0.85fr);
+      grid-template-columns: minmax(0, 1.85fr) minmax(330px, 0.95fr) minmax(315px, 0.88fr);
       gap: 0.85rem;
       padding: 0.85rem;
       inline-size: 100%;
@@ -173,7 +178,7 @@
       padding: 0.8rem;
       display: flex;
       flex-direction: column;
-      gap: 0.65rem;
+      gap: 0.62rem;
       overflow: clip;
     }
 
@@ -183,12 +188,12 @@
       justify-content: space-between;
       gap: 0.5rem;
       border-block-end: 1px solid #1b2a44;
-      padding-block-end: 0.45rem;
+      padding-block-end: 0.42rem;
     }
 
-    .panel-title {
+    h2.panel-title {
       font-family: var(--font-mono);
-      font-size: 0.78rem;
+      font-size: 0.77rem;
       font-weight: 700;
       letter-spacing: 0.06em;
       text-transform: uppercase;
@@ -197,7 +202,7 @@
 
     .panel-meta {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.71rem;
       color: var(--text-secondary);
     }
 
@@ -213,11 +218,13 @@
 
     #hudCanvas {
       aspect-ratio: 16 / 9;
+      cursor: crosshair;
+      touch-action: manipulation;
     }
 
     #pipCanvas {
-      aspect-ratio: 1 / 1;
-      max-inline-size: 192px;
+      aspect-ratio: 248 / 144;
+      max-inline-size: 248px;
     }
 
     #hilbertCanvas,
@@ -227,12 +234,12 @@
 
     .pip-and-swap-row {
       display: grid;
-      grid-template-columns: 192px minmax(0, 1fr);
-      gap: 0.85rem;
+      grid-template-columns: 248px minmax(0, 1fr);
+      gap: 0.8rem;
       align-items: stretch;
     }
 
-    @media (max-width: 560px) {
+    @media (max-width: 640px) {
       .pip-and-swap-row {
         grid-template-columns: 1fr;
       }
@@ -241,8 +248,8 @@
     /* Telemetry KPI Matrix */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(135px, 1fr));
-      gap: 0.5rem;
+      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+      gap: 0.48rem;
       inline-size: 100%;
     }
 
@@ -250,15 +257,15 @@
       background-color: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: 4px;
-      padding: 0.5rem 0.6rem;
+      padding: 0.48rem 0.58rem;
       display: flex;
       flex-direction: column;
-      gap: 0.2rem;
+      gap: 0.18rem;
     }
 
     .kpi-label {
       font-family: var(--font-mono);
-      font-size: 0.67rem;
+      font-size: 0.66rem;
       color: var(--text-secondary);
       text-transform: uppercase;
       letter-spacing: 0.04em;
@@ -266,7 +273,7 @@
 
     .kpi-value {
       font-family: var(--font-mono);
-      font-size: 1.02rem;
+      font-size: 0.98rem;
       font-weight: 700;
       color: var(--text-primary);
     }
@@ -278,7 +285,7 @@
 
     /* Control Deck Styling */
     .scrollable-controls {
-      max-block-size: calc(100dvh - 5.2rem);
+      max-block-size: calc(100dvh - 5.1rem);
       overflow-y: auto;
       scrollbar-gutter: stable;
       overscroll-behavior: contain;
@@ -289,14 +296,16 @@
     .btn-row {
       display: flex;
       flex-wrap: wrap;
-      gap: 0.45rem;
+      gap: 0.42rem;
     }
 
     button {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 600;
-      padding: 0.45rem 0.68rem;
+      min-block-size: 28px;
+      min-inline-size: 28px;
+      padding: 0.42rem 0.64rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
@@ -306,7 +315,7 @@
       flex: 1 1 auto;
     }
 
-    button:hover {
+    button:hover:not([aria-disabled="true"]) {
       border-color: var(--border-accent);
       background-color: #16243d;
     }
@@ -323,16 +332,41 @@
       color: var(--brand-color);
     }
 
+    button[aria-disabled="true"] {
+      opacity: 0.48;
+      cursor: not-allowed;
+    }
+
     button.action-btn {
       background-color: #15253f;
       border-color: #3f6294;
     }
 
+    .transport-bar {
+      display: flex;
+      flex-direction: column;
+      gap: 0.38rem;
+      padding: 0.5rem 0.55rem;
+      border-radius: 4px;
+      background-color: #0d1729;
+      border: 1px solid #2b4770;
+    }
+
+    .transport-meta-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: var(--font-mono);
+      font-size: 0.69rem;
+      color: var(--text-secondary);
+    }
+
     .file-upload-label {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 600;
-      padding: 0.45rem 0.68rem;
+      min-block-size: 28px;
+      padding: 0.42rem 0.64rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
@@ -346,22 +380,32 @@
       border-color: var(--border-accent);
     }
 
-    .visually-hidden {
-      position: absolute;
-      clip-path: inset(50%);
-      overflow: hidden;
-      width: 1px;
-      height: 1px;
-      margin: -1px;
-      padding: 0;
-      border: 0;
-      white-space: nowrap;
+    .visually-hidden:where(:not(:focus-within, :active)) {
+      position: absolute !important;
+      clip-path: inset(50%) !important;
+      overflow: hidden !important;
+      width: 1px !important;
+      height: 1px !important;
+      margin: -1px !important;
+      padding: 0 !important;
+      border: 0 !important;
+      white-space: nowrap !important;
     }
 
     .file-upload-wrap {
       position: relative;
       display: flex;
       flex: 1 1 auto;
+    }
+
+    .file-upload-wrap input[type="file"] {
+      position: absolute;
+      clip-path: inset(50%);
+      overflow: hidden;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      border: 0;
     }
 
     .file-upload-wrap input[type="file"]:focus-visible + .file-upload-label {
@@ -373,20 +417,21 @@
     .select-field {
       display: flex;
       flex-direction: column;
-      gap: 0.25rem;
+      gap: 0.24rem;
     }
 
     .select-field label {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.71rem;
       color: var(--text-secondary);
     }
 
     .select-field select {
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 600;
-      padding: 0.45rem 0.6rem;
+      min-block-size: 30px;
+      padding: 0.42rem 0.58rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
@@ -407,14 +452,14 @@
     .control-group {
       display: flex;
       flex-direction: column;
-      gap: 0.32rem;
+      gap: 0.3rem;
     }
 
     .slider-label-row {
       display: flex;
       justify-content: space-between;
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.73rem;
       color: var(--text-secondary);
     }
 
@@ -425,33 +470,74 @@
 
     input[type="range"] {
       inline-size: 100%;
+      min-block-size: 24px;
       cursor: pointer;
+    }
+
+    input[type="range"]:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
     }
 
     .toggle-list {
       display: flex;
       flex-direction: column;
-      gap: 0.45rem;
+      gap: 0.42rem;
     }
 
     .toggle-item {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
+      min-block-size: 24px;
       font-family: var(--font-mono);
-      font-size: 0.76rem;
+      font-size: 0.75rem;
       color: var(--text-primary);
       cursor: pointer;
     }
 
     .lab-desc {
-      font-size: 0.78rem;
+      font-size: 0.77rem;
       line-height: 1.42;
       color: var(--text-secondary);
       background-color: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: 4px;
-      padding: 0.55rem 0.65rem;
+      padding: 0.52rem 0.62rem;
+    }
+
+    /* Native <details>/<summary> disclosure for fine-grained variational sliders */
+    details.tuning-disclosure {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      padding: 0.45rem 0.58rem;
+    }
+
+    details.tuning-disclosure > summary {
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 600;
+      color: var(--text-secondary);
+      cursor: pointer;
+      min-block-size: 24px;
+      line-height: 1.5;
+    }
+
+    details.tuning-disclosure > summary:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+    }
+
+    details.tuning-disclosure[open] > summary {
+      color: var(--brand-color);
+      margin-block-end: 0.5rem;
+    }
+
+    .tuning-stack {
+      display: flex;
+      flex-direction: column;
+      gap: 0.52rem;
     }
 
     video#hiddenVideoSource {
@@ -465,7 +551,7 @@
       z-index: -1;
     }
 
-    /* Fallback when accent-color is unsupported (per brand-consistent-forms guidance) */
+    /* Fallback when accent-color is unsupported */
     @supports not (accent-color: #00e5ff) {
       .toggle-item input[type="checkbox"] {
         position: absolute !important;
@@ -550,13 +636,22 @@
       }
     }
 
+    @media (pointer: coarse) {
+      button,
+      .file-upload-label,
+      .select-field select {
+        min-block-size: 36px;
+      }
+    }
+
     /* Forced Colors Mode accessibility support */
     @media (forced-colors: active) {
       .panel,
       .kpi-card,
       .pill,
       button,
-      canvas {
+      canvas,
+      details.tuning-disclosure {
         border: 1px solid CanvasText;
       }
       button[aria-pressed="true"],
@@ -571,8 +666,8 @@
     <div class="brand-lockup">
       <span class="brand-badge">WASM32 + SIMD128</span>
       <div>
-        <div class="brand-title">CHRONOS-SPECTRAL</div>
-        <div class="brand-subtitle">Non-Causal Spatiotemporal Wavefield &amp; Phase-Synchronized Telemetry Tracker</div>
+        <h1 class="brand-title">CHRONOS-SPECTRAL</h1>
+        <p class="brand-subtitle">Non-Causal Spatiotemporal Wavefield &amp; Phase-Synchronized Telemetry Tracker</p>
       </div>
     </div>
     <div class="header-pills">
@@ -584,23 +679,23 @@
   </header>
 
   <main class="deck-grid">
-    <!-- Left Column: Main Delayed Wavefield OffscreenCanvas + Eulerian PiP & Swap Proof -->
-    <section class="deck-column">
+    <!-- Left Column: Main Delayed Wavefield OffscreenCanvas + Split Raw/Eulerian PiP & Swap Proof -->
+    <div class="deck-column">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Non-Causal Delayed Wavefield HUD [t − K]</span>
+          <h2 class="panel-title">Non-Causal Delayed Wavefield HUD [t − K]</h2>
           <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
         </div>
-        <canvas id="hudCanvas" width="960" height="540" aria-label="Delayed non-causal wavefield tracking viewport"></canvas>
+        <canvas id="hudCanvas" width="960" height="540" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">FISTA-Stabilized Eulerian Temporal-Contrast PiP &amp; Identity Audit</span>
+          <h2 class="panel-title">Split 1x Raw vs 25x Eulerian PiP &amp; Identity Audit</h2>
           <span class="panel-meta" id="mortonReadout">BINARY-PREFIX SIG: 0x00000000 (v₂ = --)</span>
         </div>
         <div class="pip-and-swap-row">
-          <canvas id="pipCanvas" width="192" height="192" aria-label="16x16 Eulerian temporal-contrast picture-in-picture"></canvas>
+          <canvas id="pipCanvas" width="248" height="144" aria-label="16x16 raw vs Eulerian temporal-contrast picture-in-picture"></canvas>
           <div class="kpi-grid">
             <div class="kpi-card">
               <span class="kpi-label" id="lblPadicSwaps">Oracle ID Switches</span>
@@ -615,48 +710,48 @@
               <span class="kpi-value accent" id="kpiClutterDb">WARMING</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">Kernel + Lanczos</span>
+              <span class="kpi-label" id="lblWasmMs">Kernel + Lanczos</span>
               <span class="kpi-value ok" id="kpiWasmMs">-- ms</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">Locked Targets</span>
+              <span class="kpi-label">Tracked Patches</span>
               <span class="kpi-value" id="kpiTargets">0 / 8</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">Pillar Collisions</span>
+              <span class="kpi-label" id="lblCollisions">Pillar Collisions</span>
               <span class="kpi-value warn" id="kpiCollisions">0</span>
             </div>
           </div>
         </div>
       </div>
-    </section>
+    </div>
 
-    <!-- Middle Column: Hilbert Analytic Tremor Scope + Lanczos Spectral Graph Scope -->
-    <section class="deck-column isolated-region">
+    <!-- Middle Column: Hilbert Analytic Tremor Scope + Lanczos Spectral & Chronological Ring Scope -->
+    <div class="deck-column isolated-region">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Equalized Hilbert Quadrature Scope (R_t vs H{R_t})</span>
+          <h2 class="panel-title">Equalized Hilbert Quadrature Scope (R_t vs H{R_t})</h2>
           <span class="panel-meta" id="hilbertMeta">φ = 0° | f = -- Hz</span>
         </div>
-        <canvas id="hilbertCanvas" width="420" height="210" aria-label="Discrete Hilbert quadrature tremor phase portrait and waveform"></canvas>
+        <canvas id="hilbertCanvas" width="420" height="210" aria-label="Auto-scaled discrete Hilbert quadrature phase portrait and waveform"></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Pre-Assignment Shifted Lanczos Fiedler &amp; 12-Slot Ring</span>
+          <h2 class="panel-title">Shifted Lanczos Fiedler &amp; Non-Causal Timeline</h2>
           <span class="panel-meta" id="spectralMeta">λ₂ = 0.0000 | Δλ = 0.000</span>
         </div>
-        <canvas id="spectralCanvas" width="420" height="210" aria-label="Lanczos Fiedler eigenvector partition and 12-frame ring buffer"></canvas>
+        <canvas id="spectralCanvas" width="420" height="210" aria-label="Lanczos Fiedler eigenvector partition and chronological t-11 to t NOW lookahead timeline"></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">Variational &amp; Kinematic Telemetry Matrix</span>
+          <h2 class="panel-title">Variational &amp; Kinematic Telemetry Matrix</h2>
           <span class="panel-meta" id="fistaGapMeta">DUAL GAP: 0.000</span>
         </div>
         <div class="kpi-grid">
           <div class="kpi-card">
-            <span class="kpi-label">Tremor Freq</span>
+            <span class="kpi-label">Oscillation Freq</span>
             <span class="kpi-value accent" id="kpiTremorHz">-- Hz</span>
           </div>
           <div class="kpi-card">
@@ -664,7 +759,7 @@
             <span class="kpi-value" id="kpiTremorPhi">--°</span>
           </div>
           <div class="kpi-card">
-            <span class="kpi-label">Ballistic T-Apex</span>
+            <span class="kpi-label" id="lblApexKpi">Ballistic T-Apex</span>
             <span class="kpi-value warn" id="kpiApexMs">-- ms</span>
           </div>
           <div class="kpi-card">
@@ -673,13 +768,13 @@
           </div>
         </div>
       </div>
-    </section>
+    </div>
 
-    <!-- Right Column: Sensor Input, Lab Modes, Synth & Kernel Controls -->
-    <aside class="deck-column isolated-region scrollable-controls control-column">
+    <!-- Right Column: Sensor Input, MP4 Transport, Lab Modes, Synth & Kernel Controls -->
+    <aside class="deck-column isolated-region scrollable-controls control-column" aria-label="Tracker controls and session telemetry">
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">1. Optical Wavefield Input Source</span>
+          <h2 class="panel-title">1. Optical Wavefield Input Source</h2>
           <span class="panel-meta" id="inputResMeta">320×180 SD RGBA</span>
         </div>
         <div class="btn-row" role="group" aria-label="Wavefield spatial resolution">
@@ -690,30 +785,57 @@
           <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Blind Pillar Bench</button>
           <button type="button" id="btnSrcWebcam" aria-pressed="false">◉ Live Webcam</button>
           <div class="file-upload-wrap">
-            <input type="file" id="mp4Input" name="mp4File" accept="video/*" class="visually-hidden" />
+            <input type="file" id="mp4Input" name="mp4File" accept="video/*" />
             <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
           </div>
         </div>
-        <div class="select-field">
-          <label for="sampleVideoSelect">Built-in real-camera calibration MP4s</label>
-          <select id="sampleVideoSelect" name="sampleVideo">
-            <option value="">Select calibration MP4 clip...</option>
-            <option value="./samples/juggling_ballistic.mp4" data-fps="60" data-lab="0">Juggling Chalkboard (60 fps, Mode A Ballistic)</option>
-            <option value="./samples/pets_pedestrian_occlusion.mp4" data-fps="10" data-lab="0">PETS2009 Pedestrians (10 fps, Lamp-Post Occlusion)</option>
-            <option value="./samples/newton_cradle_impulses.mp4" data-fps="60" data-lab="2">Steel Newton Cradle (60 fps, Mode C Impulses)</option>
-            <option value="./samples/cup_hand_tremor.mp4" data-fps="26.78" data-lab="1">Handheld Cup (27 fps, Mode B Postural Tremor)</option>
-            <option value="./samples/webcam_book_occlusion.mp4" data-fps="25" data-lab="0">Monochrome Webcam (25 fps, Book Occlusion)</option>
+
+        <div class="select-field" id="benchScenarioField">
+          <label for="benchScenarioSelect">Synthetic testbench physics scenario</label>
+          <select id="benchScenarioSelect" name="benchScenario">
+            <option value="pillar_crossing">Dual-Pillar Crossing &amp; In-Pillar Bounce (Default)</option>
+            <option value="short_gap_bridge">Short-Gap Occlusion Bridge (5f ≤ K Hermite Spline)</option>
+            <option value="ballistic_cascade">Newtonian Ballistic Cascade (Mode A Apex Proof)</option>
+            <option value="harmonic_tremor">8.5 Hz Coherent Quadrature Orbit (Mode B Proof)</option>
+            <option value="percussion_ricochet">4-Zone Elastic Ricochet Snaps (Mode C Proof)</option>
           </select>
         </div>
+
+        <div class="select-field">
+          <label for="sampleVideoSelect">Built-in real-camera physics &amp; traffic MP4s</label>
+          <select id="sampleVideoSelect" name="sampleVideo">
+            <option value="">Select real-camera MP4 clip...</option>
+            <option value="./samples/juggling_ballistic.mp4" data-fps="25" data-lab="0">Newtonian 3-Ball Juggling (25 fps · Mode A Apex)</option>
+            <option value="./samples/roundabout_occlusion.mp4" data-fps="24" data-lab="0">Highway Gantry Sign Occlusion (24 fps · Mode A Bridge)</option>
+            <option value="./samples/galileo_pendulum_peg.mp4" data-fps="30" data-lab="0">Galileo Peg-Interrupted Pendulum (30 fps · Mode A/C)</option>
+            <option value="./samples/harmonic_metronome_phase.mp4" data-fps="30" data-lab="1">Seiko Harmonic Metronome 2.38 Hz (30 fps · Mode B Phase)</option>
+            <option value="./samples/carom_billiards_impulses.mp4" data-fps="30" data-lab="2">3-Cushion Carom Billiards (30 fps · Mode C Impulses)</option>
+          </select>
+        </div>
+
+        <div class="transport-bar" id="videoTransportBar" hidden>
+          <div class="transport-meta-row">
+            <span>MP4 FRAME TRANSPORT</span>
+            <span id="vidTimeLabel">0.00s / --s</span>
+          </div>
+          <div class="btn-row">
+            <button type="button" id="btnVidPlayPause" aria-pressed="true" class="active">⏸ Pause</button>
+            <button type="button" id="btnVidStepBack" class="action-btn">⏮ −1f</button>
+            <button type="button" id="btnVidStepFwd" class="action-btn">⏭ +1f</button>
+            <button type="button" id="btnVidReplay" class="action-btn">↺ Replay</button>
+          </div>
+        </div>
+
         <div class="btn-row">
           <button type="button" id="btnAudioToggle" aria-pressed="false">♪ Enable WebAudio Synth</button>
+          <button type="button" id="btnFocusCycle" class="action-btn">◎ Focus: AUTO</button>
           <button type="button" id="btnResetArena" class="action-btn">↺ Reset Tracks</button>
         </div>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">2. Biophysical &amp; Kinematic Lab Mode</span>
+          <h2 class="panel-title">2. Biophysical &amp; Kinematic Lab Mode</h2>
           <span class="panel-meta" id="labBadge">MODE A</span>
         </div>
         <div class="btn-row">
@@ -722,7 +844,7 @@
           <button type="button" data-lab="2" class="lab-btn" aria-pressed="false">C: Air-Percussion</button>
         </div>
         <p class="lab-desc" id="labDescription">
-          <strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and predicts Newtonian parabolic apex coordinates in physical units.
+          <strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and freezes Newtonian parabolic apex reticles with live peak accuracy scoring.
         </p>
         <div class="btn-row">
           <button type="button" id="btnLabStimulus" class="action-btn">⚡ Launch Ballistic Arc Impulse</button>
@@ -731,7 +853,7 @@
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">3. Predicted Present-Phase Strobe Offset</span>
+          <h2 class="panel-title">3. Predicted Present-Phase Strobe Offset</h2>
           <span class="panel-meta" id="phaseOffsetLabel">−π/2 LAG CUE</span>
         </div>
         <div class="btn-row">
@@ -744,7 +866,7 @@
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">4. Kernel &amp; Variational Hyperparameters</span>
+          <h2 class="panel-title">4. Kernel &amp; Variational Hyperparameters</h2>
           <span class="panel-meta">REAL-TIME</span>
         </div>
 
@@ -754,30 +876,6 @@
             <span class="slider-val" id="valK">8 frames (133 ms)</span>
           </div>
           <input type="range" id="sliderK" min="0" max="11" step="1" value="8" />
-        </div>
-
-        <div class="control-group">
-          <div class="slider-label-row">
-            <label for="sliderEca">ECA Guarded Regression Rate</label>
-            <span class="slider-val" id="valEca">0.035</span>
-          </div>
-          <input type="range" id="sliderEca" min="0.005" max="0.150" step="0.005" value="0.035" />
-        </div>
-
-        <div class="control-group">
-          <div class="slider-label-row">
-            <label for="sliderLambda">Dual FISTA L1 Penalty λ</label>
-            <span class="slider-val" id="valLambda">1.45</span>
-          </div>
-          <input type="range" id="sliderLambda" min="0.10" max="5.00" step="0.05" value="1.45" />
-        </div>
-
-        <div class="control-group">
-          <div class="slider-label-row">
-            <label for="sliderGain">Temporal Contrast Gain</label>
-            <span class="slider-val" id="valGain">25x</span>
-          </div>
-          <input type="range" id="sliderGain" min="5" max="60" step="1" value="25" />
         </div>
 
         <div class="toggle-list">
@@ -794,11 +892,40 @@
             <span>Enable Present-Phase Strobe Cue</span>
           </label>
         </div>
+
+        <details class="tuning-disclosure">
+          <summary>Advanced Variational Tuning (ECA / λ / Gain)</summary>
+          <div class="tuning-stack">
+            <div class="control-group">
+              <div class="slider-label-row">
+                <label for="sliderEca">ECA Guarded Regression Rate</label>
+                <span class="slider-val" id="valEca">0.035</span>
+              </div>
+              <input type="range" id="sliderEca" min="0.005" max="0.150" step="0.005" value="0.035" />
+            </div>
+
+            <div class="control-group">
+              <div class="slider-label-row">
+                <label for="sliderLambda">Dual FISTA L1 Penalty λ</label>
+                <span class="slider-val" id="valLambda">1.45</span>
+              </div>
+              <input type="range" id="sliderLambda" min="0.10" max="5.00" step="0.05" value="1.45" />
+            </div>
+
+            <div class="control-group">
+              <div class="slider-label-row">
+                <label for="sliderGain">Temporal Contrast Gain</label>
+                <span class="slider-val" id="valGain">25x</span>
+              </div>
+              <input type="range" id="sliderGain" min="5" max="60" step="1" value="25" />
+            </div>
+          </div>
+        </details>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <span class="panel-title">5. Session Telemetry Recorder</span>
+          <h2 class="panel-title">5. Session Telemetry Recorder</h2>
           <span class="panel-meta" id="recStatusLabel" role="status">IDLE (0 FRAMES)</span>
         </div>
         <div class="btn-row">
@@ -813,7 +940,7 @@
     </aside>
   </main>
 
-  <video id="hiddenVideoSource" playsinline muted loop></video>
+  <video id="hiddenVideoSource" playsinline muted loop aria-hidden="true"></video>
 
   <script type="module">
     const hudEl = document.getElementById('hudCanvas');
@@ -826,7 +953,7 @@
     const hilbertOffscreen = hilbertEl.transferControlToOffscreen();
     const spectralOffscreen = spectralEl.transferControlToOffscreen();
 
-    const worker = new Worker('./worker.js?v=20261110c');
+    const worker = new Worker('./worker.js?v=20261110d');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
     });
@@ -836,7 +963,7 @@
     worker.postMessage(
       {
         type: 'init',
-        wasmUrl: './chronos_spectral.wasm?v=20261110c',
+        wasmUrl: './chronos_spectral.wasm?v=20261110d',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
         hilbertCanvas: hilbertOffscreen,
@@ -900,10 +1027,11 @@
       osc.stop(t0 + 0.065);
     }
 
-    function playDelayedSyncPercussion(zone, leadSec, velocity, sentPerfMs) {
+    function playDelayedSyncPercussion(zone, leadSec, velocity, sentEpochMs) {
       if (!audioEnabled || !audioCtx) return;
-      const msgDelaySec = typeof sentPerfMs === 'number'
-        ? Math.max(0.0, (performance.now() - sentPerfMs) * 0.001)
+      const nowEpochMs = performance.timeOrigin + performance.now();
+      const msgDelaySec = typeof sentEpochMs === 'number'
+        ? Math.max(0.0, Math.min(0.10, (nowEpochMs - sentEpochMs) * 0.001))
         : 0.0;
       const netLeadSec = Math.max(0.0, Math.min(0.24, leadSec - msgDelaySec - getAudioOutputLatencySec()));
       const when = audioCtx.currentTime + netLeadSec;
@@ -978,12 +1106,14 @@
     }
 
     // ========================================================================
-    // Deduplicated Live Webcam & Uploaded MP4 Frame Pump
+    // Deduplicated Live Webcam & MP4 Frame Pump + Frame-Accurate Transport
     // ========================================================================
     const videoEl = document.getElementById('hiddenVideoSource');
     let activeMediaStream = null;
     let currentObjectUrl = null;
     let videoPumpActive = false;
+    let activeSourceMode = 'testbench';
+    let activeVideoFps = 30.0;
     let lastMediaTime = -1;
     let lastPumpPerfMs = 0;
     let activeResMode = 0;
@@ -992,6 +1122,67 @@
     let pumpFrameInFlight = false;
     const fallbackCapCanvas = document.createElement('canvas');
     const fallbackCapCtx = fallbackCapCanvas.getContext('2d', { willReadFrequently: true });
+
+    const dom = {
+      pillKernel: document.getElementById('pillKernel'),
+      pillArena: document.getElementById('pillArena'),
+      pillPerf: document.getElementById('pillPerf'),
+      pillFps: document.getElementById('pillFps'),
+      inputResMeta: document.getElementById('inputResMeta'),
+      hudSourceLabel: document.getElementById('hudSourceLabel'),
+      mortonReadout: document.getElementById('mortonReadout'),
+      lblPadicSwaps: document.getElementById('lblPadicSwaps'),
+      kpiPadicSwaps: document.getElementById('kpiPadicSwaps'),
+      kpiKalmanSwaps: document.getElementById('kpiKalmanSwaps'),
+      kpiClutterDb: document.getElementById('kpiClutterDb'),
+      lblWasmMs: document.getElementById('lblWasmMs'),
+      kpiWasmMs: document.getElementById('kpiWasmMs'),
+      kpiTargets: document.getElementById('kpiTargets'),
+      lblCollisions: document.getElementById('lblCollisions'),
+      kpiCollisions: document.getElementById('kpiCollisions'),
+      hilbertMeta: document.getElementById('hilbertMeta'),
+      spectralMeta: document.getElementById('spectralMeta'),
+      fistaGapMeta: document.getElementById('fistaGapMeta'),
+      kpiTremorHz: document.getElementById('kpiTremorHz'),
+      kpiTremorPhi: document.getElementById('kpiTremorPhi'),
+      lblApexKpi: document.getElementById('lblApexKpi'),
+      kpiApexMs: document.getElementById('kpiApexMs'),
+      lblReflexKpi: document.getElementById('lblReflexKpi'),
+      kpiSaccadeMs: document.getElementById('kpiSaccadeMs'),
+      labBadge: document.getElementById('labBadge'),
+      labDescription: document.getElementById('labDescription'),
+      btnLabStimulus: document.getElementById('btnLabStimulus'),
+      phaseOffsetLabel: document.getElementById('phaseOffsetLabel'),
+      recStatusLabel: document.getElementById('recStatusLabel'),
+      benchScenarioField: document.getElementById('benchScenarioField'),
+      benchScenarioSelect: document.getElementById('benchScenarioSelect'),
+      videoTransportBar: document.getElementById('videoTransportBar'),
+      vidTimeLabel: document.getElementById('vidTimeLabel'),
+      btnVidPlayPause: document.getElementById('btnVidPlayPause'),
+      btnFocusCycle: document.getElementById('btnFocusCycle'),
+    };
+
+    function updateVideoTimeLabel() {
+      if (activeSourceMode !== 'video') return;
+      const cur = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime.toFixed(2) : '0.00';
+      const dur = Number.isFinite(videoEl.duration) ? videoEl.duration.toFixed(2) : '--';
+      dom.vidTimeLabel.textContent = `${cur}s / ${dur}s`;
+      const playing = !videoEl.paused && !videoEl.ended;
+      dom.btnVidPlayPause.classList.toggle('active', playing);
+      dom.btnVidPlayPause.setAttribute('aria-pressed', String(playing));
+      dom.btnVidPlayPause.textContent = playing ? '⏸ Pause' : '▶ Play';
+    }
+
+    videoEl.addEventListener('timeupdate', updateVideoTimeLabel);
+    videoEl.addEventListener('loadedmetadata', updateVideoTimeLabel);
+
+    function syncContextualSourceUi(mode) {
+      activeSourceMode = mode;
+      dom.benchScenarioField.hidden = mode !== 'testbench';
+      dom.videoTransportBar.hidden = mode !== 'video';
+      syncStimulusButtonAvailability();
+      updateVideoTimeLabel();
+    }
 
     function stopMediaCapture() {
       videoPumpActive = false;
@@ -1011,29 +1202,9 @@
       videoEl.removeAttribute('src');
     }
 
-    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
-      if (!videoPumpActive || pumpFrameInFlight || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
-        return;
-      }
-      if (mediaTimeSec === lastMediaTime) return;
-
-      // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
-      if (lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
-        worker.postMessage({ type: 'lab_action', action: 'reset' });
-        lastMediaTime = -1;
-        lastPumpPerfMs = 0;
-      }
-
-      let dtSec = 1.0 / 60.0;
-      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.25) {
-        dtSec = Math.max(0.004, mediaTimeSec - lastMediaTime);
-      } else if (lastPumpPerfMs > 0) {
-        dtSec = Math.min(0.15, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
-      }
-      lastMediaTime = mediaTimeSec;
-      lastPumpPerfMs = nowPerfMs;
+    async function captureAndSendCurrentVideoFrame(dtSec) {
+      if (videoEl.readyState < 2 || pumpFrameInFlight) return;
       pumpFrameInFlight = true;
-
       try {
         const bitmap = await createImageBitmap(videoEl);
         worker.postMessage({ type: 'video_frame', bitmap, dtSec }, [bitmap]);
@@ -1053,6 +1224,31 @@
       } finally {
         pumpFrameInFlight = false;
       }
+    }
+
+    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
+      if (!videoPumpActive || pumpFrameInFlight || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+        return;
+      }
+      if (mediaTimeSec === lastMediaTime) return;
+
+      // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
+      if (lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
+        worker.postMessage({ type: 'lab_action', action: 'reset' });
+        lastMediaTime = -1;
+        lastPumpPerfMs = 0;
+      }
+
+      let dtSec = 1.0 / Math.max(8.0, activeVideoFps);
+      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.25) {
+        dtSec = Math.max(0.004, mediaTimeSec - lastMediaTime);
+      } else if (lastPumpPerfMs > 0) {
+        dtSec = Math.min(0.15, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
+      }
+      lastMediaTime = mediaTimeSec;
+      lastPumpPerfMs = nowPerfMs;
+      updateVideoTimeLabel();
+      await captureAndSendCurrentVideoFrame(dtSec);
     }
 
     function startVideoPump() {
@@ -1081,37 +1277,8 @@
     // ========================================================================
     // UI Bindings & Telemetry DOM Updates
     // ========================================================================
-    const dom = {
-      pillKernel: document.getElementById('pillKernel'),
-      pillArena: document.getElementById('pillArena'),
-      pillPerf: document.getElementById('pillPerf'),
-      pillFps: document.getElementById('pillFps'),
-      inputResMeta: document.getElementById('inputResMeta'),
-      hudSourceLabel: document.getElementById('hudSourceLabel'),
-      mortonReadout: document.getElementById('mortonReadout'),
-      lblPadicSwaps: document.getElementById('lblPadicSwaps'),
-      kpiPadicSwaps: document.getElementById('kpiPadicSwaps'),
-      kpiKalmanSwaps: document.getElementById('kpiKalmanSwaps'),
-      kpiClutterDb: document.getElementById('kpiClutterDb'),
-      kpiWasmMs: document.getElementById('kpiWasmMs'),
-      kpiTargets: document.getElementById('kpiTargets'),
-      kpiCollisions: document.getElementById('kpiCollisions'),
-      hilbertMeta: document.getElementById('hilbertMeta'),
-      spectralMeta: document.getElementById('spectralMeta'),
-      fistaGapMeta: document.getElementById('fistaGapMeta'),
-      kpiTremorHz: document.getElementById('kpiTremorHz'),
-      kpiTremorPhi: document.getElementById('kpiTremorPhi'),
-      kpiApexMs: document.getElementById('kpiApexMs'),
-      lblReflexKpi: document.getElementById('lblReflexKpi'),
-      kpiSaccadeMs: document.getElementById('kpiSaccadeMs'),
-      labBadge: document.getElementById('labBadge'),
-      labDescription: document.getElementById('labDescription'),
-      btnLabStimulus: document.getElementById('btnLabStimulus'),
-      phaseOffsetLabel: document.getElementById('phaseOffsetLabel'),
-      recStatusLabel: document.getElementById('recStatusLabel'),
-    };
-
     let uiRecActive = false;
+    let currentLabMode = 0;
 
     function updateRecorderUi(active, frames, durationSec) {
       uiRecActive = Boolean(active);
@@ -1150,7 +1317,7 @@
       activeFrameH = h || (activeResMode ? 360 : 180);
       const pipSz = pDim || (activeResMode ? 32 : 16);
       dom.inputResMeta.textContent = `${activeFrameW}×${activeFrameH} ${activeResMode ? 'HD' : 'SD'} RGBA`;
-      pipEl.setAttribute('aria-label', `${pipSz}x${pipSz} Eulerian temporal-contrast picture-in-picture`);
+      pipEl.setAttribute('aria-label', `${pipSz}x${pipSz} raw vs Eulerian temporal-contrast picture-in-picture`);
       document.querySelectorAll('.res-btn').forEach((b) => {
         const on = Number(b.dataset.res) === activeResMode;
         b.classList.toggle('active', on);
@@ -1169,30 +1336,50 @@
       } else if (m.type === 'audio_strobe') {
         playPhaseStrobePulse(m.resonant, m.freqHz, m.amp);
       } else if (m.type === 'audio_percussion') {
-        playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentPerfMs);
+        playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentEpochMs);
       } else if (m.type === 'telemetry') {
+        const medMs = typeof m.wasmMedianMs === 'number' ? m.wasmMedianMs : m.wasmMeanMs;
         const budgetMs = m.resMode === 1 ? 1.0 : (m.sourceMode === 'testbench' ? 0.28 : 0.50);
-        const underBudget = m.wasmMeanMs < budgetMs;
-        dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${m.wasmMeanMs.toFixed(3)} ms`;
+        const underBudget = medMs < budgetMs;
+        dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${medMs.toFixed(3)} ms`;
         dom.pillPerf.className = `pill ${underBudget ? 'ok' : 'warn'}`;
         dom.pillFps.textContent = `FPS: ${m.fps.toFixed(0)}`;
 
-        // Separate independent testbench 1-to-1 oracle count from live internal signature audit
         if (m.sourceMode === 'testbench') {
           dom.lblPadicSwaps.textContent = 'Oracle ID Switches';
           dom.kpiPadicSwaps.textContent = `◆ ${m.oracleSwaps}`;
+          dom.lblCollisions.textContent = 'Pillar Collisions';
+          dom.kpiCollisions.textContent = `${m.inPillarCollisions}`;
         } else {
           dom.lblPadicSwaps.textContent = '2-Adic Fiedler Audit';
           dom.kpiPadicSwaps.textContent = `◆ ${m.padicSwaps}`;
+          if (currentLabMode === 2) {
+            dom.lblCollisions.textContent = 'L1 Impact Strikes';
+            dom.kpiCollisions.textContent = `${m.strikeEvents || 0}`;
+          } else {
+            dom.lblCollisions.textContent = 'Hermite Bridges';
+            dom.kpiCollisions.textContent = `${m.bridgedFrames || 0}f`;
+          }
         }
 
         dom.kpiKalmanSwaps.textContent = `▲ ${m.kalmanSwaps}`;
         dom.kpiClutterDb.textContent = m.clutterDbValid
           ? `${m.clutterDb.toFixed(1)} dB`
           : 'WARMING';
-        dom.kpiWasmMs.textContent = `${m.wasmMeanMs.toFixed(3)} ms`;
+        dom.lblWasmMs.textContent = `Kernel p50 (${m.wasmMeanMs.toFixed(2)} avg)`;
+        dom.kpiWasmMs.textContent = `${medMs.toFixed(3)} ms`;
         dom.kpiTargets.textContent = `${m.activeTargets} / 8`;
-        dom.kpiCollisions.textContent = `${m.inPillarCollisions}`;
+
+        if (m.focusTrackId > 0) {
+          dom.btnFocusCycle.textContent = `◎ Focus: PIN T${m.focusTrackId}`;
+          dom.btnFocusCycle.classList.add('active');
+        } else if (m.primaryTrackId > 0) {
+          dom.btnFocusCycle.textContent = `◎ Focus: AUTO T${m.primaryTrackId}`;
+          dom.btnFocusCycle.classList.remove('active');
+        } else {
+          dom.btnFocusCycle.textContent = '◎ Focus: AUTO';
+          dom.btnFocusCycle.classList.remove('active');
+        }
 
         dom.mortonReadout.textContent = `BINARY-PREFIX SIG: ${m.primarySigHex} (v₂ = ${m.primaryPadicVal})`;
         if (m.lookaheadK < 7) {
@@ -1200,24 +1387,38 @@
           dom.kpiTremorHz.textContent = 'GATED (K<7)';
           dom.kpiTremorPhi.textContent = 'GATED';
         } else if (m.phaseValid) {
-          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | f = ${m.tremorFreqHz.toFixed(1)} Hz`;
-          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(1)} Hz` : '-- Hz';
+          const cohPct = Math.round((m.tremorCoherence || 0) * 100);
+          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | f = ${m.tremorFreqHz.toFixed(1)} Hz | COH ${cohPct}%`;
+          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(2)} Hz` : '-- Hz';
           dom.kpiTremorPhi.textContent = `${m.tremorPhaseDeg.toFixed(0)}°`;
         } else {
-          dom.hilbertMeta.textContent = 'STENCIL OCCLUDED (HOLD)';
-          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(1)} Hz` : 'OCCLUDED';
+          dom.hilbertMeta.textContent = 'STENCIL WARMING / HOLD';
+          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(2)} Hz` : 'HOLD';
           dom.kpiTremorPhi.textContent = 'HOLD';
         }
         dom.spectralMeta.textContent = `λ₂ = ${m.lambda2.toFixed(4)} | Δλ = ${m.spectralGap.toFixed(3)}`;
         dom.fistaGapMeta.textContent = `DUAL GAP: ${m.fistaDualityGap.toFixed(3)}`;
-        dom.kpiApexMs.textContent = m.apexMs > 1 ? `${m.apexMs.toFixed(0)} ms` : 'STEADY';
+
+        if (m.apexMs > 1.0) {
+          dom.lblApexKpi.textContent = 'Ballistic T-Apex';
+          dom.kpiApexMs.textContent = `${m.apexMs.toFixed(0)} ms`;
+        } else if (currentLabMode === 0 && typeof m.apexErrPx === 'number' && m.apexErrPx >= 0) {
+          dom.lblApexKpi.textContent = 'Last Apex Error Δ';
+          dom.kpiApexMs.textContent = `±${m.apexErrPx.toFixed(1)} px`;
+        } else {
+          dom.lblApexKpi.textContent = 'Ballistic T-Apex';
+          dom.kpiApexMs.textContent = 'STEADY';
+        }
 
         if (m.stimulusArmed) {
           dom.lblReflexKpi.textContent = 'Stimulus Armed';
           dom.kpiSaccadeMs.textContent = 'AWAITING';
         } else if (m.saccadeLatencyMs > 0) {
-          dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
+          dom.lblReflexKpi.textContent = 'Stimulus Onset Latency';
           dom.kpiSaccadeMs.textContent = `${m.saccadeLatencyMs.toFixed(1)} ms`;
+        } else if (m.stepSettleMs > 0) {
+          dom.lblReflexKpi.textContent = 'Spontaneous Step Settle';
+          dom.kpiSaccadeMs.textContent = `${m.stepSettleMs.toFixed(1)} ms`;
         } else {
           dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
           dom.kpiSaccadeMs.textContent = 'READY';
@@ -1275,6 +1476,19 @@
       }
     };
 
+    // Click-to-pin target on HUD Canvas + Accessible Keyboard Focus Cycle Button
+    hudEl.addEventListener('click', (ev) => {
+      const rect = hudEl.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
+      const normY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      worker.postMessage({ type: 'canvas_click', normX, normY });
+    });
+
+    dom.btnFocusCycle.addEventListener('click', () => {
+      worker.postMessage({ type: 'cycle_focus' });
+    });
+
     // Spatial Resolution Switching (320x180 SD vs 640x360 HD)
     document.querySelectorAll('.res-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1285,6 +1499,19 @@
         lastPumpPerfMs = 0;
         worker.postMessage({ type: 'set_resolution', resMode: mode });
       });
+    });
+
+    // Testbench Scenario Selector
+    dom.benchScenarioSelect.addEventListener('change', () => {
+      const sc = dom.benchScenarioSelect.value;
+      worker.postMessage({ type: 'set_scenario', scenario: sc });
+      if (sc === 'ballistic_cascade' && currentLabMode !== 0) {
+        document.querySelector('.lab-btn[data-lab="0"]')?.click();
+      } else if (sc === 'harmonic_tremor' && currentLabMode !== 1) {
+        document.querySelector('.lab-btn[data-lab="1"]')?.click();
+      } else if (sc === 'percussion_ricochet' && currentLabMode !== 2) {
+        document.querySelector('.lab-btn[data-lab="2"]')?.click();
+      }
     });
 
     // Source Switching
@@ -1305,6 +1532,7 @@
       stopMediaCapture();
       sampleVideoSelect.value = '';
       setSourceButtons(btnTestbench);
+      syncContextualSourceUi('testbench');
       dom.hudSourceLabel.textContent = 'SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)';
       worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
     });
@@ -1318,9 +1546,11 @@
           audio: false,
         });
         activeMediaStream = stream;
+        activeVideoFps = 60.0;
         videoEl.srcObject = stream;
         await videoEl.play();
         setSourceButtons(btnWebcam);
+        syncContextualSourceUi('webcam');
         dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
         worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
         startVideoPump();
@@ -1329,16 +1559,31 @@
       }
     });
 
+    async function safePlayVideo() {
+      try {
+        await videoEl.play();
+        return true;
+      } catch (err) {
+        if (err && err.name === 'AbortError') return false;
+        throw err;
+      }
+    }
+
     mp4Input.addEventListener('change', async (ev) => {
       const file = ev.target.files && ev.target.files[0];
       if (!file) return;
       stopMediaCapture();
       sampleVideoSelect.value = '';
       setSourceButtons(null);
+      if (activeResMode === 0) {
+        document.getElementById('btnResHd')?.click();
+      }
+      activeVideoFps = 30.0;
       currentObjectUrl = URL.createObjectURL(file);
       videoEl.src = currentObjectUrl;
       videoEl.loop = true;
-      await videoEl.play();
+      if (!(await safePlayVideo())) return;
+      syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: MP4 FILE (${file.name})`;
       worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
       startVideoPump();
@@ -1353,17 +1598,66 @@
 
       stopMediaCapture();
       setSourceButtons(null);
+      if (activeResMode === 0) {
+        document.getElementById('btnResHd')?.click();
+      }
+      activeVideoFps = fpsHint;
       videoEl.src = url;
       videoEl.loop = true;
-      await videoEl.play();
+      if (!(await safePlayVideo())) return;
 
       const targetBtn = document.querySelector(`.lab-btn[data-lab="${targetLab}"]`);
       if (targetBtn && currentLabMode !== targetLab) {
         targetBtn.click();
       }
+      syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: SAMPLE MP4 (${opt.textContent.split(' (')[0].toUpperCase()})`;
       worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint });
       startVideoPump();
+    });
+
+    // MP4 Frame-Accurate Transport Controls
+    dom.btnVidPlayPause.addEventListener('click', async () => {
+      if (activeSourceMode !== 'video') return;
+      if (videoEl.paused || videoEl.ended) {
+        await safePlayVideo();
+      } else {
+        videoEl.pause();
+      }
+      updateVideoTimeLabel();
+    });
+
+    async function stepVideoByFrames(deltaFrames) {
+      if (activeSourceMode !== 'video' || videoEl.readyState < 2) return;
+      videoEl.pause();
+      const frameStepSec = 1.0 / Math.max(8.0, activeVideoFps);
+      const dur = Number.isFinite(videoEl.duration) ? videoEl.duration : 30.0;
+      const targetTime = Math.max(0.0, Math.min(dur - 0.002, videoEl.currentTime + deltaFrames * frameStepSec));
+      if (deltaFrames < 0) {
+        worker.postMessage({ type: 'lab_action', action: 'reset' });
+      }
+      await new Promise((resolve) => {
+        const onSeeked = () => {
+          videoEl.removeEventListener('seeked', onSeeked);
+          resolve();
+        };
+        videoEl.addEventListener('seeked', onSeeked, { once: true });
+        videoEl.currentTime = targetTime;
+      });
+      lastMediaTime = videoEl.currentTime;
+      updateVideoTimeLabel();
+      await captureAndSendCurrentVideoFrame(frameStepSec);
+    }
+
+    document.getElementById('btnVidStepBack').addEventListener('click', () => stepVideoByFrames(-1));
+    document.getElementById('btnVidStepFwd').addEventListener('click', () => stepVideoByFrames(1));
+    document.getElementById('btnVidReplay').addEventListener('click', async () => {
+      if (activeSourceMode !== 'video') return;
+      worker.postMessage({ type: 'lab_action', action: 'reset' });
+      lastMediaTime = -1;
+      videoEl.currentTime = 0;
+      await safePlayVideo();
+      updateVideoTimeLabel();
     });
 
     // Audio & Reset Buttons
@@ -1385,25 +1679,37 @@
     const LAB_COPY = [
       {
         badge: 'MODE A',
-        html: '<strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and predicts Newtonian parabolic apex coordinates in physical units.',
+        html: '<strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and freezes Newtonian parabolic apex reticles with live peak accuracy scoring.',
         btn: '⚡ Launch Ballistic Arc Impulse',
+        videoBtn: '⚡ Ballistic Impulse (Testbench Only)',
         action: 'ballistic_toss',
+        simOnly: true,
       },
       {
         badge: 'MODE B',
-        html: '<strong>Mode B — Tremor Quadrature &amp; Stimulus Onset:</strong> Revises non-causal 2D principal-axis residuals R(t) = Y_raw − X_FISTA, equalizes 15-tap Hilbert phase, and timestamps stimulus-to-onset latency.',
+        html: '<strong>Mode B — Tremor Quadrature &amp; Stimulus Onset:</strong> Revises non-causal 2D principal-axis residuals, equalizes 15-tap Hilbert quadrature phase, and timestamps armed stimulus-to-onset vs spontaneous step settle.',
         btn: '⚡ Arm & Trigger Saccade Stimulus',
+        videoBtn: '⚡ Arm Stimulus Onset Timer',
         action: 'saccade_step',
+        simOnly: false,
       },
       {
         badge: 'MODE C',
-        html: '<strong>Mode C — Delayed-Sync Air-Percussion Synth:</strong> Deduplicates sparse second-difference impulses (‖D₂X‖) on physical event time and synchronizes polyphonic WebAudio voices + pad flashes at t − K.',
+        html: '<strong>Mode C — Delayed-Sync Impact Shockwaves &amp; Synth:</strong> Deduplicates sparse L1 velocity-jump impulses across colliding bodies and synchronizes localized impact shockwave rings + WebAudio voices at t − K.',
         btn: '⚡ Snap Air-Percussion L1 Strike',
+        videoBtn: '⚡ Synthetic Snap (Testbench Only)',
         action: 'air_strike',
+        simOnly: true,
       },
     ];
 
-    let currentLabMode = 0;
+    function syncStimulusButtonAvailability() {
+      const info = LAB_COPY[currentLabMode];
+      const disabledInVideo = activeSourceMode !== 'testbench' && info.simOnly;
+      dom.btnLabStimulus.setAttribute('aria-disabled', String(disabledInVideo));
+      dom.btnLabStimulus.textContent = activeSourceMode === 'testbench' ? info.btn : info.videoBtn;
+    }
+
     document.querySelectorAll('.lab-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         currentLabMode = Number(btn.dataset.lab);
@@ -1415,7 +1721,7 @@
         const info = LAB_COPY[currentLabMode];
         dom.labBadge.textContent = info.badge;
         dom.labDescription.innerHTML = info.html;
-        dom.btnLabStimulus.textContent = info.btn;
+        syncStimulusButtonAvailability();
         if (currentLabMode === 2 && !audioEnabled) {
           ensureAudioContext();
           audioEnabled = true;
@@ -1429,6 +1735,7 @@
     });
 
     dom.btnLabStimulus.addEventListener('click', () => {
+      if (dom.btnLabStimulus.getAttribute('aria-disabled') === 'true') return;
       worker.postMessage({ type: 'lab_action', action: LAB_COPY[currentLabMode].action });
     });
 
@@ -1466,7 +1773,8 @@
 
     sliderK.addEventListener('input', () => {
       const k = parseInt(sliderK.value, 10);
-      document.getElementById('valK').textContent = `${k} frames (${Math.round(k * 16.67)} ms)`;
+      const effRate = activeSourceMode === 'video' ? activeVideoFps : 60.0;
+      document.getElementById('valK').textContent = `${k} frames (${Math.round((k * 1000) / effRate)} ms)`;
       syncRangeFallbackProgress(sliderK);
       worker.postMessage({ type: 'params', lookaheadK: k });
     });

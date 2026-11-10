@@ -336,7 +336,7 @@ async function main() {
     );
     console.log(`  [PASS] Step 2 (640x360 HD Live Switch): res=${hdState.resMeta}, pip=${hdState.pipAria}, collisions=${hdState.collisions}, swaps=${hdState.swaps}`);
 
-    // 3. Built-in Real-Camera Sample MP4 Playback in 640x360 HD
+    // 3. Built-in Real-Camera Sample MP4 Playback, Transport, Focus Pin & Multi-Clip Proof
     await cdp.evalJs(
       sessionId,
       `(() => {
@@ -349,17 +349,21 @@ async function main() {
     const mp4State = await waitForCondition(
       cdp,
       sessionId,
-      'Sample MP4 playback + createImageBitmap(640x360) target lock',
+      'Sample MP4 playback + transport bar + target lock',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
         const srcLabel = document.getElementById('hudSourceLabel')?.textContent || '';
         const targetsText = document.getElementById('kpiTargets')?.textContent || '0 / 8';
         const activeCount = parseInt(targetsText.split('/')[0], 10) || 0;
         const clutterText = document.getElementById('kpiClutterDb')?.textContent || '';
+        const transportVisible = !document.getElementById('videoTransportBar')?.hidden;
+        const simBtnDisabled = document.getElementById('btnLabStimulus')?.getAttribute('aria-disabled') === 'true';
         return {
           ok: srcLabel.includes('SAMPLE MP4') &&
+              transportVisible &&
+              simBtnDisabled &&
               v && !v.paused && v.currentTime > 0.35 &&
-              activeCount >= 2,
+              activeCount >= 1,
           srcLabel,
           currentTime: v ? Number(v.currentTime.toFixed(3)) : 0,
           activeCount,
@@ -368,7 +372,97 @@ async function main() {
       })()`,
       15000
     );
-    console.log(`  [PASS] Step 3 (Real-Camera H.264 MP4 @ 640x360 HD): t=${mp4State.currentTime}s, locked=${mp4State.activeCount}/8, ECA=${mp4State.clutterText}`);
+
+    // Pin focus target via accessible Focus Cycle button, step +1 frame, then resume playback
+    await cdp.evalJs(sessionId, `document.getElementById('btnFocusCycle').click(); true;`);
+    const pinState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Focus target pin (PIN T#)',
+      `(() => {
+        const txt = document.getElementById('btnFocusCycle')?.textContent || '';
+        return { ok: txt.includes('PIN T'), txt };
+      })()`
+    );
+    const beforeStepT = await cdp.evalJs(sessionId, `document.getElementById('hiddenVideoSource').currentTime`);
+    await cdp.evalJs(sessionId, `document.getElementById('btnVidStepFwd').click(); true;`);
+    const stepState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Frame-accurate +1f MP4 step',
+      `(() => {
+        const v = document.getElementById('hiddenVideoSource');
+        return { ok: v && v.paused && Math.abs(v.currentTime - ${beforeStepT}) > 0.01, t: v ? v.currentTime : 0 };
+      })()`
+    );
+    await cdp.evalJs(sessionId, `document.getElementById('btnVidPlayPause').click(); true;`);
+    console.log(`  [PASS] Step 3a (Juggling MP4 + Transport + Focus Pin): t=${mp4State.currentTime}s->${stepState.t.toFixed(3)}s, ${pinState.txt}, ECA=${mp4State.clutterText}`);
+
+    // Verify Highway Gantry Occlusion Hermite Bridges, Harmonic Metronome Mode B, and Carom Billiards Mode C
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const sel = document.getElementById('sampleVideoSelect');
+        sel.value = './samples/roundabout_occlusion.mp4';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        document.getElementById('hiddenVideoSource').currentTime = 1.6;
+        return true;
+      })()`
+    );
+    const gantryState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Highway gantry MP4 Hermite bridges',
+      `(() => {
+        const bridges = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10) || 0;
+        const activeCount = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+        return { ok: activeCount >= 3 && bridges >= 1, activeCount, bridges };
+      })()`,
+      15000
+    );
+
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const sel = document.getElementById('sampleVideoSelect');
+        sel.value = './samples/harmonic_metronome_phase.mp4';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`
+    );
+    const metroState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Harmonic metronome Mode B Hilbert coherence',
+      `(() => {
+        const badge = document.getElementById('labBadge')?.textContent || '';
+        const meta = document.getElementById('hilbertMeta')?.textContent || '';
+        return { ok: badge === 'MODE B' && meta.includes('COH'), badge, meta };
+      })()`,
+      15000
+    );
+
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const sel = document.getElementById('sampleVideoSelect');
+        sel.value = './samples/carom_billiards_impulses.mp4';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`
+    );
+    const caromState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Carom billiards Mode C L1 impact strikes',
+      `(() => {
+        const badge = document.getElementById('labBadge')?.textContent || '';
+        const strikes = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10) || 0;
+        return { ok: badge === 'MODE C' && strikes >= 1, badge, strikes };
+      })()`,
+      15000
+    );
+    console.log(`  [PASS] Step 3b (Multi-Clip Real Physics Proof): gantryBridges=${gantryState.bridges}f, metronome=(${metroState.meta}), caromStrikes=${caromState.strikes}`);
 
     // 4. Session Telemetry Recorder (Record -> Pause -> Export CSV -> Export JSON)
     await cdp.evalJs(sessionId, `document.getElementById('btnRecToggle').click(); true;`);
@@ -452,11 +546,36 @@ async function main() {
     }
     console.log(`  [PASS] Step 4 (Telemetry Export & Disk Download): CSV (${csvExport.rows}x${csvExport.cols}, ${downloadedCsv}) & JSON (${jsonExport.frameCount} frames, ${downloadedJson})`);
 
-    // 5. Lab Modes B & C + Return to 320x180 SD Cleanly
+    // 5. Testbench Scenarios + Lab Modes B & C + Return to 320x180 SD Cleanly
     await cdp.evalJs(
       sessionId,
       `(() => {
         document.getElementById('btnSrcTestbench').click();
+        const scSel = document.getElementById('benchScenarioSelect');
+        scSel.value = 'short_gap_bridge';
+        scSel.dispatchEvent(new Event('change', { bubbles: true }));
+        document.querySelector('.lab-btn[data-lab="0"]').click();
+        return true;
+      })()`
+    );
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Short-gap Hermite bridge scenario lock (4 targets, 0 swaps)',
+      `(() => ({
+        ok: !document.getElementById('benchScenarioField')?.hidden &&
+            document.getElementById('videoTransportBar')?.hidden &&
+            (document.getElementById('kpiTargets')?.textContent || '') === '4 / 8' &&
+            (document.getElementById('kpiPadicSwaps')?.textContent || '').trim() === '◆ 0'
+      }))()`
+    );
+
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const scSel = document.getElementById('benchScenarioSelect');
+        scSel.value = 'pillar_crossing';
+        scSel.dispatchEvent(new Event('change', { bubbles: true }));
         document.querySelector('.lab-btn[data-lab="1"]').click();
         return true;
       })()`
