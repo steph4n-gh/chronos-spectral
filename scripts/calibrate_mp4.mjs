@@ -15,6 +15,8 @@ import { performance } from 'node:perf_hooks';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const WASM_PATH = path.join(ROOT, 'web', 'chronos_spectral.wasm');
 const SAMPLES_DIR = path.join(ROOT, 'web', 'samples');
+const GT_PATH = path.join(ROOT, 'scripts', 'gt_mp4_reference.json');
+const gtDataset = fs.existsSync(GT_PATH) ? JSON.parse(fs.readFileSync(GT_PATH, 'utf8')) : null;
 
 const GRAPH_NODES = 16;
 const MAX_TARGETS = 8;
@@ -349,8 +351,34 @@ for (const clip of CLIPS) {
   const ringViews = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), frameBytes));
   const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
   const dtSec = 1.0 / clip.fps;
+  const s = w / 320.0;
+  const gtScale = w / 640.0;
+
+  const gtByFrame = new Map();
+  if (gtDataset && gtDataset[clip.file]) {
+    for (const tr of gtDataset[clip.file].tracks) {
+      for (const pt of tr.frames) {
+        if (!gtByFrame.has(pt.f)) gtByFrame.set(pt.f, []);
+        gtByFrame.get(pt.f).push({
+          gtId: tr.id,
+          x: pt.x * gtScale,
+          y: pt.y * gtScale,
+          rad: tr.matchRadiusHd * gtScale,
+        });
+      }
+    }
+  }
 
   const trackAges = new Map();
+  const trackLife = new Map();
+  const lastTidForGt = new Map();
+  const lastGtForTid = new Map();
+  let gtTotal = 0;
+  let gtMatched = 0;
+  let gtSumSqErr = 0.0;
+  let gtIdSwaps = 0;
+  let gtHijacks = 0;
+  let teleportJumps = 0;
   let sumTickMs = 0.0;
   let maxClutterDb = 0.0;
   let lastClutterDb = 0.0;
@@ -392,16 +420,80 @@ for (const clip of CLIPS) {
     if (telem[26] > 0.5) phaseValidFrames++;
     if (Math.round(telem[15]) !== 0) percTriggers++;
 
+    const activeTracks = [];
     for (let m = 0; m < MAX_TARGETS; m++) {
       const base = 32 + m * 56;
       if (telem[base] > 0.5) {
         const tid = Math.round(telem[base + 1]);
+        const fx = telem[base + 2];
+        const fy = telem[base + 3];
+        const ix = telem[base + 8];
+        const iy = telem[base + 9];
+        const latestVis = telem[base + 44 + 11] > 0.5;
         trackAges.set(tid, (trackAges.get(tid) || 0) + 1);
         if (telem[base + 11] > 0.5) bridgeFrames++;
         if (telem[base + 17] > 1.0) apexFrames++;
+        activeTracks.push({ m, tid, fx, fy });
+
+        let tl = trackLife.get(tid);
+        if (!tl) {
+          tl = { n: 0, minX: ix, maxX: ix, minY: iy, maxY: iy, prevX: ix, prevY: iy, prevVis: latestVis };
+          trackLife.set(tid, tl);
+        } else {
+          if (latestVis && tl.prevVis && Math.hypot(ix - tl.prevX, iy - tl.prevY) > 42.0 * s) {
+            teleportJumps++;
+          }
+          tl.minX = Math.min(tl.minX, ix);
+          tl.maxX = Math.max(tl.maxX, ix);
+          tl.minY = Math.min(tl.minY, iy);
+          tl.maxY = Math.max(tl.maxY, iy);
+          tl.prevX = ix;
+          tl.prevY = iy;
+          tl.prevVis = latestVis;
+        }
+        tl.n++;
+      }
+    }
+
+    const effK = Math.round(telem[1]);
+    const fDisp = f - effK;
+    if (fDisp >= 14 && gtByFrame.size > 0) {
+      const gts = gtByFrame.get(fDisp) || [];
+      gtTotal += gts.length;
+      if (gts.length > 0 && activeTracks.length > 0) {
+        const pairs = [];
+        for (let gi = 0; gi < gts.length; gi++) {
+          for (let ti = 0; ti < activeTracks.length; ti++) {
+            const d = Math.hypot(activeTracks[ti].fx - gts[gi].x, activeTracks[ti].fy - gts[gi].y);
+            if (d <= gts[gi].rad) pairs.push({ gi, ti, d });
+          }
+        }
+        pairs.sort((a, b) => a.d - b.d);
+        const usedG = new Set();
+        const usedT = new Set();
+        for (const p of pairs) {
+          if (usedG.has(p.gi) || usedT.has(p.ti)) continue;
+          usedG.add(p.gi);
+          usedT.add(p.ti);
+          gtMatched++;
+          gtSumSqErr += p.d * p.d;
+          const gtId = gts[p.gi].gtId;
+          const tid = activeTracks[p.ti].tid;
+          if (lastTidForGt.has(gtId) && lastTidForGt.get(gtId) !== tid) gtIdSwaps++;
+          lastTidForGt.set(gtId, tid);
+          if (lastGtForTid.has(tid) && lastGtForTid.get(tid) !== gtId) gtHijacks++;
+          lastGtForTid.set(tid, gtId);
+        }
       }
     }
   });
+
+  let staticPins = 0;
+  for (const tl of trackLife.values()) {
+    if (tl.n >= 30 && Math.hypot(tl.maxX - tl.minX, tl.maxY - tl.minY) < 4.5 * s) staticPins++;
+  }
+  const gtRecallPct = gtTotal > 0 ? (100.0 * gtMatched) / gtTotal : 100.0;
+  const gtRmsePx = gtMatched > 0 ? Math.sqrt(gtSumSqErr / gtMatched) : 0.0;
 
   const totalSpawned = trackAges.size;
   const persistentTracks = [...trackAges.values()].filter((c) => c >= 15).length;
@@ -415,6 +507,9 @@ for (const clip of CLIPS) {
   console.log(`  Compute Tick  : ${meanTickMs.toFixed(3)} ms/frame | NaNs: ${nanDetected ? 'FAIL' : '0'} | max ||Lv-lv||: ${maxEigRes.toExponential(2)}`);
   console.log(`  ECA Clutter   : ${lastClutterDb.toFixed(2)} dB (peak ${maxClutterDb.toFixed(2)} dB, bg mask ${(lastEvalRatio * 100).toFixed(1)}%)`);
   console.log(`  Target Locks  : ${lockPct.toFixed(1)}% frames locked | avg ${(sumActiveTargets / numFrames).toFixed(2)} (max ${maxActiveTargets}) | spawned=${totalSpawned} (persistent>=15f: ${persistentTracks}, longest=${maxTrackLife}f)`);
+  if (gtTotal > 0) {
+    console.log(`  Ground Truth  : Recall=${gtRecallPct.toFixed(1)}% (${gtMatched}/${gtTotal}) | RMSE=${gtRmsePx.toFixed(2)} px | IDSW=${gtIdSwaps} | Hijacks=${gtHijacks} | Teleports=${teleportJumps} | StaticPins=${staticPins}`);
+  }
   console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicAudit=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
 
   if (strictGate) {
