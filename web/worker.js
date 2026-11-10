@@ -91,9 +91,14 @@ let flashQueueHead = 0;
 const SCOPE_HIST = 128;
 const histTremorR = new Float32Array(SCOPE_HIST);
 const histTremorH = new Float32Array(SCOPE_HIST);
+const histPhaseValid = new Uint8Array(SCOPE_HIST);
 const histStrobe = new Uint8Array(SCOPE_HIST);
 const histLambda2 = new Float32Array(SCOPE_HIST);
 let scopeWriteIdx = 0;
+
+// Pre-allocated HUD label collision stagger buffers (zero per-frame allocation)
+const hudLabelX = new Float32Array(MAX_TARGETS);
+const hudLabelY = new Float32Array(MAX_TARGETS);
 
 // Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 15 = N - 1)
 const MAX_KRYLOV = 15;
@@ -170,6 +175,12 @@ function resetTestbenchState() {
   prevFiedlerTrack.fill(0.0);
   flashQueueFrame.fill(-1);
   padFlashAlpha.fill(0.0);
+  histTremorR.fill(0.0);
+  histTremorH.fill(0.0);
+  histPhaseValid.fill(0);
+  histStrobe.fill(0);
+  histLambda2.fill(0.0);
+  scopeWriteIdx = 0;
   strobeFlashAlpha = 0.0;
   oraclePadicSwaps = 0;
   inPillarCollisions = 0;
@@ -744,6 +755,7 @@ function renderMainHud(dispSlot) {
   const effK = Math.round(telemView[1]);
   const uDisp = (RING_LEN - 1) - effK;
   const effFps = sourceMode === 'testbench' ? smoothFps : sourceFps;
+  let placedLabels = 0;
 
   // 5. Render Target Trajectories, Hermite Spline Bridges, Reticles & Kinematic Kalman Baselines
   for (let m = 0; m < MAX_TARGETS; m++) {
@@ -801,20 +813,25 @@ function renderMainHud(dispSlot) {
       hudCtx.fill();
     }
 
-    // 5c. Kinematic-Only 2x2 Kalman Baseline Marker
-    if (showKalmanBaseline) {
-      hudCtx.strokeStyle = '#ff595e';
-      hudCtx.lineWidth = 1.5;
+    // 5c. Kinematic-Only 2x2 Kalman Baseline Marker (bounded tether prevents full-screen spiderwebs)
+    const kalDist = Math.hypot(kx - fx, ky - fy);
+    if (showKalmanBaseline && kalDist <= 165.0) {
+      hudCtx.strokeStyle = 'rgba(255, 89, 94, 0.85)';
+      hudCtx.lineWidth = 1.4;
       hudCtx.setLineDash([3, 3]);
-      hudCtx.strokeRect(kx - 14, ky - 14, 28, 28);
-      hudCtx.beginPath();
-      hudCtx.moveTo(fx, fy);
-      hudCtx.lineTo(kx, ky);
-      hudCtx.stroke();
+      hudCtx.strokeRect(kx - 13, ky - 13, 26, 26);
+      if (kalDist > 6.0) {
+        hudCtx.beginPath();
+        hudCtx.moveTo(fx, fy);
+        hudCtx.lineTo(kx, ky);
+        hudCtx.stroke();
+      }
       hudCtx.setLineDash([]);
-      hudCtx.fillStyle = '#ff7b82';
-      hudCtx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-      hudCtx.fillText(`KAL-${tid}`, kx - 14, ky + 24);
+      if (kalDist > 20.0) {
+        hudCtx.fillStyle = '#ff7b82';
+        hudCtx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText(`KAL-${tid}`, kx - 14, ky + 23);
+      }
     }
 
     // 5d. Mode A: Exact Newtonian Parabolic Ballistic Arc (quadratic Bezier control at (0.5*(x0+xA), yA))
@@ -854,11 +871,28 @@ function renderMainHud(dispSlot) {
     const fSign = fiedlerCoord >= 0 ? 'F+' : 'F-';
     const stateTag = isBridged ? 'HERMITE-BRIDGE' : (dispVis ? 'LOCK' : 'COAST');
     const labelTop = `T${tid} [${stateTag}] v2:${padicVal} ${fSign}`;
-    hudCtx.fillStyle = 'rgba(7, 11, 18, 0.82)';
-    hudCtx.fillRect(fx - 26, fy - 46, 156, 19);
+    let lx = Math.max(8, Math.min(W - 166, fx - 26));
+    let ly = fy > 68 ? fy - 46 : fy + 28;
+    for (let pass = 0; pass < 3; pass++) {
+      let hit = false;
+      for (let k = 0; k < placedLabels; k++) {
+        if (Math.abs(lx - hudLabelX[k]) < 154 && Math.abs(ly - hudLabelY[k]) < 21) {
+          hit = true;
+          break;
+        }
+      }
+      if (!hit) break;
+      ly = ly + 22 < H - 28 ? ly + 22 : Math.max(38, ly - 22);
+    }
+    hudLabelX[placedLabels] = lx;
+    hudLabelY[placedLabels] = ly;
+    placedLabels++;
+
+    hudCtx.fillStyle = 'rgba(7, 11, 18, 0.84)';
+    hudCtx.fillRect(lx, ly, 156, 19);
     hudCtx.fillStyle = isBridged ? '#ffd166' : color;
     hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(labelTop, fx - 22, fy - 33);
+    hudCtx.fillText(labelTop, lx + 4, ly + 13);
 
     hudCtx.fillStyle = 'rgba(205, 224, 245, 0.82)';
     hudCtx.font = '500 9px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -866,8 +900,8 @@ function renderMainHud(dispSlot) {
     hudCtx.restore();
   }
 
-  // 6. Present-Time Phase-Locked Strobe Border Pulse
-  if (strobeEnabled && strobeFlashAlpha > 0.02) {
+  // 6. Present-Time Phase-Locked Strobe Border Pulse (Mode B Biophysical Entrainment)
+  if (labMode === 1 && strobeEnabled && strobeFlashAlpha > 0.02) {
     const isPosLead = phaseOffsetRad > 0;
     const rgb = isPosLead ? '255, 183, 3' : '0, 240, 255';
     hudCtx.save();
@@ -882,6 +916,8 @@ function renderMainHud(dispSlot) {
       H - 18
     );
     hudCtx.restore();
+  }
+  if (strobeFlashAlpha > 0.001) {
     strobeFlashAlpha *= 0.78;
   }
 
@@ -968,22 +1004,33 @@ function renderHilbertScope() {
   hilbertCtx.strokeStyle = '#38f27a';
   hilbertCtx.lineWidth = 1.6;
   hilbertCtx.beginPath();
+  let polarPenDown = false;
   for (let k = 0; k < 48; k++) {
     const idx = (scopeWriteIdx + SCOPE_HIST - 48 + k) % SCOPE_HIST;
+    if (!histPhaseValid[idx]) {
+      polarPenDown = false;
+      continue;
+    }
     const rx = cx + Math.max(-rad, Math.min(rad, histTremorR[idx] * scale));
     const hy = cy - Math.max(-rad, Math.min(rad, histTremorH[idx] * scale));
-    if (k === 0) hilbertCtx.moveTo(rx, hy);
-    else hilbertCtx.lineTo(rx, hy);
+    if (!polarPenDown) {
+      hilbertCtx.moveTo(rx, hy);
+      polarPenDown = true;
+    } else {
+      hilbertCtx.lineTo(rx, hy);
+    }
   }
   hilbertCtx.stroke();
 
   const curIdx = (scopeWriteIdx + SCOPE_HIST - 1) % SCOPE_HIST;
   const headX = cx + Math.max(-rad, Math.min(rad, histTremorR[curIdx] * scale));
   const headY = cy - Math.max(-rad, Math.min(rad, histTremorH[curIdx] * scale));
-  hilbertCtx.fillStyle = '#ffffff';
-  hilbertCtx.beginPath();
-  hilbertCtx.arc(headX, headY, 3.2, 0, Math.PI * 2);
-  hilbertCtx.fill();
+  if (histPhaseValid[curIdx]) {
+    hilbertCtx.fillStyle = '#ffffff';
+    hilbertCtx.beginPath();
+    hilbertCtx.arc(headX, headY, 3.2, 0, Math.PI * 2);
+    hilbertCtx.fill();
+  }
 
   const waveX0 = 26 + pSize;
   const waveW = W - waveX0 - 10;
@@ -1023,12 +1070,21 @@ function renderHilbertScope() {
   hilbertCtx.strokeStyle = '#e840f8';
   hilbertCtx.lineWidth = 1.3;
   hilbertCtx.beginPath();
+  let hPenDown = false;
   for (let i = 0; i < SCOPE_HIST; i++) {
     const idx = (scopeWriteIdx + i) % SCOPE_HIST;
+    if (!histPhaseValid[idx]) {
+      hPenDown = false;
+      continue;
+    }
     const wx = waveX0 + (i / (SCOPE_HIST - 1)) * waveW;
     const wy = waveMidY - Math.max(-1, Math.min(1, histTremorH[idx] * invRes * 1.3)) * waveAmp;
-    if (i === 0) hilbertCtx.moveTo(wx, wy);
-    else hilbertCtx.lineTo(wx, wy);
+    if (!hPenDown) {
+      hilbertCtx.moveTo(wx, wy);
+      hPenDown = true;
+    } else {
+      hilbertCtx.lineTo(wx, wy);
+    }
   }
   hilbertCtx.stroke();
 
@@ -1196,6 +1252,7 @@ function processIngestedFrame(rawPixels, dtSec) {
   // Record scope traces
   histTremorR[scopeWriteIdx] = telemView[9];
   histTremorH[scopeWriteIdx] = telemView[10];
+  histPhaseValid[scopeWriteIdx] = telemView[26] > 0.5 ? 1 : 0;
   histStrobe[scopeWriteIdx] = telemView[14] > 0.5 ? 1 : 0;
   histLambda2[scopeWriteIdx] = lambda2;
   scopeWriteIdx = (scopeWriteIdx + 1) % SCOPE_HIST;
@@ -1326,6 +1383,15 @@ function processIngestedFrame(rawPixels, dtSec) {
       pVal = Math.round(telemView[b + 14]);
       apexMs = telemView[b + 17] * (1000.0 / effSampleRate);
     }
+    if (apexMs <= 0.0) {
+      for (let m = 0; m < MAX_TARGETS; m++) {
+        const mb = 32 + m * 56;
+        if (telemView[mb] > 0.5 && telemView[mb + 17] > 1.5) {
+          const candApexMs = telemView[mb + 17] * (1000.0 / effSampleRate);
+          if (candApexMs > apexMs) apexMs = candApexMs;
+        }
+      }
+    }
 
     self.postMessage({
       type: 'telemetry',
@@ -1419,14 +1485,23 @@ function configureResolutionViews(mode) {
 let rafHandle = 0;
 let rafWatchdogId = 0;
 
+function cancelWorkerTickLoop() {
+  clearTimeout(rafWatchdogId);
+  rafWatchdogId = 0;
+  if (rafHandle && typeof self.cancelAnimationFrame === 'function') {
+    self.cancelAnimationFrame(rafHandle);
+  }
+  rafHandle = 0;
+}
+
 function scheduleNextWorkerTick() {
-  if (!running) return;
+  if (!running || sourceMode !== 'testbench') return;
   if (typeof self.requestAnimationFrame === 'function') {
     clearTimeout(rafWatchdogId);
     const prevTick = tickCounter;
     rafHandle = self.requestAnimationFrame(workerRafLoop);
     rafWatchdogId = setTimeout(() => {
-      if (running && tickCounter === prevTick) {
+      if (running && sourceMode === 'testbench' && tickCounter === prevTick) {
         if (typeof self.cancelAnimationFrame === 'function') {
           self.cancelAnimationFrame(rafHandle);
         }
@@ -1434,19 +1509,19 @@ function scheduleNextWorkerTick() {
       }
     }, 18);
   } else {
-    setTimeout(() => workerRafLoop(performance.now()), 16);
+    rafWatchdogId = setTimeout(() => workerRafLoop(performance.now()), 16);
   }
 }
 
 function workerRafLoop(now) {
-  if (!running) return;
+  if (!running || sourceMode !== 'testbench') return;
   clearTimeout(rafWatchdogId);
   const dtMs = lastRafTs > 0 ? Math.min(50.0, Math.max(4.0, now - lastRafTs)) : 16.667;
   lastRafTs = now;
   const instFps = 1000.0 / dtMs;
   smoothFps = 0.92 * smoothFps + 0.08 * instFps;
 
-  if (sourceMode === 'testbench' && wasmExports) {
+  if (wasmExports) {
     const simDt = 1.0 / 60.0;
     const rawPixels = stepAndRenderBlindPillarScene(simDt);
     processIngestedFrame(rawPixels, simDt);
@@ -1570,10 +1645,19 @@ self.onmessage = async (ev) => {
     } else if (sourceMode !== 'testbench') {
       sourceFps = 30.0;
     }
+    wasmTimeHist.fill(0.0);
+    timeHistIdx = 0;
+    tickCounter = 0;
+    lastRafTs = 0;
     if (wasmExports) {
       wasmExports.chronos_reset_tracks();
     }
     resetTestbenchState();
+    if (sourceMode === 'testbench') {
+      scheduleNextWorkerTick();
+    } else {
+      cancelWorkerTickLoop();
+    }
   } else if (msg.type === 'video_frame') {
     const bmp = msg.bitmap;
     if (wasmExports && sourceMode !== 'testbench') {
@@ -1582,6 +1666,13 @@ self.onmessage = async (ev) => {
       processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 60.0);
     }
     bmp.close();
+  } else if (msg.type === 'video_rgba') {
+    if (wasmExports && sourceMode !== 'testbench' && msg.buffer) {
+      const rawPixels = new Uint8Array(msg.buffer);
+      if (rawPixels.byteLength === frameBytes) {
+        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 60.0);
+      }
+    }
   } else if (msg.type === 'lab_action') {
     if (msg.action === 'saccade_step') {
       if (wasmExports) wasmExports.chronos_trigger_stimulus();

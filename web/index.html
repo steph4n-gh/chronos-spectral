@@ -455,7 +455,14 @@
     }
 
     video#hiddenVideoSource {
-      display: none;
+      position: fixed;
+      left: 0;
+      bottom: 0;
+      width: 2px;
+      height: 2px;
+      opacity: 0.001;
+      pointer-events: none;
+      z-index: -1;
     }
 
     /* Fallback when accent-color is unsupported (per brand-consistent-forms guidance) */
@@ -819,7 +826,7 @@
     const hilbertOffscreen = hilbertEl.transferControlToOffscreen();
     const spectralOffscreen = spectralEl.transferControlToOffscreen();
 
-    const worker = new Worker('./worker.js');
+    const worker = new Worker('./worker.js?v=20261110c');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
     });
@@ -829,7 +836,7 @@
     worker.postMessage(
       {
         type: 'init',
-        wasmUrl: './chronos_spectral.wasm',
+        wasmUrl: './chronos_spectral.wasm?v=20261110c',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
         hilbertCanvas: hilbertOffscreen,
@@ -982,9 +989,13 @@
     let activeResMode = 0;
     let activeFrameW = 320;
     let activeFrameH = 180;
+    let pumpFrameInFlight = false;
+    const fallbackCapCanvas = document.createElement('canvas');
+    const fallbackCapCtx = fallbackCapCanvas.getContext('2d', { willReadFrequently: true });
 
     function stopMediaCapture() {
       videoPumpActive = false;
+      pumpFrameInFlight = false;
       lastMediaTime = -1;
       lastPumpPerfMs = 0;
       videoEl.pause();
@@ -1001,7 +1012,9 @@
     }
 
     async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
-      if (!videoPumpActive || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) return;
+      if (!videoPumpActive || pumpFrameInFlight || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+        return;
+      }
       if (mediaTimeSec === lastMediaTime) return;
 
       // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
@@ -1019,36 +1032,47 @@
       }
       lastMediaTime = mediaTimeSec;
       lastPumpPerfMs = nowPerfMs;
+      pumpFrameInFlight = true;
 
       try {
-        const bitmap = await createImageBitmap(videoEl, {
-          resizeWidth: activeFrameW,
-          resizeHeight: activeFrameH,
-          resizeQuality: 'low',
-        });
+        const bitmap = await createImageBitmap(videoEl);
         worker.postMessage({ type: 'video_frame', bitmap, dtSec }, [bitmap]);
       } catch (_err) {
-        // Ignore transient decode race during source switch
+        try {
+          if (fallbackCapCanvas.width !== activeFrameW || fallbackCapCanvas.height !== activeFrameH) {
+            fallbackCapCanvas.width = activeFrameW;
+            fallbackCapCanvas.height = activeFrameH;
+          }
+          fallbackCapCtx.drawImage(videoEl, 0, 0, activeFrameW, activeFrameH);
+          const img = fallbackCapCtx.getImageData(0, 0, activeFrameW, activeFrameH);
+          const copy = new Uint8Array(img.data);
+          worker.postMessage({ type: 'video_rgba', buffer: copy.buffer, dtSec }, [copy.buffer]);
+        } catch (_fallbackErr) {
+          // Ignore transient decode race during source switch
+        }
+      } finally {
+        pumpFrameInFlight = false;
       }
     }
 
     function startVideoPump() {
       videoPumpActive = true;
+      pumpFrameInFlight = false;
       lastMediaTime = -1;
       lastPumpPerfMs = 0;
 
       if (typeof videoEl.requestVideoFrameCallback === 'function') {
-        const onVideoFrame = async (now, metadata) => {
+        const onVideoFrame = (now, metadata) => {
           if (!videoPumpActive) return;
-          await forwardUniqueVideoFrame(metadata.mediaTime, now);
-          if (videoPumpActive) videoEl.requestVideoFrameCallback(onVideoFrame);
+          videoEl.requestVideoFrameCallback(onVideoFrame);
+          forwardUniqueVideoFrame(metadata.mediaTime, now);
         };
         videoEl.requestVideoFrameCallback(onVideoFrame);
       } else {
-        const onRafFallback = async (now) => {
+        const onRafFallback = (now) => {
           if (!videoPumpActive) return;
-          await forwardUniqueVideoFrame(videoEl.currentTime, now);
-          if (videoPumpActive) requestAnimationFrame(onRafFallback);
+          requestAnimationFrame(onRafFallback);
+          forwardUniqueVideoFrame(videoEl.currentTime, now);
         };
         requestAnimationFrame(onRafFallback);
       }
@@ -1147,7 +1171,7 @@
       } else if (m.type === 'audio_percussion') {
         playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentPerfMs);
       } else if (m.type === 'telemetry') {
-        const budgetMs = m.resMode === 1 ? 1.0 : 0.25;
+        const budgetMs = m.resMode === 1 ? 1.0 : (m.sourceMode === 'testbench' ? 0.28 : 0.50);
         const underBudget = m.wasmMeanMs < budgetMs;
         dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${m.wasmMeanMs.toFixed(3)} ms`;
         dom.pillPerf.className = `pill ${underBudget ? 'ok' : 'warn'}`;
@@ -1368,7 +1392,7 @@
       {
         badge: 'MODE B',
         html: '<strong>Mode B — Tremor Quadrature &amp; Stimulus Onset:</strong> Revises non-causal 2D principal-axis residuals R(t) = Y_raw − X_FISTA, equalizes 15-tap Hilbert phase, and timestamps stimulus-to-onset latency.',
-        btn: '⚡ Arm &amp; Trigger Saccade Stimulus',
+        btn: '⚡ Arm & Trigger Saccade Stimulus',
         action: 'saccade_step',
       },
       {
