@@ -175,10 +175,10 @@
       background-color: var(--bg-panel);
       border: 1px solid var(--border-strong);
       border-radius: 6px;
-      padding: 0.8rem;
+      padding: 0.68rem 0.76rem;
       display: flex;
       flex-direction: column;
-      gap: 0.62rem;
+      gap: 0.5rem;
       overflow: clip;
     }
 
@@ -311,13 +311,21 @@
       background-color: var(--bg-card);
       color: var(--text-primary);
       cursor: pointer;
-      transition: background-color 0.14s ease, border-color 0.14s ease;
       flex: 1 1 auto;
     }
 
-    button:hover:not([aria-disabled="true"]) {
-      border-color: var(--border-accent);
-      background-color: #16243d;
+    @media (prefers-reduced-motion: no-preference) {
+      button,
+      .cal-field input {
+        transition: background-color 0.14s ease, border-color 0.14s ease;
+      }
+    }
+
+    @media (hover: hover) {
+      button:hover:not([aria-disabled="true"]) {
+        border-color: var(--border-accent);
+        background-color: #16243d;
+      }
     }
 
     button:focus-visible {
@@ -330,6 +338,102 @@
       background-color: #083344;
       border-color: var(--brand-color);
       color: var(--brand-color);
+      box-shadow: inset 0 0 0 1px var(--brand-color);
+    }
+
+    /* Accessible Calibration Toolbar & Scale Form */
+    .cal-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.38rem;
+    }
+
+    .cal-toolbar-group {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.36rem;
+      flex: 1 1 auto;
+    }
+
+    .cal-toolbar-sep {
+      align-self: stretch;
+      min-block-size: 24px;
+      border-inline-start: 1px solid var(--border-strong);
+      margin-inline: 0.08rem;
+    }
+
+    .cal-status-live {
+      font-family: var(--font-mono);
+      font-size: 0.69rem;
+      line-height: 1.38;
+      color: var(--brand-color);
+      background-color: #091425;
+      border: 1px solid #223b60;
+      border-radius: 4px;
+      padding: 0.38rem 0.52rem;
+    }
+
+    .cal-scale-form {
+      display: flex;
+      flex-direction: column;
+      gap: 0.34rem;
+    }
+
+    .cal-field-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+      align-items: end;
+      gap: 0.38rem;
+    }
+
+    .cal-field {
+      display: flex;
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.18rem;
+    }
+
+    .cal-field label {
+      font-family: var(--font-mono);
+      font-size: 0.67rem;
+      color: var(--text-secondary);
+    }
+
+    .cal-field input {
+      font: inherit;
+      font-family: var(--font-mono);
+      font-size: max(1rem, 1em);
+      font-weight: 600;
+      min-block-size: 32px;
+      padding: 0.24rem 0.38rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      inline-size: 100%;
+    }
+
+    @media (hover: hover) {
+      .cal-field input:hover {
+        border-color: var(--border-accent);
+      }
+    }
+
+    .cal-field input:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+    }
+
+    .cal-field input:is(:user-invalid, [aria-invalid="true"]) {
+      border-color: var(--status-alert);
+      outline-color: var(--status-alert);
+    }
+
+    .cal-hint {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-secondary);
     }
 
     button[aria-disabled="true"] {
@@ -639,7 +743,8 @@
     @media (pointer: coarse) {
       button,
       .file-upload-label,
-      .select-field select {
+      .select-field select,
+      .cal-field input {
         min-block-size: 36px;
       }
     }
@@ -651,8 +756,13 @@
       .pill,
       button,
       canvas,
+      .cal-field input,
+      .cal-status-live,
       details.tuning-disclosure {
         border: 1px solid CanvasText;
+      }
+      .cal-toolbar-sep {
+        border-inline-start: 1px solid CanvasText;
       }
       button[aria-pressed="true"],
       button.active {
@@ -766,6 +876,22 @@
             <span class="kpi-label" id="lblReflexKpi">Stimulus Onset / Settle</span>
             <span class="kpi-value ok" id="kpiSaccadeMs">-- ms</span>
           </div>
+          <div class="kpi-card">
+            <span class="kpi-label" id="lblKinAngle">Flight / Heading θ</span>
+            <span class="kpi-value accent" id="kpiKinAngle">--°</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label" id="lblKinSpeed">Tangential Speed</span>
+            <span class="kpi-value" id="kpiKinSpeed">-- px/s</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label" id="lblKinDeflect">Angular Rate ω</span>
+            <span class="kpi-value warn" id="kpiKinDeflect">--°/s</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label" id="lblKinRestGrav">Restitution / Gravity</span>
+            <span class="kpi-value ok" id="kpiKinRestGrav">STEADY</span>
+          </div>
         </div>
       </div>
     </div>
@@ -844,7 +970,7 @@
           <button type="button" data-lab="2" class="lab-btn" aria-pressed="false">C: Air-Percussion</button>
         </div>
         <p class="lab-desc" id="labDescription">
-          <strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and freezes Newtonian parabolic apex reticles with live peak accuracy scoring.
+          <strong>Mode A — Ballistic Parabola, Flight Angle θ &amp; Spline Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via curved Hermite arcs, and plots live tangent flight angles &amp; frozen apex reticles.
         </p>
         <div class="btn-row">
           <button type="button" id="btnLabStimulus" class="action-btn">⚡ Launch Ballistic Arc Impulse</button>
@@ -853,7 +979,45 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">3. Predicted Present-Phase Strobe Offset</h2>
+          <h2 class="panel-title" id="calPanelHeading">3. Metric &amp; Perspective Calibration</h2>
+          <span class="panel-meta" id="calBadge">PX UNITS</span>
+        </div>
+        <div role="toolbar" id="calToolbar" class="cal-toolbar" focusgroup="toolbar wrap" aria-label="Metric and perspective calibration" aria-controls="hudCanvas">
+          <div role="group" class="cal-toolbar-group" aria-label="Interactive viewport calibration">
+            <button type="button" id="btnCalRuler" aria-pressed="false" title="Click 2 reference endpoints on viewport to calibrate meters">📏 2-Pt Ruler</button>
+            <button type="button" id="btnCalQuad" aria-pressed="false" title="Click 4 plane corners TL, TR, BR, BL to rectify perspective">⬠ 4-Pt Plane</button>
+          </div>
+          <span role="separator" class="cal-toolbar-sep" aria-orientation="vertical"></span>
+          <div role="group" class="cal-toolbar-group" aria-label="Calibration actions">
+            <button type="button" id="btnCalAutoG" class="action-btn" title="Derive meter scale from parabolic gravity g = 9.81 m/s²">⚡ Auto-g</button>
+            <button type="button" id="btnCalPreset" class="action-btn" title="Apply physical reference scale or perspective plane for active scene">✦ Scene Preset</button>
+            <button type="button" id="btnCalClear" class="action-btn" title="Clear metric calibration and return to pixel units">✕ Clear</button>
+          </div>
+        </div>
+        <p class="cal-status-live" id="calStatusLive" role="status">UNCALIBRATED · PIXEL UNITS (px · px/s)</p>
+        <form id="calScaleForm" class="cal-scale-form" aria-labelledby="calPanelHeading" action="#" method="get" novalidate>
+          <div class="cal-field-grid">
+            <div class="cal-field">
+              <label for="calRulerM">Ruler L (m)</label>
+              <input type="text" id="calRulerM" name="rulerMeters" value="1.00" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+            </div>
+            <div class="cal-field">
+              <label for="calPlaneW">Plane W (m)</label>
+              <input type="text" id="calPlaneW" name="planeWidth" value="2.84" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+            </div>
+            <div class="cal-field">
+              <label for="calPlaneH">Plane H (m)</label>
+              <input type="text" id="calPlaneH" name="planeHeight" value="1.42" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+            </div>
+            <button type="submit" id="btnCalApplyDims" class="action-btn" style="min-block-size: 32px; flex: 0 0 auto; padding-inline: 0.52rem;">Apply Scale</button>
+          </div>
+          <span id="calScaleHelp" class="cal-hint">Positive meters (0.05–500). Quad order: TL → TR → BR → BL.</span>
+        </form>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header">
+          <h2 class="panel-title">4. Predicted Present-Phase Strobe Offset</h2>
           <span class="panel-meta" id="phaseOffsetLabel">−π/2 LAG CUE</span>
         </div>
         <div class="btn-row">
@@ -866,7 +1030,7 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">4. Kernel &amp; Variational Hyperparameters</h2>
+          <h2 class="panel-title">5. Kernel &amp; Variational Hyperparameters</h2>
           <span class="panel-meta">REAL-TIME</span>
         </div>
 
@@ -925,7 +1089,7 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">5. Session Telemetry Recorder</h2>
+          <h2 class="panel-title">6. Session Telemetry Recorder</h2>
           <span class="panel-meta" id="recStatusLabel" role="status">IDLE (0 FRAMES)</span>
         </div>
         <div class="btn-row">
@@ -953,7 +1117,7 @@
     const hilbertOffscreen = hilbertEl.transferControlToOffscreen();
     const spectralOffscreen = spectralEl.transferControlToOffscreen();
 
-    const worker = new Worker('./worker.js?v=20261110d');
+    const worker = new Worker('./worker.js?v=20261110f');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
     });
@@ -963,7 +1127,7 @@
     worker.postMessage(
       {
         type: 'init',
-        wasmUrl: './chronos_spectral.wasm?v=20261110d',
+        wasmUrl: './chronos_spectral.wasm?v=20261110f',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
         hilbertCanvas: hilbertOffscreen,
@@ -1149,6 +1313,26 @@
       kpiApexMs: document.getElementById('kpiApexMs'),
       lblReflexKpi: document.getElementById('lblReflexKpi'),
       kpiSaccadeMs: document.getElementById('kpiSaccadeMs'),
+      lblKinAngle: document.getElementById('lblKinAngle'),
+      kpiKinAngle: document.getElementById('kpiKinAngle'),
+      lblKinSpeed: document.getElementById('lblKinSpeed'),
+      kpiKinSpeed: document.getElementById('kpiKinSpeed'),
+      lblKinDeflect: document.getElementById('lblKinDeflect'),
+      kpiKinDeflect: document.getElementById('kpiKinDeflect'),
+      lblKinRestGrav: document.getElementById('lblKinRestGrav'),
+      kpiKinRestGrav: document.getElementById('kpiKinRestGrav'),
+      calBadge: document.getElementById('calBadge'),
+      calToolbar: document.getElementById('calToolbar'),
+      calStatusLive: document.getElementById('calStatusLive'),
+      btnCalRuler: document.getElementById('btnCalRuler'),
+      btnCalQuad: document.getElementById('btnCalQuad'),
+      btnCalAutoG: document.getElementById('btnCalAutoG'),
+      btnCalPreset: document.getElementById('btnCalPreset'),
+      btnCalClear: document.getElementById('btnCalClear'),
+      calScaleForm: document.getElementById('calScaleForm'),
+      calRulerM: document.getElementById('calRulerM'),
+      calPlaneW: document.getElementById('calPlaneW'),
+      calPlaneH: document.getElementById('calPlaneH'),
       labBadge: document.getElementById('labBadge'),
       labDescription: document.getElementById('labDescription'),
       btnLabStimulus: document.getElementById('btnLabStimulus'),
@@ -1279,6 +1463,40 @@
     // ========================================================================
     let uiRecActive = false;
     let currentLabMode = 0;
+    let uiCalArmed = 'none';
+
+    function applyCalibrationUiState(m) {
+      uiCalArmed = m.calArmed || 'none';
+      const rulerOn = uiCalArmed === 'ruler' || (uiCalArmed === 'none' && m.calMode === 'ruler');
+      const quadOn = uiCalArmed === 'homography' || (uiCalArmed === 'none' && m.calMode === 'homography');
+      dom.btnCalRuler.setAttribute('aria-pressed', String(rulerOn));
+      dom.btnCalQuad.setAttribute('aria-pressed', String(quadOn));
+
+      if (m.calMode === 'homography') {
+        dom.calBadge.textContent = '4-PT PLANE H';
+      } else if (m.calMode === 'ruler') {
+        dom.calBadge.textContent = '2-PT RULER';
+      } else if (m.calMode === 'auto_g') {
+        dom.calBadge.textContent = 'AUTO-g 9.81';
+      } else {
+        dom.calBadge.textContent = 'PX UNITS';
+      }
+
+      if (typeof m.summary === 'string') {
+        dom.calStatusLive.textContent = m.summary;
+      }
+
+      const syncInputVal = (inputEl, numVal) => {
+        if (typeof numVal === 'number' && Number.isFinite(numVal) && document.activeElement !== inputEl) {
+          inputEl.value = numVal.toFixed(2);
+          inputEl.setCustomValidity('');
+          inputEl.removeAttribute('aria-invalid');
+        }
+      };
+      syncInputVal(dom.calRulerM, m.rulerMeters);
+      syncInputVal(dom.calPlaneW, m.planeW);
+      syncInputVal(dom.calPlaneH, m.planeH);
+    }
 
     function updateRecorderUi(active, frames, durationSec) {
       uiRecActive = Boolean(active);
@@ -1423,7 +1641,66 @@
           dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
           dom.kpiSaccadeMs.textContent = 'READY';
         }
+
+        if (m.activeTargets > 0) {
+          if (m.pivotValid) {
+            const signP = m.pendSwingDeg >= 0 ? '+' : '';
+            dom.lblKinAngle.textContent = 'Pendulum Swing θ';
+            dom.kpiKinAngle.textContent = `${signP}${m.pendSwingDeg.toFixed(1)}°`;
+          } else {
+            const signH = m.headingDeg >= 0 ? '+' : '';
+            dom.lblKinAngle.textContent = 'Flight / Heading θ';
+            dom.kpiKinAngle.textContent = `${signH}${m.headingDeg.toFixed(1)}°`;
+          }
+          dom.lblKinSpeed.textContent = m.calibrated ? 'Physical Speed' : 'Tangential Speed';
+          dom.kpiKinSpeed.textContent = m.calibrated
+            ? `${m.speedPhys.toFixed(2)} m/s`
+            : `${Math.round(m.speedPhys)} px/s`;
+        } else {
+          dom.lblKinAngle.textContent = 'Flight / Swing θ';
+          dom.kpiKinAngle.textContent = '--°';
+          dom.lblKinSpeed.textContent = m.calibrated ? 'Physical Speed' : 'Tangential Speed';
+          dom.kpiKinSpeed.textContent = m.calibrated ? '-- m/s' : '-- px/s';
+        }
+
+        if (currentLabMode === 2) {
+          if (m.lastStrikeValid) {
+            const signD = m.lastDeflectDeg >= 0 ? '+' : '';
+            if (m.scatterDeg > 2.0) {
+              dom.lblKinDeflect.textContent = 'Deflect Δθ / Scatter';
+              dom.kpiKinDeflect.textContent = `${signD}${m.lastDeflectDeg.toFixed(0)}° / ${m.scatterDeg.toFixed(0)}°`;
+            } else {
+              dom.lblKinDeflect.textContent = 'Impact Deflection Δθ';
+              dom.kpiKinDeflect.textContent = `${signD}${m.lastDeflectDeg.toFixed(1)}°`;
+            }
+          } else {
+            dom.lblKinDeflect.textContent = 'Impact Deflection Δθ';
+            dom.kpiKinDeflect.textContent = 'AWAITING';
+          }
+        } else if (m.pivotValid) {
+          dom.lblKinDeflect.textContent = 'Tether Radius R';
+          dom.kpiKinDeflect.textContent = m.calibrated
+            ? `${m.pendRadiusPhys.toFixed(2)} m`
+            : `${Math.round(m.pendRadiusPhys)} px`;
+        } else {
+          dom.lblKinDeflect.textContent = 'Angular Rate ω';
+          dom.kpiKinDeflect.textContent = m.activeTargets > 0 ? `${Math.round(m.angVelDegS)}°/s` : '--°/s';
+        }
+
+        if (currentLabMode === 2) {
+          dom.lblKinRestGrav.textContent = 'Restitution e (v⁺/v⁻)';
+          dom.kpiKinRestGrav.textContent = m.lastStrikeValid ? m.lastRestitution.toFixed(2) : 'READY';
+        } else if (m.sceneGravityConf >= 0.25 && m.sceneGravityPxS2 > 50) {
+          dom.lblKinRestGrav.textContent = 'Scene Gravity ĝ';
+          dom.kpiKinRestGrav.textContent = `${Math.round(m.sceneGravityPxS2)} px/s²`;
+        } else {
+          dom.lblKinRestGrav.textContent = 'Metric Calibration';
+          dom.kpiKinRestGrav.textContent = m.calibrated ? dom.calBadge.textContent : 'PX UNITS';
+        }
+
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+      } else if (m.type === 'cal_state') {
+        applyCalibrationUiState(m);
       } else if (m.type === 'rec_state') {
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
       } else if (m.type === 'telemetry_export_data') {
@@ -1679,7 +1956,7 @@
     const LAB_COPY = [
       {
         badge: 'MODE A',
-        html: '<strong>Mode A — Occlusion Spline &amp; Ballistic Apex:</strong> Bridges bounded occlusion gaps via two-point Cubic Hermite boundary splines and freezes Newtonian parabolic apex reticles with live peak accuracy scoring.',
+        html: '<strong>Mode A — Ballistic Parabola, Flight Angle θ &amp; Spline Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via curved Hermite arcs, and plots live tangent flight angles &amp; frozen apex reticles.',
         btn: '⚡ Launch Ballistic Arc Impulse',
         videoBtn: '⚡ Ballistic Impulse (Testbench Only)',
         action: 'ballistic_toss',
@@ -1687,7 +1964,7 @@
       },
       {
         badge: 'MODE B',
-        html: '<strong>Mode B — Tremor Quadrature &amp; Stimulus Onset:</strong> Revises non-causal 2D principal-axis residuals, equalizes 15-tap Hilbert quadrature phase, and timestamps armed stimulus-to-onset vs spontaneous step settle.',
+        html: '<strong>Mode B — Kåsa Virtual Pendulum Pivot &amp; Hilbert Quadrature:</strong> Solves 2×2 algebraic tether/metronome pivots for plumb swing θ, equalizes 15-tap Hilbert phase, and timestamps stimulus-to-onset settle.',
         btn: '⚡ Arm & Trigger Saccade Stimulus',
         videoBtn: '⚡ Arm Stimulus Onset Timer',
         action: 'saccade_step',
@@ -1695,7 +1972,7 @@
       },
       {
         badge: 'MODE C',
-        html: '<strong>Mode C — Delayed-Sync Impact Shockwaves &amp; Synth:</strong> Deduplicates sparse L1 velocity-jump impulses across colliding bodies and synchronizes localized impact shockwave rings + WebAudio voices at t − K.',
+        html: '<strong>Mode C — CAD Deflection Δθ, Restitution e &amp; Impact Synth:</strong> Measures pre/post-impact deflection angles, coefficient of restitution v⁺/v⁻, and 2-body scatter wedges synchronized with WebAudio voices at t − K.',
         btn: '⚡ Snap Air-Percussion L1 Strike',
         videoBtn: '⚡ Synthetic Snap (Testbench Only)',
         action: 'air_strike',
@@ -1808,6 +2085,144 @@
     });
     document.getElementById('chkStrobe').addEventListener('change', (e) => {
       worker.postMessage({ type: 'params', strobeEnabled: e.target.checked });
+    });
+
+    // Metric & Perspective Calibration Toolbar + Scale Form
+    if (!('focusGroup' in HTMLElement.prototype)) {
+      const toolbarItems = Array.from(dom.calToolbar.querySelectorAll('button'));
+      toolbarItems.forEach((b, i) => {
+        b.tabIndex = i ? -1 : 0;
+      });
+      dom.calToolbar.addEventListener('focusin', ({ target }) => {
+        if (toolbarItems.includes(target)) {
+          toolbarItems.forEach((b) => {
+            b.tabIndex = b === target ? 0 : -1;
+          });
+        }
+      });
+      dom.calToolbar.addEventListener('keydown', (ev) => {
+        const idx = toolbarItems.indexOf(document.activeElement);
+        if (idx < 0) return;
+        const vertical = dom.calToolbar.getAttribute('aria-orientation') === 'vertical';
+        const rtl = getComputedStyle(dom.calToolbar).direction === 'rtl';
+        const steps = vertical
+          ? { ArrowDown: 1, ArrowUp: -1 }
+          : { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 };
+        let nextIdx = -1;
+        if (Object.hasOwn(steps, ev.key)) {
+          nextIdx = (idx + steps[ev.key] + toolbarItems.length) % toolbarItems.length;
+        } else if (ev.key === 'Home') {
+          nextIdx = 0;
+        } else if (ev.key === 'End') {
+          nextIdx = toolbarItems.length - 1;
+        }
+        if (nextIdx >= 0) {
+          ev.preventDefault();
+          toolbarItems[nextIdx].focus();
+        }
+      });
+    }
+
+    const calScaleInputs = [dom.calRulerM, dom.calPlaneW, dom.calPlaneH];
+
+    function parseAndValidateScaleField(inputEl) {
+      const raw = inputEl.value.trim();
+      const num = Number(raw);
+      if (!raw || !/^\d+(\.\d+)?$/.test(raw) || !Number.isFinite(num) || num < 0.05 || num > 500) {
+        const msg = 'Enter positive meters between 0.05 and 500 (e.g. 1.00 or 2.84).';
+        inputEl.setCustomValidity(msg);
+        inputEl.setAttribute('aria-invalid', 'true');
+        return null;
+      }
+      inputEl.setCustomValidity('');
+      inputEl.removeAttribute('aria-invalid');
+      return num;
+    }
+
+    function readValidatedCalibrationDims(routeFocusOnFail) {
+      let firstBad = null;
+      const vals = [];
+      for (const inp of calScaleInputs) {
+        const v = parseAndValidateScaleField(inp);
+        if (v === null && !firstBad) {
+          firstBad = inp;
+        }
+        vals.push(v);
+      }
+      if (firstBad) {
+        dom.calStatusLive.textContent = 'INVALID SCALE · ENTER POSITIVE METERS (0.05–500 m)';
+        if (routeFocusOnFail) firstBad.focus();
+        return null;
+      }
+      return { rulerMeters: vals[0], planeW: vals[1], planeH: vals[2] };
+    }
+
+    calScaleInputs.forEach((inp) => {
+      inp.addEventListener('input', () => {
+        inp.setCustomValidity('');
+        inp.removeAttribute('aria-invalid');
+      });
+      inp.addEventListener('blur', () => {
+        const v = parseAndValidateScaleField(inp);
+        if (v === null) {
+          dom.calStatusLive.textContent = 'INVALID SCALE · ENTER POSITIVE METERS (0.05–500 m)';
+          return;
+        }
+        const dims = readValidatedCalibrationDims(false);
+        if (dims) {
+          worker.postMessage({ type: 'cal_control', action: 'update_dims', ...dims });
+        }
+      });
+      inp.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter' && ev.isComposing) {
+          ev.preventDefault();
+        }
+      });
+    });
+
+    dom.calScaleForm.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const dims = readValidatedCalibrationDims(true);
+      if (dims) {
+        worker.postMessage({ type: 'cal_control', action: 'update_dims', ...dims });
+      }
+    });
+
+    function getActivePresetKey() {
+      if (activeSourceMode === 'video' && sampleVideoSelect.value) {
+        return sampleVideoSelect.value.split('/').pop().replace(/\.[^.]+$/, '');
+      }
+      return activeSourceMode === 'video' ? 'custom_video' : 'testbench';
+    }
+
+    dom.btnCalRuler.addEventListener('click', () => {
+      const dims = readValidatedCalibrationDims(true);
+      if (!dims) return;
+      worker.postMessage({ type: 'cal_control', action: 'arm_ruler', ...dims });
+    });
+
+    dom.btnCalQuad.addEventListener('click', () => {
+      const dims = readValidatedCalibrationDims(true);
+      if (!dims) return;
+      worker.postMessage({ type: 'cal_control', action: 'arm_homography', ...dims });
+    });
+
+    dom.btnCalAutoG.addEventListener('click', () => {
+      worker.postMessage({ type: 'cal_control', action: 'set_auto_g' });
+    });
+
+    dom.btnCalPreset.addEventListener('click', () => {
+      worker.postMessage({ type: 'cal_control', action: 'apply_preset', preset: getActivePresetKey() });
+    });
+
+    dom.btnCalClear.addEventListener('click', () => {
+      worker.postMessage({ type: 'cal_control', action: 'clear' });
+    });
+
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape' && uiCalArmed !== 'none') {
+        worker.postMessage({ type: 'cal_control', action: 'cancel_arm' });
+      }
     });
 
     // Session Telemetry Recorder Controls

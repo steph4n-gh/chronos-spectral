@@ -51,7 +51,7 @@ pub const MAX_ROI_DIM: usize = 96;
 pub const MAX_ROI_PIXELS: usize = MAX_ROI_DIM * MAX_ROI_DIM; // 9,216
 pub const MAX_HYPS: usize = 24;
 pub const ASSIGN_COLS: usize = MAX_HYPS + MAX_TARGETS; // 32
-pub const TELEMETRY_LEN: usize = 576;
+pub const TELEMETRY_LEN: usize = 648;
 
 #[inline(always)]
 fn mode_dims(res_mode: u32) -> (usize, usize, usize, usize, usize, usize, f32) {
@@ -102,6 +102,49 @@ fn fast_sinf(x: f32) -> f32 {
     }
     let a2 = a * a;
     a * (1.0 + a2 * (-0.16666657 + a2 * (0.008333025 - a2 * 0.000198074)))
+}
+
+#[inline(always)]
+fn fast_cosf(x: f32) -> f32 {
+    fast_sinf(x + HALF_PI)
+}
+
+/// Trigonometric Constant-Turn-Rate & Velocity (CTRV) + gravitational free-flight step predictor.
+/// Smoothly reduces to exact straight-line chord `(x0 + vx0 * dt_f, y0 + vy0 * dt_f)` as `omega_f -> 0`.
+#[inline]
+fn predict_curved_step(
+    x0: f32,
+    y0: f32,
+    vx0: f32,
+    vy0: f32,
+    omega_f: f32,
+    ay_grav_f: f32,
+    is_ballistic: u8,
+    dt_f: f32,
+) -> (f32, f32, f32, f32) {
+    if is_ballistic != 0 && ay_grav_f > 0.02 {
+        let dt_c = dt_f.min(10.0);
+        let px = x0 + vx0 * dt_f;
+        let py = y0 + vy0 * dt_f + 0.5 * ay_grav_f * dt_c * dt_c;
+        let evy = vy0 + ay_grav_f * dt_c;
+        (px, py, vx0, evy)
+    } else if omega_f.abs() > 0.045 && omega_f.abs() < 0.42 {
+        let psi = (omega_f * dt_f).clamp(-1.25, 1.25);
+        let (sinc, cosc) = if psi.abs() < 1e-3 {
+            (1.0 - psi * psi * (1.0 / 6.0), 0.5 * psi)
+        } else {
+            (fast_sinf(psi) / psi, (1.0 - fast_cosf(psi)) / psi)
+        };
+        let dx = dt_f * (vx0 * sinc - vy0 * cosc);
+        let dy = dt_f * (vx0 * cosc + vy0 * sinc);
+        let cp = fast_cosf(psi);
+        let sp = fast_sinf(psi);
+        let evx = vx0 * cp - vy0 * sp;
+        let evy = vx0 * sp + vy0 * cp;
+        (x0 + dx, y0 + dy, evx, evy)
+    } else {
+        (x0 + vx0 * dt_f, y0 + vy0 * dt_f, vx0, vy0)
+    }
 }
 
 #[inline(always)]
@@ -249,6 +292,10 @@ pub struct TargetTrack {
     pub proximity_mask: u8,
     pub co_dup_streak: u8,
     pub has_entry: u8,
+    pub is_ballistic: u8,
+    pub pivot_valid: u8,
+    pub turn_streak: u8,
+    pub _pad_kin: [u8; 1],
 
     pub track_id: u32,
     pub birth_frame: u32,
@@ -315,6 +362,25 @@ pub struct TargetTrack {
     pub step_onset_frame: u32,
     pub saccade_latency_ms: f32,
     pub step_settle_ms: f32,
+
+    // Trigonometric, curved-arc CTRV, ballistic gravity & collision angle kinematics
+    pub arc_raw_x: [f32; 24],
+    pub arc_raw_y: [f32; 24],
+    pub arc_vis: [u8; 24],
+    pub ang_vel_rad_f: f32,
+    pub entry_omega_f: f32,
+    pub grav_ay_frame: f32,
+    pub heading_deg: f32,
+    pub speed_px_s: f32,
+    pub ang_vel_deg_s: f32,
+    pub strike_deflect_deg: f32,
+    pub strike_restitution: f32,
+    pub strike_in_deg: f32,
+    pub strike_out_vx: f32,
+    pub strike_out_vy: f32,
+    pub pivot_x: f32,
+    pub pivot_y: f32,
+    pub pivot_r: f32,
 }
 
 /// Constant-Velocity 2x2 State-Covariance Kinematic Kalman Baseline (`[x, v]` with `p_xx, p_xv, p_vv`).
@@ -414,6 +480,14 @@ pub struct Arena {
     pub stimulus_frame: u32,
     pub stimulus_armed: u32,
     pub focus_target_id: u32,
+    pub scene_gravity_px_s2: f32,
+    pub scene_gravity_conf: f32,
+    pub scatter_deg: f32,
+    pub scatter_x: f32,
+    pub scatter_y: f32,
+    pub scatter_th1_deg: f32,
+    pub scatter_th2_deg: f32,
+    pub scatter_event_frame: u32,
 }
 
 // Compile-time structural bound: Arena + 16 KiB stack + .rodata <= 256 pages (16,777,216 B)
@@ -719,18 +793,53 @@ unsafe fn propose_track_candidates_pyr(
         let sy = (((t.pos_y - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_py);
         roots[n_roots] = (sx, sy);
         n_roots += 1;
+
+        // Forward-heading extended root for confirmed airborne projectiles & returning periodic whips
+        // (one-way vehicles strictly satisfy cur_exc2 == max_excursion2 AND dot(pos - birth, vel) > 0;
+        // periodic oscillators violate one of those on ~96% of every swing regardless of birth phase!)
+        let bdx_p = t.pos_x - t.birth_x;
+        let bdy_p = t.pos_y - t.birth_y;
+        let cur_exc2_p = bdx_p * bdx_p + bdy_p * bdy_p;
+        let dot_birth_v = bdx_p * t.vel_x + bdy_p * t.vel_y;
+        let returning_osc = t.max_excursion2 >= (22.0 * s) * (22.0 * s)
+            && (cur_exc2_p < 0.85 * t.max_excursion2 || dot_birth_v < 0.0)
+            && (t.pivot_valid > 0 || (t.phase_valid != 0 && t.tremor_coherence > 0.24));
+        if (t.is_ballistic != 0 || returning_osc) && (t.vel_x.abs() + t.vel_y.abs() > 11.5 * s) {
+            let fwd_grav = if t.is_ballistic != 0 { 0.5 * t.grav_ay_frame } else { 0.0 };
+            let fwd_cx = pred_cx + 0.45 * t.vel_x;
+            let fwd_cy = pred_cy + 0.45 * t.vel_y + fwd_grav;
+            let fx = (((fwd_cx - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_px);
+            let fy = (((fwd_cy - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_py);
+            if (fx - p0x).abs() + (fy - p0y).abs() >= 3 && n_roots < roots.len() {
+                roots[n_roots] = (fx, fy);
+                n_roots += 1;
+            }
+        }
     } else if coasting > 0 {
         let ex = (((t.entry_x - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_px);
         let ey = (((t.entry_y - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_py);
         roots[n_roots] = (ex, ey);
         n_roots += 1;
 
-        let refl_cx = t.entry_x - (coasting as f32) * t.entry_vx;
-        let refl_cy = t.entry_y - (coasting as f32) * t.entry_vy;
+        let cf = coasting as f32;
+        let refl_cx = t.entry_x - cf * t.entry_vx;
+        let refl_cy = t.entry_y - cf * t.entry_vy;
         let rx = (((refl_cx - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_px);
         let ry = (((refl_cy - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_py);
         roots[n_roots] = (rx, ry);
         n_roots += 1;
+
+        // Linear-chord fallback strictly when CTRV/ballistic curved `pred_cx/pred_cy` is active
+        if t.is_ballistic != 0 || t.entry_omega_f.abs() > 0.045 {
+            let lin_cx = t.entry_x + cf * t.entry_vx;
+            let lin_cy = t.entry_y + cf * t.entry_vy;
+            let lx = (((lin_cx - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_px);
+            let ly = (((lin_cy - half_patch) * inv_pyr_div + 0.5) as i32).clamp(0, max_py);
+            if (lx - p0x).abs() + (ly - p0y).abs() >= 3 && n_roots < roots.len() {
+                roots[n_roots] = (lx, ly);
+                n_roots += 1;
+            }
+        }
     }
 
     // Track top 2 pyramid minima separated by >= 5 pyramid pixels (`10 * s` screen px)
@@ -1141,17 +1250,28 @@ unsafe fn backtrack_gap_in_rgba_ring(
             break;
         }
 
-        let guide_x = if use_entry_guide {
+        let (guide_x, guide_y) = if use_entry_guide {
             let alpha = (b as f32) / denom_b;
-            (1.0 - alpha) * cur_x + alpha * ent_x
+            let tau = 1.0 - alpha;
+            let sag_y = if a.targets[m].is_ballistic != 0 {
+                -0.5 * a.targets[m].grav_ay_frame * denom_b * denom_b * tau * alpha
+            } else {
+                0.0
+            };
+            (
+                (1.0 - alpha) * cur_x + alpha * ent_x,
+                (1.0 - alpha) * cur_y + alpha * ent_y + sag_y,
+            )
         } else {
-            cur_x - a.targets[m].vel_x
-        };
-        let guide_y = if use_entry_guide {
-            let alpha = (b as f32) / denom_b;
-            (1.0 - alpha) * cur_y + alpha * ent_y
-        } else {
-            cur_y - a.targets[m].vel_y
+            let step_grav = if a.targets[m].is_ballistic != 0 {
+                0.5 * a.targets[m].grav_ay_frame
+            } else {
+                0.0
+            };
+            (
+                cur_x - a.targets[m].vel_x,
+                cur_y - a.targets[m].vel_y + step_grav,
+            )
         };
 
         let roi_x = ((guide_x as i32) - (roi_dim as i32) / 2)
@@ -1807,7 +1927,9 @@ fn solve_noncausal_fista_target(
     frame_w: usize,
     frame_h: usize,
     scale_f: f32,
-) -> bool {
+    scene_gravity_px_s2: f32,
+    scene_gravity_conf: f32,
+) -> (bool, Option<f32>) {
     let mut yx = [0.0f32; RING_LEN];
     let mut yy = [0.0f32; RING_LEN];
     let mut vx = [0.0f32; RING_LEN];
@@ -1863,11 +1985,17 @@ fn solve_noncausal_fista_target(
                         vy[u0]
                     };
 
-                    // Provisional secant tangent on initial re-emergence frame u1 == 11 (revised next frame)
+                    // Provisional curvature-aware exit tangent on initial re-emergence frame u1 == 11 (revised next frame)
                     let (v1x, v1y) = if u1 + 1 < RING_LEN && vis[u1 + 1] != 0 {
                         (yx[u1 + 1] - yx[u1], yy[u1 + 1] - yy[u1])
                     } else {
-                        ((yx[u1] - yx[u0]) / dt, (yy[u1] - yy[u0]) / dt)
+                        let sec_vx = (yx[u1] - yx[u0]) / dt;
+                        let sec_vy = (yy[u1] - yy[u0]) / dt;
+                        if t.is_ballistic != 0 || t.entry_omega_f.abs() > 0.045 {
+                            (1.65 * sec_vx - 0.65 * v0x, 1.65 * sec_vy - 0.65 * v0y)
+                        } else {
+                            (sec_vx, sec_vy)
+                        }
                     };
 
                     for k in gap_start..gap_end {
@@ -1898,8 +2026,18 @@ fn solve_noncausal_fista_target(
                     };
                     for k in gap_start..RING_LEN {
                         let dt = (k - u0) as f32;
-                        yx[k] = (yx[u0] + dt * v_tail_x).clamp(tail_margin, (frame_w as f32) - tail_margin);
-                        yy[k] = (yy[u0] + dt * v_tail_y).clamp(tail_margin, (frame_h as f32) - tail_margin);
+                        let (cx_k, cy_k, _, _) = predict_curved_step(
+                            yx[u0],
+                            yy[u0],
+                            v_tail_x,
+                            v_tail_y,
+                            t.entry_omega_f,
+                            t.grav_ay_frame,
+                            t.is_ballistic,
+                            dt,
+                        );
+                        yx[k] = cx_k.clamp(tail_margin, (frame_w as f32) - tail_margin);
+                        yy[k] = cy_k.clamp(tail_margin, (frame_h as f32) - tail_margin);
                         weff[k] = 0.60;
                     }
                 } else if gap_end < RING_LEN {
@@ -1923,7 +2061,13 @@ fn solve_noncausal_fista_target(
                         let (v1x, v1y) = if u1 + 1 < RING_LEN && vis[u1 + 1] != 0 {
                             (yx[u1 + 1] - yx[u1], yy[u1 + 1] - yy[u1])
                         } else {
-                            ((yx[u1] - t.entry_x) / dt, (yy[u1] - t.entry_y) / dt)
+                            let sec_vx = (yx[u1] - t.entry_x) / dt;
+                            let sec_vy = (yy[u1] - t.entry_y) / dt;
+                            if t.is_ballistic != 0 || t.entry_omega_f.abs() > 0.045 {
+                                (1.65 * sec_vx - 0.65 * v0x, 1.65 * sec_vy - 0.65 * v0y)
+                            } else {
+                                (sec_vx, sec_vy)
+                            }
                         };
                         for k in 0..gap_end {
                             if (frame_idx as usize) + k >= (RING_LEN - 1) {
@@ -2117,10 +2261,10 @@ fn solve_noncausal_fista_target(
     t.fista_uy = uy;
     t.fista_duality_gap = dual_gap;
 
-    // Mode A: Physical-units Parabolic Ballistic Apex Predictor
-    // Fits an exact 3-point wide-chord parabola across observed sub-pixel positions [u0, um, 11]
-    // so soft-thresholded boundary L1 differences never zero out true gravitational curvature.
-    // Screen Y increases downward: ascending throw has vy_phys < 0 and downward gravity ay_phys > 0.
+    // Mode A: Full-Segment Closed-Form Quadratic Least-Squares Parabola + Scene Gravity Prior
+    // Solves the centered 2x2 normal system for y(tau) = c0 + c1*tau + c2*tau^2 (with c2 = 0.5*g)
+    // and x(tau) = x_bar + vx*tau across all impulse-free observations in [seg_start..=11],
+    // retaining a 3-point Newtonian ascent fallback at [9, 10, 11] right after hand release.
     let a_frame_x = xk[11] - 2.0 * xk[10] + xk[9];
     let v_frame_x = (xk[11] - xk[10]) + 0.5 * a_frame_x;
     let v_frame_y = yk[11] - yk[10];
@@ -2128,127 +2272,324 @@ fn solve_noncausal_fista_target(
     let v_phys_y = v_frame_y * fps;
 
     let mut apex_found = false;
+    let mut ballistic_found = false;
+    let mut pooled_ay_phys: Option<f32> = None;
+
     if vis_count >= 3 && vis[11] != 0 {
-        for u0 in [2usize, 3, 4, 5, 6, 7, 8, 9] {
-            let span = 11 - u0;
-            let (valid_anchor, v1_y, v2_y, dt_mid, v_ball_x, v_consistency_ok, min_rise) = if span >= 4 {
-                let um = (u0 + 11) / 2;
-                if vis[u0] != 0 && vis[um] != 0 && yy[u0] > yy[um] && yy[um] > yy[11] {
-                    let dt1 = (um - u0) as f32;
-                    let dt2 = (11 - um) as f32;
-                    let vy1 = (yy[um] - yy[u0]) / dt1;
-                    let vy2 = (yy[11] - yy[um]) / dt2;
-                    let vx1 = (yx[um] - yx[u0]) / dt1;
-                    let vx2 = (yx[11] - yx[um]) / dt2;
-                    (
-                        true,
-                        vy1,
-                        vy2,
-                        0.5 * (dt1 + dt2),
-                        (yx[11] - yx[u0]) / (span as f32),
-                        (vx2 - vx1).abs() < 3.2 * scale_f,
-                        6.0 * scale_f,
-                    )
-                } else {
-                    (false, 0.0, 0.0, 1.0, 0.0, false, 0.0)
-                }
-            } else if span == 3 {
-                if vis[8] != 0
-                    && vis[9] != 0
-                    && vis[10] != 0
-                    && yy[8] > yy[9]
-                    && yy[9] > yy[10]
-                    && yy[10] > yy[11]
-                {
-                    let vy1 = yy[9] - yy[8];
-                    let vy2 = yy[11] - yy[10];
-                    let vx1 = yx[9] - yx[8];
-                    let vx2 = yx[11] - yx[10];
-                    (
-                        true,
-                        vy1,
-                        vy2,
-                        2.0,
-                        (yx[11] - yx[8]) / 3.0,
-                        (vx2 - vx1).abs() < 3.5 * scale_f,
-                        9.0 * scale_f,
-                    )
-                } else {
-                    (false, 0.0, 0.0, 1.0, 0.0, false, 0.0)
+        let mut seg_start = 0usize;
+        let mut miss_run = 0usize;
+        let mut scan_u = 11usize;
+        while scan_u > 0 {
+            scan_u -= 1;
+            if vis[scan_u] == 0 {
+                miss_run += 1;
+                if miss_run >= 2 {
+                    seg_start = scan_u + 2;
+                    break;
                 }
             } else {
-                // Fast 3-point Newtonian ascent [9, 10, 11] for steep high-velocity 24-30fps throws
-                if vis[9] != 0 && vis[10] != 0 && yy[9] > yy[10] && yy[10] > yy[11] {
-                    let vy1 = yy[10] - yy[9];
-                    let vy2 = yy[11] - yy[10];
-                    let vx1 = yx[10] - yx[9];
-                    let vx2 = yx[11] - yx[10];
-                    (
-                        true,
-                        vy1,
-                        vy2,
-                        1.0,
-                        0.5 * (vx1 + vx2),
-                        (vx2 - vx1).abs() < 2.8 * scale_f,
-                        12.0 * scale_f,
-                    )
-                } else {
-                    (false, 0.0, 0.0, 1.0, 0.0, false, 0.0)
-                }
-            };
-
-            if valid_anchor && v_consistency_ok && (yy[u0] - yy[11]) >= min_rise {
-                let a_ball_y = (v2_y - v1_y) / dt_mid;
-                let dt_last = if span >= 4 {
-                    (11 - ((u0 + 11) / 2)) as f32
-                } else {
-                    1.0
-                };
-                let v_ball_y = v2_y + 0.5 * dt_last * a_ball_y;
-                let vy_phys_b = v_ball_y * fps;
-                let vx_phys_b = v_ball_x * fps;
-                let ay_phys_b = a_ball_y * fps * fps;
-
-                if vy_phys_b < -18.0 * scale_f
-                    && ay_phys_b > 110.0 * scale_f
-                    && ay_phys_b < 16500.0 * scale_f
-                {
-                    let min_obs = if span == 2 { 3usize } else { 4usize };
-                    let mut obs_in_arc = 0usize;
-                    let mut max_res_y = 0.0f32;
-                    let mut max_res_x = 0.0f32;
-                    for q in u0..=11usize {
-                        if vis[q] != 0 {
-                            obs_in_arc += 1;
-                            let du = (q as f32) - 11.0;
-                            let y_fit = yy[11] + v_ball_y * du + 0.5 * a_ball_y * du * du;
-                            let x_fit = yx[11] + v_ball_x * du;
-                            let ey = (yy[q] - y_fit).abs();
-                            let ex = (yx[q] - x_fit).abs();
-                            if ey > max_res_y {
-                                max_res_y = ey;
-                            }
-                            if ex > max_res_x {
-                                max_res_x = ex;
-                            }
-                        }
-                    }
-                    if obs_in_arc >= min_obs && max_res_y <= 3.6 * scale_f && max_res_x <= 3.8 * scale_f {
-                        let t_apex_sec = (-vy_phys_b / ay_phys_b).min(0.75);
-                        t.apex_frames = t_apex_sec * fps;
-                        t.apex_x = (xk[11] + vx_phys_b * t_apex_sec)
-                            .clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
-                        t.apex_y = (yk[11]
-                            + vy_phys_b * t_apex_sec
-                            + 0.5 * ay_phys_b * t_apex_sec * t_apex_sec)
-                            .clamp(6.0 * scale_f, (frame_h as f32) - 6.0 * scale_f);
-                        apex_found = true;
+                miss_run = 0;
+                if scan_u + 2 <= 11 && vis[scan_u + 1] != 0 && vis[scan_u + 2] != 0 {
+                    let dvx = (yx[scan_u + 2] - yx[scan_u + 1]) - (yx[scan_u + 1] - yx[scan_u]);
+                    let dvy = (yy[scan_u + 2] - yy[scan_u + 1]) - (yy[scan_u + 1] - yy[scan_u]);
+                    if dvx.abs() > 3.8 * scale_f || dvy < -2.8 * scale_f || dvy > 14.0 * scale_f {
+                        seg_start = scan_u + 1;
                         break;
                     }
                 }
             }
         }
+
+        let bounded_osc = t.phase_valid != 0
+            && t.tremor_coherence > 0.45
+            && t.max_excursion2 < (92.0 * scale_f) * (92.0 * scale_f);
+        let rigid_tether = t.pivot_valid > 0
+            || (t.phase_valid != 0 && t.tremor_coherence > 0.36);
+
+        if !bounded_osc {
+            let start_min = seg_start.min(9);
+            for u0 in start_min..=9usize {
+                let mut pts = [0usize; RING_LEN];
+                let mut n_pts = 0usize;
+                for q in u0..=11usize {
+                    if vis[q] != 0 {
+                        pts[n_pts] = q;
+                        n_pts += 1;
+                    }
+                }
+
+                if n_pts >= 4 && (pts[n_pts - 1] - pts[0]) >= 3 {
+                    let inv_n = 1.0 / (n_pts as f32);
+                    let mut sum_t = 0.0f32;
+                    let mut sum_x = 0.0f32;
+                    let mut sum_y = 0.0f32;
+                    let mut min_y = 1e9f32;
+                    let mut max_y = -1e9f32;
+                    for i in 0..n_pts {
+                        let q = pts[i];
+                        let ti = (q as f32) - 11.0;
+                        let xi = yx[q];
+                        let yi = yy[q];
+                        sum_t += ti;
+                        sum_x += xi;
+                        sum_y += yi;
+                        if yi < min_y {
+                            min_y = yi;
+                        }
+                        if yi > max_y {
+                            max_y = yi;
+                        }
+                    }
+                    let t_bar = sum_t * inv_n;
+                    let x_bar = sum_x * inv_n;
+                    let y_bar = sum_y * inv_n;
+
+                    let mut s2 = 0.0f32;
+                    let mut s3 = 0.0f32;
+                    let mut s4 = 0.0f32;
+                    let mut x1 = 0.0f32;
+                    let mut y1 = 0.0f32;
+                    let mut y2_raw = 0.0f32;
+                    for i in 0..n_pts {
+                        let q = pts[i];
+                        let tau = ((q as f32) - 11.0) - t_bar;
+                        let tau2 = tau * tau;
+                        let dx = yx[q] - x_bar;
+                        let dy = yy[q] - y_bar;
+                        s2 += tau2;
+                        s3 += tau2 * tau;
+                        s4 += tau2 * tau2;
+                        x1 += tau * dx;
+                        y1 += tau * dy;
+                        y2_raw += tau2 * dy;
+                    }
+                    let s2_n = s2 * inv_n;
+                    let s4c = s4 - s2 * s2_n;
+                    let det = s2 * s4c - s3 * s3;
+                    if s2 > 1e-3 && det > 1e-3 {
+                        // Centered y_bar gives sum(dy) == 0, so sum((tau^2 - s2/N)*dy) == y2_raw
+                        let inv_det = 1.0 / det;
+                        let c1 = (s4c * y1 - s3 * y2_raw) * inv_det;
+                        let c2 = (s2 * y2_raw - s3 * y1) * inv_det;
+                        let c0 = y_bar - c2 * s2_n;
+
+                        let a_ball_y = 2.0 * c2;
+                        let v_ball_y = c1 - 2.0 * c2 * t_bar;
+                        let v_ball_x = x1 / s2;
+                        let x11_fit = x_bar - v_ball_x * t_bar;
+                        let y11_fit = c0 - c1 * t_bar + c2 * t_bar * t_bar;
+
+                        let vy_phys_b = v_ball_y * fps;
+                        let vx_phys_b = v_ball_x * fps;
+                        let ay_phys_b = a_ball_y * fps * fps;
+
+                        if ((max_y - min_y) >= 6.0 * scale_f || vy_phys_b.abs() >= 42.0 * scale_f)
+                            && ay_phys_b > 110.0 * scale_f
+                            && ay_phys_b < 16500.0 * scale_f
+                        {
+                            let mut sum_ey2 = 0.0f32;
+                            let mut sum_ex2 = 0.0f32;
+                            let mut max_res_y = 0.0f32;
+                            let mut max_res_x = 0.0f32;
+                            for i in 0..n_pts {
+                                let q = pts[i];
+                                let tau = ((q as f32) - 11.0) - t_bar;
+                                let y_fit = c0 + c1 * tau + c2 * tau * tau;
+                                let x_fit = x_bar + v_ball_x * tau;
+                                let ey = (yy[q] - y_fit).abs();
+                                let ex = (yx[q] - x_fit).abs();
+                                sum_ey2 += ey * ey;
+                                sum_ex2 += ex * ex;
+                                if ey > max_res_y {
+                                    max_res_y = ey;
+                                }
+                                if ex > max_res_x {
+                                    max_res_x = ex;
+                                }
+                            }
+                            let rmse_y = wasm_sqrtf(sum_ey2 * inv_n);
+                            let rmse_x = wasm_sqrtf(sum_ex2 * inv_n);
+
+                            if rmse_y <= 2.4 * scale_f
+                                && rmse_x <= 2.6 * scale_f
+                                && max_res_y <= 3.6 * scale_f
+                                && max_res_x <= 3.8 * scale_f
+                            {
+                                let prev_g_phys = t.grav_ay_frame * fps * fps;
+                                let ascending_launch = !rigid_tether
+                                    && vy_phys_b < -18.0 * scale_f
+                                    && ay_phys_b > 760.0 * scale_f;
+                                let continuing_arc = !rigid_tether
+                                    && t.is_ballistic != 0
+                                    && rmse_y <= 1.85 * scale_f
+                                    && prev_g_phys > 760.0 * scale_f
+                                    && ay_phys_b > 0.55 * prev_g_phys
+                                    && ay_phys_b < 1.55 * prev_g_phys;
+
+                                if ascending_launch || continuing_arc {
+                                    ballistic_found = true;
+                                    t.is_ballistic = 1;
+                                    t.grav_ay_frame = if t.grav_ay_frame > 0.01 {
+                                        0.68 * t.grav_ay_frame + 0.32 * a_ball_y
+                                    } else {
+                                        a_ball_y
+                                    };
+                                    if ascending_launch
+                                        && n_pts >= 5
+                                        && rmse_y <= 1.9 * scale_f
+                                        && rmse_x <= 2.2 * scale_f
+                                    {
+                                        pooled_ay_phys = Some(ay_phys_b);
+                                    }
+                                }
+
+                                if vy_phys_b < -18.0 * scale_f {
+                                    let ay_used = if n_pts == 4
+                                        && scene_gravity_conf >= 0.55
+                                        && scene_gravity_px_s2 > 320.0 * scale_f
+                                        && ay_phys_b > 0.45 * scene_gravity_px_s2
+                                        && ay_phys_b < 1.85 * scene_gravity_px_s2
+                                    {
+                                        0.78 * ay_phys_b + 0.22 * scene_gravity_px_s2
+                                    } else {
+                                        ay_phys_b
+                                    };
+                                    let t_apex_sec = (-vy_phys_b / ay_used).min(0.75);
+                                    let x0_ap = 0.5 * (xk[11] + x11_fit);
+                                    let y0_ap = 0.5 * (yk[11] + y11_fit);
+                                    t.apex_frames = t_apex_sec * fps;
+                                    t.apex_x = (x0_ap + vx_phys_b * t_apex_sec)
+                                        .clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
+                                    t.apex_y = (y0_ap
+                                        + vy_phys_b * t_apex_sec
+                                        + 0.5 * ay_used * t_apex_sec * t_apex_sec)
+                                        .clamp(6.0 * scale_f, (frame_h as f32) - 6.0 * scale_f);
+                                    apex_found = true;
+                                    break;
+                                }
+                                if continuing_arc && vy_phys_b > 15.0 * scale_f {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else if u0 == 9
+                    && n_pts == 3
+                    && vis[9] != 0
+                    && vis[10] != 0
+                    && yy[9] > yy[10]
+                    && yy[10] > yy[11]
+                    && (yy[9] - yy[11]) >= 12.0 * scale_f
+                {
+                    // Fast 3-point Newtonian ascent [9, 10, 11] for steep 24-30fps throws right after release
+                    let vy1 = yy[10] - yy[9];
+                    let vy2 = yy[11] - yy[10];
+                    let vx1 = yx[10] - yx[9];
+                    let vx2 = yx[11] - yx[10];
+                    if (vx2 - vx1).abs() < 2.8 * scale_f {
+                        let a_ball_y = vy2 - vy1;
+                        let v_ball_y = vy2 + 0.5 * a_ball_y;
+                        let v_ball_x = 0.5 * (vx1 + vx2);
+                        let vy_phys_b = v_ball_y * fps;
+                        let vx_phys_b = v_ball_x * fps;
+                        let ay_phys_b = a_ball_y * fps * fps;
+                        if vy_phys_b < -18.0 * scale_f
+                            && ay_phys_b > 110.0 * scale_f
+                            && ay_phys_b < 16500.0 * scale_f
+                        {
+                            let ay_used = if scene_gravity_conf >= 0.55
+                                && scene_gravity_px_s2 > 110.0 * scale_f
+                                && ay_phys_b > 0.40 * scene_gravity_px_s2
+                                && ay_phys_b < 1.95 * scene_gravity_px_s2
+                            {
+                                0.72 * ay_phys_b + 0.28 * scene_gravity_px_s2
+                            } else {
+                                ay_phys_b
+                            };
+                            if !rigid_tether && ay_used > 760.0 * scale_f {
+                                ballistic_found = true;
+                                t.is_ballistic = 1;
+                                t.grav_ay_frame = ay_used / (fps * fps);
+                            }
+                            let t_apex_sec = (-vy_phys_b / ay_used).min(0.75);
+                            t.apex_frames = t_apex_sec * fps;
+                            t.apex_x = (xk[11] + vx_phys_b * t_apex_sec)
+                                .clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
+                            t.apex_y = (yk[11]
+                                + vy_phys_b * t_apex_sec
+                                + 0.5 * ay_used * t_apex_sec * t_apex_sec)
+                                .clamp(6.0 * scale_f, (frame_h as f32) - 6.0 * scale_f);
+                            apex_found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // Constrained-arc wide-chord turnaround fallback (e.g. Galileo's pendulum decelerating in both x & y)
+            if !apex_found {
+                for u0 in [2usize, 3, 4, 5, 6, 7, 8] {
+                    let span = 11 - u0;
+                    let um = (u0 + 11) / 2;
+                    let ok_chord = if span >= 4 {
+                        vis[u0] != 0 && vis[um] != 0 && yy[u0] > yy[um] && yy[um] > yy[11]
+                    } else {
+                        vis[8] != 0 && vis[9] != 0 && vis[10] != 0 && yy[8] > yy[9] && yy[9] > yy[10] && yy[10] > yy[11]
+                    };
+                    if !ok_chord {
+                        continue;
+                    }
+                    let (vy1, vy2, dt_mid, dt_last, vx1, vx2, min_rise) = if span >= 4 {
+                        let d1 = (um - u0) as f32;
+                        let d2 = (11 - um) as f32;
+                        ((yy[um] - yy[u0]) / d1, (yy[11] - yy[um]) / d2, 0.5 * (d1 + d2), d2, (yx[um] - yx[u0]) / d1, (yx[11] - yx[um]) / d2, 6.0 * scale_f)
+                    } else {
+                        (yy[9] - yy[8], yy[11] - yy[10], 2.0, 1.0, yx[9] - yx[8], yx[11] - yx[10], 9.0 * scale_f)
+                    };
+                    if (vx2 - vx1).abs() < 3.5 * scale_f && (yy[u0] - yy[11]) >= min_rise {
+                        let a_ball_y = (vy2 - vy1) / dt_mid;
+                        let v_ball_y = vy2 + 0.5 * dt_last * a_ball_y;
+                        let v_ball_x = (yx[11] - yx[u0]) / (span as f32);
+                        let vy_phys_b = v_ball_y * fps;
+                        let vx_phys_b = v_ball_x * fps;
+                        let ay_phys_b = a_ball_y * fps * fps;
+                        if vy_phys_b < -18.0 * scale_f && ay_phys_b > 110.0 * scale_f && ay_phys_b < 16500.0 * scale_f {
+                            let mut obs_in_arc = 0usize;
+                            let mut max_ry = 0.0f32;
+                            let mut max_rx = 0.0f32;
+                            for q in u0..=11usize {
+                                if vis[q] != 0 {
+                                    obs_in_arc += 1;
+                                    let du = (q as f32) - 11.0;
+                                    let ey = (yy[q] - (yy[11] + v_ball_y * du + 0.5 * a_ball_y * du * du)).abs();
+                                    let ex = (yx[q] - (yx[11] + v_ball_x * du)).abs();
+                                    if ey > max_ry { max_ry = ey; }
+                                    if ex > max_rx { max_rx = ex; }
+                                }
+                            }
+                            if obs_in_arc >= 4 && max_ry <= 3.6 * scale_f && max_rx <= 3.8 * scale_f {
+                                let t_apex_sec = (-vy_phys_b / ay_phys_b).min(0.75);
+                                t.apex_frames = t_apex_sec * fps;
+                                t.apex_x = (xk[11] + vx_phys_b * t_apex_sec).clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
+                                t.apex_y = (yk[11] + vy_phys_b * t_apex_sec + 0.5 * ay_phys_b * t_apex_sec * t_apex_sec).clamp(6.0 * scale_f, (frame_h as f32) - 6.0 * scale_f);
+                                apex_found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    if vis[11] != 0 && !ballistic_found {
+        t.grav_ay_frame = 0.0;
+        t.is_ballistic = 0;
+    } else if vis[11] == 0 && t.coasting > 14 {
+        t.is_ballistic = 0;
+        t.grav_ay_frame = 0.0;
+    }
+
     if !apex_found {
         t.apex_frames = 0.0;
         t.apex_x = xk[11];
@@ -2293,7 +2634,7 @@ fn solve_noncausal_fista_target(
             }
         }
     }
-    consumed_stimulus
+    (consumed_stimulus, pooled_ay_phys)
 }
 
 // ============================================================================
@@ -2366,6 +2707,14 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.stimulus_frame = 0;
     a.stimulus_armed = 0;
     a.focus_target_id = 0;
+    a.scene_gravity_px_s2 = 0.0;
+    a.scene_gravity_conf = 0.0;
+    a.scatter_deg = 0.0;
+    a.scatter_x = 0.0;
+    a.scatter_y = 0.0;
+    a.scatter_th1_deg = 0.0;
+    a.scatter_th2_deg = 0.0;
+    a.scatter_event_frame = 0;
 }
 
 #[no_mangle]
@@ -2667,15 +3016,23 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
             } else {
                 let cf = coasting as f32;
                 let ca = cf.min(8.0);
+                let (cx_raw, cy_raw, _, _) = predict_curved_step(
+                    a.targets[m].entry_x,
+                    a.targets[m].entry_y,
+                    a.targets[m].entry_vx,
+                    a.targets[m].entry_vy,
+                    a.targets[m].entry_omega_f,
+                    a.targets[m].grav_ay_frame,
+                    a.targets[m].is_ballistic,
+                    cf,
+                );
+                let use_lin_acc = a.targets[m].is_ballistic == 0
+                    && a.targets[m].entry_omega_f.abs() <= 0.045;
+                let ax_off = if use_lin_acc { 0.20 * ca * ca * a.targets[m].entry_ax } else { 0.0 };
+                let ay_off = if use_lin_acc { 0.20 * ca * ca * a.targets[m].entry_ay } else { 0.0 };
                 (
-                    (a.targets[m].entry_x
-                        + cf * a.targets[m].entry_vx
-                        + 0.20 * ca * ca * a.targets[m].entry_ax)
-                        .clamp(half_patch, (frame_w as f32) - half_patch),
-                    (a.targets[m].entry_y
-                        + cf * a.targets[m].entry_vy
-                        + 0.20 * ca * ca * a.targets[m].entry_ay)
-                        .clamp(half_patch, (frame_h as f32) - half_patch),
+                    (cx_raw + ax_off).clamp(half_patch, (frame_w as f32) - half_patch),
+                    (cy_raw + ay_off).clamp(half_patch, (frame_h as f32) - half_patch),
                 )
             };
             a.targets[m].pred_cx = px;
@@ -2725,6 +3082,174 @@ pub unsafe extern "C" fn chronos_pre_tick(_dt_sec: f32) {
     }
 }
 
+/// Measures pre- and post-impact velocity chords around a sparse L1 acceleration impulse `strike_u`
+/// inside the 12-frame ring, skipping the exposure-straddling frame `strike_u` when multi-frame
+/// flanking chords exist. Returns `(in_deg, signed_deflect_deg, restitution, out_vx, out_vy, pre_valid)`.
+fn measure_strike_kinematics(
+    t: &TargetTrack,
+    slot_in: usize,
+    strike_u: usize,
+    s: f32,
+) -> Option<(f32, f32, f32, f32, f32, bool)> {
+    if strike_u == 0 || strike_u + 1 >= RING_LEN {
+        return None;
+    }
+    let mut rx = [0.0f32; RING_LEN];
+    let mut ry = [0.0f32; RING_LEN];
+    let mut rvis = [0u8; RING_LEN];
+    for u in 0..RING_LEN {
+        let su = (slot_in + 1 + u) % RING_LEN;
+        rx[u] = t.ring_raw_x[su];
+        ry[u] = t.ring_raw_y[su];
+        rvis[u] = t.ring_vis[su];
+    }
+
+    let u_b = if strike_u >= 2 && rvis[strike_u - 1] != 0 && rvis[strike_u - 2] != 0 {
+        strike_u - 1
+    } else {
+        strike_u
+    };
+    let mut u_a = u_b;
+    let min_a = u_b.saturating_sub(3);
+    while u_a > min_a && rvis[u_a - 1] != 0 {
+        u_a -= 1;
+    }
+    if u_a == u_b || rvis[u_a] == 0 || rvis[u_b] == 0 {
+        return None;
+    }
+    let dt_pre = (u_b - u_a) as f32;
+    let vpre_x = (rx[u_b] - rx[u_a]) / dt_pre;
+    let vpre_y = (ry[u_b] - ry[u_a]) / dt_pre;
+
+    let u_c = if strike_u + 2 < RING_LEN && rvis[strike_u + 1] != 0 && rvis[strike_u + 2] != 0 {
+        strike_u + 1
+    } else {
+        strike_u
+    };
+    let mut u_d = u_c;
+    let max_d = (u_c + 3).min(RING_LEN - 1);
+    while u_d < max_d && rvis[u_d + 1] != 0 {
+        u_d += 1;
+    }
+    if u_d == u_c || rvis[u_c] == 0 || rvis[u_d] == 0 {
+        return None;
+    }
+    let dt_post = (u_d - u_c) as f32;
+    let vpost_x = (rx[u_d] - rx[u_c]) / dt_post;
+    let vpost_y = (ry[u_d] - ry[u_c]) / dt_post;
+
+    let pre_mag = wasm_sqrtf(vpre_x * vpre_x + vpre_y * vpre_y);
+    let post_mag = wasm_sqrtf(vpost_x * vpost_x + vpost_y * vpost_y);
+    let rad_to_deg = 180.0 / PI;
+
+    if pre_mag >= 0.75 * s {
+        let in_rad = fast_atan2f(-vpre_y, vpre_x);
+        let in_deg = in_rad * rad_to_deg;
+        let rest = (post_mag / pre_mag).clamp(0.0, 2.5);
+        let defl_deg = if post_mag >= 0.40 * s {
+            let out_rad = fast_atan2f(-vpost_y, vpost_x);
+            wrap_pi(out_rad - in_rad) * rad_to_deg
+        } else {
+            0.0
+        };
+        Some((in_deg, defl_deg, rest, vpost_x, vpost_y, true))
+    } else if post_mag >= 1.15 * s {
+        // Object ball struck from near-rest: export outgoing velocity for 2-body scatter wedge
+        let out_deg = fast_atan2f(-vpost_y, vpost_x) * rad_to_deg;
+        Some((out_deg, 0.0, 1.0, vpost_x, vpost_y, false))
+    } else {
+        None
+    }
+}
+
+/// Exact 2x2 centered Kasa algebraic circle fit on raw sub-pixel IC-LK observations.
+/// Unbiased by FISTA L1 piecewise-linear boundary flattening; returns `(xc, yc, rad, mean_y, sag)`.
+fn fit_kasa_circle_subpx(
+    pts_x: &[f32],
+    pts_y: &[f32],
+    n: usize,
+    s: f32,
+    min_sag_mult: f32,
+) -> Option<(f32, f32, f32, f32, f32)> {
+    if n < 7 {
+        return None;
+    }
+    let inv_n = 1.0 / (n as f32);
+    let mut mx = 0.0f32;
+    let mut my = 0.0f32;
+    let mut min_x = 1e9f32;
+    let mut max_x = -1e9f32;
+    let mut min_y = 1e9f32;
+    let mut max_y = -1e9f32;
+    for i in 0..n {
+        let x = pts_x[i];
+        let y = pts_y[i];
+        mx += x;
+        my += y;
+        if x < min_x {
+            min_x = x;
+        }
+        if x > max_x {
+            max_x = x;
+        }
+        if y < min_y {
+            min_y = y;
+        }
+        if y > max_y {
+            max_y = y;
+        }
+    }
+    let span = wasm_sqrtf((max_x - min_x) * (max_x - min_x) + (max_y - min_y) * (max_y - min_y));
+    if span < 14.0 * s {
+        return None;
+    }
+    mx *= inv_n;
+    my *= inv_n;
+
+    let mut s_uu = 0.0f32;
+    let mut s_uv = 0.0f32;
+    let mut s_vv = 0.0f32;
+    let mut b_u = 0.0f32;
+    let mut b_v = 0.0f32;
+    for i in 0..n {
+        let ui = pts_x[i] - mx;
+        let vi = pts_y[i] - my;
+        let zi = ui * ui + vi * vi;
+        s_uu += ui * ui;
+        s_uv += ui * vi;
+        s_vv += vi * vi;
+        b_u += 0.5 * ui * zi;
+        b_v += 0.5 * vi * zi;
+    }
+    let tr = s_uu + s_vv;
+    let det = s_uu * s_vv - s_uv * s_uv;
+    if tr <= 1.0 || det <= 5e-4 * tr * tr {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let uc = (s_vv * b_u - s_uv * b_v) * inv_det;
+    let vc = (s_uu * b_v - s_uv * b_u) * inv_det;
+    let xc = mx + uc;
+    let yc = my + vc;
+    let rad = wasm_sqrtf(uc * uc + vc * vc + tr * inv_n);
+    let sag = (span * span) / (8.0 * rad.max(1.0));
+    if rad < 22.0 * s || rad > 440.0 * s || sag < min_sag_mult * s {
+        return None;
+    }
+    let mut sum_er2 = 0.0f32;
+    for i in 0..n {
+        let rx = pts_x[i] - xc;
+        let ry = pts_y[i] - yc;
+        let er = wasm_sqrtf(rx * rx + ry * ry) - rad;
+        sum_er2 += er * er;
+    }
+    let rmse_r = wasm_sqrtf(sum_er2 * inv_n);
+    if rmse_r > 2.25 * s {
+        return None;
+    }
+    Some((xc, yc, rad, my, sag))
+}
+
 /// Phase 2 of frame tick (executes after Fiedler vector & eigengap are written to Arena):
 /// Performs spectrally-regularized 2-adic patch association, continuous SSD sub-pixel refinement,
 /// 2x2 Kalman baseline tracking, Dual Projected-FISTA smoothing, non-causal Hilbert equalization,
@@ -2748,6 +3273,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let dt_frames_60 = (safe_dt * 60.0).clamp(0.25, 6.5);
 
     let slot_in = (f_idx as usize) % RING_LEN;
+    let arc_slot_in = (f_idx as usize) % 24;
     let eff_k = (a.lookahead_k.min(f_idx) as usize).min(RING_LEN - 1);
     let slot_disp = ((f_idx as usize) + RING_LEN - eff_k) % RING_LEN;
     a.last_display_slot = slot_disp as u32;
@@ -2917,18 +3443,48 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let kin_cost = if coasting == 0 {
                 let dxp = hx - pred_cx;
                 let dyp = hy - pred_cy;
-                let d2_pred = dxp * dxp + dyp * dyp;
                 let dxc = hx - t.pos_x;
                 let dyc = hy - t.pos_y;
                 let d2_curr = dxc * dxc + dyc * dyc;
-                if d2_pred > vis_pred_r2 || d2_curr > vis_curr_r2 {
-                    continue;
+                let v_mag2 = t.vel_x * t.vel_x + t.vel_y * t.vel_y;
+                let non_harmonic = t.pivot_valid == 0
+                    && !(t.phase_valid != 0 && t.tremor_coherence > 0.25);
+                if t.confirmed != 0 && non_harmonic && v_mag2 >= (8.5 * s) * (8.5 * s) {
+                    // Anisotropic heading-aligned elliptical gate: expand longitudinal reach (1.08x)
+                    // along velocity vector while tightening cross-track lateral radius (0.90x) & cost (1.24x).
+                    let v_mag = wasm_sqrtf(v_mag2);
+                    let ux_h = t.vel_x / v_mag;
+                    let uy_h = t.vel_y / v_mag;
+                    let d_par = dxp * ux_h + dyp * uy_h;
+                    let d_perp = -dxp * uy_h + dyp * ux_h;
+                    let a_par = 1.08 * vis_pred_r;
+                    let b_perp = 0.90 * vis_pred_r;
+                    let norm_ell2 = (d_par * d_par) / (a_par * a_par)
+                        + (d_perp * d_perp) / (b_perp * b_perp);
+                    if norm_ell2 > 1.0 || d2_curr > vis_curr_r2 {
+                        continue;
+                    }
+                    let d2_mahal = 0.94 * d_par * d_par + 1.24 * d_perp * d_perp;
+                    0.036 * d2_mahal * inv_kin_scale2
+                } else {
+                    let d2_pred = dxp * dxp + dyp * dyp;
+                    if d2_pred > vis_pred_r2 || d2_curr > vis_curr_r2 {
+                        continue;
+                    }
+                    0.036 * d2_pred * inv_kin_scale2
                 }
-                0.036 * d2_pred * inv_kin_scale2
             } else {
                 let cf2 = cf.min(3.0);
-                let ex_x = t.entry_x + cf2 * t.entry_vx;
-                let ex_y = t.entry_y + cf2 * t.entry_vy;
+                let (ex_x, ex_y, _, _) = predict_curved_step(
+                    t.entry_x,
+                    t.entry_y,
+                    t.entry_vx,
+                    t.entry_vy,
+                    t.entry_omega_f,
+                    t.grav_ay_frame,
+                    t.is_ballistic,
+                    cf2,
+                );
                 let exited_border = cf >= 2.0
                     && (ex_x < half_patch - 3.0 * s
                         || ex_x > (frame_w as f32) - half_patch + 3.0 * s
@@ -2944,7 +3500,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     continue;
                 }
                 let d_ent = wasm_sqrtf(d2_ent) + 4.0 * s;
-                let d_pass = wasm_sqrtf((hx - pred_cx) * (hx - pred_cx) + (hy - pred_cy) * (hy - pred_cy));
+                let d_pass_curv =
+                    wasm_sqrtf((hx - pred_cx) * (hx - pred_cx) + (hy - pred_cy) * (hy - pred_cy));
+                let lin_cx = (t.entry_x + cf * t.entry_vx).clamp(half_patch, (frame_w as f32) - half_patch);
+                let lin_cy = (t.entry_y + cf * t.entry_vy).clamp(half_patch, (frame_h as f32) - half_patch);
+                let d_pass_lin =
+                    wasm_sqrtf((hx - lin_cx) * (hx - lin_cx) + (hy - lin_cy) * (hy - lin_cy));
+                let d_pass = d_pass_curv.min(d_pass_lin);
                 let refl_x = t.entry_x - cf * t.entry_vx;
                 let refl_y = t.entry_y - cf * t.entry_vy;
                 let d_refl = wasm_sqrtf((hx - refl_x) * (hx - refl_x) + (hy - refl_y) * (hy - refl_y)) + 2.0 * s;
@@ -3173,19 +3735,36 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             };
 
             if prev_coasting > 0 {
-                // Distinguish elastic in-pillar bounce back through entry vs forward chord pass-through
+                // Distinguish elastic in-pillar bounce back through entry vs forward chord/arc pass-through
                 let ent_speed = a.targets[m].entry_vx.abs() + a.targets[m].entry_vy.abs();
                 let near_entry = (mcx - a.targets[m].entry_x).abs() < 20.0 * s
                     && (mcy - a.targets[m].entry_y).abs() < 20.0 * s;
                 if prev_coasting >= 6 && ent_speed >= 1.5 * s && near_entry {
                     a.targets[m].vel_x = (-0.85 * a.targets[m].entry_vx).clamp(-v_clamp, v_clamp);
                     a.targets[m].vel_y = (0.50 * a.targets[m].entry_vy).clamp(-v_clamp, v_clamp);
+                    a.targets[m].ang_vel_rad_f = 0.0;
                 } else {
                     let dt_c = (prev_coasting + 1) as f32;
-                    a.targets[m].vel_x =
-                        ((mcx - a.targets[m].entry_x) / dt_c).clamp(-v_clamp, v_clamp);
-                    a.targets[m].vel_y =
-                        ((mcy - a.targets[m].entry_y) / dt_c).clamp(-v_clamp, v_clamp);
+                    let (_, _, evx_arc, evy_arc) = predict_curved_step(
+                        a.targets[m].entry_x,
+                        a.targets[m].entry_y,
+                        a.targets[m].entry_vx,
+                        a.targets[m].entry_vy,
+                        a.targets[m].entry_omega_f,
+                        a.targets[m].grav_ay_frame,
+                        a.targets[m].is_ballistic,
+                        dt_c,
+                    );
+                    let sec_vx = (mcx - a.targets[m].entry_x) / dt_c;
+                    let sec_vy = (mcy - a.targets[m].entry_y) / dt_c;
+                    if a.targets[m].is_ballistic != 0 || a.targets[m].entry_omega_f.abs() > 0.045 {
+                        a.targets[m].vel_x = (0.55 * sec_vx + 0.45 * evx_arc).clamp(-v_clamp, v_clamp);
+                        a.targets[m].vel_y = (0.55 * sec_vy + 0.45 * evy_arc).clamp(-v_clamp, v_clamp);
+                    } else {
+                        a.targets[m].vel_x = sec_vx.clamp(-v_clamp, v_clamp);
+                        a.targets[m].vel_y = sec_vy.clamp(-v_clamp, v_clamp);
+                    }
+                    a.targets[m].ang_vel_rad_f *= 0.50;
                 }
                 a.targets[m].acc_x = 0.0;
                 a.targets[m].acc_y = 0.0;
@@ -3199,13 +3778,46 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.targets[m].acc_y = 0.0;
                 a.targets[m].prev_inst_vx = a.targets[m].vel_x;
                 a.targets[m].prev_inst_vy = a.targets[m].vel_y;
+                a.targets[m].ang_vel_rad_f *= 0.65;
                 a.targets[m].reemerged_last = 0;
             } else {
                 if a.targets[m].age >= 2 {
-                    let inst_ax = (inst_vx - a.targets[m].prev_inst_vx).clamp(-a_clamp, a_clamp);
-                    let inst_ay = (inst_vy - a.targets[m].prev_inst_vy).clamp(-a_clamp, a_clamp);
+                    let prev_vx = a.targets[m].prev_inst_vx;
+                    let prev_vy = a.targets[m].prev_inst_vy;
+                    let inst_ax = (inst_vx - prev_vx).clamp(-a_clamp, a_clamp);
+                    let inst_ay = (inst_vy - prev_vy).clamp(-a_clamp, a_clamp);
                     a.targets[m].acc_x = 0.65 * a.targets[m].acc_x + 0.35 * inst_ax;
                     a.targets[m].acc_y = 0.65 * a.targets[m].acc_y + 0.35 * inst_ay;
+
+                    let min_turn_v2 = (2.2 * s) * (2.2 * s);
+                    if mapp_err < 0.13
+                        && inst_vx * inst_vx + inst_vy * inst_vy >= min_turn_v2
+                        && prev_vx * prev_vx + prev_vy * prev_vy >= min_turn_v2
+                    {
+                        let dth = wrap_pi(fast_atan2f(inst_vy, inst_vx) - fast_atan2f(prev_vy, prev_vx));
+                        if dth.abs() >= 0.018 && dth.abs() < 0.35 {
+                            let same_sign = (dth > 0.0 && a.targets[m].ang_vel_rad_f >= -0.004)
+                                || (dth < 0.0 && a.targets[m].ang_vel_rad_f <= 0.004);
+                            if same_sign {
+                                a.targets[m].turn_streak = a.targets[m].turn_streak.saturating_add(1);
+                            } else {
+                                a.targets[m].turn_streak = 1;
+                            }
+                            a.targets[m].ang_vel_rad_f =
+                                (0.74 * a.targets[m].ang_vel_rad_f + 0.26 * dth).clamp(-0.24, 0.24);
+                        } else if dth.abs() >= 0.35 {
+                            a.targets[m].ang_vel_rad_f = 0.0;
+                            a.targets[m].turn_streak = 0;
+                        } else {
+                            a.targets[m].ang_vel_rad_f *= 0.80;
+                            a.targets[m].turn_streak = a.targets[m].turn_streak.saturating_sub(1);
+                        }
+                    } else if mapp_err >= 0.13 {
+                        // Freeze turn-rate update during partial occlusion edge-clipping
+                    } else {
+                        a.targets[m].ang_vel_rad_f *= 0.78;
+                        a.targets[m].turn_streak = 0;
+                    }
                 }
                 a.targets[m].prev_inst_vx = inst_vx;
                 a.targets[m].prev_inst_vy = inst_vy;
@@ -3253,6 +3865,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             a.targets[m].ring_vy[slot_in] = a.targets[m].vel_y;
             a.targets[m].ring_sig[slot_in] = msig;
             a.targets[m].ring_vis[slot_in] = 1;
+            a.targets[m].arc_raw_x[arc_slot_in] = mcx;
+            a.targets[m].arc_raw_y[arc_slot_in] = mcy;
+            a.targets[m].arc_vis[arc_slot_in] = 1;
 
             // Non-causal backward ring re-tracking across `rgba_ring` on re-emergence or confirmation
             if backtrack_budget > 0 && a.targets[m].confirmed != 0 {
@@ -3386,6 +4001,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.targets[m].entry_vy = a.targets[m].vel_y;
                 a.targets[m].entry_ax = a.targets[m].acc_x;
                 a.targets[m].entry_ay = a.targets[m].acc_y;
+                a.targets[m].entry_omega_f = if a.targets[m].turn_streak >= 3
+                    && !(a.targets[m].phase_valid != 0 && a.targets[m].tremor_coherence > 0.25)
+                {
+                    a.targets[m].ang_vel_rad_f
+                } else {
+                    0.0
+                };
                 a.targets[m].entry_frame = f_idx.saturating_sub(1);
                 a.targets[m].has_entry = if a.targets[m].age > 0 { 1 } else { 0 };
                 a.targets[m].reemerged_last = 0;
@@ -3395,8 +4017,16 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             a.targets[m].hit_mask_8 <<= 1;
 
             let cf = a.targets[m].coasting as f32;
-            let raw_coast_x = a.targets[m].entry_x + cf * a.targets[m].entry_vx;
-            let raw_coast_y = a.targets[m].entry_y + cf * a.targets[m].entry_vy;
+            let (raw_coast_x, raw_coast_y, coast_vx, coast_vy) = predict_curved_step(
+                a.targets[m].entry_x,
+                a.targets[m].entry_y,
+                a.targets[m].entry_vx,
+                a.targets[m].entry_vy,
+                a.targets[m].entry_omega_f,
+                a.targets[m].grav_ay_frame,
+                a.targets[m].is_ballistic,
+                cf,
+            );
             let exited_viewport = raw_coast_x < half_patch - 3.0 * s
                 || raw_coast_x > (frame_w as f32) - half_patch + 3.0 * s
                 || raw_coast_y < half_patch - 3.0 * s
@@ -3406,10 +4036,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
             a.targets[m].ring_raw_x[slot_in] = coast_x;
             a.targets[m].ring_raw_y[slot_in] = coast_y;
-            a.targets[m].ring_vx[slot_in] = a.targets[m].entry_vx;
-            a.targets[m].ring_vy[slot_in] = a.targets[m].entry_vy;
+            a.targets[m].ring_vx[slot_in] = coast_vx;
+            a.targets[m].ring_vy[slot_in] = coast_vy;
             a.targets[m].ring_sig[slot_in] = a.targets[m].curr_sig;
             a.targets[m].ring_vis[slot_in] = 0;
+            a.targets[m].arc_vis[arc_slot_in] = 0;
 
             let max_coast = if a.targets[m].confirmed == 0 {
                 2
@@ -3889,6 +4520,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     a.targets[m].fista_x[sr] = px;
                     a.targets[m].fista_y[sr] = py;
                 }
+                a.targets[m].arc_raw_x[arc_slot_in] = px;
+                a.targets[m].arc_raw_y[arc_slot_in] = py;
+                a.targets[m].arc_vis[arc_slot_in] = 1;
 
                 a.kalman[m] = CausalKalmanTrack {
                     active: 1,
@@ -3942,7 +4576,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             continue;
         }
 
-        let consumed = solve_noncausal_fista_target(
+        let (consumed, pooled_ay) = solve_noncausal_fista_target(
             &mut a.targets[m],
             slot_in,
             a.fista_lambda,
@@ -3953,9 +4587,27 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             frame_w,
             frame_h,
             s,
+            a.scene_gravity_px_s2,
+            a.scene_gravity_conf,
         );
         if consumed {
             any_consumed_stimulus = true;
+        }
+        if let Some(ay_obs) = pooled_ay {
+            if a.targets[m].confirmed != 0 {
+                if a.scene_gravity_conf < 0.05 || a.scene_gravity_px_s2 <= 10.0 * s {
+                    a.scene_gravity_px_s2 = ay_obs;
+                    a.scene_gravity_conf = 0.35;
+                } else {
+                    let rel_diff = (ay_obs - a.scene_gravity_px_s2).abs() / a.scene_gravity_px_s2;
+                    if rel_diff < 0.45 {
+                        a.scene_gravity_px_s2 = 0.84 * a.scene_gravity_px_s2 + 0.16 * ay_obs;
+                        a.scene_gravity_conf = (a.scene_gravity_conf + 0.12).min(1.0);
+                    } else {
+                        a.scene_gravity_px_s2 = 0.94 * a.scene_gravity_px_s2 + 0.06 * ay_obs;
+                    }
+                }
+            }
         }
 
         let s_disp = slot_disp;
@@ -4279,22 +4931,62 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
             let sx_pos = a.targets[m].fista_x[strike_u];
             let sy_pos = a.targets[m].fista_y[strike_u];
-            if allowed {
-                let spatial_dedup_r2 = (42.0 * s) * (42.0 * s);
-                for o in 0..MAX_TARGETS {
-                    if o != m && a.targets[o].active != 0 && a.targets[o].has_struck != 0 {
-                        let df = if event_frame >= a.targets[o].last_strike_event_frame {
-                            event_frame - a.targets[o].last_strike_event_frame
-                        } else {
-                            a.targets[o].last_strike_event_frame - event_frame
-                        };
-                        if df <= 4 {
-                            let dx = sx_pos - a.targets[o].strike_x;
-                            let dy = sy_pos - a.targets[o].strike_y;
-                            if dx * dx + dy * dy <= spatial_dedup_r2 {
-                                allowed = false;
-                                break;
-                            }
+            let mut paired_partner: Option<usize> = None;
+            let partner_r2 = (58.0 * s) * (58.0 * s);
+            let spatial_dedup_r2 = (42.0 * s) * (42.0 * s);
+
+            for o in 0..MAX_TARGETS {
+                if o != m && a.targets[o].active != 0 && a.targets[o].has_struck != 0 {
+                    let df = if event_frame >= a.targets[o].last_strike_event_frame {
+                        event_frame - a.targets[o].last_strike_event_frame
+                    } else {
+                        a.targets[o].last_strike_event_frame - event_frame
+                    };
+                    if df <= 5 {
+                        let dx = sx_pos - a.targets[o].strike_x;
+                        let dy = sy_pos - a.targets[o].strike_y;
+                        let d2 = dx * dx + dy * dy;
+                        if d2 <= partner_r2 && paired_partner.is_none() {
+                            paired_partner = Some(o);
+                        }
+                        if allowed && df <= 4 && d2 <= spatial_dedup_r2 {
+                            allowed = false;
+                        }
+                    }
+                }
+            }
+
+            let same_event_refine = a.targets[m].has_struck != 0
+                && event_frame.abs_diff(a.targets[m].last_strike_event_frame) <= 1;
+
+            if allowed || same_event_refine || paired_partner.is_some() {
+                if let Some((in_d, defl_d, rest_e, ovx, ovy, pre_ok)) =
+                    measure_strike_kinematics(&a.targets[m], slot_in, strike_u, s)
+                {
+                    if pre_ok || a.targets[m].has_struck == 0 || allowed {
+                        a.targets[m].strike_in_deg = in_d;
+                        a.targets[m].strike_deflect_deg = defl_d;
+                        a.targets[m].strike_restitution = rest_e;
+                    }
+                    a.targets[m].strike_out_vx = ovx;
+                    a.targets[m].strike_out_vy = ovy;
+
+                    if let Some(o) = paired_partner {
+                        let o_vx = a.targets[o].strike_out_vx;
+                        let o_vy = a.targets[o].strike_out_vy;
+                        let m_v2 = ovx * ovx + ovy * ovy;
+                        let o_v2 = o_vx * o_vx + o_vy * o_vy;
+                        if m_v2 >= (0.65 * s) * (0.65 * s) && o_v2 >= (0.65 * s) * (0.65 * s) {
+                            let rad_to_deg = 180.0 / PI;
+                            let th1 = fast_atan2f(-o_vy, o_vx) * rad_to_deg;
+                            let th2 = fast_atan2f(-ovy, ovx) * rad_to_deg;
+                            let sc_deg = (wrap_pi((th1 - th2) * (PI / 180.0)) * rad_to_deg).abs();
+                            a.scatter_deg = sc_deg;
+                            a.scatter_x = 0.5 * (sx_pos + a.targets[o].strike_x);
+                            a.scatter_y = 0.5 * (sy_pos + a.targets[o].strike_y);
+                            a.scatter_th1_deg = th1;
+                            a.scatter_th2_deg = th2;
+                            a.scatter_event_frame = event_frame;
                         }
                     }
                 }
@@ -4304,6 +4996,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 a.targets[m].has_struck = 1;
                 a.targets[m].last_strike_event_frame = event_frame;
                 a.targets[m].strike_fired = 1;
+                a.targets[m].pivot_valid = 0;
 
                 let qx = if sx_pos >= (frame_w as f32 * 0.5) { 1u8 } else { 0u8 };
                 let qy = if sy_pos >= (frame_h as f32 * 0.5) { 2u8 } else { 0u8 };
@@ -4323,6 +5016,143 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     perc_vel = vel;
                 }
                 perc_mask |= 1 << m;
+            }
+        }
+
+        // Non-causal display-time trigonometric velocity, flight angle theta(t - K), & angular rate
+        let (fvx_d, fvy_d) = if u_disp >= 1 && u_disp + 1 < RING_LEN {
+            (
+                0.5 * (a.targets[m].fista_x[u_disp + 1] - a.targets[m].fista_x[u_disp - 1]),
+                0.5 * (a.targets[m].fista_y[u_disp + 1] - a.targets[m].fista_y[u_disp - 1]),
+            )
+        } else if u_disp + 1 < RING_LEN {
+            (
+                a.targets[m].fista_x[u_disp + 1] - a.targets[m].fista_x[u_disp],
+                a.targets[m].fista_y[u_disp + 1] - a.targets[m].fista_y[u_disp],
+            )
+        } else {
+            (
+                a.targets[m].fista_x[11] - a.targets[m].fista_x[10],
+                a.targets[m].fista_y[11] - a.targets[m].fista_y[10],
+            )
+        };
+        let fspeed_f = wasm_sqrtf(fvx_d * fvx_d + fvy_d * fvy_d);
+        a.targets[m].speed_px_s = fspeed_f * fps;
+        if fspeed_f >= 0.32 * s {
+            a.targets[m].heading_deg = fast_atan2f(-fvy_d, fvx_d) * (180.0 / PI);
+        }
+        if u_disp >= 1 && u_disp + 1 < RING_LEN {
+            let vpx = a.targets[m].fista_x[u_disp] - a.targets[m].fista_x[u_disp - 1];
+            let vpy = a.targets[m].fista_y[u_disp] - a.targets[m].fista_y[u_disp - 1];
+            let vnx = a.targets[m].fista_x[u_disp + 1] - a.targets[m].fista_x[u_disp];
+            let vny = a.targets[m].fista_y[u_disp + 1] - a.targets[m].fista_y[u_disp];
+            let min_w2 = (0.55 * s) * (0.55 * s);
+            if vpx * vpx + vpy * vpy >= min_w2 && vnx * vnx + vny * vny >= min_w2 {
+                let dth_d = wrap_pi(fast_atan2f(-vny, vnx) - fast_atan2f(-vpy, vpx));
+                let inst_w_deg = dth_d * fps * (180.0 / PI);
+                a.targets[m].ang_vel_deg_s =
+                    0.62 * a.targets[m].ang_vel_deg_s + 0.38 * inst_w_deg.clamp(-720.0, 720.0);
+            } else {
+                a.targets[m].ang_vel_deg_s *= 0.78;
+            }
+        } else {
+            a.targets[m].ang_vel_deg_s *= 0.78;
+        }
+
+        // Mode B: Kasa 2x2 Algebraic Circle Fit on 24-frame raw sub-pixel history (with 12-frame peg-snap priority)
+        // Note: back-and-forth harmonic oscillation on a rigid tether (e.g. 2.38 Hz metronome) always satisfies
+        // (x - xc)^2 + (y - yc)^2 = R^2 even across high-acceleration turnarounds!
+        let mut pivot_updated = false;
+        let smooth_or_osc = max_z <= 0.85 * s
+            || macro_osc
+            || (a.targets[m].phase_valid != 0 && a.targets[m].tremor_coherence > 0.28);
+        if vis_12 >= 6 && a.targets[m].age >= 8 && a.targets[m].strike_fired == 0 && smooth_or_osc {
+            let mut full_x = [0.0f32; 24];
+            let mut full_y = [0.0f32; 24];
+            let mut n_full = 0usize;
+            let mut recent_x = [0.0f32; 12];
+            let mut recent_y = [0.0f32; 12];
+            let mut n_recent = 0usize;
+
+            let mut u24 = 24usize;
+            let mut miss24 = 0usize;
+            while u24 > 0 {
+                u24 -= 1;
+                let sa = (arc_slot_in + 1 + u24) % 24;
+                if a.targets[m].arc_vis[sa] != 0 {
+                    miss24 = 0;
+                    let ax_u = a.targets[m].arc_raw_x[sa];
+                    let ay_u = a.targets[m].arc_raw_y[sa];
+                    if n_full > 0 {
+                        let jump2 = (ax_u - full_x[n_full - 1]) * (ax_u - full_x[n_full - 1])
+                            + (ay_u - full_y[n_full - 1]) * (ay_u - full_y[n_full - 1]);
+                        if jump2 > (38.0 * s) * (38.0 * s) {
+                            break;
+                        }
+                    }
+                    full_x[n_full] = ax_u;
+                    full_y[n_full] = ay_u;
+                    n_full += 1;
+                    if u24 >= 12 && n_recent < 12 {
+                        recent_x[n_recent] = ax_u;
+                        recent_y[n_recent] = ay_u;
+                        n_recent += 1;
+                    }
+                } else {
+                    miss24 += 1;
+                    if miss24 >= 3 {
+                        break;
+                    }
+                }
+            }
+
+            // Prefer recent 12-frame arc when strongly curved (fast peg transition); else use up to 24 frames!
+            let circle_cand = fit_kasa_circle_subpx(&recent_x, &recent_y, n_recent, s, 3.2)
+                .or_else(|| fit_kasa_circle_subpx(&full_x, &full_y, n_full, s, 1.8));
+
+            if let Some((xc, yc, rad, my_c, _sag)) = circle_cand {
+                // True pendulum/metronome tethers sit within ~67 deg of vertical plumb (|my_c - yc| >= 0.38 * R)
+                // with physical arm radius <= 235*s, rejecting sideways-curving highway lanes & rail grazes.
+                let hanging_pend = rad <= 235.0 * s
+                    && (my_c - yc) >= (14.0 * s).max(0.38 * rad)
+                    && a.targets[m].is_ballistic == 0;
+                let inverted_metro = rad <= 235.0 * s
+                    && (yc - my_c) >= (14.0 * s).max(0.38 * rad)
+                    && a.targets[m].is_ballistic == 0
+                    && (macro_osc
+                        || (a.targets[m].phase_valid != 0
+                            && a.targets[m].tremor_coherence > 0.28));
+                if hanging_pend || inverted_metro {
+                    if a.targets[m].pivot_valid == 0 || a.targets[m].pivot_r <= 1.0 {
+                        a.targets[m].pivot_x = xc;
+                        a.targets[m].pivot_y = yc;
+                        a.targets[m].pivot_r = rad;
+                    } else {
+                        let alpha_p =
+                            if (rad - a.targets[m].pivot_r).abs() > 0.26 * a.targets[m].pivot_r {
+                                0.72
+                            } else {
+                                0.22
+                            };
+                        a.targets[m].pivot_x =
+                            (1.0 - alpha_p) * a.targets[m].pivot_x + alpha_p * xc;
+                        a.targets[m].pivot_y =
+                            (1.0 - alpha_p) * a.targets[m].pivot_y + alpha_p * yc;
+                        a.targets[m].pivot_r =
+                            (1.0 - alpha_p) * a.targets[m].pivot_r + alpha_p * rad;
+                    }
+                    a.targets[m].pivot_valid = 18;
+                    pivot_updated = true;
+                }
+            }
+        }
+        if !pivot_updated {
+            let bottom_piv_ballistic =
+                a.targets[m].is_ballistic != 0 && a.targets[m].pivot_y > fy;
+            if a.targets[m].coasting > 4 || bottom_piv_ballistic {
+                a.targets[m].pivot_valid = 0;
+            } else {
+                a.targets[m].pivot_valid = a.targets[m].pivot_valid.saturating_sub(1);
             }
         }
 
@@ -4354,12 +5184,18 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     apex_b + bridge_b
                 }
                 1 => {
-                    if a.targets[m].phase_valid != 0 && a.targets[m].tremor_coherence > 0.30 {
+                    let osc_b = if a.targets[m].phase_valid != 0 && a.targets[m].tremor_coherence > 0.30 {
                         85.0 * a.targets[m].tremor_coherence
                             + (a.targets[m].tremor_amp / s).min(12.0) * 4.0
                     } else {
                         0.0
-                    }
+                    };
+                    let piv_b = if a.targets[m].pivot_valid > 0 && exc_px >= 12.0 {
+                        45.0
+                    } else {
+                        0.0
+                    };
+                    osc_b + piv_b
                 }
                 _ => {
                     if exc_px >= 8.0 {
@@ -4559,9 +5395,18 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     for m in 0..MAX_TARGETS {
         let base = 32 + m * 56;
         let ebase = 512 + m * 8;
+        let kbase = 576 + m * 8;
         let cf_now = a.targets[m].coasting as f32;
-        let ex_now_x = a.targets[m].entry_x + cf_now.min(3.0) * a.targets[m].entry_vx;
-        let ex_now_y = a.targets[m].entry_y + cf_now.min(3.0) * a.targets[m].entry_vy;
+        let (ex_now_x, ex_now_y, _, _) = predict_curved_step(
+            a.targets[m].entry_x,
+            a.targets[m].entry_y,
+            a.targets[m].entry_vx,
+            a.targets[m].entry_vy,
+            a.targets[m].entry_omega_f,
+            a.targets[m].grav_ay_frame,
+            a.targets[m].is_ballistic,
+            cf_now.min(3.0),
+        );
         let exited_past_disp = a.targets[m].coasting >= 2
             && a.targets[m].disp_vis < 0.5
             && a.targets[m].bridged_at_disp == 0
@@ -4573,7 +5418,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             a.telemetry[base] = 0.0;
             for q in 0..8 {
                 a.telemetry[ebase + q] = 0.0;
+                a.telemetry[kbase + q] = 0.0;
             }
+            a.telemetry[kbase + 6] = -1.0e6;
+            a.telemetry[kbase + 7] = -1.0e6;
             continue;
         }
         let sig = a.targets[m].curr_sig;
@@ -4613,7 +5461,30 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         a.telemetry[ebase + 5] = a.targets[m].strike_y;
         a.telemetry[ebase + 6] = a.targets[m].tremor_coherence;
         a.telemetry[ebase + 7] = fast_atan2f(a.targets[m].axis_y, a.targets[m].axis_x);
+
+        a.telemetry[kbase] = a.targets[m].heading_deg;
+        a.telemetry[kbase + 1] = a.targets[m].speed_px_s;
+        a.telemetry[kbase + 2] = a.targets[m].ang_vel_deg_s;
+        a.telemetry[kbase + 3] = a.targets[m].strike_deflect_deg;
+        a.telemetry[kbase + 4] = a.targets[m].strike_restitution;
+        a.telemetry[kbase + 5] = a.targets[m].strike_in_deg;
+        if a.targets[m].pivot_valid > 0 {
+            a.telemetry[kbase + 6] = a.targets[m].pivot_x;
+            a.telemetry[kbase + 7] = a.targets[m].pivot_y;
+        } else {
+            a.telemetry[kbase + 6] = -1.0e6;
+            a.telemetry[kbase + 7] = -1.0e6;
+        }
     }
+
+    a.telemetry[640] = a.scene_gravity_px_s2;
+    a.telemetry[641] = a.scene_gravity_conf;
+    a.telemetry[642] = a.scatter_deg;
+    a.telemetry[643] = a.scatter_x;
+    a.telemetry[644] = a.scatter_y;
+    a.telemetry[645] = a.scatter_th1_deg;
+    a.telemetry[646] = a.scatter_th2_deg;
+    a.telemetry[647] = a.scatter_event_frame as f32;
 
     for p in 0..MAX_TARGETS {
         let pbase = 480 + p * 4;

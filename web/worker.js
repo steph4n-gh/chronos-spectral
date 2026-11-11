@@ -11,7 +11,7 @@ const MAX_FRAME_BYTES = MAX_FRAME_W * MAX_FRAME_H * 4;
 const RING_LEN = 12;
 const MAX_TARGETS = 8;
 const GRAPH_NODES = 16;
-const TELEMETRY_LEN = 576;
+const TELEMETRY_LEN = 648;
 
 let resMode = 0; // 0: 320x180 SD (16x16 patch/PiP), 1: 640x360 HD (32x32 foveated patch/PiP)
 let frameW = 320;
@@ -93,8 +93,15 @@ const shockX = new Float32Array(SHOCK_POOL);
 const shockY = new Float32Array(SHOCK_POOL);
 const shockZone = new Uint8Array(SHOCK_POOL);
 const shockVel = new Float32Array(SHOCK_POOL);
+const shockInDeg = new Float32Array(SHOCK_POOL);
+const shockDeflectDeg = new Float32Array(SHOCK_POOL);
+const shockRestitution = new Float32Array(SHOCK_POOL);
 const shockAge = new Int16Array(SHOCK_POOL).fill(-1);
 let shockWriteHead = 0;
+let lastStrikeDeflectDeg = 0.0;
+let lastStrikeRestitution = 0.0;
+let lastStrikeValid = false;
+let lastScatterDeg = 0.0;
 
 // Pre-allocated Mode A Frozen Parabolic Apex Reticle & Live Accuracy Score Buffers
 const apexLockTid = new Int32Array(MAX_TARGETS);
@@ -117,8 +124,10 @@ const histLambda2 = new Float32Array(SCOPE_HIST);
 let scopeWriteIdx = 0;
 
 // Pre-allocated HUD label collision stagger buffers (zero per-frame allocation)
-const hudLabelX = new Float32Array(MAX_TARGETS);
-const hudLabelY = new Float32Array(MAX_TARGETS);
+const MAX_HUD_LABELS = 24;
+const hudLabelX = new Float32Array(MAX_HUD_LABELS);
+const hudLabelY = new Float32Array(MAX_HUD_LABELS);
+const hudLabelW = new Float32Array(MAX_HUD_LABELS);
 
 // Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 15 = N - 1)
 const MAX_KRYLOV = 15;
@@ -132,8 +141,8 @@ const jacobiV = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
 const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
 const eigVecBuf = new Float64Array(GRAPH_NODES);
 
-// Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz)
-const REC_COLS = 38;
+// Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz, 46 cols)
+const REC_COLS = 46;
 const REC_MAX_FRAMES = 18000;
 const REC_COLUMNS = [
   'frame_idx', 'elapsed_sec', 'frame_w', 'frame_h', 'lookahead_k', 'lab_mode',
@@ -145,12 +154,481 @@ const REC_COLUMNS = [
   'disp_kalman_x', 'disp_kalman_y', 'disp_vis', 'disp_bridged',
   'tremor_r', 'tremor_h', 'tremor_phase_deg', 'tremor_freq_hz', 'tremor_amp',
   'phase_valid', 'strobe_fired', 'perc_mask', 'apex_ms', 'saccade_latency_ms',
+  'heading_deg', 'speed_phys', 'ang_vel_deg_s', 'pend_swing_deg',
+  'strike_deflect_deg', 'strike_restitution', 'metric_x_m', 'metric_y_m',
 ];
 const recSlab = new Float64Array(REC_MAX_FRAMES * REC_COLS);
 let recActive = false;
 let recHead = 0;
 let recCount = 0;
 let recElapsedSec = 0.0;
+
+// ============================================================================
+// Pre-Allocated Metric Ruler, Auto-g Scale, & 4-Point Plane Homography Engine
+// Stored in normalized [0..1] viewport coordinates so SD <-> HD is automatic!
+// ============================================================================
+const GRAVITY_M_S2 = 9.80665;
+const CORNER_TAGS = ['TL', 'TR', 'BR', 'BL'];
+let calMode = 'none';  // 'none' | 'ruler' | 'auto_g' | 'homography'
+let calArmed = 'none'; // 'none' | 'ruler' | 'homography'
+let calPtCount = 0;
+let calRulerMeters = 1.0;
+let calPlaneW = 2.84;
+let calPlaneH = 1.42;
+let calPresetName = '';
+let calAutoGNormH = 0.0;         // scene_gravity_px_s2 / frameH (resolution-invariant)
+let calAutoGFallbackNormW = 0.0; // optional fallback span in normalized frameW units before 1st toss
+const calPtsNormX = new Float64Array(4);
+const calPtsNormY = new Float64Array(4);
+const calHomography = new Float64Array(9);    // H: (nx, ny, 1)^T -> ~ (X_m, Y_m, 1)^T
+const calHomographyInv = new Float64Array(9); // H^-1: (X_m, Y_m, 1)^T -> ~ (nx, ny, 1)^T
+let calHomographyValid = false;
+
+// Pre-allocated solver & output scratchpad (zero runtime heap allocations)
+const homMatA = new Float64Array(64);
+const homVecB = new Float64Array(8);
+const homSol = new Float64Array(8);
+const homTargetX = new Float64Array(4);
+const homTargetY = new Float64Array(4);
+const calOutPt = new Float64Array(2);
+const calOutNorm = new Float64Array(2);
+const calOutVel = new Float64Array(2);     // [speedPhys, rectifiedHeadingDeg]
+const calOutStrike = new Float64Array(3);  // [rectInDeg, rectDeflectDeg, rectRestitution]
+const calOutScatter = new Float64Array(3); // [rectTh1Deg, rectTh2Deg, rectScatterDeg]
+const calOutPend = new Float64Array(2);    // [swingDeg, radiusPhys]
+
+function wrapDeg180(deg) {
+  let d = ((deg + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
+  if (d === -180.0) d = 180.0;
+  return d;
+}
+
+function invert3x3(m, out) {
+  const a00 = m[0], a01 = m[1], a02 = m[2];
+  const a10 = m[3], a11 = m[4], a12 = m[5];
+  const a20 = m[6], a21 = m[7], a22 = m[8];
+
+  const b01 = a22 * a11 - a12 * a21;
+  const b11 = -a22 * a10 + a12 * a20;
+  const b21 = a21 * a10 - a11 * a20;
+  const det = a00 * b01 + a01 * b11 + a02 * b21;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-11) return false;
+  const invDet = 1.0 / det;
+
+  out[0] = b01 * invDet;
+  out[1] = (-a22 * a01 + a02 * a21) * invDet;
+  out[2] = (a12 * a01 - a02 * a11) * invDet;
+  out[3] = b11 * invDet;
+  out[4] = (a22 * a00 - a02 * a20) * invDet;
+  out[5] = (-a12 * a00 + a02 * a10) * invDet;
+  out[6] = b21 * invDet;
+  out[7] = (-a21 * a00 + a01 * a20) * invDet;
+  out[8] = (a11 * a00 - a01 * a10) * invDet;
+  return true;
+}
+
+function solveHomography4Pt(planeW, planeH) {
+  const Wp = Math.max(0.01, planeW);
+  const Hp = Math.max(0.01, planeH);
+  // Corner order TL -> TR -> BR -> BL mapped to right-handed plane [0..Wp] x [0..Hp] (+X right, +Y forward/up)
+  homTargetX[0] = 0.0; homTargetY[0] = Hp;
+  homTargetX[1] = Wp;  homTargetY[1] = Hp;
+  homTargetX[2] = Wp;  homTargetY[2] = 0.0;
+  homTargetX[3] = 0.0; homTargetY[3] = 0.0;
+
+  homMatA.fill(0.0);
+  for (let i = 0; i < 4; i++) {
+    const x = calPtsNormX[i];
+    const y = calPtsNormY[i];
+    const X = homTargetX[i];
+    const Y = homTargetY[i];
+    const r0 = (i * 2) * 8;
+    const r1 = (i * 2 + 1) * 8;
+
+    homMatA[r0 + 0] = x;
+    homMatA[r0 + 1] = y;
+    homMatA[r0 + 2] = 1.0;
+    homMatA[r0 + 6] = -x * X;
+    homMatA[r0 + 7] = -y * X;
+    homVecB[i * 2] = X;
+
+    homMatA[r1 + 3] = x;
+    homMatA[r1 + 4] = y;
+    homMatA[r1 + 5] = 1.0;
+    homMatA[r1 + 6] = -x * Y;
+    homMatA[r1 + 7] = -y * Y;
+    homVecB[i * 2 + 1] = Y;
+  }
+
+  // 8x8 Gaussian elimination with partial pivoting
+  for (let col = 0; col < 8; col++) {
+    let pivRow = col;
+    let maxAbs = Math.abs(homMatA[col * 8 + col]);
+    for (let r = col + 1; r < 8; r++) {
+      const v = Math.abs(homMatA[r * 8 + col]);
+      if (v > maxAbs) {
+        maxAbs = v;
+        pivRow = r;
+      }
+    }
+    if (maxAbs < 1e-10) return false;
+    if (pivRow !== col) {
+      for (let c = col; c < 8; c++) {
+        const tmp = homMatA[col * 8 + c];
+        homMatA[col * 8 + c] = homMatA[pivRow * 8 + c];
+        homMatA[pivRow * 8 + c] = tmp;
+      }
+      const tb = homVecB[col];
+      homVecB[col] = homVecB[pivRow];
+      homVecB[pivRow] = tb;
+    }
+    const diag = homMatA[col * 8 + col];
+    for (let r = col + 1; r < 8; r++) {
+      const f = homMatA[r * 8 + col] / diag;
+      if (f === 0.0) continue;
+      homMatA[r * 8 + col] = 0.0;
+      for (let c = col + 1; c < 8; c++) {
+        homMatA[r * 8 + c] -= f * homMatA[col * 8 + c];
+      }
+      homVecB[r] -= f * homVecB[col];
+    }
+  }
+
+  for (let r = 7; r >= 0; r--) {
+    let sum = homVecB[r];
+    for (let c = r + 1; c < 8; c++) {
+      sum -= homMatA[r * 8 + c] * homSol[c];
+    }
+    homSol[r] = sum / homMatA[r * 8 + r];
+    if (!Number.isFinite(homSol[r])) return false;
+  }
+
+  for (let k = 0; k < 8; k++) calHomography[k] = homSol[k];
+  calHomography[8] = 1.0;
+
+  // Verify strictly positive projective depth across all 4 corners (reject self-intersecting bowties)
+  for (let i = 0; i < 4; i++) {
+    const w = calHomography[6] * calPtsNormX[i] + calHomography[7] * calPtsNormY[i] + 1.0;
+    if (w <= 0.02) return false;
+  }
+  return invert3x3(calHomography, calHomographyInv);
+}
+
+function getEffectivePxPerMeter() {
+  if (calMode === 'ruler' && calPtCount >= 2) {
+    const dx = (calPtsNormX[1] - calPtsNormX[0]) * frameW;
+    const dy = (calPtsNormY[1] - calPtsNormY[0]) * frameH;
+    const spanPx = Math.hypot(dx, dy);
+    return spanPx > 1.0 ? spanPx / Math.max(0.01, calRulerMeters) : 0.0;
+  }
+  if (calMode === 'auto_g') {
+    if (calAutoGNormH > 0.05) {
+      return (calAutoGNormH * frameH) / GRAVITY_M_S2;
+    }
+    if (calAutoGFallbackNormW > 0.05) {
+      return (calAutoGFallbackNormW * frameW) / Math.max(0.01, calRulerMeters);
+    }
+  }
+  return 0.0;
+}
+
+function isMetricCalibrated() {
+  if (calMode === 'homography') return calHomographyValid;
+  if (calMode === 'ruler' || calMode === 'auto_g') return getEffectivePxPerMeter() > 0.5;
+  return false;
+}
+
+function mapPixelToMetric(px, py) {
+  if (calMode === 'homography' && calHomographyValid) {
+    const nx = px / frameW;
+    const ny = py / frameH;
+    const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
+    if (w > 0.28) {
+      calOutPt[0] = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
+      calOutPt[1] = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+      return calOutPt;
+    }
+  }
+  const ppm = getEffectivePxPerMeter();
+  if (ppm > 0.5) {
+    if (calMode === 'ruler' && calPtCount >= 2) {
+      const ox = calPtsNormX[0] * frameW;
+      const oy = calPtsNormY[0] * frameH;
+      calOutPt[0] = (px - ox) / ppm;
+      calOutPt[1] = (oy - py) / ppm;
+    } else {
+      calOutPt[0] = px / ppm;
+      calOutPt[1] = (frameH - py) / ppm;
+    }
+    return calOutPt;
+  }
+  calOutPt[0] = 0.0;
+  calOutPt[1] = 0.0;
+  return calOutPt;
+}
+
+function mapMetricToNorm(Xm, Ym) {
+  const w = calHomographyInv[6] * Xm + calHomographyInv[7] * Ym + calHomographyInv[8];
+  const safeW = Math.abs(w) < 1e-5 ? 1e-5 : w;
+  calOutNorm[0] = (calHomographyInv[0] * Xm + calHomographyInv[1] * Ym + calHomographyInv[2]) / safeW;
+  calOutNorm[1] = (calHomographyInv[3] * Xm + calHomographyInv[4] * Ym + calHomographyInv[5]) / safeW;
+  return calOutNorm;
+}
+
+function mapVelocityToPhysical(px, py, speedPxS, headingDeg) {
+  if (calMode === 'homography' && calHomographyValid) {
+    const nx = px / frameW;
+    const ny = py / frameH;
+    const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
+    if (w > 0.28) {
+      const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
+      const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+      const rad = headingDeg * (Math.PI / 180.0);
+      const dnx = (speedPxS * Math.cos(rad)) / frameW;
+      const dny = (-speedPxS * Math.sin(rad)) / frameH;
+      const dw = calHomography[6] * dnx + calHomography[7] * dny;
+      const dX = ((calHomography[0] * dnx + calHomography[1] * dny) - X * dw) / w;
+      const dY = ((calHomography[3] * dnx + calHomography[4] * dny) - Y * dw) / w;
+      const spdM = Math.hypot(dX, dY);
+      calOutVel[0] = spdM;
+      calOutVel[1] = spdM > 1e-4 ? Math.atan2(dY, dX) * (180.0 / Math.PI) : headingDeg;
+      return calOutVel;
+    }
+  }
+  const ppm = getEffectivePxPerMeter();
+  calOutVel[0] = ppm > 0.5 ? speedPxS / ppm : speedPxS;
+  calOutVel[1] = headingDeg;
+  return calOutVel;
+}
+
+function rectifyStrikeKinematics(sxPx, syPx, inDeg, deflectDeg, restitution) {
+  if (calMode === 'homography' && calHomographyValid && restitution > 0.01) {
+    const nx = sxPx / frameW;
+    const ny = syPx / frameH;
+    const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
+    if (Math.abs(w) > 1e-4) {
+      const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
+      const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+
+      const inRad = inDeg * (Math.PI / 180.0);
+      const inDnx = Math.cos(inRad) / frameW;
+      const inDny = -Math.sin(inRad) / frameH;
+      const inDw = calHomography[6] * inDnx + calHomography[7] * inDny;
+      const inDX = ((calHomography[0] * inDnx + calHomography[1] * inDny) - X * inDw) / w;
+      const inDY = ((calHomography[3] * inDnx + calHomography[4] * inDny) - Y * inDw) / w;
+
+      const outDeg = inDeg + deflectDeg;
+      const outRad = outDeg * (Math.PI / 180.0);
+      const outDnx = (restitution * Math.cos(outRad)) / frameW;
+      const outDny = (-restitution * Math.sin(outRad)) / frameH;
+      const outDw = calHomography[6] * outDnx + calHomography[7] * outDny;
+      const outDX = ((calHomography[0] * outDnx + calHomography[1] * outDny) - X * outDw) / w;
+      const outDY = ((calHomography[3] * outDnx + calHomography[4] * outDny) - Y * outDw) / w;
+
+      const inNorm = Math.hypot(inDX, inDY);
+      const outNorm = Math.hypot(outDX, outDY);
+      if (inNorm > 1e-6 && outNorm > 1e-6) {
+        const rInDeg = Math.atan2(inDY, inDX) * (180.0 / Math.PI);
+        const rOutDeg = Math.atan2(outDY, outDX) * (180.0 / Math.PI);
+        calOutStrike[0] = rInDeg;
+        calOutStrike[1] = wrapDeg180(rOutDeg - rInDeg);
+        calOutStrike[2] = Math.min(2.5, outNorm / inNorm);
+        return calOutStrike;
+      }
+    }
+  }
+  calOutStrike[0] = inDeg;
+  calOutStrike[1] = deflectDeg;
+  calOutStrike[2] = restitution;
+  return calOutStrike;
+}
+
+function rectifyScatterKinematics(scxPx, scyPx, th1Deg, th2Deg, rawScatterDeg) {
+  if (calMode === 'homography' && calHomographyValid) {
+    const nx = scxPx / frameW;
+    const ny = scyPx / frameH;
+    const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
+    if (Math.abs(w) > 1e-4) {
+      const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
+      const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+
+      const r1 = th1Deg * (Math.PI / 180.0);
+      const dnx1 = Math.cos(r1) / frameW;
+      const dny1 = -Math.sin(r1) / frameH;
+      const dw1 = calHomography[6] * dnx1 + calHomography[7] * dny1;
+      const dX1 = ((calHomography[0] * dnx1 + calHomography[1] * dny1) - X * dw1) / w;
+      const dY1 = ((calHomography[3] * dnx1 + calHomography[4] * dny1) - Y * dw1) / w;
+
+      const r2 = th2Deg * (Math.PI / 180.0);
+      const dnx2 = Math.cos(r2) / frameW;
+      const dny2 = -Math.sin(r2) / frameH;
+      const dw2 = calHomography[6] * dnx2 + calHomography[7] * dny2;
+      const dX2 = ((calHomography[0] * dnx2 + calHomography[1] * dny2) - X * dw2) / w;
+      const dY2 = ((calHomography[3] * dnx2 + calHomography[4] * dny2) - Y * dw2) / w;
+
+      if (Math.hypot(dX1, dY1) > 1e-6 && Math.hypot(dX2, dY2) > 1e-6) {
+        const a1 = Math.atan2(dY1, dX1) * (180.0 / Math.PI);
+        const a2 = Math.atan2(dY2, dX2) * (180.0 / Math.PI);
+        calOutScatter[0] = a1;
+        calOutScatter[1] = a2;
+        calOutScatter[2] = Math.abs(wrapDeg180(a1 - a2));
+        return calOutScatter;
+      }
+    }
+  }
+  calOutScatter[0] = th1Deg;
+  calOutScatter[1] = th2Deg;
+  calOutScatter[2] = rawScatterDeg;
+  return calOutScatter;
+}
+
+function computePendulumKinematics(fx, fy, pivX, pivY) {
+  const dx = fx - pivX;
+  const dyAbs = Math.max(1e-3, Math.abs(fy - pivY));
+  const swingDeg = Math.atan2(dx, dyAbs) * (180.0 / Math.PI);
+  const rPx = Math.hypot(dx, fy - pivY);
+  if (calMode === 'homography' && calHomographyValid) {
+    const p0 = mapPixelToMetric(pivX, pivY);
+    const p0x = p0[0], p0y = p0[1];
+    const p1 = mapPixelToMetric(fx, fy);
+    calOutPend[0] = swingDeg;
+    calOutPend[1] = Math.hypot(p1[0] - p0x, p1[1] - p0y);
+    return calOutPend;
+  }
+  const ppm = getEffectivePxPerMeter();
+  calOutPend[0] = swingDeg;
+  calOutPend[1] = ppm > 0.5 ? rPx / ppm : rPx;
+  return calOutPend;
+}
+
+function formatCalibrationSummary(overrideNotice) {
+  if (overrideNotice) return overrideNotice;
+  if (calArmed === 'ruler') {
+    return `ARMED 2-PT RULER (${calPtCount}/2 CLICKS · L=${calRulerMeters.toFixed(2)} m · ESC CANCEL)`;
+  }
+  if (calArmed === 'homography') {
+    return `ARMED 4-PT PLANE (${calPtCount}/4 [${CORNER_TAGS[Math.min(3, calPtCount)]}] · ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m)`;
+  }
+  if (calMode === 'ruler') {
+    const ppm = getEffectivePxPerMeter();
+    return `2-PT RULER: ${calRulerMeters.toFixed(2)} m (${Math.round(ppm)} px/m · METRIC m/s)`;
+  }
+  if (calMode === 'auto_g') {
+    const ppm = getEffectivePxPerMeter();
+    if (calAutoGNormH > 0.05) {
+      const gPx = Math.round(calAutoGNormH * frameH);
+      return `AUTO-g LOCKED: ĝ=${gPx} px/s² → ${Math.round(ppm)} px/m (9.81 m/s²)`;
+    }
+    if (ppm > 0.5) {
+      return `AUTO-g ARMED (INITIAL ${Math.round(ppm)} px/m · REFINING ON BALLISTIC ARC)`;
+    }
+    return 'AUTO-g ARMED · AWAITING PARABOLIC FLIGHT ARC (g = 9.81 m/s²)';
+  }
+  if (calMode === 'homography' && calHomographyValid) {
+    return `4-PT HOMOGRAPHY: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m PLANE [PERSPECTIVE RECTIFIED]`;
+  }
+  return 'UNCALIBRATED · PIXEL UNITS (px · px/s)';
+}
+
+function getCalibrationSnapshot() {
+  return {
+    mode: calMode,
+    armed: calArmed,
+    ptCount: calPtCount,
+    rulerMeters: calRulerMeters,
+    planeW: calPlaneW,
+    planeH: calPlaneH,
+    presetName: calPresetName,
+    pxPerMeter: Number(getEffectivePxPerMeter().toFixed(4)),
+    homographyValid: calHomographyValid,
+    homography: calHomographyValid ? Array.from(calHomography) : null,
+  };
+}
+
+function emitCalibrationState(overrideNotice) {
+  self.postMessage({
+    type: 'cal_state',
+    calMode,
+    calArmed,
+    calPtCount,
+    rulerMeters: calRulerMeters,
+    planeW: calPlaneW,
+    planeH: calPlaneH,
+    presetName: calPresetName,
+    calibrated: isMetricCalibrated(),
+    summary: formatCalibrationSummary(overrideNotice),
+  });
+}
+
+function clearCalibrationState() {
+  calMode = 'none';
+  calArmed = 'none';
+  calPtCount = 0;
+  calPresetName = '';
+  calAutoGNormH = 0.0;
+  calAutoGFallbackNormW = 0.0;
+  calHomographyValid = false;
+  calHomography.fill(0.0);
+  calHomographyInv.fill(0.0);
+}
+
+function applySceneCalibrationPreset(presetKey) {
+  clearCalibrationState();
+  calPresetName = presetKey || 'testbench';
+  if (presetKey === 'carom_billiards_impulses') {
+    // UMB Regulation Match Carom Table playing surface (2.84 m x 1.42 m)
+    calPlaneW = 2.84;
+    calPlaneH = 1.42;
+    calPtsNormX[0] = 0.18; calPtsNormY[0] = 0.21;
+    calPtsNormX[1] = 0.82; calPtsNormY[1] = 0.21;
+    calPtsNormX[2] = 0.94; calPtsNormY[2] = 0.87;
+    calPtsNormX[3] = 0.06; calPtsNormY[3] = 0.87;
+    calPtCount = 4;
+    calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+    calMode = calHomographyValid ? 'homography' : 'none';
+  } else if (presetKey === 'roundabout_occlusion') {
+    // Multi-lane highway interchange deck (20.0 m width x 32.0 m longitudinal span)
+    calPlaneW = 20.00;
+    calPlaneH = 32.00;
+    calPtsNormX[0] = 0.20; calPtsNormY[0] = 0.17;
+    calPtsNormX[1] = 0.78; calPtsNormY[1] = 0.17;
+    calPtsNormX[2] = 0.93; calPtsNormY[2] = 0.90;
+    calPtsNormX[3] = 0.07; calPtsNormY[3] = 0.90;
+    calPtCount = 4;
+    calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+    calMode = calHomographyValid ? 'homography' : 'none';
+  } else if (presetKey === 'juggling_ballistic') {
+    // Newtonian Auto-g (9.80665 m/s^2) with 0.90 m shoulder-span seed prior to 1st apex
+    calMode = 'auto_g';
+    calRulerMeters = 0.90;
+    calAutoGFallbackNormW = 0.42;
+    if (telemView && telemView[641] >= 0.25 && telemView[640] > 50.0) {
+      calAutoGNormH = telemView[640] / frameH;
+    }
+  } else if (presetKey === 'galileo_pendulum_peg') {
+    // Vertical Galileo pendulum stand chord (0.65 m)
+    calMode = 'ruler';
+    calRulerMeters = 0.65;
+    calPtsNormX[0] = 0.50; calPtsNormY[0] = 0.14;
+    calPtsNormX[1] = 0.50; calPtsNormY[1] = 0.78;
+    calPtCount = 2;
+  } else if (presetKey === 'harmonic_metronome_phase') {
+    // Seiko mechanical metronome tower body (0.20 m)
+    calMode = 'ruler';
+    calRulerMeters = 0.20;
+    calPtsNormX[0] = 0.50; calPtsNormY[0] = 0.18;
+    calPtsNormX[1] = 0.50; calPtsNormY[1] = 0.84;
+    calPtCount = 2;
+  } else {
+    // Default synthetic testbench / generic video 1.00 m horizontal optical bench span
+    calMode = 'ruler';
+    calRulerMeters = 1.00;
+    calPtsNormX[0] = 0.20; calPtsNormY[0] = 0.50;
+    calPtsNormX[1] = 0.80; calPtsNormY[1] = 0.50;
+    calPtCount = 2;
+  }
+  emitCalibrationState();
+}
 
 // ============================================================================
 // Blind Pixel Pillar Testbench Scenarios & 1-to-1 Ground-Truth Swap Oracle
@@ -201,6 +679,13 @@ const ZONE_COLORS = ['#00f0ff', '#ffb703', '#38f27a', '#ff4d6d'];
 function clearVisualQueues() {
   shockTriggerFrame.fill(-1);
   shockAge.fill(-1);
+  shockInDeg.fill(0.0);
+  shockDeflectDeg.fill(0.0);
+  shockRestitution.fill(0.0);
+  lastStrikeDeflectDeg = 0.0;
+  lastStrikeRestitution = 0.0;
+  lastStrikeValid = false;
+  lastScatterDeg = 0.0;
   padFlashAlpha.fill(0.0);
   apexLockTid.fill(0);
   apexLockErrPx.fill(-1.0);
@@ -838,6 +1323,183 @@ function updateFrozenApexLocks(uDisp) {
   }
 }
 
+function drawHudArrow(ctx, x0, y0, x1, y1, headLen) {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const len = Math.hypot(dx, dy);
+  if (len < 2.0) return;
+  const ang = Math.atan2(dy, dx);
+  ctx.beginPath();
+  ctx.moveTo(x0, y0);
+  ctx.lineTo(x1, y1);
+  ctx.lineTo(x1 - headLen * Math.cos(ang - 0.46), y1 - headLen * Math.sin(ang - 0.46));
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - headLen * Math.cos(ang + 0.46), y1 - headLen * Math.sin(ang + 0.46));
+  ctx.stroke();
+}
+
+function reserveHudLabelSlot(W, H, prefX, prefY, boxW, placedCount) {
+  let lx = Math.max(8, Math.min(W - boxW - 8, prefX));
+  let ly = Math.max(38, Math.min(H - 54, prefY));
+  for (let pass = 0; pass < 4; pass++) {
+    let hit = false;
+    for (let k = 0; k < placedCount; k++) {
+      const overlapX = lx < hudLabelX[k] + hudLabelW[k] + 4 && lx + boxW + 4 > hudLabelX[k];
+      const overlapY = Math.abs(ly - hudLabelY[k]) < 21;
+      if (overlapX && overlapY) {
+        hit = true;
+        break;
+      }
+    }
+    if (!hit) break;
+    ly = ly + 22 < H - 54 ? ly + 22 : Math.max(38, ly - 22);
+  }
+  if (placedCount < MAX_HUD_LABELS) {
+    hudLabelX[placedCount] = lx;
+    hudLabelY[placedCount] = ly;
+    hudLabelW[placedCount] = boxW;
+  }
+  calOutPt[0] = lx;
+  calOutPt[1] = ly;
+  return calOutPt;
+}
+
+function renderCalibrationOverlay(W, H) {
+  if (calMode === 'none' && calArmed === 'none') return;
+  hudCtx.save();
+
+  if (calMode === 'ruler' && calPtCount >= 2 && calArmed === 'none') {
+    const x0 = calPtsNormX[0] * W;
+    const y0 = calPtsNormY[0] * H;
+    const x1 = calPtsNormX[1] * W;
+    const y1 = calPtsNormY[1] * H;
+    const dx = x1 - x0;
+    const dy = y1 - y0;
+    const len = Math.max(1.0, Math.hypot(dx, dy));
+    const nx = -dy / len;
+    const ny = dx / len;
+
+    hudCtx.strokeStyle = 'rgba(255, 209, 102, 0.85)';
+    hudCtx.lineWidth = 1.8;
+    hudCtx.setLineDash([6, 4]);
+    hudCtx.beginPath();
+    hudCtx.moveTo(x0, y0);
+    hudCtx.lineTo(x1, y1);
+    hudCtx.stroke();
+    hudCtx.setLineDash([]);
+
+    hudCtx.beginPath();
+    hudCtx.moveTo(x0 - nx * 8, y0 - ny * 8);
+    hudCtx.lineTo(x0 + nx * 8, y0 + ny * 8);
+    hudCtx.moveTo(x1 - nx * 8, y1 - ny * 8);
+    hudCtx.lineTo(x1 + nx * 8, y1 + ny * 8);
+    hudCtx.stroke();
+
+    const mx = 0.5 * (x0 + x1);
+    const my = 0.5 * (y0 + y1);
+    const rTxt = `📏 ${calRulerMeters.toFixed(2)} m`;
+    hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
+    hudCtx.fillRect(mx - 36, my - 10, 72, 18);
+    hudCtx.strokeStyle = 'rgba(255, 209, 102, 0.65)';
+    hudCtx.lineWidth = 1.0;
+    hudCtx.strokeRect(mx - 36, my - 10, 72, 18);
+    hudCtx.fillStyle = '#ffd166';
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(rTxt, mx - 30, my + 3);
+  } else if (calMode === 'homography' && calHomographyValid && calArmed === 'none') {
+    // Perspective plane boundary + 4x4 iso-metric grid lines mapped back through H^-1
+    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.22)';
+    hudCtx.lineWidth = 1.0;
+    hudCtx.setLineDash([4, 4]);
+    for (let g = 1; g <= 3; g++) {
+      const u = (g / 4.0) * calPlaneW;
+      const pA = mapMetricToNorm(u, 0.0);
+      const ax = pA[0] * W, ay = pA[1] * H;
+      const pB = mapMetricToNorm(u, calPlaneH);
+      const bx = pB[0] * W, by = pB[1] * H;
+      hudCtx.beginPath();
+      hudCtx.moveTo(ax, ay);
+      hudCtx.lineTo(bx, by);
+      hudCtx.stroke();
+
+      const v = (g / 4.0) * calPlaneH;
+      const pC = mapMetricToNorm(0.0, v);
+      const cx = pC[0] * W, cy = pC[1] * H;
+      const pD = mapMetricToNorm(calPlaneW, v);
+      const dx = pD[0] * W, dy = pD[1] * H;
+      hudCtx.beginPath();
+      hudCtx.moveTo(cx, cy);
+      hudCtx.lineTo(dx, dy);
+      hudCtx.stroke();
+    }
+    hudCtx.setLineDash([]);
+
+    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.58)';
+    hudCtx.lineWidth = 1.8;
+    hudCtx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const qx = calPtsNormX[i] * W;
+      const qy = calPtsNormY[i] * H;
+      if (i === 0) hudCtx.moveTo(qx, qy);
+      else hudCtx.lineTo(qx, qy);
+    }
+    hudCtx.closePath();
+    hudCtx.stroke();
+
+    hudCtx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+    for (let i = 0; i < 4; i++) {
+      const qx = calPtsNormX[i] * W;
+      const qy = calPtsNormY[i] * H;
+      hudCtx.fillStyle = '#00e5ff';
+      hudCtx.beginPath();
+      hudCtx.arc(qx, qy, 3.6, 0, Math.PI * 2);
+      hudCtx.fill();
+      hudCtx.fillStyle = 'rgba(6, 10, 18, 0.82)';
+      hudCtx.fillRect(qx + 5, qy - 12, 20, 13);
+      hudCtx.fillStyle = '#8ef9f3';
+      hudCtx.fillText(CORNER_TAGS[i], qx + 7, qy - 2);
+    }
+  }
+
+  // Interactive click-capture crosshairs & guidance banner when armed
+  if (calArmed !== 'none') {
+    for (let i = 0; i < calPtCount; i++) {
+      const px = calPtsNormX[i] * W;
+      const py = calPtsNormY[i] * H;
+      hudCtx.strokeStyle = '#ffd166';
+      hudCtx.lineWidth = 2.0;
+      hudCtx.beginPath();
+      hudCtx.arc(px, py, 7, 0, Math.PI * 2);
+      hudCtx.moveTo(px - 12, py); hudCtx.lineTo(px + 12, py);
+      hudCtx.moveTo(px, py - 12); hudCtx.lineTo(px, py + 12);
+      hudCtx.stroke();
+      if (i > 0) {
+        hudCtx.setLineDash([4, 3]);
+        hudCtx.beginPath();
+        hudCtx.moveTo(calPtsNormX[i - 1] * W, calPtsNormY[i - 1] * H);
+        hudCtx.lineTo(px, py);
+        hudCtx.stroke();
+        hudCtx.setLineDash([]);
+      }
+    }
+    const prompt = calArmed === 'ruler'
+      ? `📏 CLICK RULER ENDPOINT ${calPtCount + 1}/2 (${calRulerMeters.toFixed(2)} m · ESC TO CANCEL)`
+      : `⬠ CLICK PLANE CORNER ${calPtCount + 1}/4 [${CORNER_TAGS[Math.min(3, calPtCount)]}] (${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m · ESC CANCEL)`;
+    const bw = 472;
+    const bx = Math.round((W - bw) * 0.5);
+    hudCtx.fillStyle = 'rgba(8, 13, 24, 0.92)';
+    hudCtx.fillRect(bx, 40, bw, 24);
+    hudCtx.strokeStyle = '#ffd166';
+    hudCtx.lineWidth = 1.5;
+    hudCtx.strokeRect(bx, 40, bw, 24);
+    hudCtx.fillStyle = '#ffd166';
+    hudCtx.font = '700 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(prompt, bx + 12, 56);
+  }
+
+  hudCtx.restore();
+}
+
 function renderMainHud(dispSlot) {
   if (!hudCtx) return;
   const W = hudCanvas.width;   // 960
@@ -845,6 +1507,10 @@ function renderMainHud(dispSlot) {
   const sx = W / frameW;       // 3.0 in SD, 1.5 in HD
   const sy = H / frameH;       // 3.0 in SD, 1.5 in HD
   const fIdx = Math.round(telemView[0]);
+  const effK = Math.round(telemView[1]);
+  const dispFrame = fIdx - effK;
+  const metricOn = isMetricCalibrated();
+  const spdUnit = metricOn ? 'm/s' : 'px/s';
 
   // Activate any Mode C localized shockwaves whose scheduled presentation frame has arrived at t - K
   for (let q = 0; q < SHOCK_POOL; q++) {
@@ -902,11 +1568,16 @@ function renderMainHud(dispSlot) {
     }
   }
 
-  // 4. Mode C: Subtle Quadrant Voice Grid + Localized Impact Shockwave Rings at exact (strike_x, strike_y)
+  // 3b. Metric Ruler or 4-Point Perspective Homography Floor Grid Overlay
+  renderCalibrationOverlay(W, H);
+
+  let placedLabels = 0;
+
+  // 4. Mode C: Quadrant Voice Grid + Localized Impact Shockwaves + CAD Deflection & Scatter Protractors
   if (labMode === 2) {
     const labels = ['Q0: SUB-KICK 808', 'Q1: CRISP SNARE', 'Q2: METALLIC FM HAT', 'Q3: HARMONIC TOM'];
     hudCtx.save();
-    hudCtx.strokeStyle = 'rgba(0, 240, 255, 0.18)';
+    hudCtx.strokeStyle = 'rgba(0, 240, 255, 0.16)';
     hudCtx.lineWidth = 1;
     hudCtx.beginPath();
     hudCtx.moveTo(W * 0.5, 0); hudCtx.lineTo(W * 0.5, H);
@@ -924,79 +1595,199 @@ function renderMainHud(dispSlot) {
         hudCtx.globalAlpha = 1.0;
         padFlashAlpha[z] *= 0.82;
       }
+      const badgeY = z >= 2 ? H * 0.5 - 52 : 40;
       hudCtx.fillStyle = 'rgba(6, 10, 18, 0.72)';
-      hudCtx.fillRect(qx + 10, qy + (z >= 2 ? H * 0.5 - 28 : 40), 138, 18);
+      hudCtx.fillRect(qx + 10, qy + badgeY, 138, 18);
       hudCtx.fillStyle = ZONE_COLORS[z];
       hudCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-      hudCtx.fillText(labels[z], qx + 15, qy + (z >= 2 ? H * 0.5 - 15 : 53));
+      hudCtx.fillText(labels[z], qx + 15, qy + badgeY + 13);
     }
 
-    // Localized concentric shockwave rings centered at exact physical collision point!
+    // Localized concentric shockwave rings + CAD deflection & restitution protractors!
     for (let q = 0; q < SHOCK_POOL; q++) {
       if (shockAge[q] >= 0) {
         const age = shockAge[q];
-        const prog = age / 15.0;
-        const alpha = Math.max(0.0, 1.0 - prog);
         const cx = shockX[q] * sx;
         const cy = shockY[q] * sy;
-        const rOuter = 10.0 + prog * 54.0 * (0.65 + 0.5 * shockVel[q]);
-        const rInner = 4.0 + prog * 28.0;
         const zCol = ZONE_COLORS[shockZone[q] & 3];
 
         hudCtx.save();
-        hudCtx.globalAlpha = alpha;
-        hudCtx.strokeStyle = zCol;
-        hudCtx.lineWidth = 2.6 * (1.0 - 0.5 * prog);
-        hudCtx.beginPath();
-        hudCtx.arc(cx, cy, rOuter, 0, Math.PI * 2);
-        hudCtx.stroke();
+        if (age <= 15) {
+          const prog = age / 15.0;
+          const alpha = Math.max(0.0, 1.0 - prog);
+          const rOuter = 10.0 + prog * 54.0 * (0.65 + 0.5 * shockVel[q]);
+          const rInner = 4.0 + prog * 28.0;
 
-        hudCtx.strokeStyle = '#ffffff';
-        hudCtx.lineWidth = 1.4;
-        hudCtx.beginPath();
-        hudCtx.arc(cx, cy, rInner, 0, Math.PI * 2);
-        hudCtx.moveTo(cx - 8, cy); hudCtx.lineTo(cx + 8, cy);
-        hudCtx.moveTo(cx, cy - 8); hudCtx.lineTo(cx, cy + 8);
-        hudCtx.stroke();
+          hudCtx.globalAlpha = alpha;
+          hudCtx.strokeStyle = zCol;
+          hudCtx.lineWidth = 2.6 * (1.0 - 0.5 * prog);
+          hudCtx.beginPath();
+          hudCtx.arc(cx, cy, rOuter, 0, Math.PI * 2);
+          hudCtx.stroke();
 
-        if (age <= 9) {
+          hudCtx.strokeStyle = '#ffffff';
+          hudCtx.lineWidth = 1.4;
+          hudCtx.beginPath();
+          hudCtx.arc(cx, cy, rInner, 0, Math.PI * 2);
+          hudCtx.moveTo(cx - 8, cy); hudCtx.lineTo(cx + 8, cy);
+          hudCtx.moveTo(cx, cy - 8); hudCtx.lineTo(cx, cy + 8);
+          hudCtx.stroke();
+        }
+
+        // CAD Deflection Protractor & Restitution readout (held 26 frames for clear reading)
+        if (shockRestitution[q] > 0.04 && Math.abs(shockDeflectDeg[q]) >= 2.5) {
+          const fade = age <= 18 ? 0.96 : Math.max(0.0, 1.0 - (age - 18) / 9.0);
+          hudCtx.globalAlpha = fade;
+
+          // Canvas rays follow actual 2D screen geometry; numeric angle & restitution rectify via J_H!
+          const rawInCanvas = -shockInDeg[q] * (Math.PI / 180.0);
+          const rawOutCanvas = -(shockInDeg[q] + shockDeflectDeg[q]) * (Math.PI / 180.0);
+          const rectSt = rectifyStrikeKinematics(
+            shockX[q],
+            shockY[q],
+            shockInDeg[q],
+            shockDeflectDeg[q],
+            shockRestitution[q]
+          );
+          const dispDefl = rectSt[1];
+          const dispRest = rectSt[2];
+
+          // Incident continuation dashed reference ray
+          hudCtx.strokeStyle = 'rgba(226, 238, 255, 0.68)';
+          hudCtx.lineWidth = 1.5;
+          hudCtx.setLineDash([4, 3]);
+          hudCtx.beginPath();
+          hudCtx.moveTo(cx, cy);
+          hudCtx.lineTo(cx + Math.cos(rawInCanvas) * 34.0, cy + Math.sin(rawInCanvas) * 34.0);
+          hudCtx.stroke();
+          hudCtx.setLineDash([]);
+
+          // Outgoing deflected velocity vector
+          hudCtx.strokeStyle = zCol;
+          hudCtx.lineWidth = 2.2;
+          drawHudArrow(
+            hudCtx,
+            cx,
+            cy,
+            cx + Math.cos(rawOutCanvas) * 42.0,
+            cy + Math.sin(rawOutCanvas) * 42.0,
+            7.0
+          );
+
+          // Signed CAD deflection arc
+          const dArc = Math.atan2(Math.sin(rawOutCanvas - rawInCanvas), Math.cos(rawOutCanvas - rawInCanvas));
+          hudCtx.fillStyle = 'rgba(255, 209, 102, 0.20)';
+          hudCtx.beginPath();
+          hudCtx.moveTo(cx, cy);
+          hudCtx.arc(cx, cy, 22.0, rawInCanvas, rawInCanvas + dArc, dArc < 0);
+          hudCtx.closePath();
+          hudCtx.fill();
+          hudCtx.strokeStyle = '#ffd166';
+          hudCtx.lineWidth = 1.6;
+          hudCtx.beginPath();
+          hudCtx.arc(cx, cy, 22.0, rawInCanvas, rawInCanvas + dArc, dArc < 0);
+          hudCtx.stroke();
+
+          const signStr = dispDefl >= 0 ? '+' : '';
+          const cadTxt = `⚡ Δθ=${signStr}${dispDefl.toFixed(1)}° | e=${dispRest.toFixed(2)}`;
+          const bw = 152;
+          const pos = reserveHudLabelSlot(W, H, cx + 14, cy - 26, bw, placedLabels);
+          placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+          hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
+          hudCtx.fillRect(pos[0], pos[1], bw, 18);
+          hudCtx.strokeStyle = zCol;
+          hudCtx.lineWidth = 1.0;
+          hudCtx.strokeRect(pos[0], pos[1], bw, 18);
+          hudCtx.fillStyle = '#ffd166';
+          hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+          hudCtx.fillText(cadTxt, pos[0] + 5, pos[1] + 12);
+        } else if (age <= 10) {
+          const bw = 110;
+          const pos = reserveHudLabelSlot(W, H, cx + 12, cy - 22, bw, placedLabels);
+          placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
           hudCtx.fillStyle = 'rgba(6, 10, 18, 0.84)';
-          const bx = Math.min(W - 118, Math.max(8, cx + 12));
-          const by = Math.max(44, cy - 22);
-          hudCtx.fillRect(bx, by, 108, 16);
+          hudCtx.fillRect(pos[0], pos[1], bw, 16);
           hudCtx.fillStyle = zCol;
           hudCtx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-          hudCtx.fillText(`⚡ L1 IMPACT Q${shockZone[q]}`, bx + 4, by + 11);
+          hudCtx.fillText(`⚡ L1 IMPACT Q${shockZone[q]}`, pos[0] + 4, pos[1] + 11);
         }
         hudCtx.restore();
 
         shockAge[q]++;
-        if (shockAge[q] > 15) shockAge[q] = -1;
+        if (shockAge[q] > 26) shockAge[q] = -1;
       }
     }
+
+    // Two-Body Elastic Scatter Wedge (90-deg carom billiard / disc pair collision proof!)
+    const rawScDeg = telemView[642];
+    const scEventFrame = Math.round(telemView[647]);
+    if (rawScDeg > 2.0 && scEventFrame > 0 && Math.abs(dispFrame - scEventFrame) <= 24) {
+      const scx = telemView[643] * sx;
+      const scy = telemView[644] * sy;
+      const th1Canvas = -telemView[645] * (Math.PI / 180.0);
+      const th2Canvas = -telemView[646] * (Math.PI / 180.0);
+      const rectSc = rectifyScatterKinematics(
+        telemView[643],
+        telemView[644],
+        telemView[645],
+        telemView[646],
+        rawScDeg
+      );
+      const dispScDeg = rectSc[2];
+      const dSc = Math.atan2(Math.sin(th2Canvas - th1Canvas), Math.cos(th2Canvas - th1Canvas));
+
+      hudCtx.save();
+      hudCtx.fillStyle = 'rgba(0, 240, 255, 0.22)';
+      hudCtx.beginPath();
+      hudCtx.moveTo(scx, scy);
+      hudCtx.arc(scx, scy, 34.0, th1Canvas, th1Canvas + dSc, dSc < 0);
+      hudCtx.closePath();
+      hudCtx.fill();
+
+      hudCtx.strokeStyle = '#00f0ff';
+      hudCtx.lineWidth = 2.0;
+      drawHudArrow(hudCtx, scx, scy, scx + Math.cos(th1Canvas) * 44.0, scy + Math.sin(th1Canvas) * 44.0, 6.5);
+      drawHudArrow(hudCtx, scx, scy, scx + Math.cos(th2Canvas) * 44.0, scy + Math.sin(th2Canvas) * 44.0, 6.5);
+
+      const scTxt = `⟁ SCATTER ${dispScDeg.toFixed(1)}°`;
+      const bw = 126;
+      const pos = reserveHudLabelSlot(W, H, scx - 62, scy + 18, bw, placedLabels);
+      placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+      hudCtx.fillStyle = 'rgba(6, 10, 18, 0.90)';
+      hudCtx.fillRect(pos[0], pos[1], bw, 18);
+      hudCtx.strokeStyle = '#00f0ff';
+      hudCtx.lineWidth = 1.2;
+      hudCtx.strokeRect(pos[0], pos[1], bw, 18);
+      hudCtx.fillStyle = '#8ef9f3';
+      hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText(scTxt, pos[0] + 6, pos[1] + 12);
+      hudCtx.restore();
+    }
+
     hudCtx.restore();
   }
 
-  const effK = Math.round(telemView[1]);
   const uDisp = (RING_LEN - 1) - effK;
   const effFps = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
   const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
   const primarySlot = Math.round(telemView[8]);
-  let placedLabels = 0;
 
   updateFrozenApexLocks(uDisp);
 
-  // 5. Render Target Trajectories, Hermite Spline Bridges, Frozen Apex Reticles & Kalman Baselines
+  // 5. Render Target Trajectories, Hermite Spline Bridges, Frozen Apex Reticles, Protractors & Kalman Baselines
   for (let m = 0; m < MAX_TARGETS; m++) {
     const base = 32 + m * 56;
     if (telemView[base] < 0.5) continue;
 
+    const kbase = 576 + m * 8;
     const tid = Math.round(telemView[base + 1]);
     const isPrimary = m === primarySlot;
     const isPinned = focusTid !== 0 && tid === focusTid;
     const color = TARGET_COLORS[(tid - 1) % TARGET_COLORS.length];
-    const fx = telemView[base + 2] * sx;
-    const fy = telemView[base + 3] * sy;
+    const fxPx = telemView[base + 2];
+    const fyPx = telemView[base + 3];
+    const fx = fxPx * sx;
+    const fy = fyPx * sy;
     const rawDispX = telemView[base + 4] * sx;
     const rawDispY = telemView[base + 5] * sy;
     const kx = telemView[base + 6] * sx;
@@ -1010,9 +1801,102 @@ function renderMainHud(dispSlot) {
     const headX = telemView[base + 20 + 11] * sx;
     const headY = telemView[base + 32 + 11] * sy;
 
+    const rawHeadingDeg = telemView[kbase + 0];
+    const rawSpeedPxS = telemView[kbase + 1];
+    const pivXPx = telemView[kbase + 6];
+    const pivYPx = telemView[kbase + 7];
+    const hasPivot = pivXPx > -9.0e5 && pivYPx > -9.0e5;
+
     hudCtx.save();
 
-    // 5a. Past Dual-FISTA Ribbon [0 .. uDisp]
+    // 5a. Virtual Pendulum / Metronome Pivot, Plumb Reference, Tether & Swing Wedge
+    if (hasPivot && (isPrimary || isPinned || labMode === 1)) {
+      const pivX = pivXPx * sx;
+      const pivY = pivYPx * sy;
+      const pendKin = computePendulumKinematics(fxPx, fyPx, pivXPx, pivYPx);
+      const swingDeg = pendKin[0];
+      const radPhys = pendKin[1];
+      const plumbAng = fy >= pivY ? Math.PI * 0.5 : -Math.PI * 0.5;
+      const tethAng = Math.atan2(fy - pivY, fx - pivX);
+      const tethHudLen = Math.hypot(fx - pivX, fy - pivY);
+      const wedgeR = Math.min(54.0, Math.max(22.0, tethHudLen * 0.36));
+
+      // Plumb vertical reference dashed ray
+      hudCtx.strokeStyle = 'rgba(168, 192, 223, 0.45)';
+      hudCtx.lineWidth = 1.3;
+      hudCtx.setLineDash([4, 4]);
+      hudCtx.beginPath();
+      hudCtx.moveTo(pivX, Math.max(38, Math.min(H - 38, pivY)));
+      hudCtx.lineTo(pivX, fy >= pivY ? Math.min(H - 36, pivY + tethHudLen * 0.95) : Math.max(38, pivY - tethHudLen * 0.95));
+      hudCtx.stroke();
+
+      // Rigid tether ray from virtual pivot to FISTA bob/weight
+      hudCtx.strokeStyle = '#38f27a';
+      hudCtx.lineWidth = 1.8;
+      hudCtx.setLineDash([6, 4]);
+      hudCtx.beginPath();
+      hudCtx.moveTo(pivX, pivY);
+      hudCtx.lineTo(fx, fy);
+      hudCtx.stroke();
+      hudCtx.setLineDash([]);
+
+      // Swing angle sector wedge (when pivot is near/inside viewport)
+      if (pivY >= -30 && pivY <= H + 30 && Math.abs(swingDeg) >= 0.8) {
+        const dSw = Math.atan2(Math.sin(tethAng - plumbAng), Math.cos(tethAng - plumbAng));
+        hudCtx.fillStyle = 'rgba(56, 242, 122, 0.18)';
+        hudCtx.beginPath();
+        hudCtx.moveTo(pivX, pivY);
+        hudCtx.arc(pivX, pivY, wedgeR, plumbAng, plumbAng + dSw, dSw < 0);
+        hudCtx.closePath();
+        hudCtx.fill();
+        hudCtx.strokeStyle = '#38f27a';
+        hudCtx.lineWidth = 1.6;
+        hudCtx.beginPath();
+        hudCtx.arc(pivX, pivY, wedgeR, plumbAng, plumbAng + dSw, dSw < 0);
+        hudCtx.stroke();
+      }
+
+      // Pivot bullseye ring (or top-edge directional marker if ceiling mount is above camera frame)
+      if (pivY >= 40 && pivY <= H - 36 && pivX >= 8 && pivX <= W - 8) {
+        hudCtx.strokeStyle = '#38f27a';
+        hudCtx.lineWidth = 2.0;
+        hudCtx.beginPath();
+        hudCtx.arc(pivX, pivY, 6.5, 0, Math.PI * 2);
+        hudCtx.moveTo(pivX - 11, pivY); hudCtx.lineTo(pivX + 11, pivY);
+        hudCtx.moveTo(pivX, pivY - 11); hudCtx.lineTo(pivX, pivY + 11);
+        hudCtx.stroke();
+        hudCtx.fillStyle = 'rgba(6, 10, 18, 0.84)';
+        hudCtx.fillRect(pivX + 9, pivY - 8, 56, 15);
+        hudCtx.fillStyle = '#38f27a';
+        hudCtx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText('◎ PIVOT', pivX + 12, pivY + 3);
+      } else if (pivY < 40) {
+        const tClip = Math.abs(fy - pivY) > 1e-3 ? (44.0 - pivY) / (fy - pivY) : 0.0;
+        const edgeX = Math.max(24, Math.min(W - 96, pivX + tClip * (fx - pivX)));
+        hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
+        hudCtx.fillRect(edgeX - 8, 38, 86, 15);
+        hudCtx.fillStyle = '#38f27a';
+        hudCtx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText('▲ VIRT PIVOT', edgeX - 4, 49);
+      }
+
+      const swSign = swingDeg >= 0 ? '+' : '';
+      const rStr = metricOn ? `${radPhys.toFixed(2)}m` : `${Math.round(radPhys)}px`;
+      const swTxt = `θ=${swSign}${swingDeg.toFixed(1)}° | R=${rStr}`;
+      const bw = 138;
+      const pos = reserveHudLabelSlot(W, H, fx + 30, fy + 16, bw, placedLabels);
+      placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+      hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
+      hudCtx.fillRect(pos[0], pos[1], bw, 17);
+      hudCtx.strokeStyle = 'rgba(56, 242, 122, 0.65)';
+      hudCtx.lineWidth = 1.0;
+      hudCtx.strokeRect(pos[0], pos[1], bw, 17);
+      hudCtx.fillStyle = '#38f27a';
+      hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText(swTxt, pos[0] + 5, pos[1] + 12);
+    }
+
+    // 5b. Past Dual-FISTA Ribbon [0 .. uDisp]
     hudCtx.lineWidth = isPrimary ? 2.8 : 2.2;
     hudCtx.strokeStyle = color;
     hudCtx.beginPath();
@@ -1024,7 +1908,7 @@ function renderMainHud(dispSlot) {
     }
     hudCtx.stroke();
 
-    // 5b. Future Non-Causal Lookahead / Hermite Bridge Ribbon [uDisp .. 11]
+    // 5c. Future Non-Causal Lookahead / Hermite Bridge Ribbon [uDisp .. 11]
     if (uDisp < RING_LEN - 1) {
       hudCtx.lineWidth = isBridged ? 3.0 : 2.0;
       hudCtx.strokeStyle = isBridged ? '#ffd166' : color;
@@ -1060,7 +1944,73 @@ function renderMainHud(dispSlot) {
       }
     }
 
-    // 5c. Kinematic-Only 2x2 Kalman Baseline Marker
+    // 5d. Tangent Velocity Vector & Flight-Angle Protractor (θ(t-K) & speed in m/s or px/s)
+    if (rawSpeedPxS >= 14.0 * resScale) {
+      const velCanvasAng = -rawHeadingDeg * (Math.PI / 180.0);
+      const arrowLen = Math.min(54.0, Math.max(26.0, (rawSpeedPxS / resScale) * 0.22));
+      const tipX = fx + Math.cos(velCanvasAng) * arrowLen;
+      const tipY = fy + Math.sin(velCanvasAng) * arrowLen;
+      const showFullProtractor = (isPrimary || isPinned || (labMode === 0 && apexLockHold[m] > 0)) && !hasPivot;
+
+      if (showFullProtractor) {
+        // Horizontal 0-deg datum reference tick
+        const refDir = Math.cos(velCanvasAng) >= 0 ? 1.0 : -1.0;
+        const refAng = refDir > 0 ? 0.0 : Math.PI;
+        hudCtx.strokeStyle = 'rgba(168, 192, 223, 0.55)';
+        hudCtx.lineWidth = 1.2;
+        hudCtx.setLineDash([3, 3]);
+        hudCtx.beginPath();
+        hudCtx.moveTo(fx, fy);
+        hudCtx.lineTo(fx + refDir * 32.0, fy);
+        hudCtx.stroke();
+        hudCtx.setLineDash([]);
+
+        const dVelArc = Math.atan2(Math.sin(velCanvasAng - refAng), Math.cos(velCanvasAng - refAng));
+        if (Math.abs(dVelArc) > 0.04) {
+          hudCtx.fillStyle = 'rgba(0, 229, 255, 0.16)';
+          hudCtx.beginPath();
+          hudCtx.moveTo(fx, fy);
+          hudCtx.arc(fx, fy, 20.0, refAng, refAng + dVelArc, dVelArc < 0);
+          hudCtx.closePath();
+          hudCtx.fill();
+          hudCtx.strokeStyle = '#00e5ff';
+          hudCtx.lineWidth = 1.4;
+          hudCtx.beginPath();
+          hudCtx.arc(fx, fy, 20.0, refAng, refAng + dVelArc, dVelArc < 0);
+          hudCtx.stroke();
+        }
+
+        hudCtx.strokeStyle = '#00e5ff';
+        hudCtx.lineWidth = 2.1;
+        drawHudArrow(hudCtx, fx, fy, tipX, tipY, 6.5);
+
+        const physVel = mapVelocityToPhysical(fxPx, fyPx, rawSpeedPxS, rawHeadingDeg);
+        const dispSpd = physVel[0];
+        const dispHeading = physVel[1];
+        const thSign = dispHeading >= 0 ? '+' : '';
+        const spdFmt = metricOn ? dispSpd.toFixed(2) : Math.round(dispSpd).toString();
+        const kinTxt = `∠${thSign}${dispHeading.toFixed(1)}° · ${spdFmt}${spdUnit}`;
+        const bw = 148;
+        const pos = reserveHudLabelSlot(W, H, fx + 30, fy + 12, bw, placedLabels);
+        placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+        hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
+        hudCtx.fillRect(pos[0], pos[1], bw, 17);
+        hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.58)';
+        hudCtx.lineWidth = 1.0;
+        hudCtx.strokeRect(pos[0], pos[1], bw, 17);
+        hudCtx.fillStyle = '#8ef9f3';
+        hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText(kinTxt, pos[0] + 5, pos[1] + 12);
+      } else if (labMode !== 1) {
+        hudCtx.strokeStyle = color;
+        hudCtx.globalAlpha = 0.78;
+        hudCtx.lineWidth = 1.6;
+        drawHudArrow(hudCtx, fx, fy, tipX, tipY, 5.5);
+        hudCtx.globalAlpha = 1.0;
+      }
+    }
+
+    // 5e. Kinematic-Only 2x2 Kalman Baseline Marker
     const kalDist = Math.hypot(kx - fx, ky - fy);
     if (showKalmanBaseline && kalDist <= 165.0) {
       hudCtx.strokeStyle = 'rgba(255, 89, 94, 0.85)';
@@ -1081,7 +2031,7 @@ function renderMainHud(dispSlot) {
       }
     }
 
-    // 5d. Mode A: Frozen Parabolic Apex Reticle & Live Peak Accuracy Score (APEX Δ = X.X px)
+    // 5f. Mode A: Frozen Parabolic Apex Reticle & Live Peak Accuracy Score (APEX Δ = X.X px)
     if (labMode === 0 && apexLockTid[m] === tid && apexLockHold[m] > 0) {
       const predX = apexLockPredX[m] * sx;
       const predY = apexLockPredY[m] * sy;
@@ -1110,16 +2060,17 @@ function renderMainHud(dispSlot) {
       const badgeText = scored
         ? `APEX Δ=${apexLockErrPx[m].toFixed(1)}px`
         : `APEX ${Math.max(8, apexFrames * (1000.0 / effFps)).toFixed(0)}ms`;
-      const bx = Math.min(W - 122, Math.max(8, predX + 13));
-      const by = Math.max(40, predY - 18);
+      const bw = 114;
+      const pos = reserveHudLabelSlot(W, H, predX + 13, predY - 18, bw, placedLabels);
+      placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
       hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
-      hudCtx.fillRect(bx, by, 112, 17);
+      hudCtx.fillRect(pos[0], pos[1], bw, 17);
       hudCtx.fillStyle = arcCol;
       hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-      hudCtx.fillText(badgeText, bx + 4, by + 12);
+      hudCtx.fillText(badgeText, pos[0] + 4, pos[1] + 12);
     }
 
-    // 5e. Primary 2-Adic + Fiedler + FISTA Corner-Bracket Reticle at `t - K`
+    // 5g. Primary 2-Adic + Fiedler + FISTA Corner-Bracket Reticle at `t - K`
     const boxR = isPrimary ? 26 : 23;
     const bLen = isPrimary ? 9 : 8;
     hudCtx.strokeStyle = isBridged ? '#ffd166' : color;
@@ -1146,32 +2097,18 @@ function renderMainHud(dispSlot) {
       ? (isPrimary ? 'FOCUS' : 'LOCK')
       : 'COAST';
     const labelTop = `T${tid} [${stateTag}] v2:${padicVal} ${fSign}`;
-    let lx = Math.max(8, Math.min(W - 172, fx - 26));
-    let ly = fy > 68 ? fy - 46 : fy + 28;
-    for (let pass = 0; pass < 3; pass++) {
-      let hit = false;
-      for (let k = 0; k < placedLabels; k++) {
-        if (Math.abs(lx - hudLabelX[k]) < 158 && Math.abs(ly - hudLabelY[k]) < 21) {
-          hit = true;
-          break;
-        }
-      }
-      if (!hit) break;
-      ly = ly + 22 < H - 28 ? ly + 22 : Math.max(38, ly - 22);
-    }
-    hudLabelX[placedLabels] = lx;
-    hudLabelY[placedLabels] = ly;
-    placedLabels++;
+    const posTop = reserveHudLabelSlot(W, H, fx - 26, fy > 68 ? fy - 46 : fy + 28, 162, placedLabels);
+    placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
 
     hudCtx.fillStyle = 'rgba(7, 11, 18, 0.85)';
-    hudCtx.fillRect(lx, ly, 162, 19);
+    hudCtx.fillRect(posTop[0], posTop[1], 162, 19);
     hudCtx.fillStyle = isBridged ? '#ffd166' : color;
     hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(labelTop, lx + 4, ly + 13);
+    hudCtx.fillText(labelTop, posTop[0] + 4, posTop[1] + 13);
 
     hudCtx.fillStyle = 'rgba(205, 224, 245, 0.82)';
     hudCtx.font = '500 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(sigHex, fx + 29, fy + 4);
+    hudCtx.fillText(sigHex, fx + 29, fy - 2);
     hudCtx.restore();
   }
 
@@ -1196,7 +2133,7 @@ function renderMainHud(dispSlot) {
     strobeFlashAlpha *= 0.78;
   }
 
-  // 7. Top-left HUD Status Strip + Top-right Focus Hint
+  // 7. Top-left HUD Status Strip + Top-right Focus Hint + Bottom Calibration / Gravity Strip
   const clutterReady = telemView[22] > 0.5;
   const clutterStr = clutterReady ? `${telemView[4].toFixed(1)} dB` : 'WARMING';
   const ecaTag = showEcaOverlay ? ' | LIVE ECA@t' : '';
@@ -1223,6 +2160,38 @@ function renderMainHud(dispSlot) {
   hudCtx.fillStyle = focusTid !== 0 ? '#ffd166' : '#a8c0df';
   hudCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
   hudCtx.fillText(focusStr, W - 258, 26);
+
+  // Bottom-left Scene Gravity Prior badge when parabolic gravity is locked
+  const sceneGPx = telemView[640];
+  const sceneGConf = telemView[641];
+  if (labMode === 0 && sceneGConf >= 0.25 && sceneGPx > 50.0) {
+    hudCtx.fillStyle = 'rgba(6, 10, 18, 0.84)';
+    hudCtx.fillRect(10, H - 32, 232, 22);
+    hudCtx.strokeStyle = 'rgba(255, 209, 102, 0.48)';
+    hudCtx.lineWidth = 1.0;
+    hudCtx.strokeRect(10, H - 32, 232, 22);
+    hudCtx.fillStyle = '#ffd166';
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(`ĝ = ${Math.round(sceneGPx)} px/s² (CONF ${Math.round(sceneGConf * 100)}%)`, 17, H - 17);
+  }
+
+  // Bottom-right Metric / Homography Calibration badge
+  if (calMode !== 'none') {
+    const calShort = calMode === 'homography' && calHomographyValid
+      ? `⬠ PLANE H: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m [RECTIFIED m/s]`
+      : calMode === 'auto_g'
+      ? `⚡ AUTO-g: ${Math.round(getEffectivePxPerMeter())} px/m (9.81 m/s²)`
+      : `📏 RULER: ${calRulerMeters.toFixed(2)} m (${Math.round(getEffectivePxPerMeter())} px/m)`;
+    const cw = 304;
+    hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
+    hudCtx.fillRect(W - cw - 10, H - 32, cw, 22);
+    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.55)';
+    hudCtx.lineWidth = 1.0;
+    hudCtx.strokeRect(W - cw - 10, H - 32, cw, 22);
+    hudCtx.fillStyle = '#00e5ff';
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(calShort, W - cw - 2, H - 17);
+  }
 }
 
 /// Side-by-Side Split PiP: Left = 1x Raw Stabilized Crop from `rgba_ring[dispSlot]`,
@@ -1699,6 +2668,15 @@ function processIngestedFrame(rawPixels, dtSec) {
     });
   }
 
+  // Update resolution-invariant scene gravity lock when high-confidence parabolic arc is observed
+  if (telemView[641] >= 0.25 && telemView[640] > 50.0) {
+    const hadLock = calAutoGNormH > 0.05;
+    calAutoGNormH = telemView[640] / frameH;
+    if (calMode === 'auto_g' && !hadLock) {
+      emitCalibrationState();
+    }
+  }
+
   // Emit per-target deduplicated Mode C strikes and schedule synchronized t - K shockwave rings!
   const percMask = Math.round(telemView[15]);
   if (percMask !== 0) {
@@ -1709,11 +2687,25 @@ function processIngestedFrame(rawPixels, dtSec) {
       const ebase = 512 + m * 8;
       if (telemView[ebase] > 0.5) {
         totalStrikeEvents++;
+        const kbase = 576 + m * 8;
         const zone = Math.round(telemView[ebase + 1]) & 3;
         const leadFrames = telemView[ebase + 2];
         const vel = telemView[ebase + 3];
         const sxPos = telemView[ebase + 4];
         const syPos = telemView[ebase + 5];
+        const rawDefl = telemView[kbase + 3];
+        const rawRest = telemView[kbase + 4];
+        const rawIn = telemView[kbase + 5];
+
+        const maxValidRest = sourceMode === 'testbench' ? 1.65 : 1.18;
+        if (rawRest >= 0.06 && rawRest <= maxValidRest && Math.abs(rawDefl) >= 3.0) {
+          const rectSt = rectifyStrikeKinematics(sxPos, syPos, rawIn, rawDefl, rawRest);
+          if (rectSt[2] <= maxValidRest) {
+            lastStrikeDeflectDeg = rectSt[1];
+            lastStrikeRestitution = rectSt[2];
+            lastStrikeValid = true;
+          }
+        }
 
         if (labMode === 2) {
           shockTriggerFrame[shockWriteHead] = fIdx + Math.round(leadFrames);
@@ -1721,6 +2713,9 @@ function processIngestedFrame(rawPixels, dtSec) {
           shockY[shockWriteHead] = syPos;
           shockZone[shockWriteHead] = zone;
           shockVel[shockWriteHead] = vel;
+          shockInDeg[shockWriteHead] = rawIn;
+          shockDeflectDeg[shockWriteHead] = rawDefl;
+          shockRestitution[shockWriteHead] = rawRest;
           shockAge[shockWriteHead] = -1;
           shockWriteHead = (shockWriteHead + 1) % SHOCK_POOL;
 
@@ -1736,13 +2731,24 @@ function processIngestedFrame(rawPixels, dtSec) {
     }
   }
 
+  if (telemView[642] > 2.0) {
+    const rectSc = rectifyScatterKinematics(
+      telemView[643],
+      telemView[644],
+      telemView[645],
+      telemView[646],
+      telemView[642]
+    );
+    lastScatterDeg = rectSc[2];
+  }
+
   // Render all 4 OffscreenCanvases inside Worker isolate
   renderMainHud(dispSlot);
   renderEulerianPip();
   renderHilbertScope();
   renderSpectralAndRingScope();
 
-  // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 38 columns)
+  // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 46 columns)
   if (recActive) {
     const effRateRec = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
     const pSlot = Math.round(telemView[8]);
@@ -1767,8 +2773,11 @@ function processIngestedFrame(rawPixels, dtSec) {
     recSlab[ro + 15] = telemView[24];
     recSlab[ro + 16] = telemView[25];
 
-    if (pSlot >= 0) {
+    if (pSlot >= 0 && telemView[32 + pSlot * 56] > 0.5) {
       const b = 32 + pSlot * 56;
+      const kb = 576 + pSlot * 8;
+      const fxPx = telemView[b + 2];
+      const fyPx = telemView[b + 3];
       const hi = Math.round(telemView[b + 12]) & 0xffff;
       const lo = Math.round(telemView[b + 13]) & 0xffff;
       recSlab[ro + 17] = Math.round(telemView[b + 1]);
@@ -1776,16 +2785,34 @@ function processIngestedFrame(rawPixels, dtSec) {
       recSlab[ro + 19] = Math.round(telemView[b + 14]);
       recSlab[ro + 20] = telemView[b + 4];
       recSlab[ro + 21] = telemView[b + 5];
-      recSlab[ro + 22] = telemView[b + 2];
-      recSlab[ro + 23] = telemView[b + 3];
+      recSlab[ro + 22] = fxPx;
+      recSlab[ro + 23] = fyPx;
       recSlab[ro + 24] = telemView[b + 6];
       recSlab[ro + 25] = telemView[b + 7];
       recSlab[ro + 26] = telemView[b + 10];
       recSlab[ro + 27] = telemView[b + 11];
       recSlab[ro + 36] = telemView[b + 17] * (1000.0 / effRateRec);
+
+      const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
+      recSlab[ro + 38] = physVel[1];
+      recSlab[ro + 39] = physVel[0];
+      recSlab[ro + 40] = telemView[kb + 2];
+      if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
+        const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
+        recSlab[ro + 41] = pend[0];
+      } else {
+        recSlab[ro + 41] = 0.0;
+      }
+      const stRect = rectifyStrikeKinematics(fxPx, fyPx, telemView[kb + 5], telemView[kb + 3], telemView[kb + 4]);
+      recSlab[ro + 42] = stRect[1];
+      recSlab[ro + 43] = stRect[2];
+      const mPt = mapPixelToMetric(fxPx, fyPx);
+      recSlab[ro + 44] = mPt[0];
+      recSlab[ro + 45] = mPt[1];
     } else {
       for (let c = 17; c <= 27; c++) recSlab[ro + c] = 0.0;
       recSlab[ro + 36] = 0.0;
+      for (let c = 38; c <= 45; c++) recSlab[ro + c] = 0.0;
     }
 
     recSlab[ro + 28] = telemView[9];
@@ -1817,18 +2844,38 @@ function processIngestedFrame(rawPixels, dtSec) {
 
     const pIdx = Math.round(telemView[8]);
     const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
+    const metricOn = isMetricCalibrated();
     let pTid = 0;
     let pSigHex = '0x00000000';
     let pVal = 0;
     let apexMs = 0;
     let primaryCoherence = 0;
+    let headingDeg = 0.0;
+    let speedPhys = 0.0;
+    let angVelDegS = 0.0;
+    let pivotValid = false;
+    let pendSwingDeg = 0.0;
+    let pendRadiusPhys = 0.0;
     if (pIdx >= 0 && telemView[32 + pIdx * 56] > 0.5) {
       const b = 32 + pIdx * 56;
+      const kb = 576 + pIdx * 8;
+      const fxPx = telemView[b + 2];
+      const fyPx = telemView[b + 3];
       pTid = Math.round(telemView[b + 1]);
       pSigHex = toHex8(telemView[b + 12], telemView[b + 13]);
       pVal = Math.round(telemView[b + 14]);
       apexMs = telemView[b + 17] * (1000.0 / effSampleRate);
       primaryCoherence = telemView[512 + pIdx * 8 + 6];
+      const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
+      speedPhys = physVel[0];
+      headingDeg = physVel[1];
+      angVelDegS = telemView[kb + 2];
+      if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
+        pivotValid = true;
+        const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
+        pendSwingDeg = pend[0];
+        pendRadiusPhys = pend[1];
+      }
     }
     if (apexMs <= 0.0) {
       for (let m = 0; m < MAX_TARGETS; m++) {
@@ -1877,6 +2924,23 @@ function processIngestedFrame(rawPixels, dtSec) {
       primaryPadicVal: pVal,
       apexMs,
       apexErrPx: lastScoredApexErrPx,
+      headingDeg,
+      speedPhys,
+      speedUnit: metricOn ? 'm/s' : 'px/s',
+      distUnit: metricOn ? 'm' : 'px',
+      angVelDegS,
+      pivotValid,
+      pendSwingDeg,
+      pendRadiusPhys,
+      sceneGravityPxS2: telemView[640],
+      sceneGravityConf: telemView[641],
+      lastDeflectDeg: lastStrikeDeflectDeg,
+      lastRestitution: lastStrikeRestitution,
+      lastStrikeValid,
+      scatterDeg: lastScatterDeg,
+      calMode,
+      calArmed,
+      calibrated: metricOn,
       arenaBytes: Math.round(telemView[20]),
       memoryPages: wasmMemory.buffer.byteLength / 65536,
       resMode,
@@ -1937,8 +3001,68 @@ function configureResolutionViews(mode) {
   resetTestbenchState();
 }
 
+function redrawPausedHudIfReady() {
+  if (wasmExports && telemView && Math.round(telemView[0]) > 0) {
+    const dispSlot = Math.round(telemView[2]);
+    renderMainHud(dispSlot);
+    renderEulerianPip();
+  }
+}
+
 function handleHudCanvasClick(normX, normY) {
   if (!wasmExports || !telemView) return;
+
+  // Intercept interactive 2-Pt Ruler & 4-Pt Plane Homography calibration clicks first
+  if (calArmed === 'ruler') {
+    calPtsNormX[calPtCount] = normX;
+    calPtsNormY[calPtCount] = normY;
+    calPtCount++;
+    if (calPtCount >= 2) {
+      const spanPx = Math.hypot(
+        (calPtsNormX[1] - calPtsNormX[0]) * frameW,
+        (calPtsNormY[1] - calPtsNormY[0]) * frameH
+      );
+      if (spanPx < 4.0) {
+        calPtCount = 0;
+        calArmed = 'none';
+        emitCalibrationState('RULER CANCELLED · ENDPOINTS TOO CLOSE (< 4 px)');
+      } else {
+        calMode = 'ruler';
+        calArmed = 'none';
+        calPresetName = '';
+        emitCalibrationState();
+      }
+    } else {
+      emitCalibrationState();
+    }
+    redrawPausedHudIfReady();
+    return;
+  }
+
+  if (calArmed === 'homography') {
+    calPtsNormX[calPtCount] = normX;
+    calPtsNormY[calPtCount] = normY;
+    calPtCount++;
+    if (calPtCount >= 4) {
+      calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+      if (calHomographyValid) {
+        calMode = 'homography';
+        calArmed = 'none';
+        calPresetName = '';
+        emitCalibrationState();
+      } else {
+        calMode = 'none';
+        calArmed = 'none';
+        calPtCount = 0;
+        emitCalibrationState('INVALID QUAD · CLICK CONVEX CORNERS TL → TR → BR → BL');
+      }
+    } else {
+      emitCalibrationState();
+    }
+    redrawPausedHudIfReady();
+    return;
+  }
+
   const cx = normX * frameW;
   const cy = normY * frameH;
   const hitRadius = 28.0 * resScale;
@@ -1965,9 +3089,7 @@ function handleHudCanvasClick(normX, normY) {
   }
 
   // Re-render canvases immediately if video is paused
-  const dispSlot = Math.round(telemView[2]);
-  renderMainHud(dispSlot);
-  renderEulerianPip();
+  redrawPausedHudIfReady();
 }
 
 function cycleFocusTarget() {
@@ -2130,6 +3252,7 @@ self.onmessage = async (ev) => {
         frameH,
         pipDim,
       });
+      emitCalibrationState();
     }
   } else if (msg.type === 'set_scenario') {
     benchScenario = msg.scenario || 'pillar_crossing';
@@ -2138,6 +3261,64 @@ self.onmessage = async (ev) => {
     tickCounter = 0;
     if (wasmExports) wasmExports.chronos_reset_tracks();
     resetTestbenchState();
+  } else if (msg.type === 'cal_control') {
+    if (typeof msg.rulerMeters === 'number' && msg.rulerMeters >= 0.01) {
+      calRulerMeters = msg.rulerMeters;
+    }
+    if (typeof msg.planeW === 'number' && msg.planeW >= 0.01) {
+      calPlaneW = msg.planeW;
+    }
+    if (typeof msg.planeH === 'number' && msg.planeH >= 0.01) {
+      calPlaneH = msg.planeH;
+    }
+
+    if (msg.action === 'arm_ruler') {
+      if (calArmed === 'ruler') {
+        calArmed = 'none';
+        calPtCount = calMode === 'ruler' ? 2 : (calMode === 'homography' ? 4 : 0);
+      } else {
+        calArmed = 'ruler';
+        calPtCount = 0;
+      }
+      emitCalibrationState();
+    } else if (msg.action === 'arm_homography') {
+      if (calArmed === 'homography') {
+        calArmed = 'none';
+        calPtCount = calMode === 'homography' ? 4 : (calMode === 'ruler' ? 2 : 0);
+      } else {
+        calArmed = 'homography';
+        calPtCount = 0;
+      }
+      emitCalibrationState();
+    } else if (msg.action === 'cancel_arm') {
+      if (calArmed !== 'none') {
+        calArmed = 'none';
+        calPtCount = calMode === 'homography' ? 4 : (calMode === 'ruler' ? 2 : 0);
+        emitCalibrationState();
+      }
+    } else if (msg.action === 'set_auto_g') {
+      calArmed = 'none';
+      calPtCount = 0;
+      calPresetName = '';
+      calHomographyValid = false;
+      calMode = 'auto_g';
+      calAutoGFallbackNormW = 0.0;
+      if (telemView && telemView[641] >= 0.25 && telemView[640] > 50.0) {
+        calAutoGNormH = telemView[640] / frameH;
+      }
+      emitCalibrationState();
+    } else if (msg.action === 'apply_preset') {
+      applySceneCalibrationPreset(msg.preset || 'testbench');
+    } else if (msg.action === 'update_dims') {
+      if (calMode === 'homography' && calPtCount >= 4) {
+        calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+      }
+      emitCalibrationState();
+    } else if (msg.action === 'clear') {
+      clearCalibrationState();
+      emitCalibrationState();
+    }
+    redrawPausedHudIfReady();
   } else if (msg.type === 'canvas_click') {
     if (typeof msg.normX === 'number' && typeof msg.normY === 'number') {
       handleHudCanvasClick(msg.normX, msg.normY);
@@ -2187,6 +3368,8 @@ self.onmessage = async (ev) => {
     timeHistIdx = 0;
     tickCounter = 0;
     lastRafTs = 0;
+    clearCalibrationState();
+    emitCalibrationState();
     if (wasmExports) {
       wasmExports.chronos_reset_tracks();
     }
@@ -2273,7 +3456,7 @@ self.onmessage = async (ev) => {
         columns: REC_COLUMNS,
         buffer: ordered.buffer,
         meta: {
-          schemaVersion: '1.2.0',
+          schemaVersion: '1.3.0',
           sourceMode,
           benchScenario,
           resMode,
@@ -2286,6 +3469,7 @@ self.onmessage = async (ev) => {
           eulerianGain,
           phaseOffsetRad,
           labMode,
+          calibration: getCalibrationSnapshot(),
         },
       },
       [ordered.buffer]

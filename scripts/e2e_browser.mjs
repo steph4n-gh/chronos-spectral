@@ -3,7 +3,7 @@
 // CHRONOS-SPECTRAL // Zero-Dependency Headless Chrome CDP Full-Stack E2E Gate
 // Exercises V8 Web Worker + OffscreenCanvas HUD, 256-page Wasm SIMD128 kernel,
 // runtime 320x180 SD <-> 640x360 HD switching, real-camera H.264 MP4 playback,
-// Lab Modes A/B/C, and 38-column CSV/JSON telemetry recording & export.
+// Lab Modes A/B/C, Metric/Homography calibration, and 46-column CSV/JSON export.
 // ============================================================================
 
 import fs from 'node:fs';
@@ -446,6 +446,31 @@ async function main() {
       sessionId,
       `(() => {
         const sel = document.getElementById('sampleVideoSelect');
+        sel.value = './samples/galileo_pendulum_peg.mp4';
+        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      })()`
+    );
+    const galileoState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Galileo pendulum Kåsa virtual pivot & swing angle θ',
+      `(() => {
+        const lbl = document.getElementById('lblKinAngle')?.textContent || '';
+        const val = document.getElementById('kpiKinAngle')?.textContent || '';
+        return {
+          ok: lbl === 'Pendulum Swing θ' && val.endsWith('°') && !val.includes('NaN') && !val.includes('--'),
+          lbl,
+          val,
+        };
+      })()`,
+      15000
+    );
+
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const sel = document.getElementById('sampleVideoSelect');
         sel.value = './samples/carom_billiards_impulses.mp4';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
         return true;
@@ -462,7 +487,54 @@ async function main() {
       })()`,
       15000
     );
-    console.log(`  [PASS] Step 3b (Multi-Clip Real Physics Proof): gantryBridges=${gantryState.bridges}f, metronome=(${metroState.meta}), caromStrikes=${caromState.strikes}`);
+
+    // Verify Calibration Toolbar (arm 2-Pt Ruler -> Escape cancel -> Scene Preset 4-Pt Homography)
+    await cdp.evalJs(sessionId, `document.getElementById('btnCalRuler').click(); true;`);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      '2-Pt Ruler arm state',
+      `(() => ({
+        ok: document.getElementById('calToolbar')?.getAttribute('role') === 'toolbar' &&
+            document.getElementById('btnCalRuler')?.getAttribute('aria-pressed') === 'true'
+      }))()`
+    );
+    await cdp.evalJs(
+      sessionId,
+      `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); true;`
+    );
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Escape cancels armed 2-Pt Ruler',
+      `(() => ({
+        ok: document.getElementById('btnCalRuler')?.getAttribute('aria-pressed') === 'false'
+      }))()`
+    );
+    await cdp.evalJs(sessionId, `document.getElementById('btnCalPreset').click(); true;`);
+    const calPresetState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Carom 4-Pt Homography preset + physical m/s speed KPI',
+      `(() => {
+        const badge = document.getElementById('calBadge')?.textContent || '';
+        const quadPressed = document.getElementById('btnCalQuad')?.getAttribute('aria-pressed') || '';
+        const speedTxt = document.getElementById('kpiKinSpeed')?.textContent || '';
+        const angTxt = document.getElementById('kpiKinAngle')?.textContent || '';
+        const deflTxt = document.getElementById('kpiKinDeflect')?.textContent || '';
+        const restTxt = document.getElementById('kpiKinRestGrav')?.textContent || '';
+        const noNan = ![speedTxt, angTxt, deflTxt, restTxt].some((s) => s.includes('NaN'));
+        return {
+          ok: badge === '4-PT PLANE H' && quadPressed === 'true' && speedTxt.endsWith(' m/s') && noNan,
+          badge,
+          speedTxt,
+          angTxt,
+          deflTxt,
+          restTxt,
+        };
+      })()`
+    );
+    console.log(`  [PASS] Step 3b (Multi-Clip + Trig + Homography): gantryBridges=${gantryState.bridges}f, galileo=${galileoState.val}, metronome=(${metroState.meta}), caromStrikes=${caromState.strikes}, cal=${calPresetState.badge} (${calPresetState.speedTxt})`);
 
     // 4. Session Telemetry Recorder (Record -> Pause -> Export CSV -> Export JSON)
     await cdp.evalJs(sessionId, `document.getElementById('btnRecToggle').click(); true;`);
@@ -492,7 +564,13 @@ async function main() {
         const firstRow = lines[1] ? lines[1].split(',').map(Number) : [];
         const allFinite = lines.slice(1).every((l) => l.split(',').every((v) => Number.isFinite(Number(v))));
         return {
-          ok: headerCols.length === 38 && lines.length >= 17 && allFinite && firstRow[2] === 640 && firstRow[3] === 360,
+          ok: headerCols.length === 46 &&
+              headerCols.includes('heading_deg') &&
+              headerCols.includes('metric_x_m') &&
+              lines.length >= 17 &&
+              allFinite &&
+              firstRow[2] === 640 &&
+              firstRow[3] === 360,
           filename: ex.filename,
           cols: headerCols.length,
           rows: lines.length - 1,
@@ -511,8 +589,13 @@ async function main() {
         const ex = window.__lastTelemetryExport;
         if (!ex || !ex.filename.endsWith('.json')) return { ok: false };
         const parsed = JSON.parse(ex.fullText);
+        const hasMetric = parsed.frames.some((f) => Math.abs(f.metric_x_m) > 0.01 || Math.abs(f.metric_y_m) > 0.01);
         return {
-          ok: parsed.columns.length === 38 &&
+          ok: parsed.columns.length === 46 &&
+              parsed.meta.schemaVersion === '1.3.0' &&
+              parsed.meta.calibration?.mode === 'homography' &&
+              parsed.meta.calibration?.homographyValid === true &&
+              hasMetric &&
               parsed.frameCount >= 16 &&
               parsed.frames.length === parsed.frameCount &&
               parsed.meta.resMode === 1 &&

@@ -67,7 +67,7 @@ const BYTES = PIXELS * 4;
 const GRAPH_NODES = 16;
 const MAX_TARGETS = 8;
 const MAX_KRYLOV = 15;
-const TELEMETRY_LEN = 576;
+const TELEMETRY_LEN = 648;
 
 const wasmBytes = fs.readFileSync('./web/chronos_spectral.wasm');
 const { instance } = await WebAssembly.instantiate(wasmBytes, {});
@@ -694,6 +694,179 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
     throw new Error('Gate G: Failed to restore 320x180 SD mode');
   }
   console.log('  [PASS] Gate G (Dual-Resolution 320x180 SD <-> 640x360 HD Switch): 256 static pages, 32x32 PiP verified');
+}
+
+// ----------------------------------------------------------------------------
+// Gate H: Ballistic Quadratic Gravity, CTRV Curved Coasting, Kasa Virtual Pivot & Collision Angles
+// ----------------------------------------------------------------------------
+{
+  const sdBytes = 320 * 180 * 4;
+  const sdBg = new Uint8Array(sdBytes);
+  for (let y = 0; y < 180; y++) {
+    for (let x = 0; x < 320; x++) {
+      const idx = (y * 320 + x) * 4;
+      const g = (x % 20 === 0 || y % 20 === 0) ? 10 : 0;
+      sdBg[idx] = 18 + g; sdBg[idx + 1] = 22 + g; sdBg[idx + 2] = 30 + g; sdBg[idx + 3] = 255;
+    }
+  }
+  const stampSubpxDisc = (dst, cx, cy) => {
+    const x0 = Math.max(0, Math.floor(cx - 8)), x1 = Math.min(319, Math.ceil(cx + 8));
+    const y0 = Math.max(0, Math.floor(cy - 8)), y1 = Math.min(179, Math.ceil(cy + 8));
+    for (let py = y0; py <= y1; py++) {
+      for (let px = x0; px <= x1; px++) {
+        const d2 = (px - cx) ** 2 + (py - cy) ** 2;
+        if (d2 <= 42.0) {
+          const w = Math.max(0, Math.min(1, (42.0 - d2) / 10.0));
+          const c = d2 <= 10.0;
+          const tr = c ? 255 : 246, tg = c ? 240 : 72, tb = c ? 120 : 62;
+          const idx = (py * 320 + px) * 4;
+          dst[idx] = Math.round(dst[idx] * (1 - w) + tr * w);
+          dst[idx + 1] = Math.round(dst[idx + 1] * (1 - w) + tg * w);
+          dst[idx + 2] = Math.round(dst[idx + 2] * (1 - w) + tb * w);
+        }
+      }
+    }
+  };
+
+  // H1: Full-segment closed-form quadratic gravity & apex theta=0 crossing
+  exp.chronos_init();
+  exp.chronos_set_params(8, 0.035, 1.45, 25.0, -Math.PI * 0.5, 0);
+  const ring = Array.from({ length: 12 }, (_, s) => new Uint8Array(mem.buffer, exp.chronos_get_ring_slot_ptr(s), sdBytes));
+  let maxAscTheta = -999, minDescTheta = 999, apexThetaAbs = 999, bestApexYErr = 999, gHat = 0;
+  for (let f = 0; f < 56; f++) {
+    const dst = ring[f % 12];
+    dst.set(sdBg);
+    if (f >= 4) {
+      const u = f - 4;
+      const cx = 36.0 + 4.2 * u;
+      const cy = 152.0 - 6.5 * u + 0.5 * 0.25 * u * u; // g_true = 900 px/s^2, apex at u=26 (cy=67.5)
+      stampSubpxDisc(dst, cx, cy);
+    }
+    exp.chronos_pre_tick(1 / 60);
+    solveShiftedLanczosFiedler();
+    exp.chronos_post_tick(1 / 60);
+    if (telem[640] > 0) gHat = telem[640];
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const base = 32 + m * 56, kbase = 576 + m * 8;
+      if (telem[base] > 0.5) {
+        if (telem[base + 17] > 1.0) {
+          bestApexYErr = Math.min(bestApexYErr, Math.abs(telem[base + 16] - 67.5));
+        }
+        const th = telem[kbase];
+        const fDisp = f - Math.round(telem[1]);
+        if (fDisp >= 10 && fDisp <= 20) maxAscTheta = Math.max(maxAscTheta, th);
+        if (fDisp === 30) apexThetaAbs = Math.min(apexThetaAbs, Math.abs(th));
+        if (fDisp >= 38 && fDisp <= 46) minDescTheta = Math.min(minDescTheta, th);
+      }
+    }
+  }
+  if (Math.abs(gHat - 900.0) > 55.0 || bestApexYErr > 3.0 || maxAscTheta < 35.0 || apexThetaAbs > 6.5 || minDescTheta > -30.0) {
+    throw new Error(`Gate H1 (Ballistic Quadratic & Theta): gHat=${gHat.toFixed(1)}, apexYErr=${bestApexYErr.toFixed(2)}, asc=${maxAscTheta.toFixed(1)}, apexTh=${apexThetaAbs.toFixed(2)}, desc=${minDescTheta.toFixed(1)}`);
+  }
+
+  // H2: CTRV Curved-Arc Occlusion Coasting behind opaque pillar
+  exp.chronos_init();
+  let arcTrackId = -1, arcIdConsistent = true, arcBridges = 0;
+  for (let f = 0; f < 54; f++) {
+    const dst = ring[f % 12];
+    dst.set(sdBg);
+    if (f >= 4) {
+      const ang = -2.35 + 0.048 * (f - 4); // Smooth circular turn R=96 around (160, 172)
+      const cx = 160.0 + 96.0 * Math.cos(ang);
+      const cy = 172.0 + 96.0 * Math.sin(ang);
+      stampSubpxDisc(dst, cx, cy);
+    }
+    // Opaque pillar occluding curved arc near top of turn x in [145, 177] (~7 frames)
+    for (let py = 20; py < 140; py++) {
+      for (let px = 145; px < 177; px++) {
+        const idx = (py * 320 + px) * 4;
+        dst[idx] = 36; dst[idx + 1] = 42; dst[idx + 2] = 52; dst[idx + 3] = 255;
+      }
+    }
+    exp.chronos_pre_tick(1 / 60);
+    solveShiftedLanczosFiedler();
+    exp.chronos_post_tick(1 / 60);
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const base = 32 + m * 56;
+      if (telem[base] > 0.5) {
+        const tid = Math.round(telem[base + 1]);
+        if (arcTrackId < 0) arcTrackId = tid;
+        else if (tid !== arcTrackId) arcIdConsistent = false;
+        if (telem[base + 11] > 0.5) arcBridges++;
+      }
+    }
+  }
+  if (arcTrackId < 0 || !arcIdConsistent || arcBridges < 4) {
+    throw new Error(`Gate H2 (CTRV Curved Occlusion Coasting): tid=${arcTrackId}, consistent=${arcIdConsistent}, bridges=${arcBridges}`);
+  }
+
+  // H3: Mode B Kasa 2x2 Virtual Pendulum Pivot Recovery
+  exp.chronos_init();
+  exp.chronos_set_params(8, 0.035, 1.45, 25.0, -Math.PI * 0.5, 1);
+  let bestPivotErr = 999;
+  for (let f = 0; f < 56; f++) {
+    const dst = ring[f % 12];
+    dst.set(sdBg);
+    if (f >= 4) {
+      const th = 0.56 * Math.sin(2.0 * Math.PI * 0.85 * ((f - 4) / 60.0) - 0.8);
+      const cx = 160.0 + 112.0 * Math.sin(th);
+      const cy = 22.0 + 112.0 * Math.cos(th);
+      stampSubpxDisc(dst, cx, cy);
+    }
+    exp.chronos_pre_tick(1 / 60);
+    solveShiftedLanczosFiedler();
+    exp.chronos_post_tick(1 / 60);
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const base = 32 + m * 56, kbase = 576 + m * 8;
+      if (telem[base] > 0.5 && telem[kbase + 6] > -1e5) {
+        const err = Math.hypot(telem[kbase + 6] - 160.0, telem[kbase + 7] - 22.0);
+        bestPivotErr = Math.min(bestPivotErr, err);
+      }
+    }
+  }
+  if (bestPivotErr > 4.0) {
+    throw new Error(`Gate H3 (Kasa Virtual Pendulum Pivot): bestPivotErr=${bestPivotErr.toFixed(2)} px > 4.0 px`);
+  }
+
+  // H4: Mode C Deflection Angle Protractor & Coefficient of Restitution
+  exp.chronos_init();
+  exp.chronos_set_params(8, 0.035, 1.45, 25.0, -Math.PI * 0.5, 2);
+  let strikeCount = 0, measDeflect = 0, measRest = 0;
+  const rad60 = -Math.PI / 3.0; // -60 deg downward-right deflection
+  for (let f = 0; f < 46; f++) {
+    const dst = ring[f % 12];
+    dst.set(sdBg);
+    if (f >= 4) {
+      const u = f - 4;
+      let cx, cy;
+      if (u <= 20) {
+        cx = 64.0 + 4.5 * u;
+        cy = 68.0;
+      } else {
+        const du = u - 20;
+        cx = 154.0 + 3.6 * Math.cos(rad60) * du;
+        cy = 68.0 - 3.6 * Math.sin(rad60) * du; // e_true = 3.6 / 4.5 = 0.80
+      }
+      stampSubpxDisc(dst, cx, cy);
+    }
+    exp.chronos_pre_tick(1 / 60);
+    solveShiftedLanczosFiedler();
+    exp.chronos_post_tick(1 / 60);
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const base = 32 + m * 56, ebase = 512 + m * 8, kbase = 576 + m * 8;
+      if (telem[base] > 0.5) {
+        if (telem[ebase] > 0.5) strikeCount++;
+        if (Math.abs(telem[kbase + 3]) > 1.0) {
+          measDeflect = telem[kbase + 3];
+          measRest = telem[kbase + 4];
+        }
+      }
+    }
+  }
+  if (strikeCount < 1 || Math.abs(Math.abs(measDeflect) - 60.0) > 3.5 || Math.abs(measRest - 0.80) > 0.08) {
+    throw new Error(`Gate H4 (Collision Deflection & Restitution): strikes=${strikeCount}, deflect=${measDeflect.toFixed(2)} deg, e=${measRest.toFixed(3)}`);
+  }
+  console.log(`  [PASS] Gate H (Quadratic Gravity g=${gHat.toFixed(1)}, CTRV Arc Coast, Kasa Pivot err=${bestPivotErr.toFixed(2)}px, Deflect=${measDeflect.toFixed(1)}° e=${measRest.toFixed(2)})`);
 }
 
 console.log('');

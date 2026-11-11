@@ -21,7 +21,7 @@ const gtDataset = fs.existsSync(GT_PATH) ? JSON.parse(fs.readFileSync(GT_PATH, '
 const GRAPH_NODES = 16;
 const MAX_TARGETS = 8;
 const MAX_KRYLOV = 15;
-const TELEMETRY_LEN = 576;
+const TELEMETRY_LEN = 648;
 
 const CLIPS = [
   {
@@ -466,6 +466,10 @@ for (const clip of CLIPS) {
   let apexFrames = 0;
   let phaseValidFrames = 0;
   let percTriggers = 0;
+  let pivotFrames = 0;
+  let maxDeflectDeg = 0.0;
+  let lastSceneGrav = 0.0;
+  let lastScatterDeg = 0.0;
   let maxEigRes = 0.0;
   let nanDetected = false;
   const teleportStepMax = 42.0 * s * Math.max(1.0, (60.0 / clip.fps) * 0.78);
@@ -498,10 +502,13 @@ for (const clip of CLIPS) {
     }
     if (telem[26] > 0.5) phaseValidFrames++;
     if (Math.round(telem[15]) !== 0) percTriggers++;
+    if (telem[640] > 0.0) lastSceneGrav = telem[640];
+    if (telem[642] > 0.0) lastScatterDeg = telem[642];
 
     const activeTracks = [];
     for (let m = 0; m < MAX_TARGETS; m++) {
       const base = 32 + m * 56;
+      const kbase = 576 + m * 8;
       if (telem[base] > 0.5) {
         const tid = Math.round(telem[base + 1]);
         const fx = telem[base + 2];
@@ -512,6 +519,8 @@ for (const clip of CLIPS) {
         trackAges.set(tid, (trackAges.get(tid) || 0) + 1);
         if (telem[base + 11] > 0.5) bridgeFrames++;
         if (telem[base + 17] > 0.35) apexFrames++;
+        if (telem[kbase + 6] > -1e5) pivotFrames++;
+        if (Math.abs(telem[kbase + 3]) > maxDeflectDeg) maxDeflectDeg = Math.abs(telem[kbase + 3]);
         activeTracks.push({ m, tid, fx, fy });
 
         let tl = trackLife.get(tid);
@@ -598,6 +607,7 @@ for (const clip of CLIPS) {
     console.log(`  Ground Truth  : Recall=${gtRecallPct.toFixed(1)}% (${gtMatched}/${gtTotal}) | RMSE=${gtRmsePx.toFixed(2)} px | IDSW=${gtIdSwaps} | Hijacks=${gtHijacks} | Teleports=${teleportJumps} | StaticPins=${staticPins}`);
   }
   console.log(`  Features      : bridges=${bridgeFrames}f | apexFrames=${apexFrames}f | hilbertValid=${phaseValidFrames}f | percStrikes=${percTriggers} | 2adicAudit=${padicSwaps} vs kalmanSwaps=${kalmanSwaps}`);
+  console.log(`  Kinematics    : g_hat=${lastSceneGrav.toFixed(1)} px/s² | virtualPivot=${pivotFrames}f | maxDeflect=${maxDeflectDeg.toFixed(1)}° | scatter=${lastScatterDeg.toFixed(1)}°`);
 
   if (strictGate) {
     const minPersistent = clip.minPersistent ?? 1;
