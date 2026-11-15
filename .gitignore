@@ -3,3 +3,6 @@
 decisions.tsv
 .audit/
 *.log
+*.tmp.*
+node_modules/
+

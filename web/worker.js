@@ -9,22 +9,31 @@ const MAX_FRAME_W = 640;
 const MAX_FRAME_H = 360;
 const MAX_FRAME_BYTES = MAX_FRAME_W * MAX_FRAME_H * 4;
 const RING_LEN = 12;
-const MAX_TARGETS = 8;
-const GRAPH_NODES = 16;
-const TELEMETRY_LEN = 648;
+const MAX_TARGETS = 16;
+const GRAPH_NODES = 32;
+const TELEM_PEAKS = 928;
+const TELEM_EXCUR = 992;
+const TELEM_KINETIC = 1120;
+const TELEM_GLOBAL = 1248;
+const TELEM_PERSIST = 1264;
+const TELEM_PHYSICS_START = 1280;
+const TELEM_PHYSICS_STRIDE = 16;
+const TELEM_ENSEMBLE_START = 1536;
+const TELEMETRY_LEN = 1568;
+const MAX_PIP_BYTES = 64 * 64 * 4;
 
-let resMode = 0; // 0: 320x180 SD (16x16 patch/PiP), 1: 640x360 HD (32x32 foveated patch/PiP)
+let resMode = 0; // 0: 320x180 SD (32x32 patch/PiP), 1: 640x360 HD (64x64 foveated patch/PiP)
 let frameW = 320;
 let frameH = 180;
 let framePixels = frameW * frameH;
 let frameBytes = framePixels * 4;
-let pipDim = 16;
+let pipDim = 32;
 let resScale = 1;
 
 let wasmExports = null;
 let wasmMemory = null;
 
-// Pre-allocated permanent views into 256-page (16 MB) static Wasm linear memory
+// Pre-allocated permanent views into 288-page (18 MB) static Wasm linear memory
 const ringSlotU8 = new Array(RING_LEN);
 const ringSlotImgData = new Array(RING_LEN);
 const ecaOverlayBackingBuf = new Uint8ClampedArray(MAX_FRAME_BYTES);
@@ -33,6 +42,8 @@ let pipImgData = null;
 let laplacianView = null;
 let fiedlerView = null;
 let telemView = null;
+let slotMetaView = null;
+const slotPipImgData = new Array(MAX_TARGETS).fill(null);
 
 // OffscreenCanvases & 2D contexts (pre-allocated once at boot)
 let hudCanvas = null;
@@ -43,6 +54,38 @@ let hilbertCanvas = null;
 let hilbertCtx = null;
 let spectralCanvas = null;
 let spectralCtx = null;
+let persistenceCanvas = null;
+let persistenceCtx = null;
+let physicsPhaseCanvas = null;
+let physicsPhaseCtx = null;
+const slotPipCanvases = new Array(MAX_TARGETS).fill(null);
+const slotPipCtxs = new Array(MAX_TARGETS).fill(null);
+
+// Pre-allocated Per-Slot Sticky Hold-on-Loss & EMA-Smoothed Roster State (zero runtime GC)
+const SLOT_HOLD_FRAMES = 48; // ~1.5s graceful hold when a target exits or briefly drops
+const PINNED_HOLD_FRAMES = 180; // Match Wasm 180-frame user-pin retention window
+const slotHoldLeft = new Int16Array(MAX_TARGETS);
+const slotHoldTid = new Int32Array(MAX_TARGETS);
+const slotIdleDrawn = new Uint8Array(MAX_TARGETS);
+const slotHoldVeilDrawn = new Uint8Array(MAX_TARGETS);
+const slotSpeedPillOn = new Uint8Array(MAX_TARGETS);
+const slotSmoothedSpeed = new Float32Array(MAX_TARGETS);
+const slotSmoothedHeading = new Float32Array(MAX_TARGETS);
+const slotSmoothedOmega = new Float32Array(MAX_TARGETS);
+const slotSmoothedEca = new Float32Array(MAX_TARGETS);
+const slotLastAgeFrames = new Int32Array(MAX_TARGETS);
+const slotLastCoast = new Int32Array(MAX_TARGETS);
+const slotLastReacq = new Int32Array(MAX_TARGETS);
+const slotLastVal = new Int32Array(MAX_TARGETS);
+const slotLastSigHi = new Int32Array(MAX_TARGETS);
+const slotLastSigLo = new Int32Array(MAX_TARGETS);
+const slotLastFreqHz = new Float32Array(MAX_TARGETS);
+const slotLastMetricValid = new Float32Array(MAX_TARGETS);
+const slotLastCalSegId = new Int32Array(MAX_TARGETS).fill(-1);
+const slotLastPivotValid = new Uint8Array(MAX_TARGETS);
+const slotLastPendSwing = new Float32Array(MAX_TARGETS);
+const slotLastPendRad = new Float32Array(MAX_TARGETS);
+let camPanStreakWorker = 0;
 
 // Internal staging & simulation OffscreenCanvases
 let dispStageCanvas = null;
@@ -62,7 +105,9 @@ let sourceMode = 'testbench'; // 'testbench' | 'webcam' | 'video'
 let benchScenario = 'pillar_crossing'; // 'pillar_crossing' | 'short_gap_bridge' | 'ballistic_cascade' | 'harmonic_tremor' | 'percussion_ricochet'
 let showEcaOverlay = false;
 let showKalmanBaseline = true;
+let showAllOverlays = false;
 let strobeEnabled = true;
+const cropNorm = new Float64Array([0.0, 0.0, 1.0, 1.0]); // [x, y, w, h] in [0..1]
 
 let lookaheadK = 8;
 let ecaAdaptRate = 0.035;
@@ -100,8 +145,17 @@ const shockAge = new Int16Array(SHOCK_POOL).fill(-1);
 let shockWriteHead = 0;
 let lastStrikeDeflectDeg = 0.0;
 let lastStrikeRestitution = 0.0;
+let lastStrikeTid = 0;
+let lastStrikeFrame = -1;
 let lastStrikeValid = false;
 let lastScatterDeg = 0.0;
+let lastScatterFrame = -1;
+const slotLastStrikeX = new Float32Array(MAX_TARGETS);
+const slotLastStrikeY = new Float32Array(MAX_TARGETS);
+const prevRectHeading = new Float32Array(MAX_TARGETS);
+const prevRectTid = new Int32Array(MAX_TARGETS);
+const prevRectFrame = new Int32Array(MAX_TARGETS).fill(-1);
+const slotRectAngVel = new Float32Array(MAX_TARGETS);
 
 // Pre-allocated Mode A Frozen Parabolic Apex Reticle & Live Accuracy Score Buffers
 const apexLockTid = new Int32Array(MAX_TARGETS);
@@ -123,14 +177,59 @@ const histPipTid = new Int32Array(SCOPE_HIST).fill(-1);
 const histLambda2 = new Float32Array(SCOPE_HIST);
 let scopeWriteIdx = 0;
 
+// Pre-allocated Zero-GC Phase-Space Portrait & Conservation Scope Buffers (15 Hz OffscreenCanvas)
+const PHYS_REGIME_NAMES = [
+  'INERTIAL CV',
+  'BALLISTIC',
+  'BALLISTIC + AERO DRAG',
+  'POWERED BOOST',
+  'PARACHUTE / TERMINAL',
+  'PENDULUM / HARMONIC',
+  'MICRO-TREMOR',
+  'IMPULSIVE COLLISIONAL',
+  'CURVED CTRV',
+];
+const JUMP_CODE_NAMES = [
+  'NONE',
+  'GALILEO PEG JUMP',
+  'BOOST BURNOUT',
+  'PARACHUTE DEPLOY',
+  'COLLISION IMPULSE',
+];
+const PHASE_HIST = 140;
+const phaseHistX = new Float32Array(PHASE_HIST);
+const phaseHistY = new Float32Array(PHASE_HIST);
+const phaseHistVx = new Float32Array(PHASE_HIST);
+const phaseHistVy = new Float32Array(PHASE_HIST);
+const phaseHistE = new Float32Array(PHASE_HIST);
+const phaseHistEnsK = new Float32Array(PHASE_HIST);
+const phaseHistKurR = new Float32Array(PHASE_HIST);
+const phaseHistKurN = new Uint8Array(PHASE_HIST);
+const phaseHistRegime = new Uint8Array(PHASE_HIST);
+const phaseHistJump = new Uint8Array(PHASE_HIST);
+const phaseHistTid = new Int32Array(PHASE_HIST).fill(-1);
+let phaseHistWrite = 0;
+let phaseHistCount = 0;
+let lastPhysicsPhaseRenderMs = 0.0;
+
 // Pre-allocated HUD label collision stagger buffers (zero per-frame allocation)
 const MAX_HUD_LABELS = 24;
 const hudLabelX = new Float32Array(MAX_HUD_LABELS);
 const hudLabelY = new Float32Array(MAX_HUD_LABELS);
 const hudLabelW = new Float32Array(MAX_HUD_LABELS);
 
-// Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 15 = N - 1)
-const MAX_KRYLOV = 15;
+// Pre-allocated 44-frame (~1.5s) persistent per-track comet trail buffers (zero runtime GC)
+const TRAIL_SLOTS = 64;
+const TRAIL_LEN = 44;
+const trailOwnerTid = new Int32Array(TRAIL_SLOTS).fill(-1);
+const trailHead = new Uint8Array(TRAIL_SLOTS);
+const trailCount = new Uint8Array(TRAIL_SLOTS);
+const trailLastFrame = new Int32Array(TRAIL_SLOTS).fill(-1);
+const trailX = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
+const trailY = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
+
+// Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 31 = N - 1)
+const MAX_KRYLOV = 31;
 const activeNodeIdx = new Int32Array(GRAPH_NODES);
 const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
 const lanczosAlpha = new Float64Array(MAX_KRYLOV);
@@ -141,8 +240,8 @@ const jacobiV = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
 const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
 const eigVecBuf = new Float64Array(GRAPH_NODES);
 
-// Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz, 46 cols)
-const REC_COLS = 46;
+// Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz, 56 cols)
+const REC_COLS = 56;
 const REC_MAX_FRAMES = 18000;
 const REC_COLUMNS = [
   'frame_idx', 'elapsed_sec', 'frame_w', 'frame_h', 'lookahead_k', 'lab_mode',
@@ -155,31 +254,72 @@ const REC_COLUMNS = [
   'tremor_r', 'tremor_h', 'tremor_phase_deg', 'tremor_freq_hz', 'tremor_amp',
   'phase_valid', 'strobe_fired', 'perc_mask', 'apex_ms', 'saccade_latency_ms',
   'heading_deg', 'speed_phys', 'ang_vel_deg_s', 'pend_swing_deg',
-  'strike_deflect_deg', 'strike_restitution', 'metric_x_m', 'metric_y_m',
+  'strike_deflect_deg', 'strike_speed_ratio', 'metric_x_m', 'metric_y_m',
+  'cal_segment_id', 'metric_valid',
+  'phys_regime', 'phys_regime_conf', 'ode_r2', 'aero_drag_beta',
+  'thrust_accel', 'damping_zeta', 'kuramoto_order_r', 'lyapunov_div_rate',
 ];
 const recSlab = new Float64Array(REC_MAX_FRAMES * REC_COLS);
 let recActive = false;
 let recHead = 0;
 let recCount = 0;
+let recTotalWritten = 0;
 let recElapsedSec = 0.0;
+let calSegmentId = 0;
+let recCalSegments = [];
+
+// Pre-allocated Zero-GC Multi-Minute Tracking Continuity & Custody Timeline State
+const CONT_MAX_TRACKS = 128;
+const CONT_MAX_SEGS = 24;
+const CONT_HIST_BINS = 240;
+const contTid = new Int32Array(CONT_MAX_TRACKS);
+const contSlot = new Int16Array(CONT_MAX_TRACKS).fill(-1);
+const contFirstSeq = new Int32Array(CONT_MAX_TRACKS);
+const contLastSeq = new Int32Array(CONT_MAX_TRACKS);
+const contTotalFrames = new Int32Array(CONT_MAX_TRACKS);
+const contTotalSec = new Float32Array(CONT_MAX_TRACKS);
+const contRelocks = new Int32Array(CONT_MAX_TRACKS);
+const contSegCount = new Uint8Array(CONT_MAX_TRACKS);
+const contSegStart = new Int32Array(CONT_MAX_TRACKS * CONT_MAX_SEGS);
+const contSegEnd = new Int32Array(CONT_MAX_TRACKS * CONT_MAX_SEGS);
+const contWasActive = new Uint8Array(CONT_MAX_TRACKS);
+const contBinMaxActive = new Uint8Array(CONT_HIST_BINS);
+const contBinFrames = new Uint32Array(CONT_HIST_BINS);
+const contRankIdx = new Int32Array(CONT_MAX_TRACKS);
+let contCount = 0;
+let persistSampleSeq = 0;
+let sessionElapsedSec = 0.0;
+let lastPersistRenderMs = 0.0;
+let contBinStrideFrames = 15;
+let contBinHead = 0;
 
 // ============================================================================
 // Pre-Allocated Metric Ruler, Auto-g Scale, & 4-Point Plane Homography Engine
 // Stored in normalized [0..1] viewport coordinates so SD <-> HD is automatic!
 // ============================================================================
 const GRAVITY_M_S2 = 9.80665;
+const HOMOG_MIN_W = 0.14;
+const AUTO_G_LOCK_CONF = 0.50;
 const CORNER_TAGS = ['TL', 'TR', 'BR', 'BL'];
-let calMode = 'none';  // 'none' | 'ruler' | 'auto_g' | 'homography'
-let calArmed = 'none'; // 'none' | 'ruler' | 'homography'
+let calMode = 'none';       // 'none' | 'ruler' | 'auto_g' | 'homography'
+let calProvenance = 'none'; // 'none' | 'assumed' | 'surveyed'
+let calArmed = 'none';      // 'none' | 'ruler' | 'homography'
 let calPtCount = 0;
+let calDraftCount = 0;
 let calRulerMeters = 1.0;
 let calPlaneW = 2.84;
 let calPlaneH = 1.42;
+let calDraftRulerMeters = 1.0;
+let calDraftPlaneW = 2.84;
+let calDraftPlaneH = 1.42;
 let calPresetName = '';
-let calAutoGNormH = 0.0;         // scene_gravity_px_s2 / frameH (resolution-invariant)
-let calAutoGFallbackNormW = 0.0; // optional fallback span in normalized frameW units before 1st toss
+let calAutoGNormH = 0.0;    // scene_gravity_px_s2 / frameH (resolution-invariant)
+let calAutoGLocked = false; // true only when >= 2 consistent free-fall arcs lock
+let lastLambda2 = 0.0;
 const calPtsNormX = new Float64Array(4);
 const calPtsNormY = new Float64Array(4);
+const calDraftPtsNormX = new Float64Array(4);
+const calDraftPtsNormY = new Float64Array(4);
 const calHomography = new Float64Array(9);    // H: (nx, ny, 1)^T -> ~ (X_m, Y_m, 1)^T
 const calHomographyInv = new Float64Array(9); // H^-1: (X_m, Y_m, 1)^T -> ~ (nx, ny, 1)^T
 let calHomographyValid = false;
@@ -190,12 +330,14 @@ const homVecB = new Float64Array(8);
 const homSol = new Float64Array(8);
 const homTargetX = new Float64Array(4);
 const homTargetY = new Float64Array(4);
-const calOutPt = new Float64Array(2);
+const homScratchMat = new Float64Array(9);
+const homScratchInv = new Float64Array(9);
+const calOutPt = new Float64Array(3);      // [Xm, Ym, metricValid: 1=m, 0=px, -1=out_of_plane]
 const calOutNorm = new Float64Array(2);
-const calOutVel = new Float64Array(2);     // [speedPhys, rectifiedHeadingDeg]
-const calOutStrike = new Float64Array(3);  // [rectInDeg, rectDeflectDeg, rectRestitution]
+const calOutVel = new Float64Array(3);     // [speedPhys, rectifiedHeadingDeg, metricValid]
+const calOutStrike = new Float64Array(3);  // [rectInDeg, rectDeflectDeg, rectSpeedRatio]
 const calOutScatter = new Float64Array(3); // [rectTh1Deg, rectTh2Deg, rectScatterDeg]
-const calOutPend = new Float64Array(2);    // [swingDeg, radiusPhys]
+const calOutPend = new Float64Array(3);    // [swingDeg, radiusPhys, metricValid]
 
 function wrapDeg180(deg) {
   let d = ((deg + 180.0) % 360.0 + 360.0) % 360.0 - 180.0;
@@ -227,94 +369,113 @@ function invert3x3(m, out) {
   return true;
 }
 
-function solveHomography4Pt(planeW, planeH) {
+function solveHomography4Pt(planeW, planeH, ptsX = calPtsNormX, ptsY = calPtsNormY, commit = true) {
   const Wp = Math.max(0.01, planeW);
   const Hp = Math.max(0.01, planeH);
-  // Corner order TL -> TR -> BR -> BL mapped to right-handed plane [0..Wp] x [0..Hp] (+X right, +Y forward/up)
-  homTargetX[0] = 0.0; homTargetY[0] = Hp;
-  homTargetX[1] = Wp;  homTargetY[1] = Hp;
-  homTargetX[2] = Wp;  homTargetY[2] = 0.0;
-  homTargetX[3] = 0.0; homTargetY[3] = 0.0;
 
-  homMatA.fill(0.0);
   for (let i = 0; i < 4; i++) {
-    const x = calPtsNormX[i];
-    const y = calPtsNormY[i];
-    const X = homTargetX[i];
-    const Y = homTargetY[i];
-    const r0 = (i * 2) * 8;
-    const r1 = (i * 2 + 1) * 8;
-
-    homMatA[r0 + 0] = x;
-    homMatA[r0 + 1] = y;
-    homMatA[r0 + 2] = 1.0;
-    homMatA[r0 + 6] = -x * X;
-    homMatA[r0 + 7] = -y * X;
-    homVecB[i * 2] = X;
-
-    homMatA[r1 + 3] = x;
-    homMatA[r1 + 4] = y;
-    homMatA[r1 + 5] = 1.0;
-    homMatA[r1 + 6] = -x * Y;
-    homMatA[r1 + 7] = -y * Y;
-    homVecB[i * 2 + 1] = Y;
+    if (!Number.isFinite(ptsX[i]) || !Number.isFinite(ptsY[i])) return false;
   }
 
-  // 8x8 Gaussian elimination with partial pivoting
-  for (let col = 0; col < 8; col++) {
-    let pivRow = col;
-    let maxAbs = Math.abs(homMatA[col * 8 + col]);
-    for (let r = col + 1; r < 8; r++) {
-      const v = Math.abs(homMatA[r * 8 + col]);
-      if (v > maxAbs) {
-        maxAbs = v;
-        pivRow = r;
-      }
-    }
-    if (maxAbs < 1e-10) return false;
-    if (pivRow !== col) {
-      for (let c = col; c < 8; c++) {
-        const tmp = homMatA[col * 8 + c];
-        homMatA[col * 8 + c] = homMatA[pivRow * 8 + c];
-        homMatA[pivRow * 8 + c] = tmp;
-      }
-      const tb = homVecB[col];
-      homVecB[col] = homVecB[pivRow];
-      homVecB[pivRow] = tb;
-    }
-    const diag = homMatA[col * 8 + col];
-    for (let r = col + 1; r < 8; r++) {
-      const f = homMatA[r * 8 + col] / diag;
-      if (f === 0.0) continue;
-      homMatA[r * 8 + col] = 0.0;
-      for (let c = col + 1; c < 8; c++) {
-        homMatA[r * 8 + c] -= f * homMatA[col * 8 + c];
-      }
-      homVecB[r] -= f * homVecB[col];
-    }
-  }
-
-  for (let r = 7; r >= 0; r--) {
-    let sum = homVecB[r];
-    for (let c = r + 1; c < 8; c++) {
-      sum -= homMatA[r * 8 + c] * homSol[c];
-    }
-    homSol[r] = sum / homMatA[r * 8 + r];
-    if (!Number.isFinite(homSol[r])) return false;
-  }
-
-  for (let k = 0; k < 8; k++) calHomography[k] = homSol[k];
-  calHomography[8] = 1.0;
-
-  // Verify strictly positive projective depth across all 4 corners (reject self-intersecting bowties)
+  // Enforce strictly convex clockwise TL -> TR -> BR -> BL screen-space quad (+x right, +y down)
+  // and minimum normalized viewport area (>= 0.1% of frame, rejecting 1px/collinear/mirrored/bowtie quads).
+  let signedArea2 = 0.0;
   for (let i = 0; i < 4; i++) {
-    const w = calHomography[6] * calPtsNormX[i] + calHomography[7] * calPtsNormY[i] + 1.0;
-    if (w <= 0.02) return false;
+    const j = (i + 1) & 3;
+    const k = (i + 2) & 3;
+    const ux = ptsX[j] - ptsX[i];
+    const uy = ptsY[j] - ptsY[i];
+    const vx = ptsX[k] - ptsX[j];
+    const vy = ptsY[k] - ptsY[j];
+    const cr = ux * vy - uy * vx;
+    if (!Number.isFinite(cr) || cr <= 1e-5) return false;
+    signedArea2 += ptsX[i] * ptsY[j] - ptsX[j] * ptsY[i];
   }
-  return invert3x3(calHomography, calHomographyInv);
+  if (!Number.isFinite(signedArea2) || signedArea2 < 2e-3) return false;
+
+  // Closed-form projective rectangle basis solve (zero h33 = 1 singularity even when the
+  // vanishing horizon passes directly through image (0, 0)):
+  // Map unit square (u, v) = (X / Wp, Y / Hp) corners:
+  //   BL (0,0) -> p3,  BR (1,0) -> lam2 * p2,  TL (0,1) -> lam0 * p0,  TR (1,1) -> lam1 * p1
+  // where lam2 * (p2 - p1) + lam0 * (p0 - p1) = p3 - p1 and lam1 = lam2 + lam0 - 1.
+  const dx2 = ptsX[2] - ptsX[1];
+  const dy2 = ptsY[2] - ptsY[1];
+  const dx0 = ptsX[0] - ptsX[1];
+  const dy0 = ptsY[0] - ptsY[1];
+  const sx = ptsX[3] - ptsX[1];
+  const sy = ptsY[3] - ptsY[1];
+  const det = dx2 * dy0 - dx0 * dy2;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-11) return false;
+
+  const lam2 = (sx * dy0 - dx0 * sy) / det;
+  const lam0 = (dx2 * sy - sx * dy2) / det;
+  const lam1 = lam2 + lam0 - 1.0;
+  if (!(lam0 > 1e-4 && lam1 > 1e-4 && lam2 > 1e-4)) return false;
+
+  // Build H_inv (metric [X, Y, 1]^T -> w_px * [x, y, 1]^T) directly from [c0/Wp, c1/Hp, c2]:
+  const invWp = 1.0 / Wp;
+  const invHp = 1.0 / Hp;
+  homScratchInv[0] = (lam2 * ptsX[2] - ptsX[3]) * invWp;
+  homScratchInv[1] = (lam0 * ptsX[0] - ptsX[3]) * invHp;
+  homScratchInv[2] = ptsX[3];
+  homScratchInv[3] = (lam2 * ptsY[2] - ptsY[3]) * invWp;
+  homScratchInv[4] = (lam0 * ptsY[0] - ptsY[3]) * invHp;
+  homScratchInv[5] = ptsY[3];
+  homScratchInv[6] = (lam2 - 1.0) * invWp;
+  homScratchInv[7] = (lam0 - 1.0) * invHp;
+  homScratchInv[8] = 1.0;
+
+  if (!invert3x3(homScratchInv, homScratchMat)) return false;
+
+  // Projective depth at corner i is proportional to 1 / lam_i > 0.
+  // Align sign so all 4 corners have w_i > 0, then scale H so min(w_corners) = 1.0
+  // (guarantees w >= 1.0 > HOMOG_MIN_W throughout the entire convex ground quad while
+  // bounding extreme horizon-grazing foreshortening ratios <= 250x).
+  let posCount = 0;
+  let negCount = 0;
+  for (let i = 0; i < 4; i++) {
+    const w = homScratchMat[6] * ptsX[i] + homScratchMat[7] * ptsY[i] + homScratchMat[8];
+    if (!Number.isFinite(w)) return false;
+    if (w > 1e-8) posCount++;
+    else if (w < -1e-8) negCount++;
+  }
+  if (negCount === 4) {
+    for (let k = 0; k < 9; k++) homScratchMat[k] = -homScratchMat[k];
+  } else if (posCount !== 4) {
+    return false;
+  }
+
+  let minW = Infinity;
+  let maxW = 0.0;
+  for (let i = 0; i < 4; i++) {
+    const w = homScratchMat[6] * ptsX[i] + homScratchMat[7] * ptsY[i] + homScratchMat[8];
+    if (w < minW) minW = w;
+    if (w > maxW) maxW = w;
+  }
+  if (!(minW > 1e-8) || maxW / minW > 250.0) return false;
+
+  const invMinW = 1.0 / minW;
+  for (let k = 0; k < 9; k++) homScratchMat[k] *= invMinW;
+  if (!invert3x3(homScratchMat, homScratchInv)) return false;
+
+  for (let i = 0; i < 4; i++) {
+    const w = homScratchMat[6] * ptsX[i] + homScratchMat[7] * ptsY[i] + homScratchMat[8];
+    if (w <= HOMOG_MIN_W) return false;
+  }
+
+  if (commit) {
+    calHomography.set(homScratchMat);
+    calHomographyInv.set(homScratchInv);
+  }
+  return true;
+}
+
+function isCameraMotionSuspendingCal() {
+  return !!(telemView && sourceMode !== 'testbench' && Math.round(telemView[TELEM_GLOBAL + 9]) > 0);
 }
 
 function getEffectivePxPerMeter() {
+  if (isCameraMotionSuspendingCal()) return 0.0;
   if (calMode === 'ruler' && calPtCount >= 2) {
     const dx = (calPtsNormX[1] - calPtsNormX[0]) * frameW;
     const dy = (calPtsNormY[1] - calPtsNormY[0]) * frameH;
@@ -322,32 +483,114 @@ function getEffectivePxPerMeter() {
     return spanPx > 1.0 ? spanPx / Math.max(0.01, calRulerMeters) : 0.0;
   }
   if (calMode === 'auto_g') {
-    if (calAutoGNormH > 0.05) {
+    if (calAutoGLocked && calAutoGNormH > 0.05) {
       return (calAutoGNormH * frameH) / GRAVITY_M_S2;
-    }
-    if (calAutoGFallbackNormW > 0.05) {
-      return (calAutoGFallbackNormW * frameW) / Math.max(0.01, calRulerMeters);
     }
   }
   return 0.0;
 }
 
 function isMetricCalibrated() {
+  if (isCameraMotionSuspendingCal()) return false;
   if (calMode === 'homography') return calHomographyValid;
   if (calMode === 'ruler' || calMode === 'auto_g') return getEffectivePxPerMeter() > 0.5;
   return false;
 }
 
+function safeFinite(v, fallback = 0.0) {
+  return Number.isFinite(v) ? v : fallback;
+}
+
+function computeLocalHomographyPpm(px, py) {
+  if (isCameraMotionSuspendingCal()) return -1.0;
+  if (calMode !== 'homography' || !calHomographyValid) return 0.0;
+  const nx = px / frameW;
+  const ny = py / frameH;
+  const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
+  if (!(w > HOMOG_MIN_W)) return -1.0;
+  const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
+  const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+  const j00 = ((calHomography[0] - X * calHomography[6]) / w) / frameW;
+  const j01 = ((calHomography[1] - X * calHomography[7]) / w) / frameH;
+  const j10 = ((calHomography[3] - Y * calHomography[6]) / w) / frameW;
+  const j11 = ((calHomography[4] - Y * calHomography[7]) / w) / frameH;
+  const det = Math.abs(j00 * j11 - j01 * j10);
+  if (!Number.isFinite(det) || det < 1e-12) return 0.0;
+  const ppm = 1.0 / Math.sqrt(det);
+  return Number.isFinite(ppm) ? ppm : 0.0;
+}
+
+function formatCompactPhysicsVal(v, digits = 2) {
+  if (!Number.isFinite(v) || Math.abs(v) < 1e-9) return '0';
+  const a = Math.abs(v);
+  if (a < 1e-3 || a >= 1e4) return v.toExponential(2);
+  return v.toFixed(digits);
+}
+
+function formatSymbolicOdeString(p) {
+  if (!p.hasPrimary) {
+    if (p.kuramotoOscCount >= 2 && p.kuramotoOrderR > 0.05) {
+      return `Σθ̇ᵢ = ω + (K/N)Σsin(θⱼ-θᵢ) [R=${p.kuramotoOrderR.toFixed(2)}, N=${p.kuramotoOscCount}]`;
+    }
+    return 'Awaiting confirmed target dynamics...';
+  }
+  const betaStr = `${formatCompactPhysicsVal(p.betaDisp, 3)} ${p.betaUnit}`;
+  const thrustStr = `${formatCompactPhysicsVal(p.thrustDisp, 2)} ${p.thrustUnit}`;
+  const kappaStr = `${formatCompactPhysicsVal(p.curvatureDisp, 3)} ${p.curvatureUnit}`;
+  const zetaStr = p.dampingZeta.toFixed(3);
+  const qStr = p.qualityFactorQ >= 998.5 ? '>=999' : (p.qualityFactorQ > 0 ? p.qualityFactorQ.toFixed(1) : '--');
+  const tStr = p.ellipticPeriodS > 1e-3 ? `${p.ellipticPeriodS.toFixed(3)}s` : '--';
+
+  switch (p.physRegime) {
+    case 0:
+      return `dr/dt = v (${p.speedStr}), d²r/dt² ≈ 0 [R²=${p.odeR2.toFixed(2)}]`;
+    case 1:
+      return `d²y/dt² = +g (${p.gStr}) [R²=${p.odeR2.toFixed(2)}]`;
+    case 2:
+      return `d²r/dt² = g - β‖v‖v (β=${betaStr}, g=${p.gStr})`;
+    case 3:
+      return `d²r/dt² = a_th + g - β‖v‖v (a_th=${thrustStr}, β=${betaStr})`;
+    case 4:
+      return `dv_y/dt = g - βv_y² (β=${betaStr}, g=${p.gStr})`;
+    case 5:
+      return `θ̈ + (g/L)sinθ + 2ζω₀θ̇ = 0 (T=${tStr}, ζ=${zetaStr}, Q=${qStr})`;
+    case 6: {
+      const fTag = p.tremorFreqHz > 0.05 ? `f=${p.tremorFreqHz.toFixed(2)}Hz, ` : '';
+      return `q̈ + 2ζω₀q̇ + ω₀²q + αq³ = 0 (${fTag}ζ=${zetaStr}, Q=${qStr})`;
+    }
+    case 7: {
+      const eStr = p.normalRestitutionE > 0.01 ? p.normalRestitutionE.toFixed(3) : '--';
+      const mTag = p.lastPairMassRatio > 0 && p.lastPairFrame > 0 ? `, m₂/m₁=${p.lastPairMassRatio.toFixed(2)}` : '';
+      return `Δvₙ⁺ = -eₙΔvₙ⁻ (eₙ=${eStr}${mTag})`;
+    }
+    case 8:
+      return `ψ̇ = ω (${p.angVelDegS.toFixed(1)}°/s), d²r/dt² = ω×v (κ=${kappaStr})`;
+    default:
+      return `dr/dt = v (${p.speedStr})`;
+  }
+}
+
 function mapPixelToMetric(px, py) {
+  if (isCameraMotionSuspendingCal()) {
+    calOutPt[0] = 0.0;
+    calOutPt[1] = 0.0;
+    calOutPt[2] = -1.0;
+    return calOutPt;
+  }
   if (calMode === 'homography' && calHomographyValid) {
     const nx = px / frameW;
     const ny = py / frameH;
     const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
-    if (w > 0.28) {
+    if (w > HOMOG_MIN_W) {
       calOutPt[0] = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
       calOutPt[1] = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
+      calOutPt[2] = 1.0;
       return calOutPt;
     }
+    calOutPt[0] = 0.0;
+    calOutPt[1] = 0.0;
+    calOutPt[2] = -1.0;
+    return calOutPt;
   }
   const ppm = getEffectivePxPerMeter();
   if (ppm > 0.5) {
@@ -360,10 +603,12 @@ function mapPixelToMetric(px, py) {
       calOutPt[0] = px / ppm;
       calOutPt[1] = (frameH - py) / ppm;
     }
+    calOutPt[2] = 1.0;
     return calOutPt;
   }
   calOutPt[0] = 0.0;
   calOutPt[1] = 0.0;
+  calOutPt[2] = 0.0;
   return calOutPt;
 }
 
@@ -376,11 +621,17 @@ function mapMetricToNorm(Xm, Ym) {
 }
 
 function mapVelocityToPhysical(px, py, speedPxS, headingDeg) {
+  if (isCameraMotionSuspendingCal()) {
+    calOutVel[0] = 0.0;
+    calOutVel[1] = headingDeg;
+    calOutVel[2] = -1.0;
+    return calOutVel;
+  }
   if (calMode === 'homography' && calHomographyValid) {
     const nx = px / frameW;
     const ny = py / frameH;
     const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
-    if (w > 0.28) {
+    if (w > HOMOG_MIN_W) {
       const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
       const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
       const rad = headingDeg * (Math.PI / 180.0);
@@ -392,21 +643,34 @@ function mapVelocityToPhysical(px, py, speedPxS, headingDeg) {
       const spdM = Math.hypot(dX, dY);
       calOutVel[0] = spdM;
       calOutVel[1] = spdM > 1e-4 ? Math.atan2(dY, dX) * (180.0 / Math.PI) : headingDeg;
+      calOutVel[2] = 1.0;
       return calOutVel;
     }
+    // Never fall back to raw px/s disguised as m/s above horizon / outside valid frustum!
+    calOutVel[0] = 0.0;
+    calOutVel[1] = headingDeg;
+    calOutVel[2] = -1.0;
+    return calOutVel;
   }
   const ppm = getEffectivePxPerMeter();
-  calOutVel[0] = ppm > 0.5 ? speedPxS / ppm : speedPxS;
-  calOutVel[1] = headingDeg;
+  if (ppm > 0.5) {
+    calOutVel[0] = speedPxS / ppm;
+    calOutVel[1] = headingDeg;
+    calOutVel[2] = 1.0;
+  } else {
+    calOutVel[0] = speedPxS;
+    calOutVel[1] = headingDeg;
+    calOutVel[2] = 0.0;
+  }
   return calOutVel;
 }
 
 function rectifyStrikeKinematics(sxPx, syPx, inDeg, deflectDeg, restitution) {
-  if (calMode === 'homography' && calHomographyValid && restitution > 0.01) {
+  if (calMode === 'homography' && calHomographyValid && !isCameraMotionSuspendingCal() && restitution > 0.01) {
     const nx = sxPx / frameW;
     const ny = syPx / frameH;
     const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
-    if (Math.abs(w) > 1e-4) {
+    if (w > HOMOG_MIN_W) {
       const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
       const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
 
@@ -444,11 +708,11 @@ function rectifyStrikeKinematics(sxPx, syPx, inDeg, deflectDeg, restitution) {
 }
 
 function rectifyScatterKinematics(scxPx, scyPx, th1Deg, th2Deg, rawScatterDeg) {
-  if (calMode === 'homography' && calHomographyValid) {
+  if (calMode === 'homography' && calHomographyValid && !isCameraMotionSuspendingCal()) {
     const nx = scxPx / frameW;
     const ny = scyPx / frameH;
     const w = calHomography[6] * nx + calHomography[7] * ny + calHomography[8];
-    if (Math.abs(w) > 1e-4) {
+    if (w > HOMOG_MIN_W) {
       const X = (calHomography[0] * nx + calHomography[1] * ny + calHomography[2]) / w;
       const Y = (calHomography[3] * nx + calHomography[4] * ny + calHomography[5]) / w;
 
@@ -489,84 +753,134 @@ function computePendulumKinematics(fx, fy, pivX, pivY) {
   const rPx = Math.hypot(dx, fy - pivY);
   if (calMode === 'homography' && calHomographyValid) {
     const p0 = mapPixelToMetric(pivX, pivY);
-    const p0x = p0[0], p0y = p0[1];
+    const p0x = p0[0], p0y = p0[1], p0v = p0[2];
     const p1 = mapPixelToMetric(fx, fy);
     calOutPend[0] = swingDeg;
-    calOutPend[1] = Math.hypot(p1[0] - p0x, p1[1] - p0y);
+    if (p0v > 0.5 && p1[2] > 0.5) {
+      calOutPend[1] = Math.hypot(p1[0] - p0x, p1[1] - p0y);
+      calOutPend[2] = 1.0;
+    } else {
+      calOutPend[1] = 0.0;
+      calOutPend[2] = -1.0;
+    }
     return calOutPend;
   }
   const ppm = getEffectivePxPerMeter();
   calOutPend[0] = swingDeg;
-  calOutPend[1] = ppm > 0.5 ? rPx / ppm : rPx;
+  if (ppm > 0.5) {
+    calOutPend[1] = rPx / ppm;
+    calOutPend[2] = 1.0;
+  } else {
+    calOutPend[1] = rPx;
+    calOutPend[2] = 0.0;
+  }
   return calOutPend;
 }
 
 function formatCalibrationSummary(overrideNotice) {
   if (overrideNotice) return overrideNotice;
   if (calArmed === 'ruler') {
-    return `ARMED 2-PT RULER (${calPtCount}/2 CLICKS · L=${calRulerMeters.toFixed(2)} m · ESC CANCEL)`;
+    return `ARMED 2-PT RULER (${calDraftCount}/2 CLICKS · L=${calDraftRulerMeters.toFixed(2)} m · ESC PRESERVES PRIOR)`;
   }
   if (calArmed === 'homography') {
-    return `ARMED 4-PT PLANE (${calPtCount}/4 [${CORNER_TAGS[Math.min(3, calPtCount)]}] · ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m)`;
+    return `ARMED 4-PT PLANE (${calDraftCount}/4 [${CORNER_TAGS[Math.min(3, calDraftCount)]}] · ${calDraftPlaneW.toFixed(2)}×${calDraftPlaneH.toFixed(2)} m · ESC PRESERVES)`;
   }
+  if (isCameraMotionSuspendingCal() && calMode !== 'none') {
+    return 'CAMERA MOTION — IMAGE-PLANE CALIBRATION SUSPENDED';
+  }
+  const provTag = calProvenance === 'assumed' ? 'ASSUMED SCALE' : 'SURVEYED';
   if (calMode === 'ruler') {
     const ppm = getEffectivePxPerMeter();
-    return `2-PT RULER: ${calRulerMeters.toFixed(2)} m (${Math.round(ppm)} px/m · METRIC m/s)`;
+    return `2-PT RULER [${provTag}]: ${calRulerMeters.toFixed(2)} m (${Math.round(ppm)} px/m)`;
   }
   if (calMode === 'auto_g') {
     const ppm = getEffectivePxPerMeter();
-    if (calAutoGNormH > 0.05) {
+    const arcs = telemView ? Math.round(telemView[TELEM_GLOBAL + 11]) : 0;
+    if (calAutoGLocked && calAutoGNormH > 0.05) {
       const gPx = Math.round(calAutoGNormH * frameH);
-      return `AUTO-g LOCKED: ĝ=${gPx} px/s² → ${Math.round(ppm)} px/m (9.81 m/s²)`;
+      return `AUTO-g LOCKED (${Math.max(2, arcs)} ARCS): ĝ=${gPx} px/s² → ${Math.round(ppm)} px/m`;
     }
-    if (ppm > 0.5) {
-      return `AUTO-g ARMED (INITIAL ${Math.round(ppm)} px/m · REFINING ON BALLISTIC ARC)`;
+    if (telemView && telemView[TELEM_GLOBAL + 0] > 50.0) {
+      return `AUTO-g PROVISIONAL (${Math.max(1, arcs)}/2 ARCS · ĝ=${Math.round(telemView[TELEM_GLOBAL + 0])} px/s² · AWAITING 2ND ARC)`;
     }
-    return 'AUTO-g ARMED · AWAITING PARABOLIC FLIGHT ARC (g = 9.81 m/s²)';
+    return 'AUTO-g ARMED · AWAITING >= 2 PARABOLIC FLIGHT ARCS (g = 9.81 m/s²)';
   }
   if (calMode === 'homography' && calHomographyValid) {
-    return `4-PT HOMOGRAPHY: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m PLANE [PERSPECTIVE RECTIFIED]`;
+    return `4-PT HOMOGRAPHY [${provTag}]: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m [RECTIFIED]`;
   }
   return 'UNCALIBRATED · PIXEL UNITS (px · px/s)';
 }
 
 function getCalibrationSnapshot() {
   return {
+    segmentId: calSegmentId,
     mode: calMode,
+    provenance: calProvenance,
     armed: calArmed,
     ptCount: calPtCount,
     rulerMeters: calRulerMeters,
     planeW: calPlaneW,
     planeH: calPlaneH,
     presetName: calPresetName,
+    autoGLocked: calAutoGLocked,
     pxPerMeter: Number(getEffectivePxPerMeter().toFixed(4)),
+    ptsNorm: calPtCount > 0
+      ? Array.from({ length: calPtCount }, (_, i) => [
+          Number(calPtsNormX[i].toFixed(5)),
+          Number(calPtsNormY[i].toFixed(5)),
+        ])
+      : [],
     homographyValid: calHomographyValid,
     homography: calHomographyValid ? Array.from(calHomography) : null,
   };
 }
 
+function recordCalibrationSegmentTransition(reason) {
+  calSegmentId++;
+  if (recActive) {
+    recCalSegments.push({
+      segmentId: calSegmentId,
+      absStartFrame: recTotalWritten,
+      startRow: recCount,
+      elapsedSec: Number(recElapsedSec.toFixed(4)),
+      reason,
+      sourceMode,
+      calibration: getCalibrationSnapshot(),
+    });
+  }
+}
+
 function emitCalibrationState(overrideNotice) {
   self.postMessage({
     type: 'cal_state',
+    calSegmentId,
     calMode,
+    calProvenance,
     calArmed,
     calPtCount,
-    rulerMeters: calRulerMeters,
-    planeW: calPlaneW,
-    planeH: calPlaneH,
+    calDraftCount,
+    rulerMeters: calArmed === 'ruler' ? calDraftRulerMeters : calRulerMeters,
+    planeW: calArmed === 'homography' ? calDraftPlaneW : calPlaneW,
+    planeH: calArmed === 'homography' ? calDraftPlaneH : calPlaneH,
     presetName: calPresetName,
+    autoGLocked: calAutoGLocked,
     calibrated: isMetricCalibrated(),
+    ptsNorm: calPtCount > 0
+      ? Array.from({ length: calPtCount }, (_, i) => [calPtsNormX[i], calPtsNormY[i]])
+      : [],
     summary: formatCalibrationSummary(overrideNotice),
   });
 }
 
 function clearCalibrationState() {
   calMode = 'none';
+  calProvenance = 'none';
   calArmed = 'none';
   calPtCount = 0;
+  calDraftCount = 0;
   calPresetName = '';
   calAutoGNormH = 0.0;
-  calAutoGFallbackNormW = 0.0;
+  calAutoGLocked = false;
   calHomographyValid = false;
   calHomography.fill(0.0);
   calHomographyInv.fill(0.0);
@@ -574,9 +888,9 @@ function clearCalibrationState() {
 
 function applySceneCalibrationPreset(presetKey) {
   clearCalibrationState();
-  calPresetName = presetKey || 'testbench';
+  calPresetName = presetKey || '';
   if (presetKey === 'carom_billiards_impulses') {
-    // UMB Regulation Match Carom Table playing surface (2.84 m x 1.42 m)
+    // Assumed illustrative Carom table inner plane (2.84 m x 1.42 m)
     calPlaneW = 2.84;
     calPlaneH = 1.42;
     calPtsNormX[0] = 0.18; calPtsNormY[0] = 0.21;
@@ -586,8 +900,9 @@ function applySceneCalibrationPreset(presetKey) {
     calPtCount = 4;
     calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
     calMode = calHomographyValid ? 'homography' : 'none';
+    calProvenance = calHomographyValid ? 'assumed' : 'none';
   } else if (presetKey === 'roundabout_occlusion') {
-    // Multi-lane highway interchange deck (20.0 m width x 32.0 m longitudinal span)
+    // Assumed illustrative multi-lane highway deck (20.0 m x 32.0 m)
     calPlaneW = 20.00;
     calPlaneH = 32.00;
     calPtsNormX[0] = 0.20; calPtsNormY[0] = 0.17;
@@ -597,36 +912,96 @@ function applySceneCalibrationPreset(presetKey) {
     calPtCount = 4;
     calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
     calMode = calHomographyValid ? 'homography' : 'none';
+    calProvenance = calHomographyValid ? 'assumed' : 'none';
   } else if (presetKey === 'juggling_ballistic') {
-    // Newtonian Auto-g (9.80665 m/s^2) with 0.90 m shoulder-span seed prior to 1st apex
+    // Newtonian Auto-g (9.80665 m/s^2) — requires >= 2 independent free-fall arcs before locking!
     calMode = 'auto_g';
-    calRulerMeters = 0.90;
-    calAutoGFallbackNormW = 0.42;
-    if (telemView && telemView[641] >= 0.25 && telemView[640] > 50.0) {
-      calAutoGNormH = telemView[640] / frameH;
+    calProvenance = 'assumed';
+    if (telemView && telemView[TELEM_GLOBAL + 1] >= AUTO_G_LOCK_CONF && telemView[TELEM_GLOBAL + 0] > 50.0) {
+      calAutoGNormH = telemView[TELEM_GLOBAL + 0] / frameH;
+      calAutoGLocked = true;
     }
   } else if (presetKey === 'galileo_pendulum_peg') {
-    // Vertical Galileo pendulum stand chord (0.65 m)
+    // Assumed Galileo pendulum stand chord (0.65 m)
     calMode = 'ruler';
+    calProvenance = 'assumed';
     calRulerMeters = 0.65;
     calPtsNormX[0] = 0.50; calPtsNormY[0] = 0.14;
     calPtsNormX[1] = 0.50; calPtsNormY[1] = 0.78;
     calPtCount = 2;
   } else if (presetKey === 'harmonic_metronome_phase') {
-    // Seiko mechanical metronome tower body (0.20 m)
+    // Assumed Nikko mechanical metronome tower body (0.20 m)
     calMode = 'ruler';
+    calProvenance = 'assumed';
     calRulerMeters = 0.20;
     calPtsNormX[0] = 0.50; calPtsNormY[0] = 0.18;
     calPtsNormX[1] = 0.50; calPtsNormY[1] = 0.84;
     calPtCount = 2;
-  } else {
-    // Default synthetic testbench / generic video 1.00 m horizontal optical bench span
+  } else if (presetKey === 'cologne_motorway_occlusion') {
+    // Assumed illustrative multi-lane A4 motorway deck (28.0 m x 48.0 m)
+    calPlaneW = 28.00;
+    calPlaneH = 48.00;
+    calPtsNormX[0] = 0.22; calPtsNormY[0] = 0.16;
+    calPtsNormX[1] = 0.78; calPtsNormY[1] = 0.16;
+    calPtsNormX[2] = 0.94; calPtsNormY[2] = 0.90;
+    calPtsNormX[3] = 0.06; calPtsNormY[3] = 0.90;
+    calPtCount = 4;
+    calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+    calMode = calHomographyValid ? 'homography' : 'none';
+    calProvenance = calHomographyValid ? 'assumed' : 'none';
+  } else if (presetKey === 'chaotic_magnetic_pendulum') {
+    // Assumed magnetic pendulum suspension chord (0.35 m)
     calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = 0.35;
+    calPtsNormX[0] = 0.50; calPtsNormY[0] = 0.12;
+    calPtsNormX[1] = 0.50; calPtsNormY[1] = 0.80;
+    calPtCount = 2;
+  } else if (presetKey === 'coupled_metronomes_sync') {
+    // Assumed coupled metronome platform span (0.45 m)
+    calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = 0.45;
+    calPtsNormX[0] = 0.22; calPtsNormY[0] = 0.58;
+    calPtsNormX[1] = 0.78; calPtsNormY[1] = 0.58;
+    calPtCount = 2;
+  } else if (presetKey === 'newtons_cradle_impulses') {
+    // Assumed 5-sphere Newton's cradle span (0.18 m)
+    calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = 0.18;
+    calPtsNormX[0] = 0.28; calPtsNormY[0] = 0.62;
+    calPtsNormX[1] = 0.72; calPtsNormY[1] = 0.62;
+    calPtCount = 2;
+  } else if (
+    presetKey === 'model_rocket_full_flights' ||
+    presetKey === 'rocket_vtvl_full_flight' ||
+    presetKey === 'water_rocket_parachute_flights'
+  ) {
+    // Assumed full-flight vertical ascent/descent span for real-camera rocketry showcases
+    const rocketRulerPresets = {
+      model_rocket_full_flights: [15.00, 0.88, 0.12],
+      rocket_vtvl_full_flight: [10.00, 0.92, 0.16],
+      water_rocket_parachute_flights: [12.00, 0.90, 0.12],
+    };
+    const [meters, y0, y1] = rocketRulerPresets[presetKey];
+    calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = meters;
+    calPtsNormX[0] = 0.50; calPtsNormY[0] = y0;
+    calPtsNormX[1] = 0.50; calPtsNormY[1] = y1;
+    calPtCount = 2;
+  } else if (presetKey === 'testbench') {
+    // Synthetic testbench 1.00 m optical bench reference
+    calMode = 'ruler';
+    calProvenance = 'assumed';
     calRulerMeters = 1.00;
     calPtsNormX[0] = 0.20; calPtsNormY[0] = 0.50;
     calPtsNormX[1] = 0.80; calPtsNormY[1] = 0.50;
     calPtCount = 2;
   }
+  // Custom uploaded videos, webcams, and live feeds remain UNCALIBRATED (pixel units) until calibrated!
+  recordCalibrationSegmentTransition(`preset:${calPresetName || 'uncalibrated'}`);
   emitCalibrationState();
 }
 
@@ -642,27 +1017,54 @@ const PILLARS_SHORT_GAP = [
   { x0: 102, x1: 118, y0: 14, y1: 166 },
   { x0: 202, x1: 218, y0: 14, y1: 166 },
 ];
+const PILLARS_SWARM = [
+  { x0: 108, x1: 124, y0: 14, y1: 166 },
+  { x0: 196, x1: 212, y0: 14, y1: 166 },
+];
 const PILLARS_NONE = [];
 
 function getActivePillars() {
   if (benchScenario === 'pillar_crossing') return PILLARS_WIDE;
   if (benchScenario === 'short_gap_bridge') return PILLARS_SHORT_GAP;
+  if (benchScenario === 'multi_target_swarm') return PILLARS_SWARM;
   return PILLARS_NONE;
 }
 
+function getActiveSimDiscCount() {
+  return benchScenario === 'multi_target_swarm' ? 12 : 4;
+}
+
 const simDiscs = [
-  { id: 0, x: 52,  y: 56,  baseX: 66,  baseY: 56,  vx: 3.0,  vy: 0.0, ballistic: false, r: '#f83a44', core: '#ffe66e' },
-  { id: 1, x: 172, y: 56,  baseX: 254, baseY: 56,  vx: -3.0, vy: 0.0, ballistic: false, r: '#1ee1fa', core: '#0f2d55' },
-  { id: 2, x: 148, y: 124, baseX: 66,  baseY: 124, vx: 3.0,  vy: 0.0, ballistic: false, r: '#32f270', core: '#ebffeb' },
-  { id: 3, x: 268, y: 124, baseX: 254, baseY: 124, vx: -3.0, vy: 0.0, ballistic: false, r: '#e840f8', core: '#5af5ff' },
+  { id: 0,  x: 52,  y: 56,  baseX: 66,  baseY: 56,  vx: 3.0,  vy: 0.0, ballistic: false, r: '#f83a44', core: '#ffe66e' },
+  { id: 1,  x: 172, y: 56,  baseX: 254, baseY: 56,  vx: -3.0, vy: 0.0, ballistic: false, r: '#1ee1fa', core: '#0f2d55' },
+  { id: 2,  x: 148, y: 124, baseX: 66,  baseY: 124, vx: 3.0,  vy: 0.0, ballistic: false, r: '#32f270', core: '#ebffeb' },
+  { id: 3,  x: 268, y: 124, baseX: 254, baseY: 124, vx: -3.0, vy: 0.0, ballistic: false, r: '#e840f8', core: '#5af5ff' },
+  { id: 4,  x: 54,  y: 78,  baseX: 54,  baseY: 78,  vx: 2.9,  vy: 0.0, ballistic: false, r: '#ff922b', core: '#fff3bf' },
+  { id: 5,  x: 266, y: 78,  baseX: 266, baseY: 78,  vx: -2.9, vy: 0.0, ballistic: false, r: '#38d9a9', core: '#0b4f4a' },
+  { id: 6,  x: 88,  y: 104, baseX: 88,  baseY: 104, vx: 3.0,  vy: 0.0, ballistic: false, r: '#a9e34b', core: '#1e3a10' },
+  { id: 7,  x: 232, y: 104, baseX: 232, baseY: 104, vx: -3.0, vy: 0.0, ballistic: false, r: '#748ffc', core: '#eef2ff' },
+  { id: 8,  x: 44,  y: 130, baseX: 44,  baseY: 130, vx: 3.1,  vy: 0.0, ballistic: false, r: '#f06595', core: '#fff0f6' },
+  { id: 9,  x: 276, y: 130, baseX: 276, baseY: 130, vx: -3.1, vy: 0.0, ballistic: false, r: '#ffd43b', core: '#3b2400' },
+  { id: 10, x: 68,  y: 154, baseX: 68,  baseY: 154, vx: 3.2,  vy: 0.0, ballistic: false, r: '#66d9e8', core: '#0c3547' },
+  { id: 11, x: 252, y: 154, baseX: 252, baseY: 154, vx: -3.2, vy: 0.0, ballistic: false, r: '#c0eb75', core: '#26380a' },
 ];
+
+// Pre-allocated model rocket multi-stage buffers (0: boost, 1: coast/apogee, 2: drogue recovery)
+const rocketPhase = new Uint8Array(4);
+const rocketBoostTicks = new Uint16Array(4);
+const SMOKE_PUFFS = 40;
+const smokeX = new Float32Array(SMOKE_PUFFS);
+const smokeY = new Float32Array(SMOKE_PUFFS);
+const smokeR = new Float32Array(SMOKE_PUFFS);
+const smokeAlpha = new Float32Array(SMOKE_PUFFS);
+let smokeWriteIdx = 0;
 
 // Pre-allocated 65,536-ID ownership table (eliminates & 255 ID wrap aliasing)
 const MAX_ORACLE_IDS = 65536;
 const oracleTrackOwner = new Int16Array(MAX_ORACLE_IDS).fill(-1);
-const oracleCandTrackSlot = new Int32Array(MAX_TARGETS * 4);
-const oracleCandDiscIdx = new Int32Array(MAX_TARGETS * 4);
-const oracleCandDist = new Float32Array(MAX_TARGETS * 4);
+const oracleCandTrackSlot = new Int32Array(MAX_TARGETS * MAX_TARGETS);
+const oracleCandDiscIdx = new Int32Array(MAX_TARGETS * MAX_TARGETS);
+const oracleCandDist = new Float32Array(MAX_TARGETS * MAX_TARGETS);
 let oraclePadicSwaps = 0;
 let inPillarCollisions = 0;
 let simTimeSec = 0.0;
@@ -672,6 +1074,8 @@ let pendingAirSnapFrames = 0;
 const TARGET_COLORS = [
   '#00f0ff', '#ff4d6d', '#38f27a', '#ffb703',
   '#c77dff', '#4cc9f0', '#f72585', '#aacc00',
+  '#ff7b00', '#06d6a0', '#e0aaff', '#ffd166',
+  '#72efdd', '#ff8fab', '#9ef01a', '#80ffdb',
 ];
 
 const ZONE_COLORS = ['#00f0ff', '#ffb703', '#38f27a', '#ff4d6d'];
@@ -684,8 +1088,17 @@ function clearVisualQueues() {
   shockRestitution.fill(0.0);
   lastStrikeDeflectDeg = 0.0;
   lastStrikeRestitution = 0.0;
+  lastStrikeTid = 0;
+  lastStrikeFrame = -1;
   lastStrikeValid = false;
   lastScatterDeg = 0.0;
+  lastScatterFrame = -1;
+  slotLastStrikeX.fill(0.0);
+  slotLastStrikeY.fill(0.0);
+  prevRectHeading.fill(0.0);
+  prevRectTid.fill(0);
+  prevRectFrame.fill(-1);
+  slotRectAngVel.fill(0.0);
   padFlashAlpha.fill(0.0);
   apexLockTid.fill(0);
   apexLockErrPx.fill(-1.0);
@@ -701,6 +1114,299 @@ function clearVisualQueues() {
   strobeFlashAlpha = 0.0;
   totalBridgedEvents = 0;
   totalStrikeEvents = 0;
+  trailOwnerTid.fill(-1);
+  trailHead.fill(0);
+  trailCount.fill(0);
+  trailLastFrame.fill(-1);
+  slotHoldLeft.fill(0);
+  slotHoldTid.fill(0);
+  slotIdleDrawn.fill(0);
+  slotHoldVeilDrawn.fill(0);
+  slotSpeedPillOn.fill(0);
+  slotSmoothedSpeed.fill(0.0);
+  slotSmoothedHeading.fill(0.0);
+  slotSmoothedOmega.fill(0.0);
+  slotSmoothedEca.fill(0.0);
+  slotLastAgeFrames.fill(0);
+  slotLastCoast.fill(0);
+  slotLastReacq.fill(0);
+  slotLastVal.fill(0);
+  slotLastSigHi.fill(0);
+  slotLastSigLo.fill(0);
+  slotLastFreqHz.fill(0.0);
+  slotLastMetricValid.fill(0.0);
+  slotLastPivotValid.fill(0);
+  slotLastPendSwing.fill(0.0);
+  slotLastPendRad.fill(0.0);
+  phaseHistWrite = 0;
+  phaseHistCount = 0;
+  phaseHistTid.fill(-1);
+  phaseHistX.fill(0.0);
+  phaseHistY.fill(0.0);
+  phaseHistVx.fill(0.0);
+  phaseHistVy.fill(0.0);
+  phaseHistE.fill(0.0);
+  phaseHistEnsK.fill(0.0);
+  phaseHistKurR.fill(0.0);
+  phaseHistKurN.fill(0);
+  phaseHistRegime.fill(0);
+  phaseHistJump.fill(0);
+  lastPhysicsPhaseRenderMs = 0.0;
+}
+
+function resetPersistenceState() {
+  contTid.fill(0);
+  contSlot.fill(-1);
+  contFirstSeq.fill(0);
+  contLastSeq.fill(0);
+  contTotalFrames.fill(0);
+  contTotalSec.fill(0.0);
+  contRelocks.fill(0);
+  contSegCount.fill(0);
+  contSegStart.fill(0);
+  contSegEnd.fill(0);
+  contWasActive.fill(0);
+  contBinMaxActive.fill(0);
+  contBinFrames.fill(0);
+  contCount = 0;
+  persistSampleSeq = 0;
+  sessionElapsedSec = 0.0;
+  lastPersistRenderMs = 0.0;
+  contBinStrideFrames = 15;
+  contBinHead = 0;
+}
+
+function updatePersistenceState(fpsDt) {
+  if (!telemView) return;
+  persistSampleSeq++;
+  sessionElapsedSec += fpsDt;
+  const seq = persistSampleSeq;
+  const activeNow = Math.max(0, Math.min(MAX_TARGETS, Math.round(telemView[3])));
+
+  for (let m = 0; m < MAX_TARGETS; m++) {
+    const b = 32 + m * 56;
+    if (telemView[b] <= 0.5) continue;
+    const tid = Math.round(telemView[b + 1]);
+    if (tid <= 0) continue;
+
+    let idx = -1;
+    for (let t = 0; t < contCount; t++) {
+      if (contTid[t] === tid) {
+        idx = t;
+        break;
+      }
+    }
+    if (idx < 0) {
+      if (contCount < CONT_MAX_TRACKS) {
+        idx = contCount++;
+      } else {
+        let evictIdx = -1;
+        let evictFrames = 1e9;
+        for (let t = 0; t < CONT_MAX_TRACKS; t++) {
+          if (contLastSeq[t] < seq - 2 && contTotalFrames[t] < evictFrames) {
+            evictFrames = contTotalFrames[t];
+            evictIdx = t;
+          }
+        }
+        if (evictIdx < 0) {
+          for (let t = 0; t < CONT_MAX_TRACKS; t++) {
+            if (contTotalFrames[t] < evictFrames) {
+              evictFrames = contTotalFrames[t];
+              evictIdx = t;
+            }
+          }
+        }
+        idx = evictIdx >= 0 ? evictIdx : 0;
+      }
+      contTid[idx] = tid;
+      contSlot[idx] = m;
+      contFirstSeq[idx] = seq;
+      contLastSeq[idx] = seq;
+      contTotalFrames[idx] = 1;
+      contTotalSec[idx] = fpsDt;
+      contRelocks[idx] = 0;
+      contSegCount[idx] = 1;
+      contSegStart[idx * CONT_MAX_SEGS] = seq;
+      contSegEnd[idx * CONT_MAX_SEGS] = seq;
+      contWasActive[idx] = 1;
+    } else {
+      const gap = seq - contLastSeq[idx];
+      contSlot[idx] = m;
+      contLastSeq[idx] = seq;
+      contTotalFrames[idx]++;
+      contTotalSec[idx] += fpsDt;
+      if (!contWasActive[idx] && gap > 6) {
+        contRelocks[idx]++;
+        const sc = contSegCount[idx];
+        if (sc < CONT_MAX_SEGS) {
+          contSegStart[idx * CONT_MAX_SEGS + sc] = seq;
+          contSegEnd[idx * CONT_MAX_SEGS + sc] = seq;
+          contSegCount[idx] = sc + 1;
+        } else {
+          contSegEnd[idx * CONT_MAX_SEGS + CONT_MAX_SEGS - 1] = seq;
+        }
+      } else {
+        const sc = contSegCount[idx];
+        if (sc > 0) {
+          contSegEnd[idx * CONT_MAX_SEGS + (sc - 1)] = seq;
+        }
+      }
+      contWasActive[idx] = 1;
+    }
+  }
+
+  for (let t = 0; t < contCount; t++) {
+    if (contLastSeq[t] !== seq) contWasActive[t] = 0;
+  }
+
+  let binIdx = Math.floor(seq / contBinStrideFrames);
+  if (binIdx >= CONT_HIST_BINS) {
+    const half = CONT_HIST_BINS >> 1;
+    for (let k = 0; k < half; k++) {
+      contBinMaxActive[k] = Math.max(contBinMaxActive[k * 2], contBinMaxActive[k * 2 + 1]);
+      contBinFrames[k] = contBinFrames[k * 2];
+    }
+    contBinMaxActive.fill(0, half);
+    contBinFrames.fill(0, half);
+    contBinStrideFrames *= 2;
+    contBinHead = half;
+    binIdx = Math.min(CONT_HIST_BINS - 1, Math.floor(seq / contBinStrideFrames));
+  }
+  if (binIdx >= contBinHead) contBinHead = binIdx + 1;
+  contBinFrames[binIdx]++;
+  if (activeNow > contBinMaxActive[binIdx]) contBinMaxActive[binIdx] = activeNow;
+}
+
+function formatPersistDurationSec(sec) {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return m > 0 ? `${m}m ${String(rem).padStart(2, '0')}s` : `${sec.toFixed(sec < 10 ? 1 : 0)}s`;
+}
+
+function renderPersistenceTimeline(force = false) {
+  if (!persistenceCtx || !persistenceCanvas) return;
+  const nowMs = performance.now();
+  if (!force && nowMs - lastPersistRenderMs < 500.0) return;
+  lastPersistRenderMs = nowMs;
+
+  const W = persistenceCanvas.width;
+  const H = persistenceCanvas.height;
+  const ctx = persistenceCtx;
+
+  ctx.fillStyle = '#070b13';
+  ctx.fillRect(0, 0, W, H);
+
+  const sparkX0 = 10;
+  const sparkY0 = 20;
+  const sparkW = W - 20;
+  const sparkH = 44;
+
+  ctx.fillStyle = '#9db4d4';
+  ctx.font = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const binsUsed = Math.max(1, contBinHead);
+  const spanTxt = formatPersistDurationSec(sessionElapsedSec);
+  ctx.fillText(`CONCURRENCY TIMELINE (0..${MAX_TARGETS} LOCKS | SPAN ${spanTxt})`, sparkX0, 13);
+
+  ctx.fillStyle = '#0b1220';
+  ctx.fillRect(sparkX0, sparkY0, sparkW, sparkH);
+  ctx.strokeStyle = '#192438';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(sparkX0 + 0.5, sparkY0 + 0.5, sparkW - 1, sparkH - 1);
+
+  const midY = sparkY0 + sparkH * 0.5;
+  ctx.strokeStyle = 'rgba(100, 128, 168, 0.25)';
+  ctx.beginPath();
+  ctx.moveTo(sparkX0, midY);
+  ctx.lineTo(sparkX0 + sparkW, midY);
+  ctx.stroke();
+
+  if (persistSampleSeq > 0) {
+    const barW = Math.max(1.5, sparkW / Math.max(16, binsUsed));
+    for (let b = 0; b < binsUsed; b++) {
+      const val = contBinMaxActive[b];
+      if (val <= 0) continue;
+      const frac = Math.min(1.0, val / MAX_TARGETS);
+      const bh = Math.max(2, Math.round(frac * (sparkH - 4)));
+      const bx = sparkX0 + (b / Math.max(1, binsUsed)) * sparkW;
+      ctx.fillStyle = val >= 9 ? '#38f27a' : '#00f0ff';
+      ctx.fillRect(bx, sparkY0 + sparkH - 2 - bh, Math.max(1.5, barW - 0.5), bh);
+    }
+  }
+
+  const laneHeaderY = sparkY0 + sparkH + 15;
+  ctx.fillStyle = '#9db4d4';
+  ctx.fillText('TOP-10 TARGET CUSTODY SWIMLANES (LOCKED vs RE-ENGAGED)', sparkX0, laneHeaderY);
+
+  const swimX0 = 56;
+  const swimW = W - swimX0 - 48;
+  const swimTop = laneHeaderY + 6;
+  const rowH = 11.5;
+
+  if (contCount === 0 || persistSampleSeq <= 0) {
+    ctx.fillStyle = '#5c7394';
+    ctx.fillText('AWAITING MULTI-SECOND TARGET CUSTODY...', swimX0, swimTop + 42);
+    return;
+  }
+
+  for (let i = 0; i < contCount; i++) contRankIdx[i] = i;
+  const topN = Math.min(10, contCount);
+  for (let i = 0; i < topN; i++) {
+    let best = i;
+    for (let j = i + 1; j < contCount; j++) {
+      const a = contRankIdx[j];
+      const b = contRankIdx[best];
+      if (
+        contTotalFrames[a] > contTotalFrames[b] ||
+        (contTotalFrames[a] === contTotalFrames[b] && contTid[a] < contTid[b])
+      ) {
+        best = j;
+      }
+    }
+    if (best !== i) {
+      const tmp = contRankIdx[i];
+      contRankIdx[i] = contRankIdx[best];
+      contRankIdx[best] = tmp;
+    }
+  }
+
+  const maxSeq = Math.max(1, persistSampleSeq);
+  for (let r = 0; r < topN; r++) {
+    const ti = contRankIdx[r];
+    const tid = contTid[ti];
+    const col = TARGET_COLORS[Math.max(0, tid - 1) % TARGET_COLORS.length];
+    const ry = swimTop + r * rowH;
+
+    ctx.fillStyle = contWasActive[ti] ? col : '#7f95b5';
+    ctx.font = '600 8.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    ctx.fillText(`T${tid}`, sparkX0, ry + 8);
+
+    ctx.fillStyle = '#0d1524';
+    ctx.fillRect(swimX0, ry + 2, swimW, 6);
+
+    const sc = Math.min(CONT_MAX_SEGS, contSegCount[ti]);
+    if (sc > 1) {
+      ctx.strokeStyle = '#ffd166';
+      ctx.lineWidth = 1;
+      for (let sIdx = 1; sIdx < sc; sIdx++) {
+        const gStart = swimX0 + (contSegEnd[ti * CONT_MAX_SEGS + sIdx - 1] / maxSeq) * swimW;
+        const gEnd = swimX0 + (contSegStart[ti * CONT_MAX_SEGS + sIdx] / maxSeq) * swimW;
+        ctx.beginPath();
+        ctx.moveTo(gStart, ry + 5);
+        ctx.lineTo(Math.max(gStart + 1, gEnd), ry + 5);
+        ctx.stroke();
+      }
+    }
+    ctx.fillStyle = col;
+    for (let sIdx = 0; sIdx < sc; sIdx++) {
+      const sx0 = swimX0 + (contSegStart[ti * CONT_MAX_SEGS + sIdx] / maxSeq) * swimW;
+      const sx1 = swimX0 + (contSegEnd[ti * CONT_MAX_SEGS + sIdx] / maxSeq) * swimW;
+      ctx.fillRect(sx0, ry + 2, Math.max(2.0, sx1 - sx0), 6);
+    }
+
+    ctx.fillStyle = contWasActive[ti] ? '#d9e6f7' : '#7f95b5';
+    ctx.fillText(formatPersistDurationSec(contTotalSec[ti]), swimX0 + swimW + 5, ry + 8);
+  }
 }
 
 function resetTestbenchState() {
@@ -710,6 +1416,25 @@ function resetTestbenchState() {
     simDiscs[1].x = 278 * s; simDiscs[1].y = 138 * s; simDiscs[1].baseY = 146 * s; simDiscs[1].vx = -2.8 * s; simDiscs[1].vy = -5.6 * s; simDiscs[1].ballistic = true;
     simDiscs[2].x = 112 * s; simDiscs[2].y = 148 * s; simDiscs[2].baseY = 148 * s; simDiscs[2].vx = 2.2 * s;  simDiscs[2].vy = -6.2 * s; simDiscs[2].ballistic = true;
     simDiscs[3].x = 210 * s; simDiscs[3].y = 144 * s; simDiscs[3].baseY = 148 * s; simDiscs[3].vx = -2.4 * s; simDiscs[3].vy = -7.0 * s; simDiscs[3].ballistic = true;
+  } else if (benchScenario === 'model_rocket_flight') {
+    const laneX = [56, 124, 196, 264];
+    const initY = [140, 74, 42, 92];
+    const initVy = [-2.4, -3.8, -0.8, 1.9];
+    const initPhase = [0, 1, 1, 2];
+    const initTicks = [4, 16, 28, 40];
+    for (let i = 0; i < 4; i++) {
+      simDiscs[i].baseX = laneX[i] * s;
+      simDiscs[i].x = laneX[i] * s;
+      simDiscs[i].y = initY[i] * s;
+      simDiscs[i].baseY = 152 * s;
+      simDiscs[i].vx = (i % 2 === 0 ? 0.35 : -0.35) * s;
+      simDiscs[i].vy = initVy[i] * s;
+      simDiscs[i].ballistic = true;
+      rocketPhase[i] = initPhase[i];
+      rocketBoostTicks[i] = initTicks[i];
+    }
+    smokeAlpha.fill(0.0);
+    smokeWriteIdx = 0;
   } else if (benchScenario === 'harmonic_tremor') {
     simDiscs[0].x = 76 * s;  simDiscs[0].y = 56 * s;  simDiscs[0].baseX = 76 * s;  simDiscs[0].baseY = 56 * s;  simDiscs[0].vx = 0; simDiscs[0].vy = 0; simDiscs[0].ballistic = false;
     simDiscs[1].x = 244 * s; simDiscs[1].y = 56 * s;  simDiscs[1].baseX = 244 * s; simDiscs[1].baseY = 56 * s;  simDiscs[1].vx = 0; simDiscs[1].vy = 0; simDiscs[1].ballistic = false;
@@ -720,6 +1445,24 @@ function resetTestbenchState() {
     simDiscs[1].x = 262 * s; simDiscs[1].y = 52 * s;  simDiscs[1].baseY = 52 * s;  simDiscs[1].vx = -4.4 * s; simDiscs[1].vy = 3.7 * s;  simDiscs[1].ballistic = false;
     simDiscs[2].x = 74 * s;  simDiscs[2].y = 136 * s; simDiscs[2].baseY = 136 * s; simDiscs[2].vx = 4.2 * s;  simDiscs[2].vy = -3.8 * s; simDiscs[2].ballistic = false;
     simDiscs[3].x = 246 * s; simDiscs[3].y = 128 * s; simDiscs[3].baseY = 128 * s; simDiscs[3].vx = -4.5 * s; simDiscs[3].vy = -3.3 * s; simDiscs[3].ballistic = false;
+  } else if (benchScenario === 'multi_target_swarm') {
+    const laneY = [26, 52, 78, 104, 130, 154];
+    const xPairs = [
+      [38, 282],
+      [76, 244],
+      [54, 266],
+      [88, 232],
+      [44, 276],
+      [68, 252],
+    ];
+    for (let lane = 0; lane < 6; lane++) {
+      const spd = (2.7 + 0.1 * lane) * s;
+      const ly = laneY[lane] * s;
+      const a = simDiscs[lane * 2];
+      const b = simDiscs[lane * 2 + 1];
+      a.x = xPairs[lane][0] * s; a.y = ly; a.baseY = ly; a.vx = spd;  a.vy = 0; a.ballistic = false;
+      b.x = xPairs[lane][1] * s; b.y = ly; b.baseY = ly; b.vx = -spd; b.vy = 0; b.ballistic = false;
+    }
   } else {
     const spd = benchScenario === 'short_gap_bridge' ? 3.2 * s : 3.0 * s;
     simDiscs[0].x = 52 * s;  simDiscs[0].y = 56 * s;  simDiscs[0].baseY = 56 * s;  simDiscs[0].vx = spd;  simDiscs[0].vy = 0; simDiscs[0].ballistic = false;
@@ -731,11 +1474,15 @@ function resetTestbenchState() {
   oracleTrackOwner.fill(-1);
   prevFiedlerTrack.fill(0.0);
   clearVisualQueues();
+  resetPersistenceState();
   oraclePadicSwaps = 0;
   inPillarCollisions = 0;
   simTimeSec = 0.0;
   pendingSaccadeFrames = 0;
   pendingAirSnapFrames = 0;
+  renderAllSlotPips(false);
+  renderPersistenceTimeline(true);
+  renderPhysicsPhaseCanvas(true);
 }
 
 function stepAndRenderBlindPillarScene(dtSec) {
@@ -758,8 +1505,9 @@ function stepAndRenderBlindPillarScene(dtSec) {
   }
   if (pendingAirSnapFrames > 0) {
     pendingAirSnapFrames--;
-    if (pendingAirSnapFrames === 0 && benchScenario !== 'percussion_ricochet' && benchScenario !== 'harmonic_tremor') {
-      for (let i = 0; i < simDiscs.length; i++) {
+    if (pendingAirSnapFrames === 0 && benchScenario !== 'percussion_ricochet' && benchScenario !== 'harmonic_tremor' && benchScenario !== 'model_rocket_flight') {
+      const nDiscsSnap = getActiveSimDiscCount();
+      for (let i = 0; i < nDiscsSnap; i++) {
         simDiscs[i].vx = Math.sign(simDiscs[i].vx || 1) * 3.0 * s;
       }
     }
@@ -783,13 +1531,96 @@ function stepAndRenderBlindPillarScene(dtSec) {
   }
   ctx.stroke();
 
+  if (benchScenario === 'model_rocket_flight') {
+    // Launch pads, guide rails, and dissipating exhaust smoke puffs behind active boosters
+    ctx.fillStyle = '#1b2434';
+    ctx.fillRect(0, 156 * s, frameW, frameH - 156 * s);
+    ctx.strokeStyle = 'rgba(130, 165, 210, 0.35)';
+    ctx.lineWidth = Math.max(1, s);
+    const laneX = [56, 124, 196, 264];
+    for (let i = 0; i < laneX.length; i++) {
+      ctx.beginPath();
+      ctx.moveTo(laneX[i] * s, 156 * s);
+      ctx.lineTo(laneX[i] * s, 126 * s);
+      ctx.stroke();
+    }
+    for (let p = 0; p < SMOKE_PUFFS; p++) {
+      const a = smokeAlpha[p];
+      if (a <= 0.015) continue;
+      smokeY[p] += 0.14 * s * stepScale;
+      smokeR[p] += 0.05 * s * stepScale;
+      smokeAlpha[p] = Math.max(0.0, a - 0.022 * stepScale);
+      ctx.fillStyle = `rgba(112, 130, 154, ${smokeAlpha[p].toFixed(3)})`;
+      ctx.beginPath();
+      ctx.arc(smokeX[p], smokeY[p], smokeR[p], 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
   // 2. Advance disc kinematics & collisions
   const tSec = simTimeSec;
   const wallMargin = 18 * s;
   const pillars = getActivePillars();
+  const nActiveDiscs = getActiveSimDiscCount();
 
-  for (let i = 0; i < simDiscs.length; i++) {
+  for (let i = 0; i < nActiveDiscs; i++) {
     const d = simDiscs[i];
+    if (benchScenario === 'model_rocket_flight') {
+      if (rocketPhase[i] === 0) {
+        // Powered boost phase (ay < 0 upward thrust)
+        const thrust = (0.34 + 0.03 * (i % 3)) * s * stepScale;
+        d.vy -= thrust;
+        d.y += d.vy * stepScale;
+        rocketBoostTicks[i]++;
+        if ((rocketBoostTicks[i] & 1) === 0) {
+          smokeX[smokeWriteIdx] = d.x + (Math.sin(tSec * 9.0 + i) * 1.1 * s);
+          smokeY[smokeWriteIdx] = d.y + 7.5 * s;
+          smokeR[smokeWriteIdx] = 1.8 * s;
+          smokeAlpha[smokeWriteIdx] = 0.08;
+          smokeWriteIdx = (smokeWriteIdx + 1) % SMOKE_PUFFS;
+        }
+        if (rocketBoostTicks[i] >= 12 || d.vy <= -5.2 * s) {
+          rocketPhase[i] = 1;
+        }
+      } else if (rocketPhase[i] === 1) {
+        // Newtonian free-fall coast + apogee rollover (ay = +g > 0)
+        const vyPrev = d.vy;
+        d.vy += 0.20 * s * stepScale;
+        d.y += 0.5 * (vyPrev + d.vy) * stepScale;
+        if (d.vy >= 2.2 * s) {
+          rocketPhase[i] = 2;
+        }
+      } else {
+        // Drogue parachute recovery descent toward pad
+        d.vy = Math.min(d.vy + 0.04 * s * stepScale, (2.15 + 0.15 * (i % 2)) * s);
+        d.y += d.vy * stepScale;
+      }
+
+      // Gentle in-lane windward arc (preserves non-degenerate 2D motion without crossing lanes)
+      d.x += d.vx * stepScale;
+      const laneOffset = d.x - d.baseX;
+      if (laneOffset < -16 * s) {
+        d.x = d.baseX - 16 * s;
+        d.vx = Math.abs(d.vx);
+      } else if (laneOffset > 16 * s) {
+        d.x = d.baseX + 16 * s;
+        d.vx = -Math.abs(d.vx);
+      }
+
+      if (d.y < 16 * s) {
+        d.y = 16 * s;
+        d.vy = Math.abs(d.vy) * 0.35;
+        rocketPhase[i] = 1;
+      }
+      if (d.y >= 152 * s) {
+        d.y = 152 * s;
+        d.vy = -(1.25 + 0.15 * (i % 3)) * s;
+        rocketPhase[i] = 0;
+        rocketBoostTicks[i] = 0;
+      }
+      continue;
+    }
+
     if (benchScenario === 'harmonic_tremor' && !d.ballistic) {
       const phase = 2.0 * Math.PI * 8.5 * tSec + i * 0.9;
       const amp = 4.2 * s;
@@ -847,8 +1678,8 @@ function stepAndRenderBlindPillarScene(dtSec) {
   // Pairwise elastic collisions
   const hitThresh = 14.5 * s;
   if (benchScenario === 'percussion_ricochet') {
-    for (let i = 0; i < simDiscs.length; i++) {
-      for (let j = i + 1; j < simDiscs.length; j++) {
+    for (let i = 0; i < nActiveDiscs; i++) {
+      for (let j = i + 1; j < nActiveDiscs; j++) {
         const a = simDiscs[i];
         const b = simDiscs[j];
         const dx = b.x - a.x;
@@ -869,8 +1700,9 @@ function stepAndRenderBlindPillarScene(dtSec) {
         }
       }
     }
-  } else if (benchScenario !== 'ballistic_cascade' && benchScenario !== 'harmonic_tremor') {
-    for (let lane = 0; lane < 2; lane++) {
+  } else if (benchScenario !== 'ballistic_cascade' && benchScenario !== 'harmonic_tremor' && benchScenario !== 'model_rocket_flight') {
+    const nLanes = benchScenario === 'multi_target_swarm' ? 6 : 2;
+    for (let lane = 0; lane < nLanes; lane++) {
       const a = simDiscs[lane * 2];
       const b = simDiscs[lane * 2 + 1];
       if (a.ballistic || b.ballistic) continue;
@@ -891,18 +1723,90 @@ function stepAndRenderBlindPillarScene(dtSec) {
     }
   }
 
-  // 3. Draw physical textured discs
-  for (let i = 0; i < simDiscs.length; i++) {
-    const d = simDiscs[i];
-    ctx.fillStyle = d.r;
-    ctx.beginPath();
-    ctx.arc(d.x, d.y, 7.6 * s, 0, Math.PI * 2);
-    ctx.fill();
+  // 3. Draw physical textured targets
+  if (benchScenario === 'model_rocket_flight') {
+    for (let i = 0; i < nActiveDiscs; i++) {
+      const d = simDiscs[i];
+      const ang = Math.atan2(d.vy, d.vx || 0.001) + Math.PI * 0.5;
+      ctx.save();
+      ctx.translate(d.x, d.y);
+      ctx.rotate(rocketPhase[i] === 2 ? Math.PI * 0.04 * Math.sin(tSec * 4.0 + i) : ang * 0.35);
 
-    ctx.fillStyle = d.core;
-    ctx.beginPath();
-    ctx.arc(d.x, d.y, 3.4 * s, 0, Math.PI * 2);
-    ctx.fill();
+      if (rocketPhase[i] === 2) {
+        // Deployed drogue chute above nosecone (compact so centroid stays on fuselage)
+        ctx.fillStyle = 'rgba(255, 107, 53, 0.72)';
+        ctx.beginPath();
+        ctx.arc(0, -7.8 * s, 4.4 * s, Math.PI, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(215, 228, 245, 0.45)';
+        ctx.lineWidth = Math.max(1, 0.7 * s);
+        ctx.beginPath();
+        ctx.moveTo(-3.6 * s, -7.8 * s);
+        ctx.lineTo(0, -3.5 * s);
+        ctx.lineTo(3.6 * s, -7.8 * s);
+        ctx.stroke();
+      }
+
+      // High-contrast fuselage body + bright beacon core (matches PD32 16x16 / 32x32 aperture)
+      ctx.fillStyle = '#f4f8ff';
+      ctx.fillRect(-3.0 * s, -3.5 * s, 6.0 * s, 7.5 * s);
+
+      // Painted nosecone
+      ctx.fillStyle = d.r;
+      ctx.beginPath();
+      ctx.moveTo(0, -7.5 * s);
+      ctx.lineTo(3.2 * s, -3.5 * s);
+      ctx.lineTo(-3.2 * s, -3.5 * s);
+      ctx.closePath();
+      ctx.fill();
+
+      // Tail fins
+      ctx.fillStyle = d.r;
+      ctx.beginPath();
+      ctx.moveTo(-3.0 * s, 1.5 * s);
+      ctx.lineTo(-5.0 * s, 4.8 * s);
+      ctx.lineTo(-3.0 * s, 4.0 * s);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(3.0 * s, 1.5 * s);
+      ctx.lineTo(5.0 * s, 4.8 * s);
+      ctx.lineTo(3.0 * s, 4.0 * s);
+      ctx.closePath();
+      ctx.fill();
+
+      // High-contrast avionics core at center of mass
+      ctx.fillStyle = d.core;
+      ctx.beginPath();
+      ctx.arc(0, 0, 2.2 * s, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (rocketPhase[i] === 0) {
+        // Compact thrust exhaust plume during boost
+        ctx.fillStyle = '#ffb703';
+        ctx.beginPath();
+        ctx.moveTo(-2.0 * s, 4.0 * s);
+        ctx.lineTo(0, 8.8 * s + 1.4 * s * Math.sin(tSec * 42.0 + i));
+        ctx.lineTo(2.0 * s, 4.0 * s);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  } else {
+    for (let i = 0; i < nActiveDiscs; i++) {
+      const d = simDiscs[i];
+      ctx.fillStyle = d.r;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, 7.6 * s, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = d.core;
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, 3.4 * s, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
 
   // 4. Draw 100% OPAQUE occlusion pillars ON TOP (wipes out underlying disc pixels completely)
@@ -926,6 +1830,7 @@ function stepAndRenderBlindPillarScene(dtSec) {
 function auditOracleSwaps() {
   const s = resScale;
   const pillars = getActivePillars();
+  const nActiveDiscs = getActiveSimDiscCount();
   let nPairs = 0;
   for (let m = 0; m < MAX_TARGETS; m++) {
     const base = 32 + m * 56;
@@ -936,7 +1841,7 @@ function auditOracleSwaps() {
     const ix = telemView[base + 8];
     const iy = telemView[base + 9];
 
-    for (let i = 0; i < simDiscs.length; i++) {
+    for (let i = 0; i < nActiveDiscs; i++) {
       const d = simDiscs[i];
       let occluded = false;
       for (let p = 0; p < pillars.length; p++) {
@@ -1261,6 +2166,20 @@ function toHex8(sigHi, sigLo) {
   return '0x' + u32.toString(16).toUpperCase().padStart(8, '0');
 }
 
+function resolvePrimarySlot() {
+  if (!telemView) return -1;
+  const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
+  if (focusTid > 0) {
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const base = 32 + m * 56;
+      if (telemView[base] > 0.5 && Math.round(telemView[base + 1]) === focusTid) {
+        return m;
+      }
+    }
+  }
+  return Math.round(telemView[8]);
+}
+
 function updateFrozenApexLocks(uDisp) {
   for (let m = 0; m < MAX_TARGETS; m++) {
     const base = 32 + m * 56;
@@ -1278,7 +2197,7 @@ function updateFrozenApexLocks(uDisp) {
     const curY = telemView[base + 32 + 11];
     const dispY = telemView[base + 32 + uDisp];
 
-    if (apexFrames >= 0.35) {
+    if (apexFrames >= 0.75) {
       if (apexLockTid[m] !== tid || apexLockHold[m] <= 0 || apexLockErrPx[m] >= 0.0) {
         // Lock new ballistic throw prediction while ascending!
         apexLockTid[m] = tid;
@@ -1288,7 +2207,7 @@ function updateFrozenApexLocks(uDisp) {
         apexLockAtMinX[m] = curX;
         apexLockErrPx[m] = -1.0;
         apexLockHold[m] = Math.max(16, lookaheadK + 12);
-      } else if (apexFrames >= 1.15) {
+      } else if (apexFrames >= 1.25) {
         // Early ascent wide-chord refinement; freezes completely before peak!
         apexLockPredX[m] = 0.65 * apexLockPredX[m] + 0.35 * apexX;
         apexLockPredY[m] = 0.65 * apexLockPredY[m] + 0.35 * apexY;
@@ -1301,14 +2220,21 @@ function updateFrozenApexLocks(uDisp) {
         apexLockMinY[m] = curY;
         apexLockAtMinX[m] = curX;
       }
-      // Score peak accuracy once ball turns downward after reaching peak!
+      // Score full Euclidean peak accuracy once projectile turns downward near predicted peak!
       if (apexLockErrPx[m] < 0.0 && apexFrames <= 0.05 && curY > apexLockMinY[m] + 2.5 * resScale) {
         const err = Math.hypot(
-          (apexLockAtMinX[m] - apexLockPredX[m]) * 0.5,
+          apexLockAtMinX[m] - apexLockPredX[m],
           apexLockMinY[m] - apexLockPredY[m]
         );
-        apexLockErrPx[m] = err;
-        lastScoredApexErrPx = err;
+        if (err <= 9.5 * resScale) {
+          apexLockErrPx[m] = err;
+          lastScoredApexErrPx = err;
+        } else {
+          apexLockTid[m] = 0;
+          apexLockHold[m] = 0;
+          apexLockErrPx[m] = -1.0;
+          continue;
+        }
       }
       if (apexLockErrPx[m] >= 0.0 && dispY > apexLockMinY[m] + 3.0 * resScale) {
         apexLockHold[m]--;
@@ -1461,11 +2387,11 @@ function renderCalibrationOverlay(W, H) {
     }
   }
 
-  // Interactive click-capture crosshairs & guidance banner when armed
+  // Interactive click-capture crosshairs & guidance banner when armed (draft points keep prior cal intact on Esc!)
   if (calArmed !== 'none') {
-    for (let i = 0; i < calPtCount; i++) {
-      const px = calPtsNormX[i] * W;
-      const py = calPtsNormY[i] * H;
+    for (let i = 0; i < calDraftCount; i++) {
+      const px = calDraftPtsNormX[i] * W;
+      const py = calDraftPtsNormY[i] * H;
       hudCtx.strokeStyle = '#ffd166';
       hudCtx.lineWidth = 2.0;
       hudCtx.beginPath();
@@ -1476,16 +2402,16 @@ function renderCalibrationOverlay(W, H) {
       if (i > 0) {
         hudCtx.setLineDash([4, 3]);
         hudCtx.beginPath();
-        hudCtx.moveTo(calPtsNormX[i - 1] * W, calPtsNormY[i - 1] * H);
+        hudCtx.moveTo(calDraftPtsNormX[i - 1] * W, calDraftPtsNormY[i - 1] * H);
         hudCtx.lineTo(px, py);
         hudCtx.stroke();
         hudCtx.setLineDash([]);
       }
     }
     const prompt = calArmed === 'ruler'
-      ? `📏 CLICK RULER ENDPOINT ${calPtCount + 1}/2 (${calRulerMeters.toFixed(2)} m · ESC TO CANCEL)`
-      : `⬠ CLICK PLANE CORNER ${calPtCount + 1}/4 [${CORNER_TAGS[Math.min(3, calPtCount)]}] (${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m · ESC CANCEL)`;
-    const bw = 472;
+      ? `📏 CLICK RULER ENDPOINT ${calDraftCount + 1}/2 (${calRulerMeters.toFixed(2)} m · ESC PRESERVES PRIOR)`
+      : `⬠ CLICK PLANE CORNER ${calDraftCount + 1}/4 [${CORNER_TAGS[Math.min(3, calDraftCount)]}] (${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m · ESC PRESERVES)`;
+    const bw = 504;
     const bx = Math.round((W - bw) * 0.5);
     hudCtx.fillStyle = 'rgba(8, 13, 24, 0.92)';
     hudCtx.fillRect(bx, 40, bw, 24);
@@ -1689,8 +2615,8 @@ function renderMainHud(dispSlot) {
           hudCtx.stroke();
 
           const signStr = dispDefl >= 0 ? '+' : '';
-          const cadTxt = `⚡ Δθ=${signStr}${dispDefl.toFixed(1)}° | e=${dispRest.toFixed(2)}`;
-          const bw = 152;
+          const cadTxt = `⚡ Δθ=${signStr}${dispDefl.toFixed(1)}° | v⁺/v⁻=${dispRest.toFixed(2)}`;
+          const bw = 176;
           const pos = reserveHudLabelSlot(W, H, cx + 14, cy - 26, bw, placedLabels);
           placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
           hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
@@ -1719,18 +2645,18 @@ function renderMainHud(dispSlot) {
     }
 
     // Two-Body Elastic Scatter Wedge (90-deg carom billiard / disc pair collision proof!)
-    const rawScDeg = telemView[642];
-    const scEventFrame = Math.round(telemView[647]);
+    const rawScDeg = telemView[TELEM_GLOBAL + 2];
+    const scEventFrame = Math.round(telemView[TELEM_GLOBAL + 7]);
     if (rawScDeg > 2.0 && scEventFrame > 0 && Math.abs(dispFrame - scEventFrame) <= 24) {
-      const scx = telemView[643] * sx;
-      const scy = telemView[644] * sy;
-      const th1Canvas = -telemView[645] * (Math.PI / 180.0);
-      const th2Canvas = -telemView[646] * (Math.PI / 180.0);
+      const scx = telemView[TELEM_GLOBAL + 3] * sx;
+      const scy = telemView[TELEM_GLOBAL + 4] * sy;
+      const th1Canvas = -telemView[TELEM_GLOBAL + 5] * (Math.PI / 180.0);
+      const th2Canvas = -telemView[TELEM_GLOBAL + 6] * (Math.PI / 180.0);
       const rectSc = rectifyScatterKinematics(
-        telemView[643],
-        telemView[644],
-        telemView[645],
-        telemView[646],
+        telemView[TELEM_GLOBAL + 3],
+        telemView[TELEM_GLOBAL + 4],
+        telemView[TELEM_GLOBAL + 5],
+        telemView[TELEM_GLOBAL + 6],
         rawScDeg
       );
       const dispScDeg = rectSc[2];
@@ -1749,8 +2675,8 @@ function renderMainHud(dispSlot) {
       drawHudArrow(hudCtx, scx, scy, scx + Math.cos(th1Canvas) * 44.0, scy + Math.sin(th1Canvas) * 44.0, 6.5);
       drawHudArrow(hudCtx, scx, scy, scx + Math.cos(th2Canvas) * 44.0, scy + Math.sin(th2Canvas) * 44.0, 6.5);
 
-      const scTxt = `⟁ SCATTER ${dispScDeg.toFixed(1)}°`;
-      const bw = 126;
+      const scTxt = `⟁ CONTACT SCATTER ${dispScDeg.toFixed(1)}°`;
+      const bw = 166;
       const pos = reserveHudLabelSlot(W, H, scx - 62, scy + 18, bw, placedLabels);
       placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
       hudCtx.fillStyle = 'rgba(6, 10, 18, 0.90)';
@@ -1768,9 +2694,14 @@ function renderMainHud(dispSlot) {
   }
 
   const uDisp = (RING_LEN - 1) - effK;
-  const effFps = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
+  const effFps = Math.max(8.0, sourceMode === 'testbench' ? 60.0 : sourceFps);
   const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
-  const primarySlot = Math.round(telemView[8]);
+  const primarySlot = resolvePrimarySlot();
+  if (Math.round(telemView[TELEM_GLOBAL + 9]) === 2) {
+    trailOwnerTid.fill(-1);
+    trailCount.fill(0);
+    trailLastFrame.fill(-1);
+  }
 
   updateFrozenApexLocks(uDisp);
 
@@ -1779,11 +2710,11 @@ function renderMainHud(dispSlot) {
     const base = 32 + m * 56;
     if (telemView[base] < 0.5) continue;
 
-    const kbase = 576 + m * 8;
+    const kbase = TELEM_KINETIC + m * 8;
     const tid = Math.round(telemView[base + 1]);
     const isPrimary = m === primarySlot;
     const isPinned = focusTid !== 0 && tid === focusTid;
-    const color = TARGET_COLORS[(tid - 1) % TARGET_COLORS.length];
+    const color = TARGET_COLORS[Math.max(0, tid - 1) % TARGET_COLORS.length];
     const fxPx = telemView[base + 2];
     const fyPx = telemView[base + 3];
     const fx = fxPx * sx;
@@ -1807,7 +2738,82 @@ function renderMainHud(dispSlot) {
     const pivYPx = telemView[kbase + 7];
     const hasPivot = pivXPx > -9.0e5 && pivYPx > -9.0e5;
 
+    // Suppress static background scale wake clutter in Mode B real-camera clips unless Show All is active
+    if (
+      labMode === 1 &&
+      sourceMode !== 'testbench' &&
+      !showAllOverlays &&
+      !isPrimary &&
+      !isPinned &&
+      !hasPivot &&
+      rawSpeedPxS < 20.0 * resScale
+    ) {
+      continue;
+    }
+
+    // Update & render 44-frame (~1.5s) persistent comet trail for smooth visual trajectory history
+    const ts = tid & (TRAIL_SLOTS - 1);
+    const tBase = ts * TRAIL_LEN;
+    if (dispVis || isBridged) {
+      if (
+        trailOwnerTid[ts] !== tid ||
+        trailCount[ts] === 0 ||
+        Math.abs(dispFrame - trailLastFrame[ts]) > 14
+      ) {
+        trailOwnerTid[ts] = tid;
+        trailHead[ts] = 1;
+        trailCount[ts] = 1;
+        trailLastFrame[ts] = dispFrame;
+        trailX[tBase] = fxPx;
+        trailY[tBase] = fyPx;
+      } else if (dispFrame !== trailLastFrame[ts]) {
+        const prevIdx = (trailHead[ts] + TRAIL_LEN - 1) % TRAIL_LEN;
+        const jumpPx = Math.hypot(fxPx - trailX[tBase + prevIdx], fyPx - trailY[tBase + prevIdx]);
+        if (jumpPx > 52.0 * resScale) {
+          trailHead[ts] = 1;
+          trailCount[ts] = 1;
+          trailX[tBase] = fxPx;
+          trailY[tBase] = fyPx;
+        } else {
+          const wr = trailHead[ts];
+          trailX[tBase + wr] = fxPx;
+          trailY[tBase + wr] = fyPx;
+          trailHead[ts] = (wr + 1) % TRAIL_LEN;
+          if (trailCount[ts] < TRAIL_LEN) trailCount[ts] += 1;
+        }
+        trailLastFrame[ts] = dispFrame;
+      }
+    }
+
     hudCtx.save();
+
+    const nTrail = trailOwnerTid[ts] === tid ? trailCount[ts] : 0;
+    if (nTrail >= 3) {
+      const oldest = (trailHead[ts] + TRAIL_LEN - nTrail) % TRAIL_LEN;
+      const split1 = Math.max(1, Math.floor(nTrail * 0.42));
+      const split2 = Math.max(split1 + 1, Math.floor(nTrail * 0.74));
+      hudCtx.strokeStyle = color;
+      hudCtx.lineCap = 'round';
+      hudCtx.lineJoin = 'round';
+
+      for (let band = 0; band < 3; band++) {
+        const i0 = band === 0 ? 0 : (band === 1 ? split1 - 1 : split2 - 1);
+        const i1 = band === 0 ? split1 : (band === 1 ? split2 : nTrail - 1);
+        if (i1 <= i0) continue;
+        hudCtx.globalAlpha = (isPrimary ? 1.0 : 0.78) * (band === 0 ? 0.18 : (band === 1 ? 0.36 : 0.60));
+        hudCtx.lineWidth = (isPrimary ? 1.15 : 0.95) * (band === 0 ? 1.2 : (band === 1 ? 1.8 : 2.4));
+        hudCtx.beginPath();
+        for (let k = i0; k <= i1; k++) {
+          const idx = tBase + ((oldest + k) % TRAIL_LEN);
+          const tx = trailX[idx] * sx;
+          const ty = trailY[idx] * sy;
+          if (k === i0) hudCtx.moveTo(tx, ty);
+          else hudCtx.lineTo(tx, ty);
+        }
+        hudCtx.stroke();
+      }
+      hudCtx.globalAlpha = 1.0;
+    }
 
     // 5a. Virtual Pendulum / Metronome Pivot, Plumb Reference, Tether & Swing Wedge
     if (hasPivot && (isPrimary || isPinned || labMode === 1)) {
@@ -1987,18 +2993,20 @@ function renderMainHud(dispSlot) {
         const physVel = mapVelocityToPhysical(fxPx, fyPx, rawSpeedPxS, rawHeadingDeg);
         const dispSpd = physVel[0];
         const dispHeading = physVel[1];
+        const vValid = physVel[2];
         const thSign = dispHeading >= 0 ? '+' : '';
-        const spdFmt = metricOn ? dispSpd.toFixed(2) : Math.round(dispSpd).toString();
-        const kinTxt = `∠${thSign}${dispHeading.toFixed(1)}° · ${spdFmt}${spdUnit}`;
-        const bw = 148;
+        const kinTxt = vValid < -0.5
+          ? `∠${thSign}${dispHeading.toFixed(1)}° · OUT-OF-PLANE`
+          : `∠${thSign}${dispHeading.toFixed(1)}° · ${vValid > 0.5 ? dispSpd.toFixed(2) + 'm/s' : Math.round(dispSpd) + 'px/s'}`;
+        const bw = vValid < -0.5 ? 168 : 148;
         const pos = reserveHudLabelSlot(W, H, fx + 30, fy + 12, bw, placedLabels);
         placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
         hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
         hudCtx.fillRect(pos[0], pos[1], bw, 17);
-        hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.58)';
+        hudCtx.strokeStyle = vValid < -0.5 ? 'rgba(255, 183, 3, 0.72)' : 'rgba(0, 229, 255, 0.58)';
         hudCtx.lineWidth = 1.0;
         hudCtx.strokeRect(pos[0], pos[1], bw, 17);
-        hudCtx.fillStyle = '#8ef9f3';
+        hudCtx.fillStyle = vValid < -0.5 ? '#ffd166' : '#8ef9f3';
         hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
         hudCtx.fillText(kinTxt, pos[0] + 5, pos[1] + 12);
       } else if (labMode !== 1) {
@@ -2010,9 +3018,10 @@ function renderMainHud(dispSlot) {
       }
     }
 
-    // 5e. Kinematic-Only 2x2 Kalman Baseline Marker
+    // 5e. Kinematic-Only 2x2 Kalman Baseline Marker (shown always on testbench; on real feeds when diverging)
     const kalDist = Math.hypot(kx - fx, ky - fy);
-    if (showKalmanBaseline && kalDist <= 165.0) {
+    const minKalShow = sourceMode === 'testbench' ? 0.0 : 11.0;
+    if (showKalmanBaseline && kalDist >= minKalShow && kalDist <= 165.0) {
       hudCtx.strokeStyle = 'rgba(255, 89, 94, 0.85)';
       hudCtx.lineWidth = 1.4;
       hudCtx.setLineDash([3, 3]);
@@ -2024,7 +3033,7 @@ function renderMainHud(dispSlot) {
         hudCtx.stroke();
       }
       hudCtx.setLineDash([]);
-      if (kalDist > 20.0) {
+      if (kalDist > 16.0) {
         hudCtx.fillStyle = '#ff7b82';
         hudCtx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
         hudCtx.fillText(`KAL-${tid}`, kx - 14, ky + 23);
@@ -2071,7 +3080,7 @@ function renderMainHud(dispSlot) {
     }
 
     // 5g. Primary 2-Adic + Fiedler + FISTA Corner-Bracket Reticle at `t - K`
-    const boxR = isPrimary ? 26 : 23;
+    const boxR = isPrimary ? 30 : 26;
     const bLen = isPrimary ? 9 : 8;
     hudCtx.strokeStyle = isBridged ? '#ffd166' : color;
     hudCtx.lineWidth = isPrimary ? 2.6 : 2.0;
@@ -2088,27 +3097,65 @@ function renderMainHud(dispSlot) {
       hudCtx.strokeRect(fx - boxR - 4, fy - boxR - 4, (boxR + 4) * 2, (boxR + 4) * 2);
     }
 
-    const fSign = fiedlerCoord >= 0 ? 'F+' : 'F-';
-    const stateTag = isPinned
-      ? 'PINNED'
-      : isBridged
-      ? 'HERMITE-BRIDGE'
-      : dispVis
-      ? (isPrimary ? 'FOCUS' : 'LOCK')
-      : 'COAST';
-    const labelTop = `T${tid} [${stateTag}] v2:${padicVal} ${fSign}`;
-    const posTop = reserveHudLabelSlot(W, H, fx - 26, fy > 68 ? fy - 46 : fy + 28, 162, placedLabels);
-    placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+    const coastNow = slotMetaView ? Math.round(slotMetaView[m * 8 + 1]) : 0;
+    const showFullCallout =
+      showAllOverlays ||
+      isPrimary ||
+      isPinned ||
+      sourceMode === 'testbench' ||
+      (isBridged && coastNow >= 5) ||
+      (labMode === 0 && apexLockHold[m] > 0);
+    if (showFullCallout) {
+      const fSign = fiedlerCoord >= 0 ? 'F+' : 'F-';
+      const stateTag = isPinned
+        ? 'PINNED'
+        : isBridged
+        ? 'HERMITE-BRIDGE'
+        : dispVis
+        ? (isPrimary ? 'FOCUS' : 'LOCK')
+        : 'COAST';
+      const labelTop = `T${tid} [${stateTag}] v2:${padicVal} ${fSign}`;
+      const posTop = reserveHudLabelSlot(W, H, fx - 26, fy > 68 ? fy - 46 : fy + 28, 162, placedLabels);
+      placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
 
-    hudCtx.fillStyle = 'rgba(7, 11, 18, 0.85)';
-    hudCtx.fillRect(posTop[0], posTop[1], 162, 19);
-    hudCtx.fillStyle = isBridged ? '#ffd166' : color;
-    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(labelTop, posTop[0] + 4, posTop[1] + 13);
+      hudCtx.fillStyle = 'rgba(7, 11, 18, 0.85)';
+      hudCtx.fillRect(posTop[0], posTop[1], 162, 19);
+      hudCtx.fillStyle = isBridged ? '#ffd166' : color;
+      hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText(labelTop, posTop[0] + 4, posTop[1] + 13);
 
-    hudCtx.fillStyle = 'rgba(205, 224, 245, 0.82)';
-    hudCtx.font = '500 9px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(sigHex, fx + 29, fy - 2);
+      hudCtx.fillStyle = 'rgba(205, 224, 245, 0.82)';
+      hudCtx.font = '500 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText(sigHex, fx + 29, fy - 2);
+    } else {
+      if (rawSpeedPxS >= 22.0 * resScale) slotSpeedPillOn[m] = 1;
+      else if (rawSpeedPxS < 14.0 * resScale) slotSpeedPillOn[m] = 0;
+
+      let compactTxt = isBridged ? `T${tid}·BRG` : `T${tid}`;
+      let compactW = isBridged ? 54 : 34;
+      if (slotSpeedPillOn[m]) {
+        const secVel = mapVelocityToPhysical(fxPx, fyPx, rawSpeedPxS, rawHeadingDeg);
+        const smSpd = slotSmoothedSpeed[m] > 0.01 ? slotSmoothedSpeed[m] : secVel[0];
+        if (secVel[2] > 0.5) {
+          compactTxt = isBridged
+            ? `T${tid}·BRG·${smSpd.toFixed(1)}m/s`
+            : `T${tid} · ${smSpd.toFixed(1)}m/s`;
+          compactW = isBridged ? 102 : 78;
+        } else if (secVel[2] > -0.5) {
+          compactTxt = isBridged
+            ? `T${tid}·BRG·${Math.round(smSpd)}px/s`
+            : `T${tid} · ${Math.round(smSpd)}px/s`;
+          compactW = isBridged ? 106 : 82;
+        }
+      }
+      const posSec = reserveHudLabelSlot(W, H, fx - boxR, fy - boxR - 17, compactW, placedLabels);
+      placedLabels = Math.min(MAX_HUD_LABELS, placedLabels + 1);
+      hudCtx.fillStyle = 'rgba(7, 11, 18, 0.84)';
+      hudCtx.fillRect(posSec[0], posSec[1], compactW, 14);
+      hudCtx.fillStyle = isBridged ? '#ffd166' : color;
+      hudCtx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText(compactTxt, posSec[0] + 4, posSec[1] + 10);
+    }
     hudCtx.restore();
   }
 
@@ -2133,21 +3180,39 @@ function renderMainHud(dispSlot) {
     strobeFlashAlpha *= 0.78;
   }
 
-  // 7. Top-left HUD Status Strip + Top-right Focus Hint + Bottom Calibration / Gravity Strip
+  // 7. Top-left HUD Status Strip + Top-right Focus Hint + Camera Motion Guard + Bottom Calibration Strip
   const clutterReady = telemView[22] > 0.5;
-  const clutterStr = clutterReady ? `${telemView[4].toFixed(1)} dB` : 'WARMING';
-  const ecaTag = showEcaOverlay ? ' | LIVE ECA@t' : '';
+  const bgMaskPct = Math.round(telemView[23] * 100);
+  const clutterStr = clutterReady ? `${telemView[4].toFixed(1)}dB (${bgMaskPct}%bg)` : 'WARMING';
+  const ecaTag = showEcaOverlay ? ' | ECA@t' : '';
   const shownSwaps = sourceMode === 'testbench' ? oraclePadicSwaps : Math.round(telemView[5]);
 
   hudCtx.fillStyle = 'rgba(6, 10, 18, 0.82)';
-  hudCtx.fillRect(10, 10, 566, 24);
+  hudCtx.fillRect(10, 10, 598, 24);
   hudCtx.fillStyle = '#8ef9f3';
-  hudCtx.font = '600 11px ui-monospace, SFMono-Regular, Menlo, monospace';
+  hudCtx.font = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
   hudCtx.fillText(
-    `VIEW [t - ${effK}] ${frameW}x${frameH} | ECA ${clutterStr} | ID SWITCHES: ${shownSwaps} | KALMAN: ${Math.round(telemView[6])}${ecaTag}`,
-    18,
+    `VIEW [t-${effK}] ${frameW}x${frameH} | ECA ${clutterStr} | IDSW:${shownSwaps} | KAL:${Math.round(telemView[6])}${ecaTag}`,
+    16,
     26
   );
+
+  const camState = Math.round(telemView[TELEM_GLOBAL + 9]);
+  if (camState > 0 && sourceMode !== 'testbench') {
+    const camMsg = camState === 2
+      ? '⚡ SCENE CUT DETECTED · ECA SUBSPACE & TRACKS AUTO-RESET'
+      : `⚠ CAMERA PTZ PAN (${Math.round(telemView[TELEM_GLOBAL + 10])} px/s) · TRACKING & SCALE HELD`;
+    const bw = 468;
+    const bx = Math.round((W - bw) * 0.5);
+    hudCtx.fillStyle = 'rgba(26, 12, 16, 0.92)';
+    hudCtx.fillRect(bx, 40, bw, 22);
+    hudCtx.strokeStyle = camState === 2 ? '#00f0ff' : '#ffb703';
+    hudCtx.lineWidth = 1.4;
+    hudCtx.strokeRect(bx, 40, bw, 22);
+    hudCtx.fillStyle = camState === 2 ? '#8ef9f3' : '#ffd166';
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(camMsg, bx + 12, 55);
+  }
 
   const pTid = primarySlot >= 0 ? Math.round(telemView[32 + primarySlot * 56 + 1]) : 0;
   const focusStr = focusTid !== 0
@@ -2161,35 +3226,43 @@ function renderMainHud(dispSlot) {
   hudCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
   hudCtx.fillText(focusStr, W - 258, 26);
 
-  // Bottom-left Scene Gravity Prior badge when parabolic gravity is locked
-  const sceneGPx = telemView[640];
-  const sceneGConf = telemView[641];
-  if (labMode === 0 && sceneGConf >= 0.25 && sceneGPx > 50.0) {
+  // Bottom-left Scene Gravity Prior badge (Provisional on 1 arc vs Locked >= 2 arcs)
+  const sceneGPx = telemView[TELEM_GLOBAL + 0];
+  const sceneGConf = telemView[TELEM_GLOBAL + 1];
+  const sceneGArcs = Math.round(telemView[TELEM_GLOBAL + 11]);
+  if (labMode === 0 && sceneGConf >= 0.20 && sceneGPx > 50.0) {
+    const locked = sceneGConf >= AUTO_G_LOCK_CONF;
+    const gStatus = locked ? `LOCKED · ${Math.max(2, sceneGArcs)} ARCS` : `PROV · ${Math.max(1, sceneGArcs)}/2 ARCS`;
     hudCtx.fillStyle = 'rgba(6, 10, 18, 0.84)';
-    hudCtx.fillRect(10, H - 32, 232, 22);
-    hudCtx.strokeStyle = 'rgba(255, 209, 102, 0.48)';
+    hudCtx.fillRect(10, H - 32, 264, 22);
+    hudCtx.strokeStyle = locked ? 'rgba(56, 242, 122, 0.58)' : 'rgba(255, 209, 102, 0.48)';
     hudCtx.lineWidth = 1.0;
-    hudCtx.strokeRect(10, H - 32, 232, 22);
-    hudCtx.fillStyle = '#ffd166';
-    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-    hudCtx.fillText(`ĝ = ${Math.round(sceneGPx)} px/s² (CONF ${Math.round(sceneGConf * 100)}%)`, 17, H - 17);
+    hudCtx.strokeRect(10, H - 32, 264, 22);
+    hudCtx.fillStyle = locked ? '#38f27a' : '#ffd166';
+    hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(`ĝ = ${Math.round(sceneGPx)} px/s² (${gStatus})`, 16, H - 17);
   }
 
-  // Bottom-right Metric / Homography Calibration badge
+  // Bottom-right Metric / Homography Calibration badge with explicit Provenance tag
   if (calMode !== 'none') {
-    const calShort = calMode === 'homography' && calHomographyValid
-      ? `⬠ PLANE H: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)} m [RECTIFIED m/s]`
+    const pBadge = calProvenance === 'assumed' ? 'ASSUMED' : 'SURVEYED';
+    const calShort = isCameraMotionSuspendingCal()
+      ? '⚠ CALIBRATION HELD (CAM MOTION)'
+      : calMode === 'homography' && calHomographyValid
+      ? `⬠ PLANE H [${pBadge}]: ${calPlaneW.toFixed(2)}×${calPlaneH.toFixed(2)}m`
       : calMode === 'auto_g'
-      ? `⚡ AUTO-g: ${Math.round(getEffectivePxPerMeter())} px/m (9.81 m/s²)`
-      : `📏 RULER: ${calRulerMeters.toFixed(2)} m (${Math.round(getEffectivePxPerMeter())} px/m)`;
-    const cw = 304;
+      ? (calAutoGLocked
+          ? `⚡ AUTO-g [LOCKED]: ${Math.round(getEffectivePxPerMeter())} px/m`
+          : `⚡ AUTO-g [PROVISIONAL · px/s]`)
+      : `📏 RULER [${pBadge}]: ${calRulerMeters.toFixed(2)}m (${Math.round(getEffectivePxPerMeter())}px/m)`;
+    const cw = 324;
     hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
     hudCtx.fillRect(W - cw - 10, H - 32, cw, 22);
-    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.55)';
+    hudCtx.strokeStyle = calProvenance === 'assumed' ? 'rgba(255, 209, 102, 0.55)' : 'rgba(0, 229, 255, 0.55)';
     hudCtx.lineWidth = 1.0;
     hudCtx.strokeRect(W - cw - 10, H - 32, cw, 22);
-    hudCtx.fillStyle = '#00e5ff';
-    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillStyle = calProvenance === 'assumed' ? '#ffd166' : '#00e5ff';
+    hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
     hudCtx.fillText(calShort, W - cw - 2, H - 17);
   }
 }
@@ -2205,7 +3278,7 @@ function renderEulerianPip() {
   pipCtx.fillStyle = '#070b13';
   pipCtx.fillRect(0, 0, W, H);
 
-  const pSlot = Math.round(telemView[8]);
+  const pSlot = resolvePrimarySlot();
   const boxSize = Math.min(H - 42, Math.floor((W - 20) * 0.5));
   const leftX = 6;
   const rightX = W - boxSize - 6;
@@ -2261,6 +3334,187 @@ function renderEulerianPip() {
     pipCtx.fillStyle = '#9db4d4';
     pipCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
     pipCtx.fillText('AWAITING PATCH LOCK', 12, H - 8);
+  }
+}
+
+/// Updates EMA-smoothed per-slot kinematics & sticky hold snapshot before HUD and Roster rendering.
+function updateSlotRosterEma() {
+  if (!telemView) return;
+  for (let m = 0; m < MAX_TARGETS; m++) {
+    const b = 32 + m * 56;
+    if (telemView[b] <= 0.5) continue;
+
+    const kb = TELEM_KINETIC + m * 8;
+    const tid = Math.round(telemView[b + 1]);
+    const fxPx = telemView[b + 2];
+    const fyPx = telemView[b + 3];
+    const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
+    const rawSpd = physVel[0];
+    const rawHdg = physVel[1];
+    const rawOmega = (calMode === 'homography' && calHomographyValid && physVel[2] > 0.5)
+      ? slotRectAngVel[m]
+      : telemView[kb + 2];
+    const rawEca = slotMetaView ? Math.min(100.0, Math.max(0.0, slotMetaView[m * 8 + 2] * 100.0)) : 0.0;
+
+    const sameTid = slotHoldTid[m] === tid;
+    const unitChanged = Math.round(slotLastMetricValid[m]) !== Math.round(physVel[2]);
+    const segChanged = slotLastCalSegId[m] !== calSegmentId;
+    if (!sameTid || unitChanged || segChanged) {
+      slotSmoothedSpeed[m] = rawSpd;
+      slotSmoothedHeading[m] = rawHdg;
+      slotSmoothedOmega[m] = rawOmega;
+      slotSmoothedEca[m] = rawEca;
+    } else {
+      slotSmoothedSpeed[m] = 0.78 * slotSmoothedSpeed[m] + 0.22 * rawSpd;
+      slotSmoothedHeading[m] = wrapDeg180(
+        slotSmoothedHeading[m] + 0.24 * wrapDeg180(rawHdg - slotSmoothedHeading[m])
+      );
+      slotSmoothedOmega[m] = 0.78 * slotSmoothedOmega[m] + 0.22 * rawOmega;
+      slotSmoothedEca[m] = 0.80 * slotSmoothedEca[m] + 0.20 * rawEca;
+    }
+
+    const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
+    slotHoldTid[m] = tid;
+    slotHoldLeft[m] = focusTid !== 0 && tid === focusTid ? PINNED_HOLD_FRAMES : SLOT_HOLD_FRAMES;
+    slotHoldVeilDrawn[m] = 0;
+    slotLastVal[m] = Math.round(telemView[b + 14]);
+    slotLastSigHi[m] = Math.round(telemView[b + 12]);
+    slotLastSigLo[m] = Math.round(telemView[b + 13]);
+    slotLastMetricValid[m] = physVel[2];
+    slotLastCalSegId[m] = calSegmentId;
+
+    if (slotMetaView) {
+      slotLastAgeFrames[m] = Math.round(slotMetaView[m * 8 + 0]);
+      slotLastCoast[m] = Math.round(slotMetaView[m * 8 + 1]);
+      slotLastReacq[m] = Math.round(slotMetaView[m * 8 + 3]);
+      slotLastFreqHz[m] = slotMetaView[m * 8 + 4];
+    }
+
+    if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
+      const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
+      slotLastPivotValid[m] = 1;
+      slotLastPendSwing[m] = sameTid && !segChanged
+        ? 0.76 * slotLastPendSwing[m] + 0.24 * pend[0]
+        : pend[0];
+      slotLastPendRad[m] = sameTid && !segChanged
+        ? 0.82 * slotLastPendRad[m] + 0.18 * pend[1]
+        : pend[1];
+    } else {
+      slotLastPivotValid[m] = 0;
+      slotLastPendSwing[m] = 0.0;
+      slotLastPendRad[m] = 0.0;
+    }
+  }
+}
+
+/// Renders all 16 per-slot Side-by-Side Split `1x RAW [t-K] | 25x TEMPORAL Δ` OffscreenCanvases
+/// with exact integer scaling (`128x128` per half: `4x` for `32x32` SD, `2x` for `64x64` HD)
+/// and a calm 48-frame (~1.5s) translucent hold-on-loss veil so slots never blink on exit.
+function renderAllSlotPips(advanceHold = true) {
+  const hasTelem = Boolean(telemView);
+  const primarySlot = hasTelem ? resolvePrimarySlot() : -1;
+  const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
+  const gainTxt = `${eulerianGain.toFixed(0)}x Δ`;
+
+  for (let m = 0; m < MAX_TARGETS; m++) {
+    const active = hasTelem && telemView[32 + m * 56] > 0.5;
+    const ctx = slotPipCtxs[m];
+    const imgData = slotPipImgData[m];
+
+    if (!active && slotHoldLeft[m] > 0) {
+      if (ctx && !slotHoldVeilDrawn[m]) {
+        slotHoldVeilDrawn[m] = 1;
+        const W = slotPipCanvases[m].width;
+        const H = slotPipCanvases[m].height;
+        const boxSize = Math.min(H - 20, Math.floor((W - 14) * 0.5));
+        const leftX = 4;
+        const topY = 14;
+        ctx.fillStyle = 'rgba(6, 10, 18, 0.48)';
+        ctx.fillRect(0, 0, W, H);
+        ctx.fillStyle = 'rgba(7, 11, 18, 0.90)';
+        ctx.fillRect(leftX + 3, topY + boxSize - 17, W - leftX * 2 - 6, 15);
+        ctx.fillStyle = '#9db4d4';
+        ctx.font = '700 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+        ctx.fillText(`HOLD T${slotHoldTid[m]} · LAST LOCK`, leftX + 7, topY + boxSize - 6);
+      }
+      if (advanceHold) {
+        slotHoldLeft[m]--;
+      }
+      continue;
+    }
+    slotHoldVeilDrawn[m] = 0;
+
+    if (!ctx) continue;
+    const W = slotPipCanvases[m].width;   // 276
+    const H = slotPipCanvases[m].height;  // 148
+    const boxSize = Math.min(H - 20, Math.floor((W - 14) * 0.5)); // 128 = 32*4 = 64*2
+    const leftX = 4;
+    const rightX = W - boxSize - 4;       // 144
+    const topY = 14;
+
+    if (active && imgData) {
+      const b = 32 + m * 56;
+      const tid = Math.round(telemView[b + 1]);
+      const fx = telemView[b + 2];
+      const fy = telemView[b + 3];
+      const dispVis = telemView[b + 10] > 0.5;
+      const isBridged = telemView[b + 11] > 0.5;
+      const isPinned = focusTid !== 0 && tid === focusTid;
+      const isPrimary = m === primarySlot;
+      const color = TARGET_COLORS[Math.max(0, tid - 1) % TARGET_COLORS.length];
+
+      slotIdleDrawn[m] = 0;
+
+      ctx.fillStyle = '#070b13';
+      ctx.fillRect(0, 0, W, H);
+
+      ctx.fillStyle = '#9db4d4';
+      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText('1x RAW [t−K]', leftX + 2, 10);
+      ctx.fillStyle = '#00f0ff';
+      ctx.fillText(gainTxt, rightX + 2, 10);
+
+      const halfP = pipDim * 0.5;
+      const cropX = Math.max(0, Math.min(frameW - pipDim, Math.round(fx - halfP)));
+      const cropY = Math.max(0, Math.min(frameH - pipDim, Math.round(fy - halfP)));
+
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(dispStageCanvas, cropX, cropY, pipDim, pipDim, leftX, topY, boxSize, boxSize);
+
+      pipStageCtx.putImageData(imgData, 0, 0);
+      ctx.drawImage(pipStageCanvas, 0, 0, pipDim, pipDim, rightX, topY, boxSize, boxSize);
+
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = isBridged ? '#ffd166' : (!dispVis ? 'rgba(255, 209, 102, 0.78)' : color);
+      ctx.strokeRect(leftX + 0.5, topY + 0.5, boxSize - 1, boxSize - 1);
+      if (isPinned || isPrimary) {
+        ctx.strokeStyle = isPinned ? '#ffffff' : 'rgba(0, 240, 255, 0.85)';
+        ctx.strokeRect(leftX - 1.5, topY - 1.5, boxSize + 3, boxSize + 3);
+      }
+
+      ctx.strokeStyle = 'rgba(0, 240, 255, 0.72)';
+      ctx.strokeRect(rightX + 0.5, topY + 0.5, boxSize - 1, boxSize - 1);
+      ctx.beginPath();
+      ctx.moveTo(rightX + boxSize * 0.5, topY);
+      ctx.lineTo(rightX + boxSize * 0.5, topY + boxSize);
+      ctx.moveTo(rightX, topY + boxSize * 0.5);
+      ctx.lineTo(rightX + boxSize, topY + boxSize * 0.5);
+      ctx.stroke();
+    } else if (!slotIdleDrawn[m]) {
+      slotIdleDrawn[m] = 1;
+      ctx.fillStyle = '#060a12';
+      ctx.fillRect(0, 0, W, H);
+      ctx.strokeStyle = '#162033';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(leftX + 0.5, topY + 0.5, boxSize - 1, boxSize - 1);
+      ctx.strokeRect(rightX + 0.5, topY + 0.5, boxSize - 1, boxSize - 1);
+      ctx.fillStyle = '#5c7394';
+      ctx.font = '600 9px ui-monospace, SFMono-Regular, Menlo, monospace';
+      ctx.fillText('1x RAW', leftX + 3, 10);
+      ctx.fillText('Δ STANDBY', rightX + 3, 10);
+      ctx.fillStyle = '#4c6180';
+      ctx.fillText(`SLOT ${String(m + 1).padStart(2, '0')} IDLE`, W * 0.5 - 32, topY + boxSize * 0.5 + 3);
+    }
   }
 }
 
@@ -2431,14 +3685,16 @@ function renderHilbertScope() {
   hilbertCtx.stroke();
 
   const pSlot = Math.round(telemView[8]);
-  const cohPct = pSlot >= 0 ? Math.round(telemView[512 + pSlot * 8 + 6] * 100) : 0;
+  const cohPct = pSlot >= 0 ? Math.round(telemView[TELEM_EXCUR + pSlot * 8 + 6] * 100) : 0;
   hilbertCtx.fillStyle = '#9db4d4';
   hilbertCtx.font = '600 10px ui-monospace, SFMono-Regular, Menlo, monospace';
   const phaseValid = telemView[26] > 0.5;
+  const freqValid = telemView[TELEM_GLOBAL + 12] > 0.5 && telemView[13] > 0.02;
   if (phaseValid) {
     const phiDeg = (telemView[11] * 180 / Math.PI).toFixed(0);
+    const fTxt = freqValid ? `f=${telemView[13].toFixed(2)}Hz` : 'APERIODIC';
     hilbertCtx.fillText(
-      `HILBERT φ=${phiDeg}° | f=${telemView[13].toFixed(1)}Hz | COH ${cohPct}% | R CYAN · H{R} MAGENTA`,
+      `HILBERT φ=${phiDeg}° | ${fTxt} | COH ${cohPct}% | R CYAN · H{R} MAGENTA`,
       10,
       14
     );
@@ -2583,6 +3839,452 @@ function renderSpectralAndRingScope() {
   }
 }
 
+function pushPhysicsPhaseSample() {
+  if (!telemView) return;
+  const pIdx = resolvePrimarySlot();
+  const w = phaseHistWrite;
+  if (pIdx >= 0 && telemView[32 + pIdx * 56] > 0.5) {
+    const b = 32 + pIdx * 56;
+    const kb = TELEM_KINETIC + pIdx * 8;
+    const pb = TELEM_PHYSICS_START + pIdx * TELEM_PHYSICS_STRIDE;
+    const spd = safeFinite(telemView[kb + 1]);
+    const hRad = safeFinite(telemView[kb + 0]) * (Math.PI / 180.0);
+    phaseHistTid[w] = Math.round(safeFinite(telemView[b + 1]));
+    phaseHistX[w] = safeFinite(telemView[b + 2]);
+    phaseHistY[w] = safeFinite(telemView[b + 3]);
+    phaseHistVx[w] = spd * Math.cos(hRad);
+    phaseHistVy[w] = spd * Math.sin(hRad);
+    phaseHistE[w] = safeFinite(telemView[pb + 12]);
+    phaseHistRegime[w] = Math.max(0, Math.min(8, Math.round(safeFinite(telemView[pb + 4]))));
+    phaseHistJump[w] = Math.max(0, Math.min(4, Math.round(safeFinite(telemView[pb + 15]))));
+  } else {
+    phaseHistTid[w] = -1;
+    phaseHistX[w] = 0.0;
+    phaseHistY[w] = 0.0;
+    phaseHistVx[w] = 0.0;
+    phaseHistVy[w] = 0.0;
+    phaseHistE[w] = 0.0;
+    phaseHistRegime[w] = 0;
+    phaseHistJump[w] = 0;
+  }
+  const eb = TELEM_ENSEMBLE_START;
+  phaseHistEnsK[w] = safeFinite(telemView[eb + 3]);
+  phaseHistKurR[w] = safeFinite(telemView[eb + 0]);
+  phaseHistKurN[w] = Math.max(0, Math.min(255, Math.round(safeFinite(telemView[eb + 2]))));
+  phaseHistWrite = (phaseHistWrite + 1) % PHASE_HIST;
+  if (phaseHistCount < PHASE_HIST) phaseHistCount++;
+}
+
+function renderPhysicsPhaseCanvas(force = false) {
+  if (!physicsPhaseCtx || !physicsPhaseCanvas) return;
+  const nowMs = performance.now();
+  if (!force && nowMs - lastPhysicsPhaseRenderMs < 66.0) return;
+  lastPhysicsPhaseRenderMs = nowMs;
+
+  const W = physicsPhaseCanvas.width;
+  const H = physicsPhaseCanvas.height;
+  const ctx = physicsPhaseCtx;
+
+  ctx.fillStyle = '#070b13';
+  ctx.fillRect(0, 0, W, H);
+
+  const lx = 6;
+  const ly = 6;
+  const lw = Math.max(96, Math.floor(W * 0.49) - 8);
+  const lh = Math.max(60, H - 12);
+  const rx = lx + lw + 6;
+  const ry = 6;
+  const rw = Math.max(96, W - rx - 6);
+  const rh = lh;
+
+  ctx.fillStyle = '#0b1220';
+  ctx.fillRect(lx, ly, lw, lh);
+  ctx.fillRect(rx, ry, rw, rh);
+  ctx.strokeStyle = '#192438';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(lx + 0.5, ly + 0.5, lw - 1, lh - 1);
+  ctx.strokeRect(rx + 0.5, ry + 0.5, rw - 1, rh - 1);
+
+  const px0 = lx + 6;
+  const py0 = ly + 20;
+  const pw = Math.max(20, lw - 12);
+  const ph = Math.max(20, lh - 26);
+
+  const ex0 = rx + 6;
+  const ey0 = ry + 20;
+  const ew = Math.max(20, rw - 12);
+  const eh = Math.max(24, Math.floor((rh - 44) * 0.62));
+  const kx0 = rx + 6;
+  const ky0 = ey0 + eh + 18;
+  const kw = ew;
+  const kh = Math.max(18, ry + rh - ky0 - 6);
+
+  ctx.font = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+  if (phaseHistCount <= 0 || !telemView) {
+    ctx.fillStyle = '#9db4d4';
+    ctx.fillText('PHASE PORTRAIT (q, qdot)', lx + 6, ly + 13);
+    ctx.fillText('CONSERVATION E(t) & R_sync', rx + 6, ry + 13);
+    ctx.fillStyle = '#5c7394';
+    ctx.fillText('AWAITING TRACK DYNAMICS...', px0 + 8, py0 + ph * 0.5);
+    ctx.fillText('AWAITING ENERGY & R_sync...', ex0 + 8, ey0 + eh * 0.55);
+    return;
+  }
+
+  const lastIdx = (phaseHistWrite + PHASE_HIST - 1) % PHASE_HIST;
+  const curTid = phaseHistTid[lastIdx];
+  const curRegime = phaseHistRegime[lastIdx];
+  const curR = phaseHistKurR[lastIdx];
+  const curN = phaseHistKurN[lastIdx];
+
+  // Left pane: contiguous phase portrait for current primary track
+  let segLen = 0;
+  if (curTid > 0) {
+    for (let k = 0; k < phaseHistCount; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - 1 - k) % PHASE_HIST;
+      if (phaseHistTid[idx] !== curTid) break;
+      segLen++;
+    }
+  }
+
+  ctx.strokeStyle = '#182438';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(px0 + 0.5, py0 + 0.5, pw - 1, ph - 1);
+  const pcx = px0 + pw * 0.5;
+  const pcy = py0 + ph * 0.5;
+  ctx.strokeStyle = 'rgba(100, 128, 168, 0.25)';
+  ctx.beginPath();
+  ctx.moveTo(px0, pcy);
+  ctx.lineTo(px0 + pw, pcy);
+  ctx.moveTo(pcx, py0);
+  ctx.lineTo(pcx, py0 + ph);
+  ctx.stroke();
+
+  if (segLen >= 2) {
+    let sumX = 0.0;
+    let sumY = 0.0;
+    for (let k = 0; k < segLen; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - segLen + k) % PHASE_HIST;
+      sumX += phaseHistX[idx];
+      sumY += phaseHistY[idx];
+    }
+    const meanX = sumX / segLen;
+    const meanY = sumY / segLen;
+
+    let varX = 0.0;
+    let varY = 0.0;
+    for (let k = 0; k < segLen; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - segLen + k) % PHASE_HIST;
+      const dx = phaseHistX[idx] - meanX;
+      const dy = phaseHistY[idx] - meanY;
+      varX += dx * dx;
+      varY += dy * dy;
+    }
+    const useY = varY > varX * 1.15;
+
+    let maxQ = 4.0;
+    let maxV = 15.0;
+    for (let k = 0; k < segLen; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - segLen + k) % PHASE_HIST;
+      const q = useY ? -(phaseHistY[idx] - meanY) : (phaseHistX[idx] - meanX);
+      const v = useY ? phaseHistVy[idx] : phaseHistVx[idx];
+      if (Math.abs(q) > maxQ) maxQ = Math.abs(q);
+      if (Math.abs(v) > maxV) maxV = Math.abs(v);
+    }
+    maxQ *= 1.15;
+    maxV *= 1.15;
+
+    const col = TARGET_COLORS[Math.max(0, curTid - 1) % TARGET_COLORS.length];
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    for (let k = 0; k < segLen; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - segLen + k) % PHASE_HIST;
+      const q = useY ? -(phaseHistY[idx] - meanY) : (phaseHistX[idx] - meanX);
+      const v = useY ? phaseHistVy[idx] : phaseHistVx[idx];
+      const gx = pcx + (q / maxQ) * (pw * 0.45);
+      const gy = pcy - (v / maxV) * (ph * 0.45);
+      if (k === 0) ctx.moveTo(gx, gy);
+      else ctx.lineTo(gx, gy);
+    }
+    ctx.stroke();
+
+    // Jump markers & live state dot
+    for (let k = 0; k < segLen; k++) {
+      const idx = (phaseHistWrite + PHASE_HIST - segLen + k) % PHASE_HIST;
+      if (phaseHistJump[idx] > 0) {
+        const q = useY ? -(phaseHistY[idx] - meanY) : (phaseHistX[idx] - meanX);
+        const v = useY ? phaseHistVy[idx] : phaseHistVx[idx];
+        const gx = pcx + (q / maxQ) * (pw * 0.45);
+        const gy = pcy - (v / maxV) * (ph * 0.45);
+        ctx.fillStyle = '#ff4d6d';
+        ctx.fillRect(gx - 2.5, gy - 2.5, 5, 5);
+      }
+    }
+    const qNow = useY ? -(phaseHistY[lastIdx] - meanY) : (phaseHistX[lastIdx] - meanX);
+    const vNow = useY ? phaseHistVy[lastIdx] : phaseHistVx[lastIdx];
+    const gxNow = pcx + (qNow / maxQ) * (pw * 0.45);
+    const gyNow = pcy - (vNow / maxV) * (ph * 0.45);
+    ctx.fillStyle = '#ffffff';
+    ctx.beginPath();
+    ctx.arc(gxNow, gyNow, 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = '#9db4d4';
+    ctx.fillText(`PHASE (${useY ? 'y,vy' : 'x,vx'}) T${curTid}`, lx + 6, ly + 13);
+    ctx.fillStyle = col;
+    ctx.fillText(PHYS_REGIME_NAMES[curRegime].slice(0, 12), lx + lw - 80, ly + 13);
+  } else {
+    ctx.fillStyle = '#9db4d4';
+    ctx.fillText('PHASE PORTRAIT (q, qdot)', lx + 6, ly + 13);
+    ctx.fillStyle = '#5c7394';
+    ctx.fillText(curTid > 0 ? 'WARMING TRACE...' : 'NO PRIMARY TARGET', px0 + 8, pcy + 14);
+  }
+
+  // Right pane top: Energy Conservation E(t) & Ensemble K_ens(t)
+  ctx.fillStyle = '#9db4d4';
+  ctx.fillText('E(t) CYAN · K_ens AMBER', rx + 6, ry + 13);
+  ctx.strokeStyle = '#182438';
+  ctx.strokeRect(ex0 + 0.5, ey0 + 0.5, ew - 1, eh - 1);
+
+  let maxE = 1.0;
+  for (let i = 0; i < phaseHistCount; i++) {
+    const idx = (phaseHistWrite + PHASE_HIST - phaseHistCount + i) % PHASE_HIST;
+    if (phaseHistE[idx] > maxE) maxE = phaseHistE[idx];
+    if (phaseHistEnsK[idx] > maxE) maxE = phaseHistEnsK[idx];
+  }
+  maxE *= 1.12;
+
+  const denom = Math.max(1, phaseHistCount - 1);
+  // Jump vertical markers
+  ctx.fillStyle = 'rgba(255, 77, 109, 0.55)';
+  for (let i = 0; i < phaseHistCount; i++) {
+    const idx = (phaseHistWrite + PHASE_HIST - phaseHistCount + i) % PHASE_HIST;
+    if (phaseHistJump[idx] > 0) {
+      const gx = ex0 + 2 + (i / denom) * (ew - 4);
+      ctx.fillRect(gx, ey0 + 1, 1.5, eh - 2);
+    }
+  }
+
+  // K_ens curve
+  ctx.strokeStyle = '#ffb703';
+  ctx.lineWidth = 1.3;
+  ctx.beginPath();
+  for (let i = 0; i < phaseHistCount; i++) {
+    const idx = (phaseHistWrite + PHASE_HIST - phaseHistCount + i) % PHASE_HIST;
+    const gx = ex0 + 2 + (i / denom) * (ew - 4);
+    const gy = ey0 + eh - 3 - Math.min(1.0, phaseHistEnsK[idx] / maxE) * (eh - 6);
+    if (i === 0) ctx.moveTo(gx, gy);
+    else ctx.lineTo(gx, gy);
+  }
+  ctx.stroke();
+
+  // Specific Energy E(t) curve
+  ctx.strokeStyle = '#00f0ff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < phaseHistCount; i++) {
+    const idx = (phaseHistWrite + PHASE_HIST - phaseHistCount + i) % PHASE_HIST;
+    const gx = ex0 + 2 + (i / denom) * (ew - 4);
+    const gy = ey0 + eh - 3 - Math.min(1.0, phaseHistE[idx] / maxE) * (eh - 6);
+    if (i === 0) ctx.moveTo(gx, gy);
+    else ctx.lineTo(gx, gy);
+  }
+  ctx.stroke();
+
+  // Right pane bottom: Kuramoto R_sync [0..1]
+  ctx.fillStyle = '#9db4d4';
+  ctx.fillText(`KURAMOTO R=${curR.toFixed(2)} (N=${curN})`, rx + 6, ky0 - 5);
+  ctx.strokeStyle = '#182438';
+  ctx.strokeRect(kx0 + 0.5, ky0 + 0.5, kw - 1, kh - 1);
+  ctx.strokeStyle = 'rgba(100, 128, 168, 0.25)';
+  ctx.beginPath();
+  ctx.moveTo(kx0, ky0 + kh * 0.5);
+  ctx.lineTo(kx0 + kw, ky0 + kh * 0.5);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#38f27a';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < phaseHistCount; i++) {
+    const idx = (phaseHistWrite + PHASE_HIST - phaseHistCount + i) % PHASE_HIST;
+    const gx = kx0 + 2 + (i / denom) * (kw - 4);
+    const rClamp = Math.max(0.0, Math.min(1.0, phaseHistKurR[idx]));
+    const gy = ky0 + kh - 2 - rClamp * (kh - 4);
+    if (i === 0) ctx.moveTo(gx, gy);
+    else ctx.lineTo(gx, gy);
+  }
+  ctx.stroke();
+}
+
+function buildPhysicsIdSnapshot(pIdx, hasPrimary, fxPx, fyPx, speedPhys, speedUnit, pMetricValid, angVelDegS) {
+  const pb = hasPrimary ? (TELEM_PHYSICS_START + pIdx * TELEM_PHYSICS_STRIDE) : -1;
+  const eb = TELEM_ENSEMBLE_START;
+
+  const immWcv = hasPrimary ? safeFinite(telemView[pb + 0]) : 0.0;
+  const immWbal = hasPrimary ? safeFinite(telemView[pb + 1]) : 0.0;
+  const immWturnOsc = hasPrimary ? safeFinite(telemView[pb + 2]) : 0.0;
+  const fistaSharpKnots = hasPrimary ? Math.max(0, Math.min(10, Math.round(safeFinite(telemView[pb + 3])))) : 0;
+  const physRegime = hasPrimary ? Math.max(0, Math.min(8, Math.round(safeFinite(telemView[pb + 4])))) : 0;
+  const physRegimeConf = hasPrimary ? safeFinite(telemView[pb + 5]) : 0.0;
+  const odeR2 = hasPrimary ? safeFinite(telemView[pb + 6]) : 0.0;
+  const aeroDragBeta = hasPrimary ? Math.max(0.0, safeFinite(telemView[pb + 7])) : 0.0;
+  const thrustAccel = hasPrimary ? Math.max(0.0, safeFinite(telemView[pb + 8])) : 0.0;
+  const ellipticPeriodS = hasPrimary ? Math.max(0.0, safeFinite(telemView[pb + 9])) : 0.0;
+  const dampingZeta = hasPrimary ? safeFinite(telemView[pb + 10]) : 0.0;
+  const qualityFactorQ = hasPrimary ? safeFinite(telemView[pb + 11]) : 0.0;
+  const specificEnergy = hasPrimary ? Math.max(0.0, safeFinite(telemView[pb + 12])) : 0.0;
+  const specificAngMom = hasPrimary ? safeFinite(telemView[pb + 13]) : 0.0;
+  const normalRestitutionE = hasPrimary ? safeFinite(telemView[pb + 14]) : 0.0;
+  const constraintJumpCode = hasPrimary ? Math.max(0, Math.min(4, Math.round(safeFinite(telemView[pb + 15])))) : 0;
+
+  const kuramotoOrderR = safeFinite(telemView[eb + 0]);
+  const kuramotoMeanPsi = safeFinite(telemView[eb + 1]);
+  const kuramotoOscCount = Math.max(0, Math.round(safeFinite(telemView[eb + 2])));
+  const ensembleKinetic = safeFinite(telemView[eb + 3]);
+  const ensembleMechEnergy = safeFinite(telemView[eb + 4]);
+  const lastPairMassRatio = safeFinite(telemView[eb + 5]);
+  const lastPairMomResid = safeFinite(telemView[eb + 6]);
+  const lastPairEnergyRetention = safeFinite(telemView[eb + 7]);
+  const lastPairTidA = Math.round(safeFinite(telemView[eb + 8]));
+  const lastPairTidB = Math.round(safeFinite(telemView[eb + 9]));
+  const lastPairFrame = Math.round(safeFinite(telemView[eb + 10]));
+  const lyapunovDivRate = Math.max(0.0, safeFinite(telemView[eb + 11]));
+  const taubinVsKasaDeltaPx = Math.max(0.0, safeFinite(telemView[eb + 12]));
+  const taubinCurvatureInvPx = Math.max(0.0, safeFinite(telemView[eb + 13]));
+
+  const camSusp = isCameraMotionSuspendingCal();
+  let unitMode = 'pixel';
+  let pxPerMeter = 0.0;
+  let localPxPerMeter = 0.0;
+  if (camSusp) {
+    unitMode = 'out_of_plane';
+  } else if (calMode === 'homography' && calHomographyValid) {
+    const hX = hasPrimary ? fxPx : frameW * 0.5;
+    const hY = hasPrimary ? fyPx : frameH * 0.5;
+    const lPpm = computeLocalHomographyPpm(hX, hY);
+    if (lPpm > 0.5 && pMetricValid >= 0) {
+      unitMode = 'metric';
+      localPxPerMeter = lPpm;
+    } else if (lPpm < 0 || pMetricValid < -0.5) {
+      unitMode = 'out_of_plane';
+    }
+  } else {
+    const ppm = getEffectivePxPerMeter();
+    pxPerMeter = ppm;
+    if (ppm > 0.5) {
+      unitMode = 'metric';
+      localPxPerMeter = ppm;
+    }
+  }
+
+  const metricOk = unitMode === 'metric' && localPxPerMeter > 0.5;
+  const ppm = metricOk ? localPxPerMeter : 1.0;
+  const ppm2 = ppm * ppm;
+
+  const betaDisp = metricOk ? aeroDragBeta * ppm : aeroDragBeta;
+  const betaUnit = metricOk ? 'm^-1' : 'px^-1';
+  const thrustDisp = metricOk ? thrustAccel / ppm : thrustAccel;
+  const thrustUnit = metricOk ? 'm/s^2' : 'px/s^2';
+  const energyDisp = metricOk ? specificEnergy / ppm2 : specificEnergy;
+  const energyUnit = metricOk ? 'J/kg' : 'px^2/s^2';
+  const angMomDisp = metricOk ? specificAngMom / ppm2 : specificAngMom;
+  const angMomUnit = metricOk ? 'm^2/s' : 'px^2/s';
+  const ensKineticDisp = metricOk ? ensembleKinetic / ppm2 : ensembleKinetic;
+  const ensMechEnergyDisp = metricOk ? ensembleMechEnergy / ppm2 : ensembleMechEnergy;
+  const taubinDeltaDisp = metricOk ? taubinVsKasaDeltaPx / ppm : taubinVsKasaDeltaPx;
+  const taubinDeltaUnit = metricOk ? 'm' : 'px';
+  const curvatureDisp = metricOk ? taubinCurvatureInvPx * ppm : taubinCurvatureInvPx;
+  const curvatureUnit = metricOk ? 'm^-1' : 'px^-1';
+
+  const sceneGravPx = safeFinite(telemView[TELEM_GLOBAL + 0]);
+  const gStr = metricOk
+    ? `${(calMode === 'auto_g' ? GRAVITY_M_S2 : (sceneGravPx > 50.0 ? sceneGravPx / ppm : GRAVITY_M_S2)).toFixed(2)} m/s^2`
+    : (sceneGravPx > 10.0 ? `${sceneGravPx.toFixed(0)} px/s^2` : 'g');
+  const speedStr = speedUnit === 'OUT OF PLANE'
+    ? 'OOP'
+    : (metricOk ? `${speedPhys.toFixed(2)} m/s` : `${speedPhys.toFixed(1)} px/s`);
+
+  const symbolicOde = formatSymbolicOdeString({
+    hasPrimary,
+    physRegime,
+    odeR2,
+    betaDisp,
+    betaUnit,
+    thrustDisp,
+    thrustUnit,
+    curvatureDisp,
+    curvatureUnit,
+    dampingZeta,
+    qualityFactorQ,
+    ellipticPeriodS,
+    normalRestitutionE,
+    lastPairMassRatio,
+    lastPairFrame,
+    kuramotoOrderR,
+    kuramotoOscCount,
+    tremorFreqHz: safeFinite(telemView[13]),
+    angVelDegS,
+    speedStr,
+    gStr,
+  });
+
+  return {
+    hasPrimary,
+    physRegime,
+    physRegimeName: PHYS_REGIME_NAMES[physRegime] || 'INERTIAL CV',
+    physRegimeConf,
+    odeR2,
+    symbolicOde,
+    immWcv,
+    immWbal,
+    immWturnOsc,
+    fistaSharpKnots,
+    aeroDragBeta,
+    thrustAccel,
+    ellipticPeriodS,
+    dampingZeta,
+    qualityFactorQ,
+    specificEnergy,
+    specificAngMom,
+    normalRestitutionE,
+    constraintJumpCode,
+    constraintJumpName: JUMP_CODE_NAMES[constraintJumpCode] || 'NONE',
+    kuramotoOrderR,
+    kuramotoMeanPsi,
+    kuramotoOscCount,
+    ensembleKinetic,
+    ensembleMechEnergy,
+    lastPairMassRatio,
+    lastPairMomResid,
+    lastPairEnergyRetention,
+    lastPairTidA,
+    lastPairTidB,
+    lastPairFrame,
+    lyapunovDivRate,
+    taubinVsKasaDeltaPx,
+    taubinCurvatureInvPx,
+    pxPerMeter,
+    localPxPerMeter,
+    unitMode,
+    display: {
+      beta: betaDisp,
+      betaUnit,
+      thrust: thrustDisp,
+      thrustUnit,
+      energy: energyDisp,
+      energyUnit,
+      angMom: angMomDisp,
+      angMomUnit,
+      ensKinetic: ensKineticDisp,
+      ensMechEnergy: ensMechEnergyDisp,
+      taubinDelta: taubinDeltaDisp,
+      taubinDeltaUnit,
+      curvature: curvatureDisp,
+      curvatureUnit,
+    },
+  };
+}
+
 // ============================================================================
 // Core Per-Frame Execution Pipeline (Pre-Tick -> Lanczos Fiedler -> Post-Tick)
 // ============================================================================
@@ -2605,9 +4307,323 @@ function computeMedianTickMs(count) {
   return (count & 1) ? wasmTimeSortBuf[mid] : 0.5 * (wasmTimeSortBuf[mid - 1] + wasmTimeSortBuf[mid]);
 }
 
-function processIngestedFrame(rawPixels, dtSec) {
-  const safeDt = Math.min(0.1, Math.max(0.002, dtSec || 1.0 / 60.0));
-  const instSourceFps = 1.0 / safeDt;
+function drawCroppedLetterboxedFrame(bmp) {
+  const bw = Math.max(1, bmp.width || frameW);
+  const bh = Math.max(1, bmp.height || frameH);
+  const cx = Math.max(0.0, Math.min(0.98, cropNorm[0]));
+  const cy = Math.max(0.0, Math.min(0.98, cropNorm[1]));
+  const cw = Math.max(0.02, Math.min(1.0 - cx, cropNorm[2]));
+  const ch = Math.max(0.02, Math.min(1.0 - cy, cropNorm[3]));
+  const sx = Math.max(0, Math.min(bw - 1, Math.round(cx * bw)));
+  const sy = Math.max(0, Math.min(bh - 1, Math.round(cy * bh)));
+  const sw = Math.max(1, Math.min(bw - sx, Math.round(cw * bw)));
+  const sh = Math.max(1, Math.min(bh - sy, Math.round(ch * bh)));
+
+  const srcAspect = sw / sh;
+  const dstAspect = frameW / frameH;
+  const fullFrame = sx === 0 && sy === 0 && sw === bw && sh === bh;
+  if (fullFrame && Math.abs(srcAspect - dstAspect) / dstAspect <= 0.02) {
+    simCtx.drawImage(bmp, 0, 0, frameW, frameH);
+    return;
+  }
+
+  simCtx.fillStyle = '#000000';
+  simCtx.fillRect(0, 0, frameW, frameH);
+  let dw = frameW;
+  let dh = frameH;
+  let dx = 0;
+  let dy = 0;
+  if (srcAspect > dstAspect) {
+    dh = Math.max(1, Math.round(frameW / srcAspect));
+    dy = (frameH - dh) >> 1;
+  } else {
+    dw = Math.max(1, Math.round(frameH * srcAspect));
+    dx = (frameW - dw) >> 1;
+  }
+  simCtx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+}
+
+function emitTelemetrySnapshot() {
+  if (!wasmExports || !telemView) return;
+  let sumMs = 0.0;
+  let maxMs = 0.0;
+  const count = Math.min(Math.max(1, tickCounter), TIME_HIST_LEN);
+  for (let i = 0; i < count; i++) {
+    sumMs += wasmTimeHist[i];
+    if (wasmTimeHist[i] > maxMs) maxMs = wasmTimeHist[i];
+  }
+  const meanMs = sumMs / Math.max(1, count);
+  const medianMs = computeMedianTickMs(count);
+  const effSampleRate = sourceMode === 'testbench' ? 60.0 : Math.max(8.0, sourceFps);
+  const fIdxNow = Math.round(telemView[0]);
+
+  const pIdx = resolvePrimarySlot();
+  const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
+  const metricOn = isMetricCalibrated();
+  let pTid = 0;
+  let pSigHex = '0x00000000';
+  let pVal = 0;
+  let apexMs = 0;
+  let primaryCoherence = 0;
+  let headingDeg = 0.0;
+  let speedPhys = 0.0;
+  let pMetricValid = metricOn ? 1.0 : 0.0;
+  let angVelDegS = 0.0;
+  let pivotValid = false;
+  let pendSwingDeg = 0.0;
+  let pendRadiusPhys = 0.0;
+  let pFxPx = frameW * 0.5;
+  let pFyPx = frameH * 0.5;
+  const hasPrimary = pIdx >= 0 && telemView[32 + pIdx * 56] > 0.5;
+  if (hasPrimary) {
+    const b = 32 + pIdx * 56;
+    const kb = TELEM_KINETIC + pIdx * 8;
+    const fxPx = telemView[b + 2];
+    const fyPx = telemView[b + 3];
+    pFxPx = fxPx;
+    pFyPx = fyPx;
+    pTid = Math.round(telemView[b + 1]);
+    pSigHex = toHex8(telemView[b + 12], telemView[b + 13]);
+    pVal = Math.round(telemView[b + 14]);
+    apexMs = telemView[b + 17] * (1000.0 / effSampleRate);
+    primaryCoherence = telemView[TELEM_EXCUR + pIdx * 8 + 6];
+    const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
+    speedPhys = physVel[0];
+    headingDeg = physVel[1];
+    pMetricValid = physVel[2];
+    angVelDegS = (calMode === 'homography' && calHomographyValid && physVel[2] > 0.5)
+      ? slotRectAngVel[pIdx]
+      : telemView[kb + 2];
+    if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
+      pivotValid = true;
+      const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
+      pendSwingDeg = pend[0];
+      pendRadiusPhys = pend[1];
+    }
+  }
+  if (apexMs <= 0.0) {
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      const mb = 32 + m * 56;
+      if (telemView[mb] > 0.5 && telemView[mb + 17] > 0.35) {
+        const candApexMs = telemView[mb + 17] * (1000.0 / effSampleRate);
+        if (candApexMs > apexMs) apexMs = candApexMs;
+      }
+    }
+  }
+
+  const speedUnit = pMetricValid < -0.5
+    ? 'OUT OF PLANE'
+    : (pMetricValid > 0.5 ? 'm/s' : 'px/s');
+  const distUnit = pMetricValid < -0.5
+    ? 'OUT OF PLANE'
+    : (metricOn ? 'm' : 'px');
+  const lastStrikeAgeFrames = lastStrikeFrame >= 0 ? Math.max(0, fIdxNow - lastStrikeFrame) : -1;
+  const scatterFrameWasm = Math.round(telemView[TELEM_GLOBAL + 7]);
+  if (scatterFrameWasm > 0) lastScatterFrame = scatterFrameWasm;
+  const scatterAgeFrames = lastScatterFrame > 0 ? Math.max(0, fIdxNow - lastScatterFrame) : -1;
+
+  const slotRoster = new Array(MAX_TARGETS);
+  for (let m = 0; m < MAX_TARGETS; m++) {
+    const b = 32 + m * 56;
+    const active = telemView[b] > 0.5;
+    if (active) {
+      const tid = Math.round(telemView[b + 1]);
+      const dispVis = telemView[b + 10] > 0.5;
+      const isBridged = telemView[b + 11] > 0.5;
+      const isPinned = focusTid !== 0 && tid === focusTid;
+      const isPrimary = m === pIdx;
+      const mv = slotLastMetricValid[m];
+      const isPiv = slotLastPivotValid[m] > 0;
+      const state = isBridged
+        ? 'BRIDGED'
+        : !dispVis
+        ? 'COAST'
+        : isPinned
+        ? 'PINNED'
+        : isPrimary
+        ? 'FOCUS'
+        : 'LOCKED';
+      slotRoster[m] = {
+        slot: m,
+        state,
+        tid,
+        color: TARGET_COLORS[Math.max(0, tid - 1) % TARGET_COLORS.length],
+        sigHex: toHex8(slotLastSigHi[m], slotLastSigLo[m]),
+        padicVal: slotLastVal[m],
+        reacq: slotLastReacq[m],
+        coastFrames: slotLastCoast[m],
+        ageSec: slotLastAgeFrames[m] / effSampleRate,
+        speed: slotSmoothedSpeed[m],
+        speedUnit: mv < -0.5 ? 'OOP' : (mv > 0.5 ? 'm/s' : 'px/s'),
+        isPivot: isPiv,
+        angleDeg: isPiv ? slotLastPendSwing[m] : slotSmoothedHeading[m],
+        rateOrRad: isPiv ? slotLastPendRad[m] : slotSmoothedOmega[m],
+        rateUnit: isPiv ? (metricOn ? 'm' : 'px') : '°/s',
+        freqHz: slotLastFreqHz[m],
+        ecaPct: slotSmoothedEca[m],
+        isPinned,
+        isPrimary,
+        physRegime: Math.max(0, Math.min(8, Math.round(safeFinite(telemView[TELEM_PHYSICS_START + m * TELEM_PHYSICS_STRIDE + 4])))),
+        odeR2: safeFinite(telemView[TELEM_PHYSICS_START + m * TELEM_PHYSICS_STRIDE + 6]),
+        jumpCode: Math.max(0, Math.min(4, Math.round(safeFinite(telemView[TELEM_PHYSICS_START + m * TELEM_PHYSICS_STRIDE + 15])))),
+      };
+    } else if (slotHoldLeft[m] > 0 && slotHoldTid[m] > 0) {
+      const tid = slotHoldTid[m];
+      const mv = slotLastMetricValid[m];
+      const isPiv = slotLastPivotValid[m] > 0;
+      slotRoster[m] = {
+        slot: m,
+        state: 'HOLD',
+        tid,
+        color: TARGET_COLORS[Math.max(0, tid - 1) % TARGET_COLORS.length],
+        sigHex: toHex8(slotLastSigHi[m], slotLastSigLo[m]),
+        padicVal: slotLastVal[m],
+        reacq: slotLastReacq[m],
+        coastFrames: slotLastCoast[m],
+        ageSec: slotLastAgeFrames[m] / effSampleRate,
+        speed: slotSmoothedSpeed[m],
+        speedUnit: mv < -0.5 ? 'OOP' : (mv > 0.5 ? 'm/s' : 'px/s'),
+        isPivot: isPiv,
+        angleDeg: isPiv ? slotLastPendSwing[m] : slotSmoothedHeading[m],
+        rateOrRad: isPiv ? slotLastPendRad[m] : slotSmoothedOmega[m],
+        rateUnit: isPiv ? (metricOn ? 'm' : 'px') : '°/s',
+        freqHz: slotLastFreqHz[m],
+        ecaPct: slotSmoothedEca[m],
+        isPinned: focusTid !== 0 && tid === focusTid,
+        isPrimary: false,
+        physRegime: 0,
+        odeR2: 0.0,
+        jumpCode: 0,
+      };
+    } else {
+      slotRoster[m] = {
+        slot: m,
+        state: 'IDLE',
+        tid: 0,
+        color: '#64748b',
+        sigHex: '0x00000000',
+        padicVal: 0,
+        reacq: 0,
+        coastFrames: 0,
+        ageSec: 0.0,
+        speed: 0.0,
+        speedUnit: metricOn ? 'm/s' : 'px/s',
+        isPivot: false,
+        angleDeg: 0.0,
+        rateOrRad: 0.0,
+        rateUnit: '°/s',
+        freqHz: 0.0,
+        ecaPct: 0.0,
+        isPinned: false,
+        isPrimary: false,
+        physRegime: 0,
+        odeR2: 0.0,
+        jumpCode: 0,
+      };
+    }
+  }
+
+  self.postMessage({
+    type: 'telemetry',
+    frameIdx: fIdxNow,
+    lookaheadK: Math.round(telemView[1]),
+    fps: effSampleRate,
+    wasmMeanMs: meanMs,
+    wasmMedianMs: medianMs,
+    wasmMaxMs: maxMs,
+    activeTargets: Math.round(telemView[3]),
+    clutterDb: telemView[4],
+    clutterDbValid: telemView[22] > 0.5,
+    clutterEvalRatio: telemView[23],
+    padicSwaps: Math.round(telemView[5]),
+    oracleSwaps: oraclePadicSwaps,
+    sourceMode,
+    benchScenario,
+    kalmanSwaps: Math.round(telemView[6]),
+    inPillarCollisions,
+    bridgedFrames: totalBridgedEvents,
+    strikeEvents: totalStrikeEvents,
+    lambda2: lastLambda2,
+    spectralGap: telemView[24],
+    fistaDualityGap: telemView[25],
+    phaseValid: telemView[26] > 0.5,
+    freqValid: telemView[TELEM_GLOBAL + 12] > 0.5,
+    tremorPhaseDeg: telemView[11] * (180.0 / Math.PI),
+    tremorFreqHz: telemView[13],
+    tremorAmp: telemView[12],
+    tremorCoherence: primaryCoherence,
+    saccadeLatencyMs: telemView[19],
+    stepSettleMs: telemView[28],
+    stimulusArmed: telemView[29] > 0.5,
+    primaryTrackId: pTid,
+    focusTrackId: focusTid,
+    primarySigHex: pSigHex,
+    primaryPadicVal: pVal,
+    apexMs,
+    apexErrPx: lastScoredApexErrPx,
+    headingDeg,
+    speedPhys,
+    metricValid: pMetricValid,
+    speedUnit,
+    distUnit,
+    angVelDegS,
+    pivotValid,
+    pendSwingDeg,
+    pendRadiusPhys,
+    sceneGravityPxS2: telemView[TELEM_GLOBAL + 0],
+    sceneGravityConf: telemView[TELEM_GLOBAL + 1],
+    sceneGravityArcs: Math.round(telemView[TELEM_GLOBAL + 11]),
+    dispLagMs: telemView[TELEM_GLOBAL + 8],
+    camMotionState: Math.round(telemView[TELEM_GLOBAL + 9]),
+    camPanSpeedPxS: telemView[TELEM_GLOBAL + 10],
+    discontCount: Math.round(telemView[TELEM_GLOBAL + 15]),
+    lastDeflectDeg: lastStrikeDeflectDeg,
+    lastRestitution: lastStrikeRestitution,
+    lastStrikeTid,
+    lastStrikeAgeFrames,
+    lastStrikeValid,
+    scatterDeg: lastScatterDeg,
+    scatterAgeFrames,
+    calSegmentId,
+    calMode,
+    calProvenance,
+    calArmed,
+    calibrated: metricOn,
+    showAllOverlays,
+    cropNorm: [cropNorm[0], cropNorm[1], cropNorm[2], cropNorm[3]],
+    arenaBytes: Math.round(telemView[20]),
+    memoryPages: wasmMemory.buffer.byteLength / 65536,
+    resMode,
+    frameW,
+    frameH,
+    pipDim,
+    recActive,
+    recFrames: recCount,
+    recDurationSec: recElapsedSec,
+    sessionPersistence: {
+      uniqueIds: Math.round(telemView[TELEM_PERSIST + 0]),
+      coastReacqEvents: Math.round(telemView[TELEM_PERSIST + 1]),
+      dormantReidEvents: Math.round(telemView[TELEM_PERSIST + 2]),
+      totalRelocks: Math.round(telemView[TELEM_PERSIST + 1]) + Math.round(telemView[TELEM_PERSIST + 2]),
+      peakSimultaneous: Math.round(telemView[TELEM_PERSIST + 3]),
+      longestTenureFrames: Math.round(telemView[TELEM_PERSIST + 4]),
+      longestTenureSec: Math.round(telemView[TELEM_PERSIST + 4]) / effSampleRate,
+      longestTenureTid: Math.round(telemView[TELEM_PERSIST + 5]),
+      sustained10s: Math.round(telemView[TELEM_PERSIST + 6]),
+      sustained60s: Math.round(telemView[TELEM_PERSIST + 7]),
+      dormantActive: Math.round(telemView[TELEM_PERSIST + 8]),
+      lastReidGapFrames: Math.round(telemView[TELEM_PERSIST + 9]),
+      sessionElapsedSec,
+    },
+    physicsId: buildPhysicsIdSnapshot(pIdx, hasPrimary, pFxPx, pFyPx, speedPhys, speedUnit, pMetricValid, angVelDegS),
+    slotRoster,
+  });
+}
+
+function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
+  const rawDt = Math.max(0.001, Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 1.0 / 60.0);
+  const fpsDt = Math.min(0.25, Math.max(0.002, rawDt));
+  const instSourceFps = 1.0 / fpsDt;
   sourceFps = 0.90 * sourceFps + 0.10 * instSourceFps;
 
   const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
@@ -2620,29 +4636,86 @@ function processIngestedFrame(rawPixels, dtSec) {
   }
   ringSlotU8[slotIdx].set(rawPixels);
 
+  if (
+    typeof wasmExports.chronos_set_ingest_pts === 'function' &&
+    Number.isFinite(mediaTimeSec) &&
+    mediaTimeSec >= 0.0
+  ) {
+    wasmExports.chronos_set_ingest_pts(mediaTimeSec);
+  }
+
   // Measure full production compute path: Wasm Pre-Tick + Shifted Lanczos Fiedler + Wasm Post-Tick
   const t0 = performance.now();
-  wasmExports.chronos_pre_tick(safeDt);
+  wasmExports.chronos_pre_tick(rawDt);
   const lambda2 = solveShiftedLanczosFiedler();
-  const dispSlot = wasmExports.chronos_post_tick(safeDt);
+  const dispSlot = wasmExports.chronos_post_tick(rawDt);
   const wasmMs = performance.now() - t0;
+  lastLambda2 = lambda2;
 
   wasmTimeHist[timeHistIdx] = wasmMs;
   timeHistIdx = (timeHistIdx + 1) % TIME_HIST_LEN;
+
+  const camMotionState = Math.round(telemView[TELEM_GLOBAL + 9]);
+  if (camMotionState === 2) {
+    camPanStreakWorker = 0;
+    clearVisualQueues();
+    if (sourceMode !== 'testbench' && calMode !== 'none') {
+      clearCalibrationState();
+      recordCalibrationSegmentTransition('scene_cut_reset');
+      emitCalibrationState('SCENE CUT · ECA & IMAGE-PLANE CALIBRATION RESET');
+    }
+  } else if (camMotionState === 1 && sourceMode !== 'testbench') {
+    camPanStreakWorker++;
+    if (
+      camPanStreakWorker >= 4 &&
+      (calMode === 'homography' || calMode === 'ruler' || calArmed !== 'none')
+    ) {
+      clearCalibrationState();
+      recordCalibrationSegmentTransition('camera_ptz_pan_reset');
+      emitCalibrationState('CAMERA PTZ PAN · IMAGE-PLANE CALIBRATION INVALIDATED (PX UNITS)');
+    }
+  } else {
+    camPanStreakWorker = 0;
+  }
 
   if (sourceMode === 'testbench') {
     auditOracleSwaps();
   }
 
+  const fIdx = Math.round(telemView[0]);
   let frameHasBridge = false;
   for (let m = 0; m < MAX_TARGETS; m++) {
     const b = 32 + m * 56;
-    if (telemView[b] > 0.5 && telemView[b + 11] > 0.5) {
-      frameHasBridge = true;
-      break;
+    if (telemView[b] > 0.5) {
+      if (telemView[b + 11] > 0.5) frameHasBridge = true;
+      if (calMode === 'homography' && calHomographyValid) {
+        const kb = TELEM_KINETIC + m * 8;
+        const tidM = Math.round(telemView[b + 1]);
+        const pv = mapVelocityToPhysical(telemView[b + 2], telemView[b + 3], telemView[kb + 1], telemView[kb + 0]);
+        if (pv[2] > 0.5 && pv[0] > 0.08) {
+          if (prevRectTid[m] === tidM && prevRectFrame[m] >= 0 && fIdx > prevRectFrame[m] && (fIdx - prevRectFrame[m]) <= 4) {
+            const dth = wrapDeg180(pv[1] - prevRectHeading[m]);
+            const spanDt = Math.max(0.002, (fIdx - prevRectFrame[m]) * fpsDt);
+            const instW = Math.max(-720.0, Math.min(720.0, dth / spanDt));
+            slotRectAngVel[m] = 0.62 * slotRectAngVel[m] + 0.38 * instW;
+          } else {
+            slotRectAngVel[m] = 0.0;
+          }
+          prevRectHeading[m] = pv[1];
+          prevRectTid[m] = tidM;
+          prevRectFrame[m] = fIdx;
+        } else {
+          slotRectAngVel[m] *= 0.78;
+        }
+      }
+    } else {
+      prevRectTid[m] = 0;
+      prevRectFrame[m] = -1;
+      slotRectAngVel[m] = 0.0;
     }
   }
   if (frameHasBridge) totalBridgedEvents++;
+  updateSlotRosterEma();
 
   // Record scope traces + primary track ID for seamless discontinuity breaks
   const pIdxNow = Math.round(telemView[8]);
@@ -2668,26 +4741,38 @@ function processIngestedFrame(rawPixels, dtSec) {
     });
   }
 
-  // Update resolution-invariant scene gravity lock when high-confidence parabolic arc is observed
-  if (telemView[641] >= 0.25 && telemView[640] > 50.0) {
-    const hadLock = calAutoGNormH > 0.05;
-    calAutoGNormH = telemView[640] / frameH;
+  // Multi-arc consensus scene gravity lock (>= 2 consistent free-fall arcs required)
+  const gConf = telemView[TELEM_GLOBAL + 1];
+  const gPxS2 = telemView[TELEM_GLOBAL + 0];
+  if (gConf >= AUTO_G_LOCK_CONF && gPxS2 > 50.0) {
+    const hadLock = calAutoGLocked;
+    calAutoGNormH = gPxS2 / frameH;
+    calAutoGLocked = true;
     if (calMode === 'auto_g' && !hadLock) {
+      recordCalibrationSegmentTransition('auto_g_locked');
       emitCalibrationState();
     }
+  } else if (calAutoGLocked && gConf < 0.35) {
+    calAutoGLocked = false;
+    if (calMode === 'auto_g') {
+      recordCalibrationSegmentTransition('auto_g_provisional');
+      emitCalibrationState();
+    }
+  } else if (calMode === 'auto_g' && !calAutoGLocked && gPxS2 > 50.0 && Math.round(telemView[TELEM_GLOBAL + 11]) === 1 && calAutoGNormH === 0.0) {
+    calAutoGNormH = gPxS2 / frameH;
+    emitCalibrationState();
   }
 
   // Emit per-target deduplicated Mode C strikes and schedule synchronized t - K shockwave rings!
   const percMask = Math.round(telemView[15]);
   if (percMask !== 0) {
-    const fIdx = Math.round(telemView[0]);
     const effSampleRate = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
     const nowEpochMs = performance.timeOrigin + performance.now();
     for (let m = 0; m < MAX_TARGETS; m++) {
-      const ebase = 512 + m * 8;
+      const ebase = TELEM_EXCUR + m * 8;
       if (telemView[ebase] > 0.5) {
         totalStrikeEvents++;
-        const kbase = 576 + m * 8;
+        const kbase = TELEM_KINETIC + m * 8;
         const zone = Math.round(telemView[ebase + 1]) & 3;
         const leadFrames = telemView[ebase + 2];
         const vel = telemView[ebase + 3];
@@ -2696,6 +4781,8 @@ function processIngestedFrame(rawPixels, dtSec) {
         const rawDefl = telemView[kbase + 3];
         const rawRest = telemView[kbase + 4];
         const rawIn = telemView[kbase + 5];
+        slotLastStrikeX[m] = sxPos;
+        slotLastStrikeY[m] = syPos;
 
         const maxValidRest = sourceMode === 'testbench' ? 1.65 : 1.18;
         if (rawRest >= 0.06 && rawRest <= maxValidRest && Math.abs(rawDefl) >= 3.0) {
@@ -2703,6 +4790,8 @@ function processIngestedFrame(rawPixels, dtSec) {
           if (rectSt[2] <= maxValidRest) {
             lastStrikeDeflectDeg = rectSt[1];
             lastStrikeRestitution = rectSt[2];
+            lastStrikeTid = Math.round(telemView[32 + m * 56 + 1]);
+            lastStrikeFrame = fIdx + Math.round(leadFrames);
             lastStrikeValid = true;
           }
         }
@@ -2731,31 +4820,38 @@ function processIngestedFrame(rawPixels, dtSec) {
     }
   }
 
-  if (telemView[642] > 2.0) {
+  if (telemView[TELEM_GLOBAL + 2] > 2.0) {
     const rectSc = rectifyScatterKinematics(
-      telemView[643],
-      telemView[644],
-      telemView[645],
-      telemView[646],
-      telemView[642]
+      telemView[TELEM_GLOBAL + 3],
+      telemView[TELEM_GLOBAL + 4],
+      telemView[TELEM_GLOBAL + 5],
+      telemView[TELEM_GLOBAL + 6],
+      telemView[TELEM_GLOBAL + 2]
     );
     lastScatterDeg = rectSc[2];
+    lastScatterFrame = Math.round(telemView[TELEM_GLOBAL + 7]);
   }
 
-  // Render all 4 OffscreenCanvases inside Worker isolate
+  updatePersistenceState(fpsDt);
+  pushPhysicsPhaseSample();
+
+  // Render all OffscreenCanvases inside Worker isolate
   renderMainHud(dispSlot);
   renderEulerianPip();
+  renderAllSlotPips(true);
   renderHilbertScope();
   renderSpectralAndRingScope();
+  renderPersistenceTimeline(false);
+  renderPhysicsPhaseCanvas(false);
 
-  // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 46 columns)
+  // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 56 columns)
   if (recActive) {
-    const effRateRec = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
+    const effRateRec = sourceMode === 'testbench' ? 60.0 : Math.max(8.0, sourceFps);
     const pSlot = Math.round(telemView[8]);
     const ro = recHead * REC_COLS;
-    recElapsedSec += safeDt;
+    recElapsedSec += Math.min(1.0, rawDt);
 
-    recSlab[ro + 0] = Math.round(telemView[0]);
+    recSlab[ro + 0] = fIdx;
     recSlab[ro + 1] = recElapsedSec;
     recSlab[ro + 2] = frameW;
     recSlab[ro + 3] = frameH;
@@ -2775,7 +4871,7 @@ function processIngestedFrame(rawPixels, dtSec) {
 
     if (pSlot >= 0 && telemView[32 + pSlot * 56] > 0.5) {
       const b = 32 + pSlot * 56;
-      const kb = 576 + pSlot * 8;
+      const kb = TELEM_KINETIC + pSlot * 8;
       const fxPx = telemView[b + 2];
       const fyPx = telemView[b + 3];
       const hi = Math.round(telemView[b + 12]) & 0xffff;
@@ -2796,25 +4892,43 @@ function processIngestedFrame(rawPixels, dtSec) {
       const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
       recSlab[ro + 38] = physVel[1];
       recSlab[ro + 39] = physVel[0];
-      recSlab[ro + 40] = telemView[kb + 2];
+      recSlab[ro + 40] = (calMode === 'homography' && calHomographyValid && physVel[2] > 0.5)
+        ? slotRectAngVel[pSlot]
+        : telemView[kb + 2];
       if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
         const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
         recSlab[ro + 41] = pend[0];
       } else {
         recSlab[ro + 41] = 0.0;
       }
-      const stRect = rectifyStrikeKinematics(fxPx, fyPx, telemView[kb + 5], telemView[kb + 3], telemView[kb + 4]);
+      const sxRec = slotLastStrikeX[pSlot] > 0.0 ? slotLastStrikeX[pSlot] : fxPx;
+      const syRec = slotLastStrikeY[pSlot] > 0.0 ? slotLastStrikeY[pSlot] : fyPx;
+      const stRect = rectifyStrikeKinematics(sxRec, syRec, telemView[kb + 5], telemView[kb + 3], telemView[kb + 4]);
       recSlab[ro + 42] = stRect[1];
       recSlab[ro + 43] = stRect[2];
       const mPt = mapPixelToMetric(fxPx, fyPx);
       recSlab[ro + 44] = mPt[0];
       recSlab[ro + 45] = mPt[1];
+      recSlab[ro + 46] = calSegmentId;
+      recSlab[ro + 47] = physVel[2];
+      const pb = TELEM_PHYSICS_START + pSlot * TELEM_PHYSICS_STRIDE;
+      recSlab[ro + 48] = Math.max(0, Math.min(8, Math.round(safeFinite(telemView[pb + 4]))));
+      recSlab[ro + 49] = safeFinite(telemView[pb + 5]);
+      recSlab[ro + 50] = safeFinite(telemView[pb + 6]);
+      recSlab[ro + 51] = safeFinite(telemView[pb + 7]);
+      recSlab[ro + 52] = safeFinite(telemView[pb + 8]);
+      recSlab[ro + 53] = safeFinite(telemView[pb + 10]);
     } else {
       for (let c = 17; c <= 27; c++) recSlab[ro + c] = 0.0;
       recSlab[ro + 36] = 0.0;
       for (let c = 38; c <= 45; c++) recSlab[ro + c] = 0.0;
+      recSlab[ro + 46] = calSegmentId;
+      recSlab[ro + 47] = isMetricCalibrated() ? 1.0 : 0.0;
+      for (let c = 48; c <= 53; c++) recSlab[ro + c] = 0.0;
     }
 
+    recSlab[ro + 54] = safeFinite(telemView[TELEM_ENSEMBLE_START + 0]);
+    recSlab[ro + 55] = safeFinite(telemView[TELEM_ENSEMBLE_START + 11]);
     recSlab[ro + 28] = telemView[9];
     recSlab[ro + 29] = telemView[10];
     recSlab[ro + 30] = telemView[11] * (180.0 / Math.PI);
@@ -2827,130 +4941,12 @@ function processIngestedFrame(rawPixels, dtSec) {
 
     recHead = (recHead + 1) % REC_MAX_FRAMES;
     if (recCount < REC_MAX_FRAMES) recCount++;
+    recTotalWritten++;
   }
 
   tickCounter++;
   if (tickCounter % 3 === 0 || sourceMode !== 'testbench') {
-    let sumMs = 0.0;
-    let maxMs = 0.0;
-    const count = Math.min(tickCounter, TIME_HIST_LEN);
-    for (let i = 0; i < count; i++) {
-      sumMs += wasmTimeHist[i];
-      if (wasmTimeHist[i] > maxMs) maxMs = wasmTimeHist[i];
-    }
-    const meanMs = sumMs / Math.max(1, count);
-    const medianMs = computeMedianTickMs(count);
-    const effSampleRate = Math.max(8.0, sourceMode === 'testbench' ? smoothFps : sourceFps);
-
-    const pIdx = Math.round(telemView[8]);
-    const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
-    const metricOn = isMetricCalibrated();
-    let pTid = 0;
-    let pSigHex = '0x00000000';
-    let pVal = 0;
-    let apexMs = 0;
-    let primaryCoherence = 0;
-    let headingDeg = 0.0;
-    let speedPhys = 0.0;
-    let angVelDegS = 0.0;
-    let pivotValid = false;
-    let pendSwingDeg = 0.0;
-    let pendRadiusPhys = 0.0;
-    if (pIdx >= 0 && telemView[32 + pIdx * 56] > 0.5) {
-      const b = 32 + pIdx * 56;
-      const kb = 576 + pIdx * 8;
-      const fxPx = telemView[b + 2];
-      const fyPx = telemView[b + 3];
-      pTid = Math.round(telemView[b + 1]);
-      pSigHex = toHex8(telemView[b + 12], telemView[b + 13]);
-      pVal = Math.round(telemView[b + 14]);
-      apexMs = telemView[b + 17] * (1000.0 / effSampleRate);
-      primaryCoherence = telemView[512 + pIdx * 8 + 6];
-      const physVel = mapVelocityToPhysical(fxPx, fyPx, telemView[kb + 1], telemView[kb + 0]);
-      speedPhys = physVel[0];
-      headingDeg = physVel[1];
-      angVelDegS = telemView[kb + 2];
-      if (telemView[kb + 6] > -9.0e5 && telemView[kb + 7] > -9.0e5) {
-        pivotValid = true;
-        const pend = computePendulumKinematics(fxPx, fyPx, telemView[kb + 6], telemView[kb + 7]);
-        pendSwingDeg = pend[0];
-        pendRadiusPhys = pend[1];
-      }
-    }
-    if (apexMs <= 0.0) {
-      for (let m = 0; m < MAX_TARGETS; m++) {
-        const mb = 32 + m * 56;
-        if (telemView[mb] > 0.5 && telemView[mb + 17] > 0.35) {
-          const candApexMs = telemView[mb + 17] * (1000.0 / effSampleRate);
-          if (candApexMs > apexMs) apexMs = candApexMs;
-        }
-      }
-    }
-
-    self.postMessage({
-      type: 'telemetry',
-      frameIdx: Math.round(telemView[0]),
-      lookaheadK: Math.round(telemView[1]),
-      fps: effSampleRate,
-      wasmMeanMs: meanMs,
-      wasmMedianMs: medianMs,
-      wasmMaxMs: maxMs,
-      activeTargets: Math.round(telemView[3]),
-      clutterDb: telemView[4],
-      clutterDbValid: telemView[22] > 0.5,
-      clutterEvalRatio: telemView[23],
-      padicSwaps: Math.round(telemView[5]),
-      oracleSwaps: oraclePadicSwaps,
-      sourceMode,
-      benchScenario,
-      kalmanSwaps: Math.round(telemView[6]),
-      inPillarCollisions,
-      bridgedFrames: totalBridgedEvents,
-      strikeEvents: totalStrikeEvents,
-      lambda2,
-      spectralGap: telemView[24],
-      fistaDualityGap: telemView[25],
-      phaseValid: telemView[26] > 0.5,
-      tremorPhaseDeg: telemView[11] * (180.0 / Math.PI),
-      tremorFreqHz: telemView[13],
-      tremorAmp: telemView[12],
-      tremorCoherence: primaryCoherence,
-      saccadeLatencyMs: telemView[19],
-      stepSettleMs: telemView[28],
-      stimulusArmed: telemView[29] > 0.5,
-      primaryTrackId: pTid,
-      focusTrackId: focusTid,
-      primarySigHex: pSigHex,
-      primaryPadicVal: pVal,
-      apexMs,
-      apexErrPx: lastScoredApexErrPx,
-      headingDeg,
-      speedPhys,
-      speedUnit: metricOn ? 'm/s' : 'px/s',
-      distUnit: metricOn ? 'm' : 'px',
-      angVelDegS,
-      pivotValid,
-      pendSwingDeg,
-      pendRadiusPhys,
-      sceneGravityPxS2: telemView[640],
-      sceneGravityConf: telemView[641],
-      lastDeflectDeg: lastStrikeDeflectDeg,
-      lastRestitution: lastStrikeRestitution,
-      lastStrikeValid,
-      scatterDeg: lastScatterDeg,
-      calMode,
-      calArmed,
-      calibrated: metricOn,
-      arenaBytes: Math.round(telemView[20]),
-      memoryPages: wasmMemory.buffer.byteLength / 65536,
-      resMode,
-      frameW,
-      frameH,
-      pipDim,
-      recActive,
-      recFrames: recCount,
-      recDurationSec: recElapsedSec,
-    });
+    emitTelemetrySnapshot();
   }
 }
 
@@ -2994,6 +4990,24 @@ function configureResolutionViews(mode) {
     pipDim,
     pipDim
   );
+  if (typeof wasmExports.chronos_get_slot_meta_ptr === 'function') {
+    slotMetaView = new Float32Array(
+      wasmMemory.buffer,
+      wasmExports.chronos_get_slot_meta_ptr(),
+      MAX_TARGETS * 8
+    );
+  }
+  if (typeof wasmExports.chronos_get_all_pip_rgba_ptr === 'function') {
+    const allPipBase = wasmExports.chronos_get_all_pip_rgba_ptr();
+    for (let m = 0; m < MAX_TARGETS; m++) {
+      slotPipImgData[m] = new ImageData(
+        new Uint8ClampedArray(wasmMemory.buffer, allPipBase + m * MAX_PIP_BYTES, pipBytes),
+        pipDim,
+        pipDim
+      );
+    }
+  }
+  slotIdleDrawn.fill(0);
 
   wasmTimeHist.fill(0.0);
   timeHistIdx = 0;
@@ -3006,32 +5020,82 @@ function redrawPausedHudIfReady() {
     const dispSlot = Math.round(telemView[2]);
     renderMainHud(dispSlot);
     renderEulerianPip();
+    renderAllSlotPips(false);
+    renderHilbertScope();
+    renderSpectralAndRingScope();
+    renderPersistenceTimeline(true);
+    renderPhysicsPhaseCanvas(true);
+    emitTelemetrySnapshot();
   }
+}
+
+function commitSurveyedCalibrationFromDraft(targetMode, reason) {
+  if (targetMode === 'ruler') {
+    const spanPx = Math.hypot(
+      (calDraftPtsNormX[1] - calDraftPtsNormX[0]) * frameW,
+      (calDraftPtsNormY[1] - calDraftPtsNormY[0]) * frameH
+    );
+    if (spanPx < 4.0) {
+      calArmed = 'none';
+      calDraftCount = 0;
+      emitCalibrationState('RULER REJECTED (< 4 px SPAN) · PRIOR CALIBRATION PRESERVED');
+      return false;
+    }
+    calRulerMeters = calDraftRulerMeters;
+    calPtsNormX[0] = calDraftPtsNormX[0];
+    calPtsNormY[0] = calDraftPtsNormY[0];
+    calPtsNormX[1] = calDraftPtsNormX[1];
+    calPtsNormY[1] = calDraftPtsNormY[1];
+    calPtCount = 2;
+    calDraftCount = 0;
+    calArmed = 'none';
+    calMode = 'ruler';
+    calProvenance = 'surveyed';
+    calPresetName = '';
+    calHomographyValid = false;
+    recordCalibrationSegmentTransition(reason || 'surveyed_ruler');
+    emitCalibrationState();
+    return true;
+  }
+
+  if (targetMode === 'homography') {
+    const solved = solveHomography4Pt(calDraftPlaneW, calDraftPlaneH, calDraftPtsNormX, calDraftPtsNormY, true);
+    if (!solved) {
+      calArmed = 'none';
+      calDraftCount = 0;
+      emitCalibrationState('INVALID QUAD (NON-CONVEX / HORIZON) · PRIOR CALIBRATION PRESERVED');
+      return false;
+    }
+    calPlaneW = calDraftPlaneW;
+    calPlaneH = calDraftPlaneH;
+    for (let i = 0; i < 4; i++) {
+      calPtsNormX[i] = calDraftPtsNormX[i];
+      calPtsNormY[i] = calDraftPtsNormY[i];
+    }
+    calPtCount = 4;
+    calDraftCount = 0;
+    calArmed = 'none';
+    calHomographyValid = true;
+    calMode = 'homography';
+    calProvenance = 'surveyed';
+    calPresetName = '';
+    recordCalibrationSegmentTransition(reason || 'surveyed_homography');
+    emitCalibrationState();
+    return true;
+  }
+  return false;
 }
 
 function handleHudCanvasClick(normX, normY) {
   if (!wasmExports || !telemView) return;
 
-  // Intercept interactive 2-Pt Ruler & 4-Pt Plane Homography calibration clicks first
+  // Stage interactive 2-Pt Ruler & 4-Pt Plane Homography clicks in draft buffers so Esc/invalid preserves prior state!
   if (calArmed === 'ruler') {
-    calPtsNormX[calPtCount] = normX;
-    calPtsNormY[calPtCount] = normY;
-    calPtCount++;
-    if (calPtCount >= 2) {
-      const spanPx = Math.hypot(
-        (calPtsNormX[1] - calPtsNormX[0]) * frameW,
-        (calPtsNormY[1] - calPtsNormY[0]) * frameH
-      );
-      if (spanPx < 4.0) {
-        calPtCount = 0;
-        calArmed = 'none';
-        emitCalibrationState('RULER CANCELLED · ENDPOINTS TOO CLOSE (< 4 px)');
-      } else {
-        calMode = 'ruler';
-        calArmed = 'none';
-        calPresetName = '';
-        emitCalibrationState();
-      }
+    calDraftPtsNormX[calDraftCount] = normX;
+    calDraftPtsNormY[calDraftCount] = normY;
+    calDraftCount++;
+    if (calDraftCount >= 2) {
+      commitSurveyedCalibrationFromDraft('ruler', 'canvas_ruler');
     } else {
       emitCalibrationState();
     }
@@ -3040,22 +5104,11 @@ function handleHudCanvasClick(normX, normY) {
   }
 
   if (calArmed === 'homography') {
-    calPtsNormX[calPtCount] = normX;
-    calPtsNormY[calPtCount] = normY;
-    calPtCount++;
-    if (calPtCount >= 4) {
-      calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
-      if (calHomographyValid) {
-        calMode = 'homography';
-        calArmed = 'none';
-        calPresetName = '';
-        emitCalibrationState();
-      } else {
-        calMode = 'none';
-        calArmed = 'none';
-        calPtCount = 0;
-        emitCalibrationState('INVALID QUAD · CLICK CONVEX CORNERS TL → TR → BR → BL');
-      }
+    calDraftPtsNormX[calDraftCount] = normX;
+    calDraftPtsNormY[calDraftCount] = normY;
+    calDraftCount++;
+    if (calDraftCount >= 4) {
+      commitSurveyedCalibrationFromDraft('homography', 'canvas_homography');
     } else {
       emitCalibrationState();
     }
@@ -3088,7 +5141,7 @@ function handleHudCanvasClick(normX, normY) {
     wasmExports.chronos_set_focus_target(0);
   }
 
-  // Re-render canvases immediately if video is paused
+  // Re-render canvases & KPI snapshot immediately if video is paused
   redrawPausedHudIfReady();
 }
 
@@ -3117,9 +5170,7 @@ function cycleFocusTarget() {
       wasmExports.chronos_set_focus_target(activeIds[idx + 1]);
     }
   }
-  const dispSlot = Math.round(telemView[2]);
-  renderMainHud(dispSlot);
-  renderEulerianPip();
+  redrawPausedHudIfReady();
 }
 
 let rafHandle = 0;
@@ -3161,13 +5212,15 @@ function workerRafLoop(now) {
   const instFps = 1000.0 / dtMs;
   smoothFps = 0.92 * smoothFps + 0.08 * instFps;
 
-  if (wasmExports) {
-    const simDt = 1.0 / 60.0;
-    const rawPixels = stepAndRenderBlindPillarScene(simDt);
-    processIngestedFrame(rawPixels, simDt);
+  try {
+    if (wasmExports) {
+      const simDt = 1.0 / 60.0;
+      const rawPixels = stepAndRenderBlindPillarScene(simDt);
+      processIngestedFrame(rawPixels, simDt, -1.0);
+    }
+  } finally {
+    scheduleNextWorkerTick();
   }
-
-  scheduleNextWorkerTick();
 }
 
 // ============================================================================
@@ -3182,11 +5235,25 @@ self.onmessage = async (ev) => {
     pipCanvas = msg.pipCanvas;
     hilbertCanvas = msg.hilbertCanvas;
     spectralCanvas = msg.spectralCanvas;
+    persistenceCanvas = msg.persistenceCanvas || null;
+    physicsPhaseCanvas = msg.physicsPhaseCanvas || null;
 
     hudCtx = hudCanvas.getContext('2d', { alpha: false });
     pipCtx = pipCanvas.getContext('2d', { alpha: false });
     hilbertCtx = hilbertCanvas.getContext('2d', { alpha: false });
     spectralCtx = spectralCanvas.getContext('2d', { alpha: false });
+    persistenceCtx = persistenceCanvas ? persistenceCanvas.getContext('2d', { alpha: false }) : null;
+    physicsPhaseCtx = physicsPhaseCanvas ? physicsPhaseCanvas.getContext('2d', { alpha: false }) : null;
+
+    if (Array.isArray(msg.slotPipCanvases)) {
+      for (let m = 0; m < Math.min(MAX_TARGETS, msg.slotPipCanvases.length); m++) {
+        const c = msg.slotPipCanvases[m];
+        if (c && typeof c.getContext === 'function') {
+          slotPipCanvases[m] = c;
+          slotPipCtxs[m] = c.getContext('2d', { alpha: false });
+        }
+      }
+    }
 
     dispStageCanvas = new OffscreenCanvas(frameW, frameH);
     dispStageCtx = dispStageCanvas.getContext('2d');
@@ -3198,50 +5265,62 @@ self.onmessage = async (ev) => {
     ecaStageCanvas = new OffscreenCanvas(frameW, frameH);
     ecaStageCtx = ecaStageCanvas.getContext('2d');
 
-    const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm');
-    const wasmBytes = await resp.arrayBuffer();
-    const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+    try {
+      const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261114b');
+      if (!resp.ok) {
+        throw new Error(`Wasm fetch failed (HTTP ${resp.status})`);
+      }
+      const wasmBytes = await resp.arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(wasmBytes, {});
 
-    wasmExports = instance.exports;
-    wasmMemory = wasmExports.memory;
-    wasmExports.chronos_init();
-    wasmExports.chronos_set_params(
-      lookaheadK,
-      ecaAdaptRate,
-      fistaLambda,
-      eulerianGain,
-      phaseOffsetRad,
-      labMode
-    );
+      wasmExports = instance.exports;
+      wasmMemory = wasmExports.memory;
+      wasmExports.chronos_init();
+      wasmExports.chronos_set_params(
+        lookaheadK,
+        ecaAdaptRate,
+        fistaLambda,
+        eulerianGain,
+        phaseOffsetRad,
+        labMode
+      );
 
-    laplacianView = new Float32Array(
-      wasmMemory.buffer,
-      wasmExports.chronos_get_laplacian_ptr(),
-      GRAPH_NODES * GRAPH_NODES
-    );
-    fiedlerView = new Float32Array(
-      wasmMemory.buffer,
-      wasmExports.chronos_get_fiedler_ptr(),
-      GRAPH_NODES
-    );
-    telemView = new Float32Array(
-      wasmMemory.buffer,
-      wasmExports.chronos_get_telemetry_ptr(),
-      TELEMETRY_LEN
-    );
+      laplacianView = new Float32Array(
+        wasmMemory.buffer,
+        wasmExports.chronos_get_laplacian_ptr(),
+        GRAPH_NODES * GRAPH_NODES
+      );
+      fiedlerView = new Float32Array(
+        wasmMemory.buffer,
+        wasmExports.chronos_get_fiedler_ptr(),
+        GRAPH_NODES
+      );
+      telemView = new Float32Array(
+        wasmMemory.buffer,
+        wasmExports.chronos_get_telemetry_ptr(),
+        TELEMETRY_LEN
+      );
 
-    configureResolutionViews(msg.resMode || 0);
-    running = true;
-    self.postMessage({
-      type: 'ready',
-      memoryBytes: wasmMemory.buffer.byteLength,
-      pages: wasmMemory.buffer.byteLength / 65536,
-      resMode,
-      frameW,
-      frameH,
-      pipDim,
-    });
-    scheduleNextWorkerTick();
+      configureResolutionViews(msg.resMode || 0);
+      applySceneCalibrationPreset('testbench');
+      running = true;
+      self.postMessage({
+        type: 'ready',
+        memoryBytes: wasmMemory.buffer.byteLength,
+        pages: wasmMemory.buffer.byteLength / 65536,
+        resMode,
+        frameW,
+        frameH,
+        pipDim,
+      });
+      scheduleNextWorkerTick();
+    } catch (initErr) {
+      running = false;
+      self.postMessage({
+        type: 'init_error',
+        message: initErr && initErr.message ? initErr.message : String(initErr),
+      });
+    }
   } else if (msg.type === 'set_resolution') {
     if (wasmExports) {
       configureResolutionViews(msg.resMode ? 1 : 0);
@@ -3261,61 +5340,149 @@ self.onmessage = async (ev) => {
     tickCounter = 0;
     if (wasmExports) wasmExports.chronos_reset_tracks();
     resetTestbenchState();
+  } else if (msg.type === 'set_crop') {
+    if (Array.isArray(msg.cropNorm) && msg.cropNorm.length === 4) {
+      const x = Math.max(0.0, Math.min(0.95, Number(msg.cropNorm[0]) || 0.0));
+      const y = Math.max(0.0, Math.min(0.95, Number(msg.cropNorm[1]) || 0.0));
+      const w = Math.max(0.05, Math.min(1.0 - x, Number(msg.cropNorm[2]) || 1.0));
+      const h = Math.max(0.05, Math.min(1.0 - y, Number(msg.cropNorm[3]) || 1.0));
+      const cropChanged =
+        Math.abs(cropNorm[0] - x) > 1e-6 ||
+        Math.abs(cropNorm[1] - y) > 1e-6 ||
+        Math.abs(cropNorm[2] - w) > 1e-6 ||
+        Math.abs(cropNorm[3] - h) > 1e-6;
+      cropNorm[0] = x;
+      cropNorm[1] = y;
+      cropNorm[2] = w;
+      cropNorm[3] = h;
+      if (cropChanged && (calMode === 'ruler' || calMode === 'homography' || calArmed !== 'none')) {
+        clearCalibrationState();
+        recordCalibrationSegmentTransition('crop_changed');
+        emitCalibrationState('ROI CROP CHANGED · IMAGE-PLANE CALIBRATION RESET TO PX UNITS');
+        redrawPausedHudIfReady();
+      }
+    }
   } else if (msg.type === 'cal_control') {
-    if (typeof msg.rulerMeters === 'number' && msg.rulerMeters >= 0.01) {
-      calRulerMeters = msg.rulerMeters;
-    }
-    if (typeof msg.planeW === 'number' && msg.planeW >= 0.01) {
-      calPlaneW = msg.planeW;
-    }
-    if (typeof msg.planeH === 'number' && msg.planeH >= 0.01) {
-      calPlaneH = msg.planeH;
-    }
+    const inRulerM = typeof msg.rulerMeters === 'number' && msg.rulerMeters >= 0.01 ? msg.rulerMeters : null;
+    const inPlaneW = typeof msg.planeW === 'number' && msg.planeW >= 0.01 ? msg.planeW : null;
+    const inPlaneH = typeof msg.planeH === 'number' && msg.planeH >= 0.01 ? msg.planeH : null;
 
     if (msg.action === 'arm_ruler') {
       if (calArmed === 'ruler') {
         calArmed = 'none';
-        calPtCount = calMode === 'ruler' ? 2 : (calMode === 'homography' ? 4 : 0);
+        calDraftCount = 0;
       } else {
+        calDraftRulerMeters = inRulerM ?? calRulerMeters;
         calArmed = 'ruler';
-        calPtCount = 0;
+        calDraftCount = 0;
       }
       emitCalibrationState();
     } else if (msg.action === 'arm_homography') {
       if (calArmed === 'homography') {
         calArmed = 'none';
-        calPtCount = calMode === 'homography' ? 4 : (calMode === 'ruler' ? 2 : 0);
+        calDraftCount = 0;
       } else {
+        calDraftPlaneW = inPlaneW ?? calPlaneW;
+        calDraftPlaneH = inPlaneH ?? calPlaneH;
         calArmed = 'homography';
-        calPtCount = 0;
+        calDraftCount = 0;
       }
       emitCalibrationState();
     } else if (msg.action === 'cancel_arm') {
       if (calArmed !== 'none') {
         calArmed = 'none';
-        calPtCount = calMode === 'homography' ? 4 : (calMode === 'ruler' ? 2 : 0);
+        calDraftCount = 0;
         emitCalibrationState();
+      }
+    } else if (msg.action === 'stage_dims') {
+      if (inRulerM !== null) calDraftRulerMeters = inRulerM;
+      if (inPlaneW !== null) calDraftPlaneW = inPlaneW;
+      if (inPlaneH !== null) calDraftPlaneH = inPlaneH;
+    } else if (msg.action === 'set_coords' && Array.isArray(msg.pts)) {
+      const targetMode = msg.coordMode === 'homography' ? 'homography' : 'ruler';
+      const reqN = targetMode === 'homography' ? 4 : 2;
+      if (msg.pts.length >= reqN) {
+        const tmpX = new Float64Array(4);
+        const tmpY = new Float64Array(4);
+        let validNums = true;
+        for (let i = 0; i < reqN; i++) {
+          const px = Number(msg.pts[i] && msg.pts[i][0]);
+          const py = Number(msg.pts[i] && msg.pts[i][1]);
+          if (!Number.isFinite(px) || !Number.isFinite(py) || px < 0.0 || px > 1.0 || py < 0.0 || py > 1.0) {
+            validNums = false;
+            break;
+          }
+          tmpX[i] = px;
+          tmpY[i] = py;
+        }
+        if (validNums) {
+          calDraftRulerMeters = inRulerM ?? calRulerMeters;
+          calDraftPlaneW = inPlaneW ?? calPlaneW;
+          calDraftPlaneH = inPlaneH ?? calPlaneH;
+          for (let i = 0; i < reqN; i++) {
+            calDraftPtsNormX[i] = tmpX[i];
+            calDraftPtsNormY[i] = tmpY[i];
+          }
+          calDraftCount = reqN;
+          commitSurveyedCalibrationFromDraft(targetMode, `keyboard_${targetMode}`);
+        } else {
+          emitCalibrationState('COORDINATES MUST BE NORMALIZED IN [0.00, 1.00] · PRIOR CALIBRATION PRESERVED');
+        }
       }
     } else if (msg.action === 'set_auto_g') {
       calArmed = 'none';
+      calDraftCount = 0;
       calPtCount = 0;
       calPresetName = '';
       calHomographyValid = false;
       calMode = 'auto_g';
-      calAutoGFallbackNormW = 0.0;
-      if (telemView && telemView[641] >= 0.25 && telemView[640] > 50.0) {
-        calAutoGNormH = telemView[640] / frameH;
+      calProvenance = 'assumed';
+      calAutoGLocked = false;
+      calAutoGNormH = 0.0;
+      if (telemView && telemView[TELEM_GLOBAL + 1] >= AUTO_G_LOCK_CONF && telemView[TELEM_GLOBAL + 0] > 50.0) {
+        calAutoGNormH = telemView[TELEM_GLOBAL + 0] / frameH;
+        calAutoGLocked = true;
+      } else if (telemView && telemView[TELEM_GLOBAL + 0] > 50.0) {
+        calAutoGNormH = telemView[TELEM_GLOBAL + 0] / frameH;
       }
+      recordCalibrationSegmentTransition('set_auto_g');
       emitCalibrationState();
     } else if (msg.action === 'apply_preset') {
       applySceneCalibrationPreset(msg.preset || 'testbench');
     } else if (msg.action === 'update_dims') {
-      if (calMode === 'homography' && calPtCount >= 4) {
-        calHomographyValid = solveHomography4Pt(calPlaneW, calPlaneH);
+      if (inRulerM !== null) calDraftRulerMeters = inRulerM;
+      if (inPlaneW !== null) calDraftPlaneW = inPlaneW;
+      if (inPlaneH !== null) calDraftPlaneH = inPlaneH;
+      if (calArmed !== 'none') {
+        emitCalibrationState();
+      } else if (calMode === 'homography' && calPtCount >= 4) {
+        const nextW = inPlaneW ?? calPlaneW;
+        const nextH = inPlaneH ?? calPlaneH;
+        const changed = Math.abs(nextW - calPlaneW) > 1e-6 || Math.abs(nextH - calPlaneH) > 1e-6;
+        if (inRulerM !== null) calRulerMeters = inRulerM;
+        if (changed) {
+          const ok = solveHomography4Pt(nextW, nextH, calPtsNormX, calPtsNormY, true);
+          if (ok) {
+            calPlaneW = nextW;
+            calPlaneH = nextH;
+            calHomographyValid = true;
+            recordCalibrationSegmentTransition('update_dims');
+          }
+        }
+        emitCalibrationState();
+      } else {
+        const rulerChanged = inRulerM !== null && Math.abs(inRulerM - calRulerMeters) > 1e-6;
+        if (inRulerM !== null) calRulerMeters = inRulerM;
+        if (inPlaneW !== null) calPlaneW = inPlaneW;
+        if (inPlaneH !== null) calPlaneH = inPlaneH;
+        if (calMode === 'ruler' && calPtCount >= 2 && rulerChanged) {
+          recordCalibrationSegmentTransition('update_dims');
+        }
+        emitCalibrationState();
       }
-      emitCalibrationState();
     } else if (msg.action === 'clear') {
       clearCalibrationState();
+      recordCalibrationSegmentTransition('clear');
       emitCalibrationState();
     }
     redrawPausedHudIfReady();
@@ -3325,6 +5492,13 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'cycle_focus') {
     cycleFocusTarget();
+  } else if (msg.type === 'pin_target') {
+    if (wasmExports) {
+      const reqTid = Math.max(0, Math.round(Number(msg.trackId) || 0));
+      const curFocus = wasmExports.chronos_get_focus_target();
+      wasmExports.chronos_set_focus_target(reqTid > 0 && reqTid !== curFocus ? reqTid : 0);
+      redrawPausedHudIfReady();
+    }
   } else if (msg.type === 'params') {
     if (typeof msg.lookaheadK === 'number') lookaheadK = msg.lookaheadK;
     if (typeof msg.ecaAdaptRate === 'number') ecaAdaptRate = msg.ecaAdaptRate;
@@ -3334,6 +5508,7 @@ self.onmessage = async (ev) => {
     if (typeof msg.labMode === 'number') labMode = msg.labMode;
     if (typeof msg.showEcaOverlay === 'boolean') showEcaOverlay = msg.showEcaOverlay;
     if (typeof msg.showKalmanBaseline === 'boolean') showKalmanBaseline = msg.showKalmanBaseline;
+    if (typeof msg.showAllOverlays === 'boolean') showAllOverlays = msg.showAllOverlays;
     if (typeof msg.strobeEnabled === 'boolean') strobeEnabled = msg.strobeEnabled;
     if (typeof msg.audioOutLatencySec === 'number') {
       audioOutLatencySec = msg.audioOutLatencySec;
@@ -3349,12 +5524,8 @@ self.onmessage = async (ev) => {
         phaseOffsetRad,
         labMode
       );
-      if (sourceMode !== 'testbench' && telemView && Math.round(telemView[0]) > 0) {
-        const dispSlot = Math.round(telemView[2]);
-        renderMainHud(dispSlot);
-        renderEulerianPip();
-        renderHilbertScope();
-        renderSpectralAndRingScope();
+      if (sourceMode !== 'testbench') {
+        redrawPausedHudIfReady();
       }
     }
   } else if (msg.type === 'set_source') {
@@ -3364,34 +5535,48 @@ self.onmessage = async (ev) => {
     } else if (sourceMode !== 'testbench') {
       sourceFps = 30.0;
     }
+    cropNorm[0] = 0.0;
+    cropNorm[1] = 0.0;
+    cropNorm[2] = 1.0;
+    cropNorm[3] = 1.0;
     wasmTimeHist.fill(0.0);
     timeHistIdx = 0;
     tickCounter = 0;
     lastRafTs = 0;
     clearCalibrationState();
+    recordCalibrationSegmentTransition(`source:${sourceMode}`);
     emitCalibrationState();
     if (wasmExports) {
       wasmExports.chronos_reset_tracks();
     }
     resetTestbenchState();
     if (sourceMode === 'testbench') {
+      applySceneCalibrationPreset('testbench');
       scheduleNextWorkerTick();
     } else {
       cancelWorkerTickLoop();
     }
   } else if (msg.type === 'video_frame') {
     const bmp = msg.bitmap;
-    if (wasmExports && sourceMode !== 'testbench') {
-      simCtx.drawImage(bmp, 0, 0, frameW, frameH);
-      const rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
-      processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0);
+    try {
+      if (wasmExports && sourceMode !== 'testbench' && bmp) {
+        drawCroppedLetterboxedFrame(bmp);
+        const rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
+        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0, msg.mediaTimeSec);
+      }
+    } finally {
+      if (bmp && typeof bmp.close === 'function') bmp.close();
+      self.postMessage({
+        type: 'frame_ack',
+        epoch: msg.epoch || 0,
+        seq: msg.seq || 0,
+      });
     }
-    bmp.close();
   } else if (msg.type === 'video_rgba') {
     if (wasmExports && sourceMode !== 'testbench' && msg.buffer) {
       const rawPixels = new Uint8Array(msg.buffer);
       if (rawPixels.byteLength === frameBytes) {
-        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0);
+        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0, msg.mediaTimeSec);
       }
     }
   } else if (msg.type === 'lab_action') {
@@ -3401,13 +5586,24 @@ self.onmessage = async (ev) => {
         pendingSaccadeFrames = 9;
       }
     } else if (msg.action === 'ballistic_toss' && sourceMode === 'testbench') {
-      simDiscs[0].x = 24 * resScale;
-      simDiscs[0].y = 148 * resScale;
-      simDiscs[0].vx = 3.8 * resScale;
-      simDiscs[0].vy = -6.8 * resScale;
-      simDiscs[0].ballistic = true;
+      if (benchScenario === 'model_rocket_flight') {
+        simDiscs[0].x = simDiscs[0].baseX;
+        simDiscs[0].y = 152 * resScale;
+        simDiscs[0].vx = 0.35 * resScale;
+        simDiscs[0].vy = -1.6 * resScale;
+        simDiscs[0].ballistic = true;
+        rocketPhase[0] = 0;
+        rocketBoostTicks[0] = 0;
+      } else {
+        simDiscs[0].x = 24 * resScale;
+        simDiscs[0].y = 148 * resScale;
+        simDiscs[0].vx = 3.8 * resScale;
+        simDiscs[0].vy = -6.8 * resScale;
+        simDiscs[0].ballistic = true;
+      }
     } else if (msg.action === 'air_strike' && sourceMode === 'testbench') {
-      for (let i = 0; i < simDiscs.length; i++) {
+      const nActiveStrike = getActiveSimDiscCount();
+      for (let i = 0; i < nActiveStrike; i++) {
         simDiscs[i].vx = -simDiscs[i].vx * 1.45;
       }
       pendingAirSnapFrames = 7;
@@ -3417,10 +5613,35 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'rec_control') {
     if (msg.action === 'start') {
-      if (msg.clear) {
+      if (msg.clear || recCalSegments.length === 0) {
         recHead = 0;
         recCount = 0;
+        recTotalWritten = 0;
         recElapsedSec = 0.0;
+        recCalSegments = [
+          {
+            segmentId: calSegmentId,
+            absStartFrame: 0,
+            startRow: 0,
+            elapsedSec: 0.0,
+            reason: 'rec_start',
+            sourceMode,
+            calibration: getCalibrationSnapshot(),
+          },
+        ];
+      } else {
+        const lastSeg = recCalSegments[recCalSegments.length - 1];
+        if (!lastSeg || lastSeg.segmentId !== calSegmentId || lastSeg.sourceMode !== sourceMode) {
+          recCalSegments.push({
+            segmentId: calSegmentId,
+            absStartFrame: recTotalWritten,
+            startRow: recCount,
+            elapsedSec: Number(recElapsedSec.toFixed(4)),
+            reason: 'rec_resume_sync',
+            sourceMode,
+            calibration: getCalibrationSnapshot(),
+          });
+        }
       }
       recActive = true;
     } else if (msg.action === 'stop') {
@@ -3429,7 +5650,9 @@ self.onmessage = async (ev) => {
       recActive = false;
       recHead = 0;
       recCount = 0;
+      recTotalWritten = 0;
       recElapsedSec = 0.0;
+      recCalSegments = [];
     }
     self.postMessage({
       type: 'rec_state',
@@ -3447,6 +5670,25 @@ self.onmessage = async (ev) => {
         ordered.set(recSlab.subarray(srcOff, srcOff + REC_COLS), i * REC_COLS);
       }
     }
+    const winStartAbs = Math.max(0, recTotalWritten - rows);
+    const exportedSegments = [];
+    for (let i = 0; i < recCalSegments.length; i++) {
+      const seg = recCalSegments[i];
+      const nextAbs = i + 1 < recCalSegments.length ? recCalSegments[i + 1].absStartFrame : recTotalWritten;
+      if (rows > 0 && nextAbs <= winStartAbs && i + 1 < recCalSegments.length) {
+        continue;
+      }
+      const absStart = typeof seg.absStartFrame === 'number' ? seg.absStartFrame : seg.startRow;
+      const startRow = Math.min(rows, Math.max(0, absStart - winStartAbs));
+      exportedSegments.push({
+        segmentId: seg.segmentId,
+        startRow,
+        elapsedSec: seg.elapsedSec,
+        reason: seg.reason,
+        sourceMode: seg.sourceMode,
+        calibration: seg.calibration,
+      });
+    }
     self.postMessage(
       {
         type: 'telemetry_export_data',
@@ -3456,7 +5698,7 @@ self.onmessage = async (ev) => {
         columns: REC_COLUMNS,
         buffer: ordered.buffer,
         meta: {
-          schemaVersion: '1.3.0',
+          schemaVersion: '1.5.0',
           sourceMode,
           benchScenario,
           resMode,
@@ -3470,6 +5712,7 @@ self.onmessage = async (ev) => {
           phaseOffsetRad,
           labMode,
           calibration: getCalibrationSnapshot(),
+          calibrationSegments: exportedSegments,
         },
       },
       [ordered.buffer]

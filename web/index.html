@@ -23,6 +23,10 @@
       --font-sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
     }
 
+    html {
+      scrollbar-gutter: stable;
+    }
+
     * {
       box-sizing: border-box;
       margin: 0;
@@ -38,10 +42,11 @@
       color: var(--text-primary);
       font-family: var(--font-sans);
       accent-color: var(--brand-color);
-      min-block-size: 100dvh;
+      min-block-size: 100svh;
       inline-size: 100%;
       display: grid;
       grid-template-rows: auto 1fr;
+      overflow-wrap: anywhere;
     }
 
     ::selection {
@@ -49,14 +54,14 @@
       color: #03070e;
     }
 
-    /* Top Command Header (compact < 12% viewport height) */
+    /* Top Command Header: Permanent 5-Slot Avionics Status Matrix */
     header.deck-header {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: safe center;
-      gap: 0.65rem 1.15rem;
-      padding-block: 0.55rem;
-      padding-inline: 1.1rem;
+      display: grid;
+      grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+      align-items: center;
+      gap: 0.5rem 1rem;
+      padding-block: 0.5rem;
+      padding-inline: 1rem;
       background-color: var(--bg-panel);
       border-block-end: 1px solid var(--border-strong);
     }
@@ -64,54 +69,108 @@
     .brand-lockup {
       display: flex;
       align-items: center;
-      gap: 0.65rem;
+      gap: 0.6rem;
       min-inline-size: 0;
+      max-inline-size: 23.5rem;
     }
 
     .brand-badge {
       font-family: var(--font-mono);
-      font-size: 0.72rem;
+      font-size: 0.7rem;
       font-weight: 700;
-      letter-spacing: 0.08em;
-      padding: 0.2rem 0.5rem;
+      letter-spacing: 0.06em;
+      line-height: 1.1;
+      padding: 0.22rem 0.48rem;
       border: 1px solid var(--border-accent);
       color: var(--brand-color);
       background-color: #061b26;
       border-radius: 3px;
+      white-space: nowrap;
+      flex: 0 0 auto;
+      text-box: trim-both cap alphabetic;
     }
 
     h1.brand-title {
       font-family: var(--font-mono);
-      font-size: 0.96rem;
+      font-size: 0.94rem;
       font-weight: 700;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.04em;
       color: var(--text-primary);
-      line-height: 1.2;
+      line-height: 1.15;
+      text-wrap: balance;
     }
 
     .brand-subtitle {
-      font-size: 0.76rem;
+      font-size: 0.73rem;
+      line-height: 1.2;
       color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .header-pills {
-      margin-inline-start: auto;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
+      display: grid;
+      grid-template-columns:
+        minmax(0, 2.28fr)
+        minmax(0, 1.85fr)
+        minmax(0, 1.24fr)
+        minmax(0, 0.64fr)
+        minmax(0, 2.22fr);
+      gap: 0.4rem;
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.66rem;
+      min-inline-size: 0;
+    }
+
+    @media (max-width: 1380px) {
+      header.deck-header {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    @media (max-width: 960px) {
+      .header-pills {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    .pill-slot {
+      display: flex;
+      min-inline-size: 0;
+      min-block-size: 1.72rem;
+    }
+
+    .pill-slot:has(> [hidden])::before {
+      content: "SOURCE: LOCAL TESTBENCH";
+      display: inline-flex;
+      align-items: center;
+      inline-size: 100%;
+      padding: 0.22rem 0.54rem;
+      border-radius: 4px;
+      background-color: #09101d;
+      border: 1px solid #1e304d;
+      color: #6e88ab;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .pill {
-      padding: 0.24rem 0.6rem;
+      inline-size: 100%;
+      min-inline-size: 0;
+      min-block-size: 1.72rem;
+      font-size: 0.66rem;
+      line-height: 1.15;
+      padding: 0.22rem 0.42rem;
       border-radius: 4px;
       background-color: var(--bg-card);
       border: 1px solid var(--border-strong);
       color: var(--text-primary);
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
+      display: block;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .pill.ok {
@@ -128,8 +187,8 @@
     main.deck-grid {
       display: grid;
       grid-template-columns: minmax(0, 1.85fr) minmax(330px, 0.95fr) minmax(315px, 0.88fr);
-      gap: 0.85rem;
-      padding: 0.85rem;
+      gap: 0.8rem;
+      padding: 0.8rem;
       inline-size: 100%;
       align-items: start;
     }
@@ -155,14 +214,14 @@
     .deck-column {
       display: flex;
       flex-direction: column;
-      gap: 0.85rem;
+      gap: 0.8rem;
       min-inline-size: 0;
     }
 
-    /* Containment isolation for high-frequency telemetry & control columns */
+    /* Layout & style containment with modern-web-guidance offscreen skipping */
     .isolated-region {
       content-visibility: auto;
-      contain-intrinsic-size: auto 340px auto 720px;
+      contain-intrinsic-size: auto 300px auto 800px;
     }
 
     @supports not (content-visibility: auto) {
@@ -175,35 +234,105 @@
       background-color: var(--bg-panel);
       border: 1px solid var(--border-strong);
       border-radius: 6px;
-      padding: 0.68rem 0.76rem;
+      padding: 0.64rem 0.74rem;
       display: flex;
       flex-direction: column;
-      gap: 0.5rem;
-      overflow: clip;
+      gap: 0.48rem;
+      min-inline-size: 0;
+      contain: layout style paint;
     }
 
+    /* Permanent 2-Row Avionics Instrument Header: zero height bounce across all telemetry states */
     .panel-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 0.5rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 0.16rem;
+      min-block-size: 2.52rem;
+      align-content: start;
       border-block-end: 1px solid #1b2a44;
-      padding-block-end: 0.42rem;
+      padding-block-end: 0.36rem;
+      flex: none;
     }
 
     h2.panel-title {
       font-family: var(--font-mono);
-      font-size: 0.77rem;
+      font-size: 0.74rem;
       font-weight: 700;
-      letter-spacing: 0.06em;
+      line-height: 1.12rem;
+      min-block-size: 1.12rem;
+      letter-spacing: 0.03em;
       text-transform: uppercase;
-      color: var(--brand-color);
+      color: #9ec5e6;
+      border-inline-start: 2px solid var(--brand-color);
+      padding-inline-start: 0.42rem;
+      text-wrap: balance;
     }
 
     .panel-meta {
+      display: block;
+      min-inline-size: 0;
+      min-block-size: 1.04rem;
+      line-height: 1.04rem;
       font-family: var(--font-mono);
-      font-size: 0.71rem;
+      font-size: 0.69rem;
+      color: #89a5c7;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Roster Header Structured 3-Slot Telemetry Strip */
+    .roster-meta-strip {
+      display: grid;
+      grid-template-columns: auto auto auto auto minmax(0, 1fr);
+      align-items: center;
+      column-gap: 0.42rem;
+      overflow: hidden;
+    }
+
+    .rm-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.26rem;
       color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .rm-chip strong {
+      display: inline-block;
+      font-weight: 700;
+      color: var(--text-primary);
+      text-align: right;
+    }
+
+    #rosterReacqVal {
+      min-inline-size: 4.2ch;
+      color: var(--status-ok);
+    }
+
+    #rosterHoldVal {
+      min-inline-size: 1.4ch;
+    }
+
+    #rosterHoldChip[data-active="1"] {
+      color: var(--status-warn);
+    }
+
+    #rosterHoldChip[data-active="1"] #rosterHoldVal {
+      color: var(--status-warn);
+    }
+
+    .rm-sep {
+      color: #425d82;
+    }
+
+    .rm-hint {
+      min-inline-size: 0;
+      text-align: right;
+      color: #7d99bc;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     /* Block display + aspect-ratio on canvases prevents baseline gaps and layout shift */
@@ -223,8 +352,11 @@
     }
 
     #pipCanvas {
-      aspect-ratio: 248 / 144;
-      max-inline-size: 248px;
+      aspect-ratio: 412 / 234;
+      inline-size: 100%;
+      max-inline-size: 412px;
+      margin-inline: auto;
+      image-rendering: pixelated;
     }
 
     #hilbertCanvas,
@@ -232,50 +364,467 @@
       aspect-ratio: 2 / 1;
     }
 
+    #persistenceCanvas {
+      aspect-ratio: 420 / 204;
+      inline-size: 100%;
+      block-size: auto;
+      display: block;
+    }
+
+    #physicsPhaseCanvas {
+      aspect-ratio: 2 / 1;
+      inline-size: 100%;
+      block-size: auto;
+      display: block;
+    }
+
     .pip-and-swap-row {
       display: grid;
-      grid-template-columns: 248px minmax(0, 1fr);
-      gap: 0.8rem;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.72rem;
       align-items: stretch;
     }
 
-    @media (max-width: 640px) {
-      .pip-and-swap-row {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    /* Telemetry KPI Matrix */
+    /* Telemetry KPI Matrices: Explicit Symmetrical Grids & Fixed Single-Line Cells */
     .kpi-grid {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
-      gap: 0.48rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.44rem;
       inline-size: 100%;
+      min-inline-size: 0;
+    }
+
+    .pip-kpi-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .pip-kpi-grid .kpi-label {
+      font-size: 0.62rem;
+      letter-spacing: 0.015em;
+    }
+
+    .pip-kpi-grid .kpi-value {
+      font-size: 0.88rem;
+    }
+
+    @media (max-width: 960px) {
+      .pip-kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     .kpi-card {
       background-color: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: 4px;
-      padding: 0.48rem 0.58rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.18rem;
+      padding: 0.46rem 0.54rem;
+      min-inline-size: 0;
+      min-block-size: 3.5rem;
+      contain: layout style paint;
+      display: grid;
+      grid-template-rows: minmax(0.95rem, auto) minmax(1.3rem, auto);
+      align-content: space-between;
+      row-gap: 0.16rem;
     }
 
     .kpi-label {
+      display: block;
+      min-inline-size: 0;
+      min-block-size: 0.95rem;
+      line-height: 0.95rem;
       font-family: var(--font-mono);
-      font-size: 0.66rem;
+      font-size: 0.65rem;
       color: var(--text-secondary);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.025em;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .kpi-value {
+      display: block;
+      min-inline-size: 0;
+      min-block-size: 1.3rem;
+      line-height: 1.3rem;
       font-family: var(--font-mono);
-      font-size: 0.98rem;
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.92rem;
       font-weight: 700;
       color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .pill,
+    .panel-meta,
+    .slider-val,
+    .transport-meta-row {
+      font-variant-numeric: tabular-nums lining-nums;
+    }
+
+    /* Multi-Target Split PiP & Sticky Telemetry Roster (16 Slots, 2-Column Scrollable Well) */
+    .roster-panel,
+    .persistence-panel {
+      contain: layout style paint;
+    }
+
+    .persist-kpi-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-block-end: 0.56rem;
+    }
+
+    .persist-kpi-grid .kpi-label {
+      font-size: 0.61rem;
+      letter-spacing: 0.015em;
+    }
+
+    .persist-kpi-grid .kpi-value {
+      font-size: 0.86rem;
+    }
+
+    @media (max-width: 640px) {
+      .persist-kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    .physics-id-panel {
+      contain: layout style paint;
+    }
+
+    .physics-badge-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 0.42rem;
+      align-items: center;
+      min-block-size: 1.52rem;
+    }
+
+    .physics-badge {
+      display: block;
+      block-size: 1.52rem;
+      line-height: 1.44rem;
+      padding-inline: 0.48rem;
+      border-radius: 4px;
+      border: 1px solid #2b4266;
+      background-color: #081222;
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.67rem;
+      font-weight: 700;
+      letter-spacing: 0.025em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    #physRegimeBadge[data-active="1"] {
+      border-color: var(--border-accent);
+      background-color: #061b26;
+      color: var(--brand-color);
+    }
+
+    #physRegimeBadge[data-regime="5"] {
+      border-color: #218c4a;
+      background-color: #061f12;
+      color: var(--status-ok);
+    }
+
+    #physRegimeBadge[data-regime="7"] {
+      border-color: #d4a234;
+      background-color: #201807;
+      color: var(--status-warn);
+    }
+
+    #physJumpBadge[data-jump="1"],
+    #physJumpBadge[data-jump="2"],
+    #physJumpBadge[data-jump="3"] {
+      border-color: #d4a234;
+      background-color: #201807;
+      color: var(--status-warn);
+    }
+
+    #physJumpBadge[data-jump="4"] {
+      border-color: #c93d4d;
+      background-color: #24090f;
+      color: var(--status-alert);
+    }
+
+    .physics-ode-box {
+      block-size: 1.82rem;
+      line-height: 1.72rem;
+      padding-inline: 0.52rem;
+      border-radius: 4px;
+      border: 1px solid #1e3354;
+      background-color: #060d19;
+      color: #c7e6ff;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.72rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .physics-kpi-grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .physics-kpi-grid .kpi-card {
+      min-block-size: 3.15rem;
+      padding: 0.38rem 0.48rem;
+    }
+
+    .physics-kpi-grid .kpi-label {
+      font-size: 0.59rem;
+      letter-spacing: 0.015em;
+    }
+
+    .physics-kpi-grid .kpi-value {
+      font-size: 0.81rem;
+    }
+
+    @media (max-width: 640px) {
+      .physics-kpi-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    .roster-scroll-well {
+      max-block-size: 472px;
+      overflow-y: auto;
+      scrollbar-gutter: stable;
+      overscroll-behavior: contain;
+      padding-inline-end: 4px;
+    }
+
+    .roster-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      inline-size: 100%;
+    }
+
+    @media (max-width: 520px) {
+      .roster-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    .roster-card {
+      position: relative;
+      display: grid;
+      grid-template-rows: auto 1.35rem auto;
+      row-gap: 0.3rem;
+      padding: 0.42rem;
+      min-inline-size: 0;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      contain: layout style paint;
+    }
+
+    /* Never change border-width, padding, or font-weight on state/selection changes */
+    .roster-card[data-state="FOCUS"] {
+      border-color: var(--border-accent);
+      box-shadow: inset 0 0 0 1px rgba(0, 229, 255, 0.28);
+    }
+
+    .roster-card[data-state="PINNED"],
+    .roster-card[data-pinned="1"] {
+      border-color: var(--status-warn);
+      box-shadow: inset 0 0 0 1px rgba(255, 209, 102, 0.42);
+    }
+
+    .roster-card[data-state="BRIDGED"],
+    .roster-card[data-state="COAST"] {
+      border-color: #c89628;
+    }
+
+    .roster-card[data-state="HOLD"] {
+      border-color: #263959;
+      opacity: 0.84;
+    }
+
+    .roster-card[data-state="IDLE"] {
+      border-color: #1a2740;
+      background-color: #0b1220;
+    }
+
+    .roster-card:has(button.roster-pin-btn:hover:not([aria-disabled="true"])) {
+      border-color: var(--brand-color);
+    }
+
+    .roster-card:has(button.roster-pin-btn:focus-visible) {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+    }
+
+    .slot-pip-canvas {
+      display: block;
+      inline-size: 100%;
+      block-size: auto;
+      aspect-ratio: 276 / 148;
+      image-rendering: pixelated;
+      border-radius: 3px;
+      border: 1px solid #1d2d47;
+      background-color: #060a12;
+    }
+
+    .roster-card-head {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.28rem;
+      min-inline-size: 0;
+      min-block-size: 1.35rem;
+    }
+
+    .roster-card-head h3 {
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1.2;
+      margin: 0;
+      min-inline-size: 0;
+    }
+
+    .roster-card button.roster-pin-btn {
+      all: unset;
+      box-sizing: border-box;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.28rem;
+      inline-size: 100%;
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      line-height: 1.2;
+      color: var(--text-primary);
+      min-block-size: 0;
+      min-inline-size: 0;
+      white-space: nowrap;
+      overflow: hidden;
+    }
+
+    .roster-slot-id {
+      min-inline-size: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roster-card button.roster-pin-btn:focus-visible {
+      outline: none;
+    }
+
+    .roster-card button.roster-pin-btn[aria-disabled="true"] {
+      cursor: default;
+      opacity: 0.62;
+    }
+
+    .roster-card button.roster-pin-btn::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      border-radius: 5px;
+    }
+
+    .roster-swatch {
+      inline-size: 7px;
+      block-size: 7px;
+      border-radius: 50%;
+      background-color: #4c6180;
+      flex: 0 0 auto;
+    }
+
+    .roster-state-badge {
+      display: inline-block;
+      inline-size: 8.6ch;
+      text-align: center;
+      font-size: 0.6rem;
+      font-weight: 700;
+      line-height: 1.15;
+      letter-spacing: 0.03em;
+      padding: 0.1rem 0.24rem;
+      border-radius: 3px;
+      border: 1px solid #2b4266;
+      background-color: #0a1424;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      text-box: trim-both cap alphabetic;
+    }
+
+    .roster-card[data-state="LOCKED"] .roster-state-badge {
+      border-color: #218c4a;
+      color: var(--status-ok);
+    }
+
+    .roster-card[data-state="FOCUS"] .roster-state-badge {
+      border-color: var(--border-accent);
+      color: var(--brand-color);
+    }
+
+    .roster-card[data-state="PINNED"] .roster-state-badge,
+    .roster-card[data-pinned="1"] .roster-state-badge {
+      border-color: #d4a234;
+      color: var(--status-warn);
+      background-color: #201807;
+    }
+
+    .roster-card[data-state="BRIDGED"] .roster-state-badge,
+    .roster-card[data-state="COAST"] .roster-state-badge {
+      border-color: #c89628;
+      color: var(--status-warn);
+    }
+
+    .roster-card[data-state="HOLD"] .roster-state-badge {
+      border-color: #39527a;
+      color: #9db4d4;
+    }
+
+    .roster-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.22rem 0.26rem;
+      margin: 0;
+      padding-block-start: 0.26rem;
+      border-block-start: 1px solid #18253d;
+      align-content: start;
+    }
+
+    .roster-stat-cell {
+      display: grid;
+      grid-template-rows: 0.78rem 0.92rem;
+      row-gap: 0.05rem;
+      min-inline-size: 0;
+    }
+
+    .roster-stat-cell dt {
+      font-size: 0.6rem;
+      line-height: 0.78rem;
+      color: var(--text-secondary);
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roster-stat-cell dd {
+      font-size: 0.63rem;
+      line-height: 0.92rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .kpi-value.accent { color: var(--brand-color); }
@@ -283,9 +832,9 @@
     .kpi-value.warn   { color: var(--status-warn); }
     .kpi-value.alert  { color: var(--status-alert); }
 
-    /* Control Deck Styling */
+    /* Control Deck Styling & Explicit Grid Control Banks */
     .scrollable-controls {
-      max-block-size: calc(100dvh - 5.1rem);
+      max-block-size: calc(100svh - 4.75rem);
       overflow-y: auto;
       scrollbar-gutter: stable;
       overscroll-behavior: contain;
@@ -294,24 +843,46 @@
     }
 
     .btn-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.42rem;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-auto-rows: minmax(2.05rem, auto);
+      gap: 0.38rem;
+      min-inline-size: 0;
+    }
+
+    .btn-row[data-cols="1"] {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .btn-row[data-cols="3"] {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .btn-row[data-cols="2-1"] {
+      grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
+    }
+
+    .btn-span-full {
+      grid-column: 1 / -1;
     }
 
     button {
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.68rem;
       font-weight: 600;
-      min-block-size: 28px;
-      min-inline-size: 28px;
-      padding: 0.42rem 0.64rem;
+      line-height: 1.15rem;
+      min-block-size: 2.05rem;
+      min-inline-size: 0;
+      inline-size: 100%;
+      padding: 0.34rem 0.38rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
       color: var(--text-primary);
       cursor: pointer;
-      flex: 1 1 auto;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     @media (prefers-reduced-motion: no-preference) {
@@ -343,35 +914,37 @@
 
     /* Accessible Calibration Toolbar & Scale Form */
     .cal-toolbar {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.38rem;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.36rem;
     }
 
     .cal-toolbar-group {
-      display: flex;
-      flex-wrap: wrap;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.36rem;
-      flex: 1 1 auto;
+      min-inline-size: 0;
+    }
+
+    .cal-toolbar-group[data-cols="3"] {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     .cal-toolbar-sep {
-      align-self: stretch;
-      min-block-size: 24px;
-      border-inline-start: 1px solid var(--border-strong);
-      margin-inline: 0.08rem;
+      display: none;
     }
 
     .cal-status-live {
       font-family: var(--font-mono);
-      font-size: 0.69rem;
-      line-height: 1.38;
+      font-size: 0.68rem;
+      line-height: 1.35;
+      min-block-size: 3.85rem;
       color: var(--brand-color);
       background-color: #091425;
       border: 1px solid #223b60;
       border-radius: 4px;
       padding: 0.38rem 0.52rem;
+      overflow-y: auto;
     }
 
     .cal-scale-form {
@@ -385,6 +958,20 @@
       grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
       align-items: end;
       gap: 0.38rem;
+      padding-block-end: 0.92rem;
+    }
+
+    .cal-field-grid .cal-field {
+      position: relative;
+    }
+
+    .cal-field-grid .error-msg {
+      position: absolute;
+      inset-block-start: calc(100% + 0.08rem);
+      inset-inline-start: 0;
+      margin-block-start: 0;
+      white-space: nowrap;
+      pointer-events: none;
     }
 
     .cal-field {
@@ -425,15 +1012,155 @@
       outline-offset: 2px;
     }
 
-    .cal-field input:is(:user-invalid, [aria-invalid="true"]) {
+    :is(:user-invalid, .user-invalid-fallback) {
       border-color: var(--status-alert);
       outline-color: var(--status-alert);
+    }
+
+    .sr-only {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .live-tier-card .cal-field {
+      position: relative;
+      padding-block-end: 0.92rem;
+    }
+
+    .live-tier-card .cal-field .error-msg {
+      position: absolute;
+      inset-block-end: 0;
+      inset-inline-start: 0;
+      margin-block-start: 0;
+      white-space: nowrap;
+      pointer-events: none;
+    }
+
+    .error-msg {
+      display: none;
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      line-height: 1.35;
+      color: var(--status-alert);
+      margin-block-start: 0.12rem;
+    }
+
+    :is(:user-invalid, .user-invalid-fallback) + .error-msg {
+      display: block;
     }
 
     .cal-hint {
       font-family: var(--font-mono);
       font-size: 0.65rem;
       color: var(--text-secondary);
+    }
+
+    .coord-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.32rem;
+      margin-block-start: 0.35rem;
+    }
+
+    /* Native Modal <dialog> & Scroll Containment Rules */
+    dialog:modal {
+      overscroll-behavior: contain;
+    }
+
+    dialog::backdrop {
+      overflow: hidden;
+      overscroll-behavior: contain;
+      background-color: rgba(3, 7, 15, 0.76);
+      backdrop-filter: blur(2px);
+    }
+
+    dialog#liveStreamDialog {
+      margin: auto;
+      inline-size: min(680px, calc(100vw - 1.5rem));
+      max-block-size: calc(100dvh - 2rem);
+      background-color: var(--bg-panel);
+      color: var(--text-primary);
+      border: 1px solid var(--border-accent);
+      border-radius: 8px;
+      padding: 0.9rem 1rem;
+    }
+
+    dialog#liveStreamDialog[open] {
+      display: flex;
+      flex-direction: column;
+      gap: 0.72rem;
+      overflow-y: auto;
+    }
+
+    .dialog-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      border-block-end: 1px solid var(--border-strong);
+      padding-block-end: 0.5rem;
+    }
+
+    .dialog-title {
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+      color: var(--brand-color);
+    }
+
+    .live-tier-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-strong);
+      border-radius: 6px;
+      padding: 0.62rem 0.72rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.44rem;
+    }
+
+    .live-tier-title {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 700;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.4rem;
+    }
+
+    .live-tier-tag {
+      font-size: 0.66rem;
+      padding: 0.12rem 0.42rem;
+      border-radius: 3px;
+      border: 1px solid var(--border-accent);
+      color: var(--brand-color);
+      background-color: #061b26;
+    }
+
+    .live-status-banner {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      line-height: 1.4;
+      padding: 0.42rem 0.56rem;
+      border-radius: 4px;
+      border: 1px solid #2b4770;
+      background-color: #091425;
+      color: var(--brand-color);
+    }
+
+    .live-status-banner.error {
+      border-color: var(--status-alert);
+      color: var(--status-alert);
+      background-color: #220b12;
     }
 
     button[aria-disabled="true"] {
@@ -446,38 +1173,104 @@
       border-color: #3f6294;
     }
 
+    .source-context-well {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      align-items: stretch;
+      min-block-size: 8.4rem;
+    }
+
+    @media (pointer: coarse) {
+      .source-context-well {
+        min-block-size: 8.85rem;
+      }
+    }
+
+    .source-context-well > * {
+      grid-area: 1 / 1;
+      min-inline-size: 0;
+    }
+
+    .source-context-well > #benchScenarioField {
+      padding: 0.5rem 0.55rem;
+      border-radius: 4px;
+      background-color: #0d1729;
+      border: 1px solid #233a5e;
+      justify-content: center;
+    }
+
+    .source-context-well:not(:has(> :not([hidden])))::before {
+      content: "LIVE WEBCAM FEED · DIRECT OPTICAL CAPTURE";
+      grid-area: 1 / 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--font-mono);
+      font-size: 0.69rem;
+      color: var(--text-secondary);
+      border-radius: 4px;
+      background-color: #0d1729;
+      border: 1px solid #233a5e;
+      padding: 0.5rem;
+    }
+
     .transport-bar {
       display: flex;
       flex-direction: column;
+      justify-content: space-between;
       gap: 0.38rem;
-      padding: 0.5rem 0.55rem;
+      padding: 0.48rem 0.55rem;
       border-radius: 4px;
       background-color: #0d1729;
       border: 1px solid #2b4770;
     }
 
     .transport-meta-row {
-      display: flex;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr);
       align-items: center;
+      column-gap: 0.5rem;
+      min-block-size: 1.05rem;
+      line-height: 1.05rem;
       font-family: var(--font-mono);
-      font-size: 0.69rem;
+      font-size: 0.68rem;
       color: var(--text-secondary);
     }
 
+    .transport-meta-row > :first-child {
+      white-space: nowrap;
+    }
+
+    .transport-meta-row > :last-child {
+      text-align: right;
+      min-inline-size: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text-primary);
+    }
+
     .file-upload-label {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.68rem;
       font-weight: 600;
-      min-block-size: 28px;
-      padding: 0.42rem 0.64rem;
+      line-height: 1.15rem;
+      min-block-size: 2.05rem;
+      inline-size: 100%;
+      min-inline-size: 0;
+      padding: 0.34rem 0.38rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
       color: var(--text-primary);
       cursor: pointer;
       text-align: center;
-      flex: 1 1 auto;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .file-upload-label:hover {
@@ -499,7 +1292,8 @@
     .file-upload-wrap {
       position: relative;
       display: flex;
-      flex: 1 1 auto;
+      min-inline-size: 0;
+      inline-size: 100%;
     }
 
     .file-upload-wrap input[type="file"] {
@@ -521,27 +1315,33 @@
     .select-field {
       display: flex;
       flex-direction: column;
-      gap: 0.24rem;
+      gap: 0.22rem;
+      min-inline-size: 0;
     }
 
     .select-field label {
       font-family: var(--font-mono);
-      font-size: 0.71rem;
+      font-size: 0.69rem;
+      line-height: 1.15;
       color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .select-field select {
       font-family: var(--font-mono);
-      font-size: 0.74rem;
+      font-size: 0.72rem;
       font-weight: 600;
-      min-block-size: 30px;
-      padding: 0.42rem 0.58rem;
+      min-block-size: 2rem;
+      padding: 0.34rem 0.52rem;
       border-radius: 4px;
       border: 1px solid var(--border-strong);
       background-color: var(--bg-card);
       color: var(--text-primary);
       cursor: pointer;
       inline-size: 100%;
+      min-inline-size: 0;
     }
 
     .select-field select:hover {
@@ -556,20 +1356,34 @@
     .control-group {
       display: flex;
       flex-direction: column;
-      gap: 0.3rem;
+      gap: 0.28rem;
+      min-inline-size: 0;
     }
 
     .slider-label-row {
-      display: flex;
-      justify-content: space-between;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      column-gap: 0.5rem;
+      min-block-size: 1.05rem;
+      line-height: 1.05rem;
       font-family: var(--font-mono);
-      font-size: 0.73rem;
+      font-size: 0.71rem;
       color: var(--text-secondary);
+    }
+
+    .slider-label-row label {
+      min-inline-size: 0;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .slider-val {
       color: var(--text-primary);
       font-weight: 700;
+      text-align: right;
+      white-space: nowrap;
     }
 
     input[type="range"] {
@@ -586,7 +1400,7 @@
     .toggle-list {
       display: flex;
       flex-direction: column;
-      gap: 0.42rem;
+      gap: 0.38rem;
     }
 
     .toggle-item {
@@ -595,19 +1409,22 @@
       gap: 0.5rem;
       min-block-size: 24px;
       font-family: var(--font-mono);
-      font-size: 0.75rem;
+      font-size: 0.73rem;
       color: var(--text-primary);
       cursor: pointer;
     }
 
     .lab-desc {
-      font-size: 0.77rem;
-      line-height: 1.42;
+      font-size: 0.72rem;
+      line-height: 1.38;
+      min-block-size: 6.5rem;
       color: var(--text-secondary);
       background-color: var(--bg-card);
       border: 1px solid var(--border-strong);
       border-radius: 4px;
-      padding: 0.52rem 0.62rem;
+      padding: 0.48rem 0.58rem;
+      text-wrap: pretty;
+      overflow-y: auto;
     }
 
     /* Native <details>/<summary> disclosure for fine-grained variational sliders */
@@ -642,6 +1459,49 @@
       display: flex;
       flex-direction: column;
       gap: 0.52rem;
+    }
+
+    .showcase-strip {
+      contain: layout style paint;
+      border-color: rgba(0, 229, 255, 0.34);
+      background: linear-gradient(180deg, rgba(10, 20, 36, 0.96), rgba(8, 13, 24, 0.96));
+    }
+
+    .showcase-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.38rem;
+    }
+
+    .showcase-btn {
+      font-family: var(--font-mono);
+      font-size: 0.67rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      text-align: left;
+      min-block-size: 28px;
+      padding: 0.40rem 0.44rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      cursor: pointer;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      transition: border-color 120ms ease, background-color 120ms ease;
+    }
+
+    .showcase-btn:hover {
+      border-color: var(--brand-color);
+      background-color: #111d33;
+    }
+
+    .showcase-btn.active,
+    .showcase-btn[aria-pressed="true"] {
+      border-color: var(--brand-color);
+      background-color: rgba(0, 229, 255, 0.14);
+      color: #8ef9f3;
     }
 
     video#hiddenVideoSource {
@@ -756,6 +1616,8 @@
       .pill,
       button,
       canvas,
+      dialog#liveStreamDialog,
+      .live-tier-card,
       .cal-field input,
       .cal-status-live,
       details.tuning-disclosure {
@@ -777,14 +1639,15 @@
       <span class="brand-badge">WASM32 + SIMD128</span>
       <div>
         <h1 class="brand-title">CHRONOS-SPECTRAL</h1>
-        <p class="brand-subtitle">Non-Causal Spatiotemporal Wavefield &amp; Phase-Synchronized Telemetry Tracker</p>
+        <p class="brand-subtitle">Non-Causal Spatiotemporal Wavefield Tracker</p>
       </div>
     </div>
     <div class="header-pills">
-      <span class="pill ok" id="pillKernel">◆ KERNEL BOOTING</span>
-      <span class="pill" id="pillArena">WASM ARENA: 256 PAGES / 16.00 MB</span>
-      <span class="pill ok" id="pillPerf">KERNEL: -- ms</span>
-      <span class="pill" id="pillFps">FPS: --</span>
+      <span class="pill-slot"><span class="pill ok" id="pillKernel">◆ KERNEL BOOTING</span></span>
+      <span class="pill-slot"><span class="pill" id="pillArena">ARENA: 288 PAGES / 18.00 MB</span></span>
+      <span class="pill-slot"><span class="pill ok" id="pillPerf">KERNEL: -- ms</span></span>
+      <span class="pill-slot"><span class="pill" id="pillFps">FPS: --</span></span>
+      <span class="pill-slot"><span class="pill ok" id="pillStreamHealth" hidden>LIVE: CAM LOCKED</span></span>
     </div>
   </header>
 
@@ -793,30 +1656,30 @@
     <div class="deck-column">
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Non-Causal Delayed Wavefield HUD [t − K]</h2>
+          <h2 class="panel-title">Delayed Wavefield HUD [t − K]</h2>
           <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
         </div>
-        <canvas id="hudCanvas" width="960" height="540" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
+        <canvas id="hudCanvas" width="960" height="540" role="img" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Split 1x Raw vs 25x Eulerian PiP &amp; Identity Audit</h2>
+          <h2 class="panel-title">Split 1× Raw / 25× Eulerian Audit</h2>
           <span class="panel-meta" id="mortonReadout">BINARY-PREFIX SIG: 0x00000000 (v₂ = --)</span>
         </div>
         <div class="pip-and-swap-row">
-          <canvas id="pipCanvas" width="248" height="144" aria-label="16x16 raw vs Eulerian temporal-contrast picture-in-picture"></canvas>
-          <div class="kpi-grid">
+          <canvas id="pipCanvas" width="412" height="234" role="img" aria-label="32x32 SD or 64x64 HD raw vs Eulerian temporal-contrast picture-in-picture"></canvas>
+          <div class="kpi-grid pip-kpi-grid">
             <div class="kpi-card">
-              <span class="kpi-label" id="lblPadicSwaps">Oracle ID Switches</span>
+              <span class="kpi-label" id="lblPadicSwaps">Oracle ID Swaps</span>
               <span class="kpi-value ok" id="kpiPadicSwaps">◆ 0</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">Kinematic Kalman Swaps</span>
+              <span class="kpi-label">Kalman Swaps</span>
               <span class="kpi-value alert" id="kpiKalmanSwaps">▲ 0</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">ECA Clutter Supp.</span>
+              <span class="kpi-label" id="lblClutterDb">ECA Clutter Supp.</span>
               <span class="kpi-value accent" id="kpiClutterDb">WARMING</span>
             </div>
             <div class="kpi-card">
@@ -825,7 +1688,7 @@
             </div>
             <div class="kpi-card">
               <span class="kpi-label">Tracked Patches</span>
-              <span class="kpi-value" id="kpiTargets">0 / 8</span>
+              <span class="kpi-value" id="kpiTargets">0 / 16</span>
             </div>
             <div class="kpi-card">
               <span class="kpi-label" id="lblCollisions">Pillar Collisions</span>
@@ -834,29 +1697,282 @@
           </div>
         </div>
       </div>
+
+      <section class="panel roster-panel" aria-labelledby="rosterPanelTitle">
+        <div class="panel-header">
+          <h2 class="panel-title" id="rosterPanelTitle">Target Roster · 1× Raw / 25× Δ</h2>
+          <span class="panel-meta roster-meta-strip" id="rosterSummaryMeta"><span class="rm-chip">↻ RE-ACQ <strong id="rosterReacqVal">0</strong></span><span class="rm-sep" aria-hidden="true">·</span><span class="rm-chip" id="rosterHoldChip" data-active="0">HOLD <strong id="rosterHoldVal">0</strong></span><span class="rm-sep" aria-hidden="true">·</span><span class="rm-hint">1.5s LATCH · CLICK SLOT TO PIN</span></span>
+        </div>
+        <div class="roster-scroll-well" id="rosterScrollWell">
+          <div class="roster-grid" id="rosterGrid">
+            <article class="roster-card" id="rosterCard0" data-slot="0" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip0" width="276" height="148" role="img" aria-label="Slot 01 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 01 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S1 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard1" data-slot="1" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip1" width="276" height="148" role="img" aria-label="Slot 02 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 02 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S2 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard2" data-slot="2" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip2" width="276" height="148" role="img" aria-label="Slot 03 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 03 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S3 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard3" data-slot="3" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip3" width="276" height="148" role="img" aria-label="Slot 04 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 04 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S4 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard4" data-slot="4" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip4" width="276" height="148" role="img" aria-label="Slot 05 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 05 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S5 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard5" data-slot="5" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip5" width="276" height="148" role="img" aria-label="Slot 06 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 06 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S6 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard6" data-slot="6" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip6" width="276" height="148" role="img" aria-label="Slot 07 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 07 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S7 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard7" data-slot="7" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip7" width="276" height="148" role="img" aria-label="Slot 08 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 08 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S8 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard8" data-slot="8" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip8" width="276" height="148" role="img" aria-label="Slot 09 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 09 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S9 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard9" data-slot="9" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip9" width="276" height="148" role="img" aria-label="Slot 10 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 10 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S10 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard10" data-slot="10" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip10" width="276" height="148" role="img" aria-label="Slot 11 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 11 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S11 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard11" data-slot="11" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip11" width="276" height="148" role="img" aria-label="Slot 12 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 12 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S12 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard12" data-slot="12" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip12" width="276" height="148" role="img" aria-label="Slot 13 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 13 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S13 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard13" data-slot="13" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip13" width="276" height="148" role="img" aria-label="Slot 14 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 14 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S14 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard14" data-slot="14" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip14" width="276" height="148" role="img" aria-label="Slot 15 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 15 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S15 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+            <article class="roster-card" id="rosterCard15" data-slot="15" data-state="IDLE" data-tid="0" data-pinned="0">
+              <canvas class="slot-pip-canvas" id="slotPip15" width="276" height="148" role="img" aria-label="Slot 16 split 1x raw vs 25x temporal delta"></canvas>
+              <header class="roster-card-head">
+                <h3><button type="button" class="roster-pin-btn" aria-pressed="false" aria-disabled="true" aria-label="Slot 16 standby"><span class="roster-swatch" aria-hidden="true"></span><span class="roster-slot-id">S16 · --</span></button></h3>
+                <span class="roster-state-badge">IDLE</span>
+              </header>
+              <dl class="roster-stats">
+                <div class="roster-stat-cell"><dt class="rs-lbl-spd">SPD</dt><dd class="rs-val-spd">-- px/s</dd></div>
+                <div class="roster-stat-cell"><dt class="rs-lbl-ang">HDG · ω</dt><dd class="rs-val-ang">--°</dd></div>
+                <div class="roster-stat-cell"><dt>LOCK AGE</dt><dd class="rs-val-age">--</dd></div>
+                <div class="roster-stat-cell"><dt>v₂ · RE-ACQ</dt><dd class="rs-val-id">-- · 0</dd></div>
+              </dl>
+            </article>
+          </div>
+        </div>
+      </section>
     </div>
 
-    <!-- Middle Column: Hilbert Analytic Tremor Scope + Lanczos Spectral & Chronological Ring Scope -->
+    <!-- Middle Column: Session Persistence & Multi-Minute Continuity + Hilbert + Spectral Scopes -->
     <div class="deck-column isolated-region">
+      <section class="panel persistence-panel" id="persistencePanel" aria-labelledby="persistPanelTitle">
+        <div class="panel-header">
+          <h2 class="panel-title" id="persistPanelTitle">Session Persistence &amp; Custody (1 Hz)</h2>
+          <span class="panel-meta" id="persistSummaryMeta">DORMANT ARCHIVE: 0 / 32</span>
+        </div>
+        <div class="kpi-grid persist-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">Session Span</span>
+            <span class="kpi-value" id="kpiPersistSpan">00:00</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Active / Peak</span>
+            <span class="kpi-value accent" id="kpiPersistActivePeak">0 / 0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Unique IDs</span>
+            <span class="kpi-value" id="kpiPersistUnique">0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Same-ID Re-Locks</span>
+            <span class="kpi-value ok" id="kpiPersistRelocks">0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Longest Custody</span>
+            <span class="kpi-value" id="kpiPersistLongest">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Locks ≥10s / 60s</span>
+            <span class="kpi-value" id="kpiPersistSustained">0 / 0</span>
+          </div>
+        </div>
+        <canvas id="persistenceCanvas" width="420" height="204" role="img" aria-label="Multi-minute target custody swimlane and concurrency timeline"></canvas>
+      </section>
+
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Equalized Hilbert Quadrature Scope (R_t vs H{R_t})</h2>
+          <h2 class="panel-title">Hilbert Quadrature Scope</h2>
           <span class="panel-meta" id="hilbertMeta">φ = 0° | f = -- Hz</span>
         </div>
-        <canvas id="hilbertCanvas" width="420" height="210" aria-label="Auto-scaled discrete Hilbert quadrature phase portrait and waveform"></canvas>
+        <canvas id="hilbertCanvas" width="420" height="210" role="img" aria-label="Auto-scaled discrete Hilbert quadrature phase portrait and waveform"></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Shifted Lanczos Fiedler &amp; Non-Causal Timeline</h2>
+          <h2 class="panel-title">Lanczos Fiedler &amp; Timeline</h2>
           <span class="panel-meta" id="spectralMeta">λ₂ = 0.0000 | Δλ = 0.000</span>
         </div>
-        <canvas id="spectralCanvas" width="420" height="210" aria-label="Lanczos Fiedler eigenvector partition and chronological t-11 to t NOW lookahead timeline"></canvas>
+        <canvas id="spectralCanvas" width="420" height="210" role="img" aria-label="Lanczos Fiedler eigenvector partition and chronological t-11 to t NOW lookahead timeline"></canvas>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Variational &amp; Kinematic Telemetry Matrix</h2>
+          <h2 class="panel-title">Variational &amp; Kinematic Matrix</h2>
           <span class="panel-meta" id="fistaGapMeta">DUAL GAP: 0.000</span>
         </div>
         <div class="kpi-grid">
@@ -873,7 +1989,7 @@
             <span class="kpi-value warn" id="kpiApexMs">-- ms</span>
           </div>
           <div class="kpi-card">
-            <span class="kpi-label" id="lblReflexKpi">Stimulus Onset / Settle</span>
+            <span class="kpi-label" id="lblReflexKpi">Onset / Settle Δt</span>
             <span class="kpi-value ok" id="kpiSaccadeMs">-- ms</span>
           </div>
           <div class="kpi-card">
@@ -889,71 +2005,199 @@
             <span class="kpi-value warn" id="kpiKinDeflect">--°/s</span>
           </div>
           <div class="kpi-card">
-            <span class="kpi-label" id="lblKinRestGrav">Restitution / Gravity</span>
+            <span class="kpi-label" id="lblKinRestGrav">Speed Ratio / Gravity</span>
             <span class="kpi-value ok" id="kpiKinRestGrav">STEADY</span>
           </div>
         </div>
       </div>
+
+      <section class="panel physics-id-panel" id="physicsIdPanel" aria-labelledby="physicsIdPanelTitle">
+        <div class="panel-header">
+          <h2 class="panel-title" id="physicsIdPanelTitle">In-Situ Physics ID &amp; Conservation (4 Hz)</h2>
+          <span class="panel-meta" id="physicsIdMeta">ODE R² -- | KNOTS 0 | PX</span>
+        </div>
+        <div class="physics-badge-row">
+          <span class="physics-badge" id="physRegimeBadge" data-active="0" data-regime="0">R0 · INERTIAL CV (0%)</span>
+          <span class="physics-badge" id="physJumpBadge" data-jump="0">J0 · NONE</span>
+        </div>
+        <div class="physics-ode-box" id="physicsOdeEq" title="Recovered symbolic ODE equation">x'' = 0, y'' = 0</div>
+        <div class="kpi-grid physics-kpi-grid">
+          <div class="kpi-card">
+            <span class="kpi-label">ODE Fit R²</span>
+            <span class="kpi-value accent" id="kpiPhysicsR2">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Regime Conf</span>
+            <span class="kpi-value" id="kpiPhysicsConf">0%</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">IMM CV/Bal/TO</span>
+            <span class="kpi-value" id="kpiImmWeights">0.33/0.33/0.34</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Aero Drag β</span>
+            <span class="kpi-value" id="kpiPhysicsBeta">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Boost Thrust</span>
+            <span class="kpi-value" id="kpiPhysicsThrust">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Damping ζ / Q</span>
+            <span class="kpi-value" id="kpiPhysicsDamping">-- / --</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Elliptic T(θ₀)</span>
+            <span class="kpi-value" id="kpiPhysicsEllipticT">-- s</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Kuramoto R / N</span>
+            <span class="kpi-value accent" id="kpiKuramotoSync">-- / 0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Lyapunov λ_max</span>
+            <span class="kpi-value warn" id="kpiLyapunovMax">-- s⁻¹</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Taubin-Kasa Δc</span>
+            <span class="kpi-value" id="kpiTaubinDelta">-- px</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Curvature κ</span>
+            <span class="kpi-value" id="kpiTaubinKappa">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">IRL1 Sharp Knots</span>
+            <span class="kpi-value" id="kpiFistaKnots">0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">2-Body m₂/m₁ · eₙ</span>
+            <span class="kpi-value ok" id="kpiTwoBodyMassE">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Mom. Resid / Ret</span>
+            <span class="kpi-value" id="kpiTwoBodyMomRes">--</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">Spec. E / Lz</span>
+            <span class="kpi-value" id="kpiPhysicsConserv">--</span>
+          </div>
+        </div>
+        <canvas id="physicsPhaseCanvas" width="420" height="210" role="img" aria-label="15 Hz phase-space portrait and mechanical energy and angular momentum conservation scope"></canvas>
+      </section>
     </div>
 
-    <!-- Right Column: Sensor Input, MP4 Transport, Lab Modes, Synth & Kernel Controls -->
+    <!-- Right Column: Sensor Input, Live Stream Suite, MP4 Transport, Lab Modes, Synth & Kernel Controls -->
     <aside class="deck-column isolated-region scrollable-controls control-column" aria-label="Tracker controls and session telemetry">
+      <div class="panel showcase-strip">
+        <div class="panel-header">
+          <h2 class="panel-title">★ Featured Showcases (1-Click HD)</h2>
+          <span class="panel-meta">AUTO-SETUP</span>
+        </div>
+        <div class="showcase-grid" role="group" aria-label="One-click HD live and physics demonstrations">
+          <button type="button" class="showcase-btn" data-showcase="model_rockets" aria-pressed="false">🚀 Model Rockets · Chutes (31s)</button>
+          <button type="button" class="showcase-btn" data-showcase="rocket_vtvl" aria-pressed="false">🚀 Rocket Pad-to-Pad (80s)</button>
+          <button type="button" class="showcase-btn" data-showcase="live_i80" aria-pressed="false">🌉 Live I-80 Cam</button>
+          <button type="button" class="showcase-btn" data-showcase="cologne_motorway" aria-pressed="false">🛣️ A4 Motorway (45s)</button>
+          <button type="button" class="showcase-btn" data-showcase="rally_pan" aria-pressed="false">🏎️ Rally Ego-Pan (29s)</button>
+          <button type="button" class="showcase-btn" data-showcase="chaos_pendulum" aria-pressed="false">🧲 Chaos Pendulum (50s)</button>
+          <button type="button" class="showcase-btn" data-showcase="coupled_metronomes" aria-pressed="false">🎵 Sync Metronomes (55s)</button>
+          <button type="button" class="showcase-btn" data-showcase="newtons_cradle" aria-pressed="false">⚪ Newton's Cradle (45s)</button>
+        </div>
+      </div>
+
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">1. Optical Wavefield Input Source</h2>
+          <h2 class="panel-title">1. Optical Input Source</h2>
           <span class="panel-meta" id="inputResMeta">320×180 SD RGBA</span>
         </div>
         <div class="btn-row" role="group" aria-label="Wavefield spatial resolution">
-          <button type="button" id="btnResSd" class="res-btn active" data-res="0" aria-pressed="true">320×180 SD (16×16 PiP)</button>
-          <button type="button" id="btnResHd" class="res-btn" data-res="1" aria-pressed="false">640×360 HD (32×32 PiP)</button>
+          <button type="button" id="btnResSd" class="res-btn active" data-res="0" aria-pressed="true">320×180 SD (32²)</button>
+          <button type="button" id="btnResHd" class="res-btn" data-res="1" aria-pressed="false">640×360 HD (64²)</button>
         </div>
         <div class="btn-row">
-          <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Blind Pillar Bench</button>
+          <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Pillar Bench</button>
           <button type="button" id="btnSrcWebcam" aria-pressed="false">◉ Live Webcam</button>
+          <button type="button" id="btnSrcLiveStream" aria-pressed="false">📡 Live Stream</button>
           <div class="file-upload-wrap">
             <input type="file" id="mp4Input" name="mp4File" accept="video/*" />
             <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
           </div>
         </div>
 
-        <div class="select-field" id="benchScenarioField">
-          <label for="benchScenarioSelect">Synthetic testbench physics scenario</label>
-          <select id="benchScenarioSelect" name="benchScenario">
-            <option value="pillar_crossing">Dual-Pillar Crossing &amp; In-Pillar Bounce (Default)</option>
-            <option value="short_gap_bridge">Short-Gap Occlusion Bridge (5f ≤ K Hermite Spline)</option>
-            <option value="ballistic_cascade">Newtonian Ballistic Cascade (Mode A Apex Proof)</option>
-            <option value="harmonic_tremor">8.5 Hz Coherent Quadrature Orbit (Mode B Proof)</option>
-            <option value="percussion_ricochet">4-Zone Elastic Ricochet Snaps (Mode C Proof)</option>
-          </select>
-        </div>
-
         <div class="select-field">
           <label for="sampleVideoSelect">Built-in real-camera physics &amp; traffic MP4s</label>
           <select id="sampleVideoSelect" name="sampleVideo">
             <option value="">Select real-camera MP4 clip...</option>
-            <option value="./samples/juggling_ballistic.mp4" data-fps="25" data-lab="0">Newtonian 3-Ball Juggling (25 fps · Mode A Apex)</option>
-            <option value="./samples/roundabout_occlusion.mp4" data-fps="24" data-lab="0">Highway Gantry Sign Occlusion (24 fps · Mode A Bridge)</option>
-            <option value="./samples/galileo_pendulum_peg.mp4" data-fps="30" data-lab="0">Galileo Peg-Interrupted Pendulum (30 fps · Mode A/C)</option>
-            <option value="./samples/harmonic_metronome_phase.mp4" data-fps="30" data-lab="1">Seiko Harmonic Metronome 2.38 Hz (30 fps · Mode B Phase)</option>
-            <option value="./samples/carom_billiards_impulses.mp4" data-fps="30" data-lab="2">3-Cushion Carom Billiards (30 fps · Mode C Impulses)</option>
+            <optgroup label="Extended HD Showcases (29s to 80s)">
+              <option value="./samples/model_rocket_full_flights.mp4" data-fps="25" data-lab="0">Model Rockets Full Flights &amp; Parachutes · 31s (25 fps · Mode A Ballistic)</option>
+              <option value="./samples/rocket_vtvl_full_flight.mp4" data-fps="30" data-lab="0">VTVL Rocket Pad-to-Pad Full Flight · 80s (30 fps · Mode A Ascent &amp; Landing)</option>
+              <option value="./samples/water_rocket_parachute_flights.mp4" data-fps="25" data-lab="0">Water Rocket Full Flights &amp; Parachute · 30s (25 fps · Mode A Recovery)</option>
+              <option value="./samples/cologne_motorway_occlusion.mp4" data-fps="30" data-lab="0">A4 Cologne Motorway &amp; Overpass Occlusion · 45s (30 fps · Mode A Bridge)</option>
+              <option value="./samples/rally_ego_pan_tracking.mp4" data-fps="30" data-lab="0">Ceredigion Rally Car Panning Camera · 29s (30 fps · Mode A Ego-Pan)</option>
+              <option value="./samples/chaotic_magnetic_pendulum.mp4" data-fps="25" data-lab="0">Chaotic Magnetic Pendulum · 50s (25 fps · Mode A Pivot &amp; Bridge)</option>
+              <option value="./samples/coupled_metronomes_sync.mp4" data-fps="30" data-lab="1">Coupled Metronomes Phase Sync · 55s (30 fps · Mode B Phase)</option>
+              <option value="./samples/newtons_cradle_impulses.mp4" data-fps="30" data-lab="2">5-Sphere Newton's Cradle · 45s (30 fps · Mode C Impulses)</option>
+            </optgroup>
+            <optgroup label="Calibration Benchmarks (5s to 7s Ground Truth)">
+              <option value="./samples/juggling_ballistic.mp4" data-fps="25" data-lab="0">Newtonian 3-Ball Juggling (25 fps · Mode A Apex)</option>
+              <option value="./samples/roundabout_occlusion.mp4" data-fps="24" data-lab="0">Highway Gantry Sign Occlusion (24 fps · Mode A Bridge)</option>
+              <option value="./samples/galileo_pendulum_peg.mp4" data-fps="30" data-lab="0">Galileo Peg-Interrupted Pendulum (30 fps · Mode A/C)</option>
+              <option value="./samples/harmonic_metronome_phase.mp4" data-fps="30" data-lab="1">Nikko Mechanical Metronome 96 BPM · 0.80 Hz (30 fps · Mode B Phase)</option>
+              <option value="./samples/carom_billiards_impulses.mp4" data-fps="30" data-lab="2">3-Cushion Carom Billiards (30 fps · Mode C Impulses)</option>
+            </optgroup>
           </select>
         </div>
 
-        <div class="transport-bar" id="videoTransportBar" hidden>
-          <div class="transport-meta-row">
-            <span>MP4 FRAME TRANSPORT</span>
-            <span id="vidTimeLabel">0.00s / --s</span>
+        <div class="source-context-well">
+          <div class="select-field" id="benchScenarioField">
+            <label for="benchScenarioSelect">Synthetic testbench physics scenario</label>
+            <select id="benchScenarioSelect" name="benchScenario">
+              <option value="pillar_crossing">Dual-Pillar Crossing &amp; In-Pillar Bounce (Default)</option>
+              <option value="multi_target_swarm">12-Target Dense Swarm (2 Pillars · 16-Slot Capacity Proof)</option>
+              <option value="short_gap_bridge">Short-Gap Occlusion Bridge (5f ≤ K Hermite Spline)</option>
+              <option value="ballistic_cascade">Newtonian Ballistic Cascade (Mode A Apex Proof)</option>
+              <option value="model_rocket_flight">Model Rocket Boost, Coast &amp; Apogee (Mode A Proof)</option>
+              <option value="harmonic_tremor">8.5 Hz Coherent Quadrature Orbit (Mode B Proof)</option>
+              <option value="percussion_ricochet">4-Zone Elastic Ricochet Snaps (Mode C Proof)</option>
+            </select>
           </div>
-          <div class="btn-row">
-            <button type="button" id="btnVidPlayPause" aria-pressed="true" class="active">⏸ Pause</button>
-            <button type="button" id="btnVidStepBack" class="action-btn">⏮ −1f</button>
-            <button type="button" id="btnVidStepFwd" class="action-btn">⏭ +1f</button>
-            <button type="button" id="btnVidReplay" class="action-btn">↺ Replay</button>
+
+          <div class="transport-bar" id="liveStreamBar" hidden>
+            <div class="transport-meta-row">
+              <span id="liveTierBadge">LIVE STREAM ACTIVE</span>
+              <span id="liveStreamMeta">PTS LOCKED</span>
+            </div>
+            <div class="select-field">
+              <label for="liveCropSelect">Aspect-preserving viewport crop ROI</label>
+              <select id="liveCropSelect" name="liveCrop">
+                <option value="0,0,1,1">Full Frame 100% (Letterboxed 16:9)</option>
+                <option value="0.075,0.075,0.85,0.85">Center 85% (Trim Browser / Player Chrome)</option>
+                <option value="0.15,0.15,0.70,0.70">Center 70% Tight ROI</option>
+              </select>
+            </div>
+            <div class="btn-row">
+              <button type="button" id="btnReopenLiveModal" class="action-btn">⚙ Switch Feed</button>
+              <button type="button" id="btnStopLiveFeed" class="action-btn">■ Stop Feed</button>
+            </div>
+          </div>
+
+          <div class="transport-bar" id="videoTransportBar" hidden>
+            <div class="transport-meta-row">
+              <span>MP4 FRAME TRANSPORT</span>
+              <span id="vidTimeLabel">0.00s / --s</span>
+            </div>
+            <div class="btn-row">
+              <button type="button" id="btnVidPlayPause" aria-pressed="true" class="active">⏸ Pause</button>
+              <button type="button" id="btnVidStepBack" class="action-btn">⏮ −1f</button>
+              <button type="button" id="btnVidStepFwd" class="action-btn">⏭ +1f</button>
+              <button type="button" id="btnVidReplay" class="action-btn">↺ Replay</button>
+            </div>
           </div>
         </div>
 
         <div class="btn-row">
-          <button type="button" id="btnAudioToggle" aria-pressed="false">♪ Enable WebAudio Synth</button>
+          <button type="button" id="btnAudioToggle" class="btn-span-full" aria-pressed="false">♪ Enable WebAudio Synth</button>
           <button type="button" id="btnFocusCycle" class="action-btn">◎ Focus: AUTO</button>
           <button type="button" id="btnResetArena" class="action-btn">↺ Reset Tracks</button>
         </div>
@@ -961,25 +2205,25 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">2. Biophysical &amp; Kinematic Lab Mode</h2>
+          <h2 class="panel-title">2. Kinematic Lab Mode</h2>
           <span class="panel-meta" id="labBadge">MODE A</span>
         </div>
-        <div class="btn-row">
-          <button type="button" data-lab="0" class="lab-btn active" aria-pressed="true">A: Ballistic Apex</button>
-          <button type="button" data-lab="1" class="lab-btn" aria-pressed="false">B: Tremor &amp; Reflex</button>
-          <button type="button" data-lab="2" class="lab-btn" aria-pressed="false">C: Air-Percussion</button>
+        <div class="btn-row" data-cols="3">
+          <button type="button" data-lab="0" class="lab-btn active" aria-pressed="true">A · Apex</button>
+          <button type="button" data-lab="1" class="lab-btn" aria-pressed="false">B · Phase</button>
+          <button type="button" data-lab="2" class="lab-btn" aria-pressed="false">C · Strike</button>
         </div>
         <p class="lab-desc" id="labDescription">
-          <strong>Mode A — Ballistic Parabola, Flight Angle θ &amp; Spline Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via curved Hermite arcs, and plots live tangent flight angles &amp; frozen apex reticles.
+          <strong>Mode A — Ballistic Parabola &amp; Hermite Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via Hermite splines, and plots tangent flight angles &amp; frozen apex reticles.
         </p>
-        <div class="btn-row">
+        <div class="btn-row" data-cols="1">
           <button type="button" id="btnLabStimulus" class="action-btn">⚡ Launch Ballistic Arc Impulse</button>
         </div>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title" id="calPanelHeading">3. Metric &amp; Perspective Calibration</h2>
+          <h2 class="panel-title" id="calPanelHeading">3. Metric Calibration</h2>
           <span class="panel-meta" id="calBadge">PX UNITS</span>
         </div>
         <div role="toolbar" id="calToolbar" class="cal-toolbar" focusgroup="toolbar wrap" aria-label="Metric and perspective calibration" aria-controls="hudCanvas">
@@ -988,36 +2232,63 @@
             <button type="button" id="btnCalQuad" aria-pressed="false" title="Click 4 plane corners TL, TR, BR, BL to rectify perspective">⬠ 4-Pt Plane</button>
           </div>
           <span role="separator" class="cal-toolbar-sep" aria-orientation="vertical"></span>
-          <div role="group" class="cal-toolbar-group" aria-label="Calibration actions">
-            <button type="button" id="btnCalAutoG" class="action-btn" title="Derive meter scale from parabolic gravity g = 9.81 m/s²">⚡ Auto-g</button>
-            <button type="button" id="btnCalPreset" class="action-btn" title="Apply physical reference scale or perspective plane for active scene">✦ Scene Preset</button>
+          <div role="group" class="cal-toolbar-group" data-cols="3" aria-label="Calibration actions">
+            <button type="button" id="btnCalAutoG" class="action-btn" title="Derive meter scale from >= 2 parabolic flight arcs (g = 9.81 m/s²)">⚡ Auto-g</button>
+            <button type="button" id="btnCalPreset" class="action-btn" title="Apply illustrative assumed scale or perspective plane for built-in scene">✦ Preset</button>
             <button type="button" id="btnCalClear" class="action-btn" title="Clear metric calibration and return to pixel units">✕ Clear</button>
           </div>
         </div>
         <p class="cal-status-live" id="calStatusLive" role="status">UNCALIBRATED · PIXEL UNITS (px · px/s)</p>
         <form id="calScaleForm" class="cal-scale-form" aria-labelledby="calPanelHeading" action="#" method="get" novalidate>
+          <span id="calScaleHelp" class="cal-hint">Positive meters (0.05–500). Quad order: TL → TR → BR → BL. Esc cancels armed clicks without losing prior scale.</span>
           <div class="cal-field-grid">
             <div class="cal-field">
               <label for="calRulerM">Ruler L (m)</label>
-              <input type="text" id="calRulerM" name="rulerMeters" value="1.00" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+              <input type="text" id="calRulerM" name="rulerMeters" value="1.00" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" data-error="errCalRulerM" />
+              <div id="errCalRulerM" class="error-msg"><span role="img" aria-label="Error">❌</span> Enter 0.05–500 m.</div>
             </div>
             <div class="cal-field">
               <label for="calPlaneW">Plane W (m)</label>
-              <input type="text" id="calPlaneW" name="planeWidth" value="2.84" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+              <input type="text" id="calPlaneW" name="planeWidth" value="2.84" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" data-error="errCalPlaneW" />
+              <div id="errCalPlaneW" class="error-msg"><span role="img" aria-label="Error">❌</span> Enter 0.05–500 m.</div>
             </div>
             <div class="cal-field">
               <label for="calPlaneH">Plane H (m)</label>
-              <input type="text" id="calPlaneH" name="planeHeight" value="1.42" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" />
+              <input type="text" id="calPlaneH" name="planeHeight" value="1.42" inputmode="decimal" autocorrect="off" autocapitalize="none" spellcheck="false" enterkeyhint="done" required pattern="^\d+(\.\d+)?$" aria-describedby="calScaleHelp" data-error="errCalPlaneH" />
+              <div id="errCalPlaneH" class="error-msg"><span role="img" aria-label="Error">❌</span> Enter 0.05–500 m.</div>
             </div>
-            <button type="submit" id="btnCalApplyDims" class="action-btn" style="min-block-size: 32px; flex: 0 0 auto; padding-inline: 0.52rem;">Apply Scale</button>
+            <button type="submit" id="btnCalApplyDims" class="action-btn" style="min-block-size: 32px; padding-inline: 0.52rem;">Apply Scale</button>
           </div>
-          <span id="calScaleHelp" class="cal-hint">Positive meters (0.05–500). Quad order: TL → TR → BR → BL.</span>
         </form>
+        <details class="tuning-disclosure" id="calKeyboardDisclosure">
+          <summary>Keyboard Normalized Coordinates [0.00–1.00]</summary>
+          <form id="calCoordForm" class="cal-scale-form" action="#" method="get" novalidate>
+            <span id="calCoordHelp" class="cal-hint">Enter normalized viewport coordinates in [0.00, 1.00]. Commits as SURVEYED scale.</span>
+            <div class="select-field">
+              <label for="calCoordMode">Keyboard calibration geometry</label>
+              <select id="calCoordMode" name="calCoordMode">
+                <option value="ruler">2-Point Metric Ruler (X1, Y1 → X2, Y2)</option>
+                <option value="homography">4-Point Plane Homography (TL, TR, BR, BL)</option>
+              </select>
+            </div>
+            <div class="coord-grid">
+              <div class="cal-field"><label for="coordX1">X1</label><input type="text" id="coordX1" value="0.20" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field"><label for="coordY1">Y1</label><input type="text" id="coordY1" value="0.20" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field"><label for="coordX2">X2</label><input type="text" id="coordX2" value="0.80" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field"><label for="coordY2">Y2</label><input type="text" id="coordY2" value="0.20" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field coord-quad-only" hidden><label for="coordX3">X3</label><input type="text" id="coordX3" value="0.90" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field coord-quad-only" hidden><label for="coordY3">Y3</label><input type="text" id="coordY3" value="0.88" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field coord-quad-only" hidden><label for="coordX4">X4</label><input type="text" id="coordX4" value="0.10" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+              <div class="cal-field coord-quad-only" hidden><label for="coordY4">Y4</label><input type="text" id="coordY4" value="0.88" inputmode="decimal" aria-describedby="calCoordHelp" /></div>
+            </div>
+            <button type="submit" id="btnCommitCoords" class="action-btn">Commit Surveyed Coordinates</button>
+          </form>
+        </details>
       </div>
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">4. Predicted Present-Phase Strobe Offset</h2>
+          <h2 class="panel-title">4. Phase Strobe Offset</h2>
           <span class="panel-meta" id="phaseOffsetLabel">−π/2 LAG CUE</span>
         </div>
         <div class="btn-row">
@@ -1030,7 +2301,7 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">5. Kernel &amp; Variational Hyperparameters</h2>
+          <h2 class="panel-title">5. Kernel Hyperparameters</h2>
           <span class="panel-meta">REAL-TIME</span>
         </div>
 
@@ -1046,6 +2317,10 @@
           <label class="toggle-item" for="chkKalman">
             <input type="checkbox" id="chkKalman" checked />
             <span>Show Kinematic 2×2 Kalman Baseline</span>
+          </label>
+          <label class="toggle-item" for="chkAllOverlays">
+            <input type="checkbox" id="chkAllOverlays" />
+            <span>Show All Peripheral Track Callouts</span>
           </label>
           <label class="toggle-item" for="chkEcaOverlay">
             <input type="checkbox" id="chkEcaOverlay" />
@@ -1089,10 +2364,11 @@
 
       <div class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">6. Session Telemetry Recorder</h2>
-          <span class="panel-meta" id="recStatusLabel" role="status">IDLE (0 FRAMES)</span>
+          <h2 class="panel-title">6. Session Recorder</h2>
+          <span class="panel-meta" id="recStatusLabel">IDLE (0 FRAMES)</span>
+          <span class="sr-only" id="recSrAnnounce" role="status"></span>
         </div>
-        <div class="btn-row">
+        <div class="btn-row" data-cols="2-1">
           <button type="button" id="btnRecToggle" aria-pressed="false">● Start Recording</button>
           <button type="button" id="btnRecClear" class="action-btn">✕ Clear</button>
         </div>
@@ -1104,37 +2380,265 @@
     </aside>
   </main>
 
+  <dialog id="liveStreamDialog" closedby="any" aria-labelledby="liveDialogTitle">
+    <div class="dialog-header">
+      <h2 id="liveDialogTitle" class="dialog-title">3-TIER CONTINUOUS LIVE STREAM INGESTION SUITE</h2>
+      <form method="dialog">
+        <button type="submit" value="dismiss" class="action-btn" style="inline-size: auto; padding-inline: 0.65rem;">✕ Close</button>
+      </form>
+    </div>
+    <p id="liveDialogStatus" class="live-status-banner" role="status">
+      Select any live ingestion tier below. Every feed is pixel-blind RGBA with per-frame PTS tracking and automatic camera pan/cut ECA guard.
+    </p>
+
+    <div class="live-tier-card">
+      <div class="live-tier-title">
+        <span>Tier 1 · Live Browser Tab / Window Capture + Crop ROI</span>
+        <span class="live-tier-tag">ZERO CORS · UNIVERSAL</span>
+      </div>
+      <p class="cal-hint">Captures any live YouTube Live, Virtual Railfan, EarthCam, Caltrans QuickMap, or sports/physics tab directly via browser display capture.</p>
+      <div class="btn-row" data-cols="1">
+        <button type="button" id="btnStartTier1Capture" class="action-btn" autofocus>◉ Capture Live Tab / Window</button>
+      </div>
+    </div>
+
+    <div class="live-tier-card">
+      <div class="live-tier-title">
+        <span>Tier 3 · Same-Origin FFmpeg fMP4 → Native MSE Relay &amp; Highway Tuner</span>
+        <span class="live-tier-tag">CALTRANS HLS + LOCAL SIM</span>
+      </div>
+      <div class="select-field">
+        <label for="tier3PresetSelect">Live Caltrans CCTV highway feeds &amp; local live relays</label>
+        <select id="tier3PresetSelect" name="tier3Preset">
+          <optgroup label="Live Public Highway Cameras (Caltrans Real-Time HLS)">
+            <option value="caltrans_d4_i80_ashby" data-lab="0" data-fps="30">[LIVE] Caltrans D4 · I-80 West of Ashby Ave, Berkeley — Overpass Occlusion (1080p HD Live)</option>
+            <option value="caltrans_d4_i280_6th" data-lab="0" data-fps="30">[LIVE] Caltrans D4 · I-280 at 6th St Offramp, San Francisco (Live)</option>
+            <option value="caltrans_d4_i880_sr238" data-lab="0" data-fps="30">[LIVE] Caltrans D4 · I-880 at SR-238 Center-Pole Freeway (1080p HD Live)</option>
+            <option value="caltrans_d4_i680_i80" data-lab="0" data-fps="30">[LIVE] Caltrans D4 · I-680 South of I-80 Cordelia (Live)</option>
+            <option value="caltrans_d4_sr4_lone_tree" data-lab="0" data-fps="30">[LIVE] Caltrans D4 · SR-4 at Lone Tree Way (Live)</option>
+          </optgroup>
+          <optgroup label="Synthetic Offline Test Relays (CI / Cut Stress)">
+            <option value="sim_live_traffic" data-lab="0" data-fps="30">[SYNTHETIC TEST] Highway Overpass Loop (30 fps fMP4)</option>
+            <option value="sim_live_cut_demo" data-lab="0" data-fps="30">[SYNTHETIC TEST] Multi-Cam Highway → Ballistic Cut (Auto-Reset Proof)</option>
+            <option value="sim_live_impulses" data-lab="2" data-fps="30">[SYNTHETIC TEST] Continuous 3-Cushion Billiards Feed (Mode C)</option>
+          </optgroup>
+        </select>
+      </div>
+      <div class="cal-field">
+        <label for="tier3CustomHlsUrl">Optional custom public HLS (.m3u8) / MP4 stream URL for local FFmpeg relay</label>
+        <span id="tier3UrlHelp" class="cal-hint">Public http(s) URL only (loopback/private RFC1918 blocked by SSRF guard).</span>
+        <input type="url" id="tier3CustomHlsUrl" name="tier3CustomUrl" placeholder="https://wzmedia.dot.ca.gov/D4/E80_JWO_ASHBY_Av.stream/playlist.m3u8" aria-describedby="tier3UrlHelp" data-error="errTier3Url" />
+        <div id="errTier3Url" class="error-msg"><span role="img" aria-label="Error">❌</span> Enter a valid http:// or https:// stream URL.</div>
+      </div>
+      <div class="btn-row" data-cols="2-1">
+        <button type="button" id="btnStartTier3Mse" class="action-btn">▶ Connect Tier 3 fMP4 MSE Stream</button>
+        <button type="button" id="btnRefreshTier3Presets" class="action-btn">↻ Probe Cameras</button>
+      </div>
+    </div>
+
+    <div class="live-tier-card">
+      <div class="live-tier-title">
+        <span>Tier 2 · Direct CORS-Verified Stream URL</span>
+        <span class="live-tier-tag">CORS READBACK VERIFIED</span>
+      </div>
+      <div class="cal-field">
+        <label for="tier2StreamUrl">CORS-enabled direct WebM / MP4 / native HLS URL</label>
+        <span id="tier2UrlHelp" class="cal-hint">Sets crossOrigin="anonymous" before load and verifies 1-px RGBA readback; offers 1-click Tier 3 relay on CORS block.</span>
+        <input type="url" id="tier2StreamUrl" name="tier2Url" placeholder="https://example.org/cors-enabled-stream.mp4" required aria-describedby="tier2UrlHelp" data-error="errTier2Url" />
+        <div id="errTier2Url" class="error-msg"><span role="img" aria-label="Error">❌</span> Enter a valid http:// or https:// stream URL.</div>
+      </div>
+      <div class="btn-row" data-cols="1">
+        <button type="button" id="btnStartTier2Url" class="action-btn">▶ Probe &amp; Connect Direct CORS Stream</button>
+        <button type="button" id="btnFallbackTier2ToTier3" class="action-btn" hidden>↪ Relay URL via Tier 3 FFmpeg Proxy</button>
+      </div>
+    </div>
+  </dialog>
+
   <video id="hiddenVideoSource" playsinline muted loop aria-hidden="true"></video>
 
   <script type="module">
     const hudEl = document.getElementById('hudCanvas');
     const pipEl = document.getElementById('pipCanvas');
+    const persistenceEl = document.getElementById('persistenceCanvas');
     const hilbertEl = document.getElementById('hilbertCanvas');
     const spectralEl = document.getElementById('spectralCanvas');
+    const physicsPhaseEl = document.getElementById('physicsPhaseCanvas');
+    const rosterSummaryEl = document.getElementById('rosterSummaryMeta');
+    const rosterReacqEl = document.getElementById('rosterReacqVal');
+    const rosterHoldChipEl = document.getElementById('rosterHoldChip');
+    const rosterHoldEl = document.getElementById('rosterHoldVal');
+
+    const rosterCardRefs = Array.from(document.querySelectorAll('.roster-card')).map((card, idx) => ({
+      card,
+      slotIdx: idx,
+      canvas: card.querySelector('.slot-pip-canvas'),
+      pinBtn: card.querySelector('.roster-pin-btn'),
+      swatch: card.querySelector('.roster-swatch'),
+      slotIdEl: card.querySelector('.roster-slot-id'),
+      badgeEl: card.querySelector('.roster-state-badge'),
+      lblSpd: card.querySelector('.rs-lbl-spd'),
+      valSpd: card.querySelector('.rs-val-spd'),
+      lblAng: card.querySelector('.rs-lbl-ang'),
+      valAng: card.querySelector('.rs-val-ang'),
+      valAge: card.querySelector('.rs-val-age'),
+      valId: card.querySelector('.rs-val-id'),
+      prevTid: -1,
+      prevState: '',
+      prevPinned: false,
+      lastDomMs: 0,
+    }));
 
     const hudOffscreen = hudEl.transferControlToOffscreen();
     const pipOffscreen = pipEl.transferControlToOffscreen();
+    const persistenceOffscreen = persistenceEl.transferControlToOffscreen();
     const hilbertOffscreen = hilbertEl.transferControlToOffscreen();
     const spectralOffscreen = spectralEl.transferControlToOffscreen();
+    const physicsPhaseOffscreen = physicsPhaseEl ? physicsPhaseEl.transferControlToOffscreen() : null;
+    const slotPipOffscreens = rosterCardRefs.map((r) => r.canvas.transferControlToOffscreen());
 
-    const worker = new Worker('./worker.js?v=20261110f');
+    const worker = new Worker('./worker.js?v=20261114b');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
+      if (dom.pillKernel && dom.pillKernel.textContent.includes('BOOTING')) {
+        dom.pillKernel.textContent = '⚠ KERNEL WORKER ERROR';
+      }
     });
     worker.addEventListener('messageerror', (err) => {
       console.error('Worker messageerror:', err);
     });
+    const initTransfers = [hudOffscreen, pipOffscreen, persistenceOffscreen, hilbertOffscreen, spectralOffscreen];
+    if (physicsPhaseOffscreen) initTransfers.push(physicsPhaseOffscreen);
+    initTransfers.push(...slotPipOffscreens);
     worker.postMessage(
       {
         type: 'init',
-        wasmUrl: './chronos_spectral.wasm?v=20261110f',
+        wasmUrl: './chronos_spectral.wasm?v=20261114b',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
+        persistenceCanvas: persistenceOffscreen,
         hilbertCanvas: hilbertOffscreen,
         spectralCanvas: spectralOffscreen,
+        physicsPhaseCanvas: physicsPhaseOffscreen,
+        slotPipCanvases: slotPipOffscreens,
       },
-      [hudOffscreen, pipOffscreen, hilbertOffscreen, spectralOffscreen]
+      initTransfers
     );
+
+    rosterCardRefs.forEach((ref) => {
+      ref.pinBtn.addEventListener('click', () => {
+        if (ref.pinBtn.getAttribute('aria-disabled') === 'true') return;
+        const tid = Number(ref.card.dataset.tid) || 0;
+        if (tid > 0) {
+          worker.postMessage({ type: 'pin_target', trackId: tid });
+        }
+      });
+    });
+
+    function setTextIfChanged(el, next) {
+      if (el.textContent !== next) el.textContent = next;
+    }
+
+    function updateSlotRosterUi(slotRoster) {
+      if (!Array.isArray(slotRoster)) return;
+      const nowMs = performance.now();
+      let totalReacq = 0;
+      let holdCount = 0;
+
+      for (let i = 0; i < rosterCardRefs.length && i < slotRoster.length; i++) {
+        const ref = rosterCardRefs[i];
+        const s = slotRoster[i];
+        if (!s) continue;
+        if (s.state !== 'IDLE') totalReacq += s.reacq || 0;
+        if (s.state === 'HOLD') holdCount++;
+
+        const stateChanged =
+          ref.prevTid !== s.tid ||
+          ref.prevState !== s.state ||
+          ref.prevPinned !== Boolean(s.isPinned);
+
+        if (stateChanged) {
+          ref.prevTid = s.tid;
+          ref.prevState = s.state;
+          ref.prevPinned = Boolean(s.isPinned);
+          ref.card.dataset.state = s.state;
+          ref.card.dataset.tid = String(s.tid || 0);
+          ref.card.dataset.pinned = s.isPinned ? '1' : '0';
+
+          const isOperable = s.tid > 0 && s.state !== 'IDLE';
+          ref.pinBtn.setAttribute('aria-disabled', String(!isOperable));
+          ref.pinBtn.setAttribute('aria-pressed', String(Boolean(s.isPinned)));
+          const slotLabel = String(i + 1).padStart(2, '0');
+          ref.pinBtn.setAttribute(
+            'aria-label',
+            isOperable
+              ? `${s.isPinned ? 'Unpin' : 'Pin focus on'} Slot ${slotLabel} Target T${s.tid}`
+              : `Slot ${slotLabel} standby`
+          );
+          ref.swatch.style.backgroundColor = s.state === 'IDLE' ? '#4c6180' : s.color;
+          setTextIfChanged(ref.slotIdEl, s.tid > 0 ? `S${i + 1} · T${s.tid}` : `S${i + 1} · --`);
+          const badgeTxt = s.isPinned && s.state !== 'PINNED' ? `PIN·${s.state.slice(0, 3)}` : s.state;
+          setTextIfChanged(ref.badgeEl, badgeTxt);
+        }
+
+        // Throttle numeric metric mutations to ~4.5 Hz (220 ms) unless slot state/ID just changed
+        if (!stateChanged && nowMs - ref.lastDomMs < 220) continue;
+        ref.lastDomMs = nowMs;
+
+        if (s.state === 'IDLE') {
+          setTextIfChanged(ref.lblSpd, 'SPD');
+          setTextIfChanged(ref.valSpd, `-- ${s.speedUnit}`);
+          setTextIfChanged(ref.lblAng, 'HDG · ω');
+          setTextIfChanged(ref.valAng, '--°');
+          setTextIfChanged(ref.valAge, '--');
+          setTextIfChanged(ref.valId, '-- · 0');
+        } else {
+          setTextIfChanged(ref.lblSpd, s.freqHz >= 0.35 ? 'SPD · HZ' : 'SPD');
+          const spdTxt = s.speedUnit === 'OOP'
+            ? 'OUT-PLANE'
+            : s.speedUnit === 'm/s'
+            ? `${s.speed.toFixed(1)} m/s`
+            : `${Math.round(s.speed)} px/s`;
+          setTextIfChanged(
+            ref.valSpd,
+            s.freqHz >= 0.35 && s.speedUnit !== 'OOP'
+              ? `${spdTxt}·${s.freqHz.toFixed(1)}Hz`
+              : spdTxt
+          );
+
+          if (s.isPivot) {
+            setTextIfChanged(ref.lblAng, 'SWG · R');
+            const swSign = s.angleDeg >= 0 ? '+' : '';
+            const rTxt = s.rateUnit === 'm' ? `${s.rateOrRad.toFixed(2)}m` : `${Math.round(s.rateOrRad)}px`;
+            setTextIfChanged(ref.valAng, `${swSign}${s.angleDeg.toFixed(1)}° ${rTxt}`);
+          } else {
+            setTextIfChanged(ref.lblAng, 'HDG · ω');
+            const hSign = s.angleDeg >= 0 ? '+' : '';
+            const wInt = Math.max(-999, Math.min(999, Math.round(s.rateOrRad)));
+            const wSign = wInt >= 0 ? '+' : '';
+            setTextIfChanged(ref.valAng, `${hSign}${Math.round(s.angleDeg)}° ${wSign}${wInt}°/s`);
+          }
+
+          const ageTxt = s.ageSec >= 10.0 ? `${s.ageSec.toFixed(0)}s` : `${s.ageSec.toFixed(1)}s`;
+          setTextIfChanged(
+            ref.valAge,
+            s.coastFrames > 0 ? `${ageTxt} (${s.coastFrames}f)` : ageTxt
+          );
+          setTextIfChanged(ref.valId, `v₂:${s.padicVal} · ↻${s.reacq}`);
+        }
+      }
+
+      if (rosterSummaryEl && nowMs - (rosterSummaryEl._lastMs || 0) >= 220) {
+        rosterSummaryEl._lastMs = nowMs;
+        if (rosterReacqEl) setTextIfChanged(rosterReacqEl, String(totalReacq));
+        if (rosterHoldEl) setTextIfChanged(rosterHoldEl, String(holdCount));
+        if (rosterHoldChipEl) {
+          const nextActive = holdCount > 0 ? '1' : '0';
+          if (rosterHoldChipEl.dataset.active !== nextActive) {
+            rosterHoldChipEl.dataset.active = nextActive;
+          }
+        }
+      }
+    }
 
     // ========================================================================
     // Polyphonic Delayed-View Synchronized WebAudio Synthesizer
@@ -1270,20 +2774,31 @@
     }
 
     // ========================================================================
-    // Deduplicated Live Webcam & MP4 Frame Pump + Frame-Accurate Transport
+    // Epoch-Tagged Frame Pump, Worker frame_ack Backpressure & 3-Tier Live Suite
     // ========================================================================
     const videoEl = document.getElementById('hiddenVideoSource');
+    const liveDialog = document.getElementById('liveStreamDialog');
     let activeMediaStream = null;
     let currentObjectUrl = null;
+    let activeMseAbort = null;
+    let activeMseMediaSource = null;
+    let activeMseRetryTimer = 0;
+    let activeLiveRetryCount = 0;
+    let activeLiveConfig = null;
     let videoPumpActive = false;
-    let activeSourceMode = 'testbench';
+    let activeSourceMode = 'testbench'; // 'testbench' | 'webcam' | 'video' | 'live'
     let activeVideoFps = 30.0;
     let lastMediaTime = -1;
     let lastPumpPerfMs = 0;
     let activeResMode = 0;
     let activeFrameW = 320;
     let activeFrameH = 180;
-    let pumpFrameInFlight = false;
+    let sourceEpoch = 1;
+    let frameSeq = 0;
+    let workerFrameBusy = false;
+    let queuedPendingFrame = null;
+    let pumpDroppedFrames = 0;
+    let bitmapCaptureBusy = false;
     const fallbackCapCanvas = document.createElement('canvas');
     const fallbackCapCtx = fallbackCapCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -1292,21 +2807,50 @@
       pillArena: document.getElementById('pillArena'),
       pillPerf: document.getElementById('pillPerf'),
       pillFps: document.getElementById('pillFps'),
+      pillStreamHealth: document.getElementById('pillStreamHealth'),
       inputResMeta: document.getElementById('inputResMeta'),
       hudSourceLabel: document.getElementById('hudSourceLabel'),
       mortonReadout: document.getElementById('mortonReadout'),
       lblPadicSwaps: document.getElementById('lblPadicSwaps'),
       kpiPadicSwaps: document.getElementById('kpiPadicSwaps'),
       kpiKalmanSwaps: document.getElementById('kpiKalmanSwaps'),
+      lblClutterDb: document.getElementById('lblClutterDb'),
       kpiClutterDb: document.getElementById('kpiClutterDb'),
       lblWasmMs: document.getElementById('lblWasmMs'),
       kpiWasmMs: document.getElementById('kpiWasmMs'),
       kpiTargets: document.getElementById('kpiTargets'),
       lblCollisions: document.getElementById('lblCollisions'),
       kpiCollisions: document.getElementById('kpiCollisions'),
+      persistSummaryMeta: document.getElementById('persistSummaryMeta'),
+      kpiPersistSpan: document.getElementById('kpiPersistSpan'),
+      kpiPersistActivePeak: document.getElementById('kpiPersistActivePeak'),
+      kpiPersistUnique: document.getElementById('kpiPersistUnique'),
+      kpiPersistRelocks: document.getElementById('kpiPersistRelocks'),
+      kpiPersistLongest: document.getElementById('kpiPersistLongest'),
+      kpiPersistSustained: document.getElementById('kpiPersistSustained'),
       hilbertMeta: document.getElementById('hilbertMeta'),
       spectralMeta: document.getElementById('spectralMeta'),
       fistaGapMeta: document.getElementById('fistaGapMeta'),
+      physicsIdPanel: document.getElementById('physicsIdPanel'),
+      physicsIdMeta: document.getElementById('physicsIdMeta'),
+      physRegimeBadge: document.getElementById('physRegimeBadge'),
+      physJumpBadge: document.getElementById('physJumpBadge'),
+      physicsOdeEq: document.getElementById('physicsOdeEq'),
+      kpiPhysicsR2: document.getElementById('kpiPhysicsR2'),
+      kpiPhysicsConf: document.getElementById('kpiPhysicsConf'),
+      kpiImmWeights: document.getElementById('kpiImmWeights'),
+      kpiPhysicsBeta: document.getElementById('kpiPhysicsBeta'),
+      kpiPhysicsThrust: document.getElementById('kpiPhysicsThrust'),
+      kpiPhysicsDamping: document.getElementById('kpiPhysicsDamping'),
+      kpiPhysicsEllipticT: document.getElementById('kpiPhysicsEllipticT'),
+      kpiKuramotoSync: document.getElementById('kpiKuramotoSync'),
+      kpiLyapunovMax: document.getElementById('kpiLyapunovMax'),
+      kpiTaubinDelta: document.getElementById('kpiTaubinDelta'),
+      kpiTaubinKappa: document.getElementById('kpiTaubinKappa'),
+      kpiFistaKnots: document.getElementById('kpiFistaKnots'),
+      kpiTwoBodyMassE: document.getElementById('kpiTwoBodyMassE'),
+      kpiTwoBodyMomRes: document.getElementById('kpiTwoBodyMomRes'),
+      kpiPhysicsConserv: document.getElementById('kpiPhysicsConserv'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -1333,6 +2877,8 @@
       calRulerM: document.getElementById('calRulerM'),
       calPlaneW: document.getElementById('calPlaneW'),
       calPlaneH: document.getElementById('calPlaneH'),
+      calCoordForm: document.getElementById('calCoordForm'),
+      calCoordMode: document.getElementById('calCoordMode'),
       labBadge: document.getElementById('labBadge'),
       labDescription: document.getElementById('labDescription'),
       btnLabStimulus: document.getElementById('btnLabStimulus'),
@@ -1340,6 +2886,15 @@
       recStatusLabel: document.getElementById('recStatusLabel'),
       benchScenarioField: document.getElementById('benchScenarioField'),
       benchScenarioSelect: document.getElementById('benchScenarioSelect'),
+      liveStreamBar: document.getElementById('liveStreamBar'),
+      liveTierBadge: document.getElementById('liveTierBadge'),
+      liveStreamMeta: document.getElementById('liveStreamMeta'),
+      liveCropSelect: document.getElementById('liveCropSelect'),
+      liveDialogStatus: document.getElementById('liveDialogStatus'),
+      tier3PresetSelect: document.getElementById('tier3PresetSelect'),
+      tier3CustomHlsUrl: document.getElementById('tier3CustomHlsUrl'),
+      tier2StreamUrl: document.getElementById('tier2StreamUrl'),
+      btnFallbackTier2ToTier3: document.getElementById('btnFallbackTier2ToTier3'),
       videoTransportBar: document.getElementById('videoTransportBar'),
       vidTimeLabel: document.getElementById('vidTimeLabel'),
       btnVidPlayPause: document.getElementById('btnVidPlayPause'),
@@ -1364,15 +2919,39 @@
       activeSourceMode = mode;
       dom.benchScenarioField.hidden = mode !== 'testbench';
       dom.videoTransportBar.hidden = mode !== 'video';
+      dom.liveStreamBar.hidden = mode !== 'live';
+      dom.pillStreamHealth.hidden = mode === 'testbench';
       syncStimulusButtonAvailability();
       updateVideoTimeLabel();
     }
 
-    function stopMediaCapture() {
+    function flushPendingQueue() {
+      if (queuedPendingFrame && queuedPendingFrame.bitmap && typeof queuedPendingFrame.bitmap.close === 'function') {
+        queuedPendingFrame.bitmap.close();
+      }
+      queuedPendingFrame = null;
+      workerFrameBusy = false;
+      bitmapCaptureBusy = false;
+    }
+
+    function stopMediaCapture(preserveLiveRetry = false) {
+      sourceEpoch++;
       videoPumpActive = false;
-      pumpFrameInFlight = false;
       lastMediaTime = -1;
       lastPumpPerfMs = 0;
+      pumpDroppedFrames = 0;
+      flushPendingQueue();
+      if (!preserveLiveRetry) {
+        clearTimeout(activeMseRetryTimer);
+        activeMseRetryTimer = 0;
+        activeLiveRetryCount = 0;
+        activeLiveConfig = null;
+      }
+      if (activeMseAbort) {
+        activeMseAbort.abort();
+        activeMseAbort = null;
+      }
+      activeMseMediaSource = null;
       videoEl.pause();
       if (activeMediaStream) {
         activeMediaStream.getTracks().forEach((t) => t.stop());
@@ -1383,76 +2962,136 @@
         currentObjectUrl = null;
       }
       videoEl.srcObject = null;
+      videoEl.removeAttribute('crossorigin');
       videoEl.removeAttribute('src');
+      videoEl.load();
     }
 
-    async function captureAndSendCurrentVideoFrame(dtSec) {
-      if (videoEl.readyState < 2 || pumpFrameInFlight) return;
-      pumpFrameInFlight = true;
-      try {
-        const bitmap = await createImageBitmap(videoEl);
-        worker.postMessage({ type: 'video_frame', bitmap, dtSec }, [bitmap]);
-      } catch (_err) {
-        try {
-          if (fallbackCapCanvas.width !== activeFrameW || fallbackCapCanvas.height !== activeFrameH) {
-            fallbackCapCanvas.width = activeFrameW;
-            fallbackCapCanvas.height = activeFrameH;
-          }
-          fallbackCapCtx.drawImage(videoEl, 0, 0, activeFrameW, activeFrameH);
-          const img = fallbackCapCtx.getImageData(0, 0, activeFrameW, activeFrameH);
-          const copy = new Uint8Array(img.data);
-          worker.postMessage({ type: 'video_rgba', buffer: copy.buffer, dtSec }, [copy.buffer]);
-        } catch (_fallbackErr) {
-          // Ignore transient decode race during source switch
-        }
-      } finally {
-        pumpFrameInFlight = false;
-      }
-    }
-
-    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs) {
-      if (!videoPumpActive || pumpFrameInFlight || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+    function dispatchBitmapFrameToWorker(item) {
+      if (!item || item.epoch !== sourceEpoch) {
+        if (item && item.bitmap && typeof item.bitmap.close === 'function') item.bitmap.close();
         return;
       }
-      if (mediaTimeSec === lastMediaTime) return;
+      if (!workerFrameBusy) {
+        workerFrameBusy = true;
+        worker.postMessage(
+          {
+            type: 'video_frame',
+            epoch: item.epoch,
+            seq: item.seq,
+            bitmap: item.bitmap,
+            dtSec: item.dtSec,
+            mediaTimeSec: item.mediaTimeSec,
+          },
+          [item.bitmap]
+        );
+      } else {
+        if (queuedPendingFrame && queuedPendingFrame.bitmap) {
+          queuedPendingFrame.bitmap.close();
+          pumpDroppedFrames++;
+        }
+        queuedPendingFrame = item;
+      }
+    }
+
+    async function captureAndSendCurrentVideoFrame(dtSec, mediaTimeSec, expectedEpoch = sourceEpoch) {
+      if (videoEl.readyState < 2 || bitmapCaptureBusy || expectedEpoch !== sourceEpoch) return;
+      bitmapCaptureBusy = true;
+      const seq = ++frameSeq;
+      try {
+        const bitmap = await createImageBitmap(videoEl);
+        if (expectedEpoch !== sourceEpoch) {
+          bitmap.close();
+          return;
+        }
+        dispatchBitmapFrameToWorker({
+          epoch: expectedEpoch,
+          seq,
+          bitmap,
+          dtSec,
+          mediaTimeSec,
+        });
+      } catch (_err) {
+        if (expectedEpoch === sourceEpoch && !workerFrameBusy) {
+          try {
+            if (fallbackCapCanvas.width !== activeFrameW || fallbackCapCanvas.height !== activeFrameH) {
+              fallbackCapCanvas.width = activeFrameW;
+              fallbackCapCanvas.height = activeFrameH;
+            }
+            fallbackCapCtx.drawImage(videoEl, 0, 0, activeFrameW, activeFrameH);
+            const img = fallbackCapCtx.getImageData(0, 0, activeFrameW, activeFrameH);
+            const copy = new Uint8Array(img.data);
+            worker.postMessage(
+              { type: 'video_rgba', buffer: copy.buffer, dtSec, mediaTimeSec },
+              [copy.buffer]
+            );
+          } catch (_fallbackErr) {
+            // Ignore transient decode or CORS probe race
+          }
+        }
+      } finally {
+        bitmapCaptureBusy = false;
+      }
+    }
+
+    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs, pumpEpoch) {
+      if (!videoPumpActive || pumpEpoch !== sourceEpoch || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
+        return;
+      }
+      const hasValidPts = Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0;
+      if (hasValidPts && mediaTimeSec === lastMediaTime && (activeSourceMode === 'video' || activeSourceMode === 'live')) {
+        return;
+      }
 
       // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
-      if (lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
+      if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
         worker.postMessage({ type: 'lab_action', action: 'reset' });
         lastMediaTime = -1;
         lastPumpPerfMs = 0;
       }
 
-      let dtSec = 1.0 / Math.max(8.0, activeVideoFps);
-      if (lastMediaTime >= 0 && mediaTimeSec > lastMediaTime && (mediaTimeSec - lastMediaTime) < 0.25) {
-        dtSec = Math.max(0.004, mediaTimeSec - lastMediaTime);
+      const nomDt = 1.0 / Math.max(8.0, activeVideoFps);
+      let dtSec = nomDt;
+      if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec > lastMediaTime) {
+        const rawMediaDt = mediaTimeSec - lastMediaTime;
+        dtSec = rawMediaDt > 0.5 ? nomDt : Math.max(0.002, rawMediaDt);
       } else if (lastPumpPerfMs > 0) {
-        dtSec = Math.min(0.15, Math.max(0.004, (nowPerfMs - lastPumpPerfMs) * 0.001));
+        const rawPerfDt = (nowPerfMs - lastPumpPerfMs) * 0.001;
+        dtSec = rawPerfDt > 0.5 ? nomDt : Math.max(0.002, rawPerfDt);
       }
-      lastMediaTime = mediaTimeSec;
+      if (hasValidPts) lastMediaTime = mediaTimeSec;
       lastPumpPerfMs = nowPerfMs;
+
+      // Live MSE edge maintenance: preserve multi-segment HLS cushion (~10-22s) while bounding extreme drift (>35s)
+      if (activeSourceMode === 'live' && activeMseMediaSource && videoEl.buffered.length > 0) {
+        const bufEnd = videoEl.buffered.end(videoEl.buffered.length - 1);
+        if (bufEnd - videoEl.currentTime > 35.0) {
+          videoEl.currentTime = Math.max(0, bufEnd - 15.0);
+        }
+      }
+
       updateVideoTimeLabel();
-      await captureAndSendCurrentVideoFrame(dtSec);
+      await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch);
     }
 
     function startVideoPump() {
       videoPumpActive = true;
-      pumpFrameInFlight = false;
       lastMediaTime = -1;
       lastPumpPerfMs = 0;
+      const myEpoch = sourceEpoch;
 
       if (typeof videoEl.requestVideoFrameCallback === 'function') {
         const onVideoFrame = (now, metadata) => {
-          if (!videoPumpActive) return;
+          if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           videoEl.requestVideoFrameCallback(onVideoFrame);
-          forwardUniqueVideoFrame(metadata.mediaTime, now);
+          forwardUniqueVideoFrame(metadata.mediaTime, now, myEpoch);
         };
         videoEl.requestVideoFrameCallback(onVideoFrame);
       } else {
         const onRafFallback = (now) => {
-          if (!videoPumpActive) return;
+          if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           requestAnimationFrame(onRafFallback);
-          forwardUniqueVideoFrame(videoEl.currentTime, now);
+          forwardUniqueVideoFrame(videoEl.currentTime, now, myEpoch);
         };
         requestAnimationFrame(onRafFallback);
       }
@@ -1472,12 +3111,13 @@
       dom.btnCalRuler.setAttribute('aria-pressed', String(rulerOn));
       dom.btnCalQuad.setAttribute('aria-pressed', String(quadOn));
 
+      const isSurveyed = m.calProvenance === 'surveyed';
       if (m.calMode === 'homography') {
-        dom.calBadge.textContent = '4-PT PLANE H';
+        dom.calBadge.textContent = isSurveyed ? 'SURVEYED 4-PT H' : 'ASSUMED 4-PT H';
       } else if (m.calMode === 'ruler') {
-        dom.calBadge.textContent = '2-PT RULER';
+        dom.calBadge.textContent = isSurveyed ? 'SURVEYED RULER' : 'ASSUMED RULER';
       } else if (m.calMode === 'auto_g') {
-        dom.calBadge.textContent = 'AUTO-g 9.81';
+        dom.calBadge.textContent = m.autoGLocked ? 'AUTO-g LOCKED' : 'AUTO-g 1/2 ARC';
       } else {
         dom.calBadge.textContent = 'PX UNITS';
       }
@@ -1490,7 +3130,7 @@
         if (typeof numVal === 'number' && Number.isFinite(numVal) && document.activeElement !== inputEl) {
           inputEl.value = numVal.toFixed(2);
           inputEl.setCustomValidity('');
-          inputEl.removeAttribute('aria-invalid');
+          syncAria(inputEl, false);
         }
       };
       syncInputVal(dom.calRulerM, m.rulerMeters);
@@ -1498,18 +3138,36 @@
       syncInputVal(dom.calPlaneH, m.planeH);
     }
 
+    let lastRecStateKey = 'idle';
     function updateRecorderUi(active, frames, durationSec) {
       uiRecActive = Boolean(active);
       const btnRec = document.getElementById('btnRecToggle');
       btnRec.classList.toggle('active', uiRecActive);
       btnRec.setAttribute('aria-pressed', String(uiRecActive));
-      btnRec.textContent = uiRecActive ? '■ Pause Recording' : '● Start Recording';
+      const nextBtnTxt = uiRecActive ? '■ Pause Recording' : '● Start Recording';
+      if (btnRec.textContent !== nextBtnTxt) btnRec.textContent = nextBtnTxt;
       const dur = typeof durationSec === 'number' ? durationSec.toFixed(1) : '0.0';
-      dom.recStatusLabel.textContent = uiRecActive
+      const nextStatusTxt = uiRecActive
         ? `● REC ${frames} FRAMES (${dur}s)`
         : frames > 0
         ? `PAUSED (${frames} FRAMES / ${dur}s)`
         : 'IDLE (0 FRAMES)';
+      if (dom.recStatusLabel.textContent !== nextStatusTxt) {
+        dom.recStatusLabel.textContent = nextStatusTxt;
+      }
+      const stateKey = uiRecActive ? 'rec' : frames > 0 ? 'paused' : 'idle';
+      if (stateKey !== lastRecStateKey) {
+        lastRecStateKey = stateKey;
+        const srEl = document.getElementById('recSrAnnounce');
+        if (srEl) {
+          srEl.textContent =
+            stateKey === 'rec'
+              ? 'Session recording started'
+              : stateKey === 'paused'
+              ? `Session recording paused at ${frames} frames`
+              : 'Session recorder cleared';
+        }
+      }
     }
 
     function triggerBlobDownload(filename, mimeType, textContent) {
@@ -1529,11 +3187,193 @@
       return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     }
 
+    let lastPersistDomMs = 0;
+    let lastPersistPeakSeen = -1;
+    let lastPersistUniqueSeen = -1;
+
+    function formatClockMmSs(sec) {
+      const s = Math.max(0, Math.floor(sec || 0));
+      const m = Math.floor(s / 60);
+      const rem = s % 60;
+      return `${String(m).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+    }
+
+    function updatePersistenceDomUi(p, activeTargets) {
+      if (!p || !dom.kpiPersistSpan) return;
+      const nowMs = performance.now();
+      const peakChanged = p.peakSimultaneous !== lastPersistPeakSeen;
+      const uniqChanged = p.uniqueIds !== lastPersistUniqueSeen;
+      const resetOccurred = p.uniqueIds < lastPersistUniqueSeen || p.sessionElapsedSec < 0.25;
+      if (!resetOccurred && !peakChanged && !uniqChanged && nowMs - lastPersistDomMs < 1000) {
+        return;
+      }
+      lastPersistDomMs = nowMs;
+      lastPersistPeakSeen = p.peakSimultaneous;
+      lastPersistUniqueSeen = p.uniqueIds;
+
+      setTextIfChanged(dom.persistSummaryMeta, `DORMANT ARCHIVE: ${p.dormantActive} / 32`);
+      setTextIfChanged(dom.kpiPersistSpan, formatClockMmSs(p.sessionElapsedSec));
+      setTextIfChanged(dom.kpiPersistActivePeak, `${activeTargets} / ${p.peakSimultaneous}`);
+      setTextIfChanged(dom.kpiPersistUnique, String(p.uniqueIds));
+      setTextIfChanged(dom.kpiPersistRelocks, String(p.totalRelocks));
+      if (p.longestTenureTid > 0 && p.longestTenureFrames > 0) {
+        const sec = p.longestTenureSec || 0;
+        const durTxt = sec >= 60 ? formatClockMmSs(sec) : `${sec.toFixed(sec < 10 ? 1 : 0)}s`;
+        setTextIfChanged(dom.kpiPersistLongest, `T${p.longestTenureTid} (${durTxt})`);
+      } else {
+        setTextIfChanged(dom.kpiPersistLongest, '--');
+      }
+      setTextIfChanged(dom.kpiPersistSustained, `${p.sustained10s} / ${p.sustained60s}`);
+    }
+
+    const PHYS_REGIME_LABELS = [
+      'INERTIAL CV',
+      'BALLISTIC',
+      'AERO DRAG',
+      'POWERED BOOST',
+      'PARACHUTE',
+      'PENDULUM HARM',
+      'MICRO TREMOR',
+      'COLLISIONAL',
+      'CURVED CTRV',
+    ];
+    const PHYS_JUMP_LABELS = ['NONE', 'PEG JUMP', 'BURNOUT', 'CANOPY', 'COLLISION'];
+
+    let lastPhysicsDomMs = 0;
+    let lastPhysicsActiveSeen = null;
+    let lastPhysicsRegimeSeen = -1;
+    let lastPhysicsJumpSeen = -1;
+    let lastPhysicsPairFrameSeen = -1;
+
+    function fmtPhysicsCompact(v) {
+      if (!Number.isFinite(v)) return '--';
+      const a = Math.abs(v);
+      if (a === 0) return '0';
+      if (a < 1e-3 || a >= 10000) return v.toExponential(1);
+      if (a < 0.1) return v.toFixed(4);
+      if (a < 10) return v.toFixed(2);
+      return v.toFixed(1);
+    }
+
+    function updatePhysicsIdDomUi(pid, m) {
+      if (!pid || !dom.physicsOdeEq) return;
+      const nowMs = performance.now();
+      const has = Boolean(pid.hasPrimary);
+      const regCode = Math.max(0, Math.min(8, Math.round(pid.physRegime || 0)));
+      const jCode = Math.max(0, Math.min(4, Math.round(pid.constraintJumpCode || 0)));
+      const pairFrame = Math.round(pid.lastPairFrame || 0);
+      const resetOccurred = Boolean(m && m.sessionPersistence && m.sessionPersistence.sessionElapsedSec < 0.25);
+      const stateChanged =
+        has !== lastPhysicsActiveSeen ||
+        regCode !== lastPhysicsRegimeSeen ||
+        jCode !== lastPhysicsJumpSeen ||
+        pairFrame !== lastPhysicsPairFrameSeen;
+
+      if (!resetOccurred && !stateChanged && nowMs - lastPhysicsDomMs < 250) {
+        return;
+      }
+      lastPhysicsDomMs = nowMs;
+      lastPhysicsActiveSeen = has;
+      lastPhysicsRegimeSeen = regCode;
+      lastPhysicsJumpSeen = jCode;
+      lastPhysicsPairFrameSeen = pairFrame;
+
+      const knots = Math.max(0, Math.round(pid.fistaSharpKnots || 0));
+      const r2 = Number.isFinite(pid.odeR2) ? pid.odeR2 : 0;
+      const confPct = Math.round((Number.isFinite(pid.physRegimeConf) ? pid.physRegimeConf : 0) * 100);
+      const unitTxt = pid.unitMode === 'metric' ? 'METRIC' : (pid.unitMode === 'out_of_plane' ? 'OUT-OF-PLANE' : 'PX');
+
+      setTextIfChanged(dom.physicsIdMeta, `ODE R² ${has ? r2.toFixed(3) : '--'} | KNOTS ${knots} | ${unitTxt}`);
+
+      const regName = (pid.physRegimeName || PHYS_REGIME_LABELS[regCode] || 'INERTIAL CV').replace(/_/g, ' ');
+      setTextIfChanged(dom.physRegimeBadge, `R${regCode} · ${regName} (${confPct}%)`);
+      if (dom.physRegimeBadge.dataset.active !== (has ? '1' : '0')) {
+        dom.physRegimeBadge.dataset.active = has ? '1' : '0';
+      }
+      if (dom.physRegimeBadge.dataset.regime !== String(regCode)) {
+        dom.physRegimeBadge.dataset.regime = String(regCode);
+      }
+
+      const jName = (pid.constraintJumpName || PHYS_JUMP_LABELS[jCode] || 'NONE').replace(/_/g, ' ');
+      setTextIfChanged(dom.physJumpBadge, `J${jCode} · ${jName}`);
+      if (dom.physJumpBadge.dataset.jump !== String(jCode)) {
+        dom.physJumpBadge.dataset.jump = String(jCode);
+      }
+
+      const eq = has && pid.symbolicOde ? String(pid.symbolicOde) : "x'' = 0, y'' = 0";
+      setTextIfChanged(dom.physicsOdeEq, eq);
+      if (dom.physicsOdeEq.title !== eq) {
+        dom.physicsOdeEq.title = eq;
+      }
+
+      const wCv = Number.isFinite(pid.immWcv) ? pid.immWcv : 0;
+      const wBal = Number.isFinite(pid.immWbal) ? pid.immWbal : 0;
+      const wTo = Number.isFinite(pid.immWturnOsc) ? pid.immWturnOsc : 0;
+      setTextIfChanged(dom.kpiPhysicsR2, has ? r2.toFixed(3) : '--');
+      setTextIfChanged(dom.kpiPhysicsConf, has ? `${confPct}% (R${regCode})` : '0%');
+      setTextIfChanged(dom.kpiImmWeights, has ? `${wCv.toFixed(2)}/${wBal.toFixed(2)}/${wTo.toFixed(2)}` : '0.33/0.33/0.34');
+
+      const disp = pid.display || {};
+      const betaRaw = pid.aeroDragBeta || 0;
+      const betaVal = Number.isFinite(disp.beta) ? disp.beta : betaRaw;
+      const betaUnit = disp.betaUnit || 'px⁻¹';
+      setTextIfChanged(dom.kpiPhysicsBeta, has && betaRaw > 1e-7 ? `${fmtPhysicsCompact(betaVal)} ${betaUnit}` : '--');
+
+      const thrustRaw = pid.thrustAccel || 0;
+      const thrustVal = Number.isFinite(disp.thrust) ? disp.thrust : thrustRaw;
+      const thrustUnit = disp.thrustUnit || 'px/s²';
+      setTextIfChanged(dom.kpiPhysicsThrust, has && thrustRaw > 1e-4 ? `${fmtPhysicsCompact(thrustVal)} ${thrustUnit}` : '--');
+
+      const zeta = pid.dampingZeta || 0;
+      const qFac = pid.qualityFactorQ || 0;
+      const qTxt = qFac >= 998.5 ? 'INF' : qFac.toFixed(1);
+      setTextIfChanged(dom.kpiPhysicsDamping, has && (zeta > 0 || qFac > 0) ? `${zeta.toFixed(3)} / ${qTxt}` : '-- / --');
+
+      const tEll = pid.ellipticPeriodS || 0;
+      setTextIfChanged(dom.kpiPhysicsEllipticT, has && tEll > 0 ? `${tEll.toFixed(3)} s` : '-- s');
+
+      const oscN = Math.max(0, Math.round(pid.kuramotoOscCount || 0));
+      const rSync = pid.kuramotoOrderR || 0;
+      setTextIfChanged(dom.kpiKuramotoSync, oscN >= 2 ? `${rSync.toFixed(2)} / ${oscN}` : `-- / ${oscN}`);
+
+      const lyap = pid.lyapunovDivRate || 0;
+      setTextIfChanged(dom.kpiLyapunovMax, has && lyap > 0 ? `${lyap.toFixed(3)} s⁻¹` : '-- s⁻¹');
+
+      const tdRaw = pid.taubinVsKasaDeltaPx || 0;
+      const tdVal = Number.isFinite(disp.taubinDelta) ? disp.taubinDelta : tdRaw;
+      const tdUnit = disp.taubinDeltaUnit || 'px';
+      setTextIfChanged(dom.kpiTaubinDelta, has && tdRaw > 0 ? `${fmtPhysicsCompact(tdVal)} ${tdUnit}` : '-- px');
+
+      const kapRaw = pid.taubinCurvatureInvPx || 0;
+      const kapVal = Number.isFinite(disp.curvature) ? disp.curvature : kapRaw;
+      const kapUnit = disp.curvatureUnit || 'px⁻¹';
+      setTextIfChanged(dom.kpiTaubinKappa, has && kapRaw > 1e-6 ? `${fmtPhysicsCompact(kapVal)} ${kapUnit}` : '--');
+
+      setTextIfChanged(dom.kpiFistaKnots, String(knots));
+
+      const restE = pid.normalRestitutionE || 0;
+      if (pairFrame > 0 && (pid.lastPairMassRatio || 0) > 0) {
+        setTextIfChanged(dom.kpiTwoBodyMassE, `${pid.lastPairMassRatio.toFixed(2)} · ${restE.toFixed(2)}`);
+        const retPct = Math.round((pid.lastPairEnergyRetention || 0) * 100);
+        setTextIfChanged(dom.kpiTwoBodyMomRes, `${(pid.lastPairMomResid || 0).toFixed(3)} / ${retPct}%`);
+      } else if (has && restE > 0) {
+        setTextIfChanged(dom.kpiTwoBodyMassE, `-- · ${restE.toFixed(2)}`);
+        setTextIfChanged(dom.kpiTwoBodyMomRes, '--');
+      } else {
+        setTextIfChanged(dom.kpiTwoBodyMassE, '--');
+        setTextIfChanged(dom.kpiTwoBodyMomRes, '--');
+      }
+
+      const eVal = Number.isFinite(disp.energy) ? disp.energy : (pid.specificEnergy || 0);
+      const lzVal = Number.isFinite(disp.angMom) ? disp.angMom : (pid.specificAngMom || 0);
+      setTextIfChanged(dom.kpiPhysicsConserv, has ? `${fmtPhysicsCompact(eVal)} | ${fmtPhysicsCompact(lzVal)}` : '--');
+    }
+
     function applyResolutionUi(mode, w, h, pDim) {
       activeResMode = mode ? 1 : 0;
       activeFrameW = w || (activeResMode ? 640 : 320);
       activeFrameH = h || (activeResMode ? 360 : 180);
-      const pipSz = pDim || (activeResMode ? 32 : 16);
+      const pipSz = pDim || (activeResMode ? 64 : 32);
       dom.inputResMeta.textContent = `${activeFrameW}×${activeFrameH} ${activeResMode ? 'HD' : 'SD'} RGBA`;
       pipEl.setAttribute('aria-label', `${pipSz}x${pipSz} raw vs Eulerian temporal-contrast picture-in-picture`);
       document.querySelectorAll('.res-btn').forEach((b) => {
@@ -1545,10 +3385,25 @@
 
     worker.onmessage = (ev) => {
       const m = ev.data;
+      if (m.type === 'frame_ack') {
+        if (m.epoch === sourceEpoch) {
+          workerFrameBusy = false;
+          if (queuedPendingFrame) {
+            const next = queuedPendingFrame;
+            queuedPendingFrame = null;
+            dispatchBitmapFrameToWorker(next);
+          }
+        }
+        return;
+      }
       if (m.type === 'ready') {
-        dom.pillKernel.textContent = '◆ WASM KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
-        dom.pillArena.textContent = `WASM ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
+        dom.pillKernel.textContent = '◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
+        dom.pillArena.textContent = `ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
+      } else if (m.type === 'init_error') {
+        dom.pillKernel.textContent = '⚠ KERNEL INIT FAILED';
+        dom.pillKernel.title = m.message || 'Failed to initialize Wasm kernel';
+        dom.hudSourceLabel.textContent = `KERNEL ERROR: ${m.message || 'Wasm load failed'}`;
       } else if (m.type === 'resolution_changed') {
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
       } else if (m.type === 'audio_strobe') {
@@ -1557,19 +3412,39 @@
         playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentEpochMs);
       } else if (m.type === 'telemetry') {
         const medMs = typeof m.wasmMedianMs === 'number' ? m.wasmMedianMs : m.wasmMeanMs;
-        const budgetMs = m.resMode === 1 ? 1.0 : (m.sourceMode === 'testbench' ? 0.28 : 0.50);
+        const budgetMs = m.resMode === 1
+          ? (m.sourceMode === 'testbench' ? 1.0 : 2.2)
+          : (m.sourceMode === 'testbench' ? 0.35 : 0.75);
         const underBudget = medMs < budgetMs;
         dom.pillPerf.textContent = `${underBudget ? '◆' : '▲'} KERNEL: ${medMs.toFixed(3)} ms`;
         dom.pillPerf.className = `pill ${underBudget ? 'ok' : 'warn'}`;
         dom.pillFps.textContent = `FPS: ${m.fps.toFixed(0)}`;
 
+        if (m.sourceMode !== 'testbench') {
+          const camState = m.camMotionState || 0;
+          const lagMs = Math.round(m.dispLagMs || 0);
+          if (camState === 2) {
+            dom.pillStreamHealth.className = 'pill warn';
+            dom.pillStreamHealth.textContent = `▲ CUT RESET · LAG ${lagMs}ms`;
+          } else if (camState === 1) {
+            dom.pillStreamHealth.className = 'pill warn';
+            dom.pillStreamHealth.textContent = `▲ PTZ PAN (${Math.round(m.camPanSpeedPxS || 0)} px/s) · LAG ${lagMs}ms`;
+          } else {
+            dom.pillStreamHealth.className = 'pill ok';
+            dom.pillStreamHealth.textContent = `◆ CAM LOCKED · LAG ${lagMs}ms · DROP ${pumpDroppedFrames}`;
+          }
+          if (activeSourceMode === 'live') {
+            dom.liveStreamMeta.textContent = `F#${m.frameIdx} · LAG ${lagMs}ms · DISCONT ${m.discontCount || 0}`;
+          }
+        }
+
         if (m.sourceMode === 'testbench') {
-          dom.lblPadicSwaps.textContent = 'Oracle ID Switches';
+          dom.lblPadicSwaps.textContent = 'Oracle ID Swaps';
           dom.kpiPadicSwaps.textContent = `◆ ${m.oracleSwaps}`;
           dom.lblCollisions.textContent = 'Pillar Collisions';
           dom.kpiCollisions.textContent = `${m.inPillarCollisions}`;
         } else {
-          dom.lblPadicSwaps.textContent = '2-Adic Fiedler Audit';
+          dom.lblPadicSwaps.textContent = '2-Adic Fiedler';
           dom.kpiPadicSwaps.textContent = `◆ ${m.padicSwaps}`;
           if (currentLabMode === 2) {
             dom.lblCollisions.textContent = 'L1 Impact Strikes';
@@ -1581,12 +3456,19 @@
         }
 
         dom.kpiKalmanSwaps.textContent = `▲ ${m.kalmanSwaps}`;
-        dom.kpiClutterDb.textContent = m.clutterDbValid
-          ? `${m.clutterDb.toFixed(1)} dB`
-          : 'WARMING';
-        dom.lblWasmMs.textContent = `Kernel p50 (${m.wasmMeanMs.toFixed(2)} avg)`;
+        const evalPct = Math.round((m.clutterEvalRatio || 0) * 100);
+        if (m.clutterDbValid) {
+          dom.lblClutterDb.textContent = `ECA Clutter (${evalPct}%)`;
+          dom.kpiClutterDb.textContent = `${m.clutterDb.toFixed(1)} dB`;
+        } else {
+          dom.lblClutterDb.textContent = 'ECA Clutter Supp.';
+          dom.kpiClutterDb.textContent = 'WARMING';
+        }
+        dom.lblWasmMs.textContent = `Kernel (${m.wasmMeanMs.toFixed(2)} avg)`;
         dom.kpiWasmMs.textContent = `${medMs.toFixed(3)} ms`;
-        dom.kpiTargets.textContent = `${m.activeTargets} / 8`;
+        dom.kpiTargets.textContent = `${m.activeTargets} / 16`;
+        updatePersistenceDomUi(m.sessionPersistence, m.activeTargets);
+        updatePhysicsIdDomUi(m.physicsId, m);
 
         if (m.focusTrackId > 0) {
           dom.btnFocusCycle.textContent = `◎ Focus: PIN T${m.focusTrackId}`;
@@ -1604,14 +3486,18 @@
           dom.hilbertMeta.textContent = 'HILBERT GATED (K<7)';
           dom.kpiTremorHz.textContent = 'GATED (K<7)';
           dom.kpiTremorPhi.textContent = 'GATED';
-        } else if (m.phaseValid) {
+        } else if (m.phaseValid && m.freqValid && m.tremorFreqHz > 0) {
           const cohPct = Math.round((m.tremorCoherence || 0) * 100);
-          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | f = ${m.tremorFreqHz.toFixed(1)} Hz | COH ${cohPct}%`;
-          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(2)} Hz` : '-- Hz';
+          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | f = ${m.tremorFreqHz.toFixed(2)} Hz | COH ${cohPct}%`;
+          dom.kpiTremorHz.textContent = `${m.tremorFreqHz.toFixed(2)} Hz`;
+          dom.kpiTremorPhi.textContent = `${m.tremorPhaseDeg.toFixed(0)}°`;
+        } else if (m.phaseValid) {
+          dom.hilbertMeta.textContent = `φ = ${m.tremorPhaseDeg.toFixed(0)}° | APERIODIC MOTION`;
+          dom.kpiTremorHz.textContent = 'APERIODIC';
           dom.kpiTremorPhi.textContent = `${m.tremorPhaseDeg.toFixed(0)}°`;
         } else {
           dom.hilbertMeta.textContent = 'STENCIL WARMING / HOLD';
-          dom.kpiTremorHz.textContent = m.tremorFreqHz > 0 ? `${m.tremorFreqHz.toFixed(2)} Hz` : 'HOLD';
+          dom.kpiTremorHz.textContent = 'HOLD';
           dom.kpiTremorPhi.textContent = 'HOLD';
         }
         dom.spectralMeta.textContent = `λ₂ = ${m.lambda2.toFixed(4)} | Δλ = ${m.spectralGap.toFixed(3)}`;
@@ -1621,8 +3507,8 @@
           dom.lblApexKpi.textContent = 'Ballistic T-Apex';
           dom.kpiApexMs.textContent = `${m.apexMs.toFixed(0)} ms`;
         } else if (currentLabMode === 0 && typeof m.apexErrPx === 'number' && m.apexErrPx >= 0) {
-          dom.lblApexKpi.textContent = 'Last Apex Error Δ';
-          dom.kpiApexMs.textContent = `±${m.apexErrPx.toFixed(1)} px`;
+          dom.lblApexKpi.textContent = 'Last Apex Euclid Δ';
+          dom.kpiApexMs.textContent = `${m.apexErrPx.toFixed(1)} px`;
         } else {
           dom.lblApexKpi.textContent = 'Ballistic T-Apex';
           dom.kpiApexMs.textContent = 'STEADY';
@@ -1632,16 +3518,17 @@
           dom.lblReflexKpi.textContent = 'Stimulus Armed';
           dom.kpiSaccadeMs.textContent = 'AWAITING';
         } else if (m.saccadeLatencyMs > 0) {
-          dom.lblReflexKpi.textContent = 'Stimulus Onset Latency';
+          dom.lblReflexKpi.textContent = 'Stimulus Onset Δt';
           dom.kpiSaccadeMs.textContent = `${m.saccadeLatencyMs.toFixed(1)} ms`;
         } else if (m.stepSettleMs > 0) {
-          dom.lblReflexKpi.textContent = 'Spontaneous Step Settle';
+          dom.lblReflexKpi.textContent = 'Step Settle Δt';
           dom.kpiSaccadeMs.textContent = `${m.stepSettleMs.toFixed(1)} ms`;
         } else {
-          dom.lblReflexKpi.textContent = 'Stimulus Onset / Settle';
+          dom.lblReflexKpi.textContent = 'Onset / Settle Δt';
           dom.kpiSaccadeMs.textContent = 'READY';
         }
 
+        const scaleQual = m.calProvenance === 'surveyed' ? 'Surveyed' : 'Assumed';
         if (m.activeTargets > 0) {
           if (m.pivotValid) {
             const signP = m.pendSwingDeg >= 0 ? '+' : '';
@@ -1652,21 +3539,27 @@
             dom.lblKinAngle.textContent = 'Flight / Heading θ';
             dom.kpiKinAngle.textContent = `${signH}${m.headingDeg.toFixed(1)}°`;
           }
-          dom.lblKinSpeed.textContent = m.calibrated ? 'Physical Speed' : 'Tangential Speed';
-          dom.kpiKinSpeed.textContent = m.calibrated
-            ? `${m.speedPhys.toFixed(2)} m/s`
-            : `${Math.round(m.speedPhys)} px/s`;
+          if (m.metricValid < -0.5) {
+            dom.lblKinSpeed.textContent = 'Perspective Guard';
+            dom.kpiKinSpeed.textContent = 'OUT OF PLANE';
+          } else if (m.calibrated) {
+            dom.lblKinSpeed.textContent = `${scaleQual} Speed`;
+            dom.kpiKinSpeed.textContent = `${m.speedPhys.toFixed(2)} m/s`;
+          } else {
+            dom.lblKinSpeed.textContent = 'Tangential Speed';
+            dom.kpiKinSpeed.textContent = `${Math.round(m.speedPhys)} px/s`;
+          }
         } else {
           dom.lblKinAngle.textContent = 'Flight / Swing θ';
           dom.kpiKinAngle.textContent = '--°';
-          dom.lblKinSpeed.textContent = m.calibrated ? 'Physical Speed' : 'Tangential Speed';
+          dom.lblKinSpeed.textContent = m.calibrated ? `${scaleQual} Speed` : 'Tangential Speed';
           dom.kpiKinSpeed.textContent = m.calibrated ? '-- m/s' : '-- px/s';
         }
 
         if (currentLabMode === 2) {
           if (m.lastStrikeValid) {
             const signD = m.lastDeflectDeg >= 0 ? '+' : '';
-            if (m.scatterDeg > 2.0) {
+            if (m.scatterDeg > 2.0 && (m.scatterAgeFrames < 0 || m.scatterAgeFrames <= 90)) {
               dom.lblKinDeflect.textContent = 'Deflect Δθ / Scatter';
               dom.kpiKinDeflect.textContent = `${signD}${m.lastDeflectDeg.toFixed(0)}° / ${m.scatterDeg.toFixed(0)}°`;
             } else {
@@ -1679,7 +3572,7 @@
           }
         } else if (m.pivotValid) {
           dom.lblKinDeflect.textContent = 'Tether Radius R';
-          dom.kpiKinDeflect.textContent = m.calibrated
+          dom.kpiKinDeflect.textContent = m.calibrated && m.metricValid > 0.5
             ? `${m.pendRadiusPhys.toFixed(2)} m`
             : `${Math.round(m.pendRadiusPhys)} px`;
         } else {
@@ -1688,16 +3581,26 @@
         }
 
         if (currentLabMode === 2) {
-          dom.lblKinRestGrav.textContent = 'Restitution e (v⁺/v⁻)';
-          dom.kpiKinRestGrav.textContent = m.lastStrikeValid ? m.lastRestitution.toFixed(2) : 'READY';
-        } else if (m.sceneGravityConf >= 0.25 && m.sceneGravityPxS2 > 50) {
-          dom.lblKinRestGrav.textContent = 'Scene Gravity ĝ';
+          const tidTag = m.lastStrikeValid && m.lastStrikeTid > 0 ? ` (T${m.lastStrikeTid})` : '';
+          dom.lblKinRestGrav.textContent = `Speed Ratio v⁺/v⁻${tidTag}`;
+          if (m.lastStrikeValid) {
+            const ageSec = m.lastStrikeAgeFrames > 15 ? ` (${(m.lastStrikeAgeFrames / Math.max(8, m.fps)).toFixed(1)}s)` : '';
+            dom.kpiKinRestGrav.textContent = `${m.lastRestitution.toFixed(2)}${ageSec}`;
+          } else {
+            dom.kpiKinRestGrav.textContent = 'READY';
+          }
+        } else if (m.sceneGravityConf >= 0.50 && m.sceneGravityPxS2 > 50) {
+          dom.lblKinRestGrav.textContent = `Gravity ĝ (${m.sceneGravityArcs || 2} arcs)`;
           dom.kpiKinRestGrav.textContent = `${Math.round(m.sceneGravityPxS2)} px/s²`;
+        } else if (m.sceneGravityPxS2 > 50 && (m.sceneGravityArcs || 0) === 1) {
+          dom.lblKinRestGrav.textContent = 'Gravity ĝ (1/2 arcs)';
+          dom.kpiKinRestGrav.textContent = `${Math.round(m.sceneGravityPxS2)} prov`;
         } else {
           dom.lblKinRestGrav.textContent = 'Metric Calibration';
           dom.kpiKinRestGrav.textContent = m.calibrated ? dom.calBadge.textContent : 'PX UNITS';
         }
 
+        updateSlotRosterUi(m.slotRoster);
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
       } else if (m.type === 'cal_state') {
         applyCalibrationUiState(m);
@@ -1771,7 +3674,7 @@
       btn.addEventListener('click', () => {
         const mode = Number(btn.dataset.res) ? 1 : 0;
         if (mode === activeResMode) return;
-        applyResolutionUi(mode, mode ? 640 : 320, mode ? 360 : 180, mode ? 32 : 16);
+        applyResolutionUi(mode, mode ? 640 : 320, mode ? 360 : 180, mode ? 64 : 32);
         lastMediaTime = -1;
         lastPumpPerfMs = 0;
         worker.postMessage({ type: 'set_resolution', resMode: mode });
@@ -1791,48 +3694,627 @@
       }
     });
 
-    // Source Switching
+    // Source Switching + 3-Tier Live Stream Suite
     const btnTestbench = document.getElementById('btnSrcTestbench');
     const btnWebcam = document.getElementById('btnSrcWebcam');
+    const btnLiveStream = document.getElementById('btnSrcLiveStream');
     const mp4Input = document.getElementById('mp4Input');
     const sampleVideoSelect = document.getElementById('sampleVideoSelect');
 
     function setSourceButtons(activeBtn) {
-      [btnTestbench, btnWebcam].forEach((b) => {
+      [btnTestbench, btnWebcam, btnLiveStream].forEach((b) => {
         const on = b === activeBtn;
         b.classList.toggle('active', on);
         b.setAttribute('aria-pressed', String(on));
       });
     }
 
+    function setLiveDialogBanner(msg, isError = false) {
+      dom.liveDialogStatus.textContent = msg;
+      dom.liveDialogStatus.classList.toggle('error', Boolean(isError));
+    }
+
+    // Native <dialog> close handling & light-dismiss fallback (modern-web-guidance)
+    liveDialog.addEventListener('close', () => {
+      const _action = liveDialog.returnValue;
+      liveDialog.returnValue = '';
+    });
+
+    if (!('closedBy' in HTMLDialogElement.prototype)) {
+      liveDialog.addEventListener('click', (event) => {
+        if (event.target !== liveDialog) return;
+        const rect = liveDialog.getBoundingClientRect();
+        const isDialogContent = (
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width
+        );
+        if (isDialogContent) return;
+        liveDialog.close();
+      });
+    }
+
+    let userPickedTier3Preset = false;
+    dom.tier3PresetSelect.addEventListener('change', () => {
+      userPickedTier3Preset = true;
+    });
+
+    async function refreshTier3LivePresets(forceRefresh = false) {
+      try {
+        const url = forceRefresh ? '/api/live-presets?refresh=1' : '/api/live-presets';
+        const resp = await fetch(url, { cache: 'no-store' });
+        if (!resp.ok) return;
+        const payload = await resp.json();
+        if (!payload || !Array.isArray(payload.presets) || payload.presets.length === 0) return;
+        const prevVal = dom.tier3PresetSelect.value;
+        dom.tier3PresetSelect.innerHTML = '';
+
+        const realCams = payload.presets.filter((p) => p.category !== 'local_sim' && p.kind !== 'simulated');
+        const simRelays = payload.presets.filter((p) => p.category === 'local_sim' || p.kind === 'simulated');
+
+        const makeOpt = (p) => {
+          const opt = document.createElement('option');
+          const isSim = p.category === 'local_sim' || p.kind === 'simulated';
+          const name = p.label || p.title || p.id;
+          opt.value = p.id;
+          opt.dataset.lab = String(p.mode ?? p.labMode ?? 0);
+          opt.dataset.fps = String(p.fpsHint ?? 30);
+          const badge = isSim
+            ? '[SYNTHETIC TEST]'
+            : (p.online ? '[LIVE ONLINE]' : '[OFFLINE]');
+          opt.textContent = `${badge} ${name}`;
+          return opt;
+        };
+
+        if (realCams.length > 0) {
+          const grpLive = document.createElement('optgroup');
+          grpLive.label = 'Live Public Highway Cameras (Caltrans Real-Time HLS)';
+          for (const p of realCams) grpLive.appendChild(makeOpt(p));
+          dom.tier3PresetSelect.appendChild(grpLive);
+        }
+        if (simRelays.length > 0) {
+          const grpSim = document.createElement('optgroup');
+          grpSim.label = 'Synthetic Offline Test Relays (CI / Cut Stress)';
+          for (const p of simRelays) grpSim.appendChild(makeOpt(p));
+          dom.tier3PresetSelect.appendChild(grpSim);
+        }
+
+        const firstOnlineCam = realCams.find((p) => p.online);
+        if (userPickedTier3Preset && prevVal && Array.from(dom.tier3PresetSelect.options).some((o) => o.value === prevVal)) {
+          dom.tier3PresetSelect.value = prevVal;
+        } else if (firstOnlineCam) {
+          dom.tier3PresetSelect.value = firstOnlineCam.id;
+        }
+      } catch (_err) {
+        // Keep built-in options if served from a plain static server
+      }
+    }
+
+    // Warm camera probe in the background so live Caltrans status is ready immediately
+    setTimeout(() => { refreshTier3LivePresets(false); }, 150);
+
+    function openLiveStreamModal() {
+      dom.btnFallbackTier2ToTier3.hidden = true;
+      refreshTier3LivePresets(false);
+      if (!liveDialog.open) liveDialog.showModal();
+    }
+
+    btnLiveStream.addEventListener('click', openLiveStreamModal);
+    document.getElementById('btnReopenLiveModal').addEventListener('click', openLiveStreamModal);
+    document.getElementById('btnRefreshTier3Presets').addEventListener('click', () => {
+      setLiveDialogBanner('Probing Caltrans HLS camera endpoints...');
+      refreshTier3LivePresets(true).then(() => {
+        setLiveDialogBanner('Camera health probe updated. Select any [LIVE ONLINE] highway camera and click Connect.');
+      });
+    });
+
+    dom.liveCropSelect.addEventListener('change', () => {
+      const parts = dom.liveCropSelect.value.split(',').map(Number);
+      if (parts.length === 4 && parts.every(Number.isFinite)) {
+        worker.postMessage({ type: 'set_crop', cropNorm: parts });
+      }
+    });
+
+    document.getElementById('btnStopLiveFeed').addEventListener('click', () => {
+      btnTestbench.click();
+    });
+
+    // Tier 1: Browser Tab / Window Capture via getDisplayMedia
+    document.getElementById('btnStartTier1Capture').addEventListener('click', async () => {
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') {
+        setLiveDialogBanner('getDisplayMedia is unavailable in this browser context. Use Tier 3 fMP4 MSE Relay instead.', true);
+        return;
+      }
+      const reqEpoch = sourceEpoch;
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getDisplayMedia({
+          video: { frameRate: { ideal: 30, max: 60 } },
+          audio: false,
+        });
+        if (reqEpoch !== sourceEpoch) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        stopMediaCapture();
+        const myEpoch = sourceEpoch;
+        sampleVideoSelect.value = '';
+        if (activeResMode === 0) document.getElementById('btnResHd')?.click();
+        activeMediaStream = stream;
+        activeVideoFps = 30.0;
+        videoEl.loop = false;
+        videoEl.srcObject = stream;
+        await videoEl.play();
+        if (myEpoch !== sourceEpoch) return;
+        const vTrack = stream.getVideoTracks()[0];
+        if (vTrack) {
+          vTrack.addEventListener('ended', () => {
+            if (activeSourceMode === 'live' && activeMediaStream === stream) btnTestbench.click();
+          }, { once: true });
+        }
+        setSourceButtons(btnLiveStream);
+        setActiveShowcaseChip('');
+        syncContextualSourceUi('live');
+        dom.liveTierBadge.textContent = 'TIER 1 · TAB / WINDOW CAPTURE';
+        dom.hudSourceLabel.textContent = `SOURCE: LIVE TAB CAPTURE (${vTrack?.label || 'DISPLAY ROI'})`;
+        worker.postMessage({ type: 'set_source', sourceMode: 'live', fpsHint: 30 });
+        dom.liveCropSelect.dispatchEvent(new Event('change'));
+        startVideoPump();
+        if (liveDialog.open) liveDialog.close('tier1');
+      } catch (err) {
+        if (stream && activeMediaStream !== stream) {
+          stream.getTracks().forEach((t) => t.stop());
+        }
+        setLiveDialogBanner(`Tab capture cancelled or denied: ${err.message || err}`, true);
+      }
+    });
+
+    // Helper: Parse ISO-BMFF avcC box inside fMP4 init segment (ftyp + moov) to construct exact MSE codec string
+    function findAvcCodecMime(u8) {
+      for (let i = 0; i + 11 < u8.length; i++) {
+        if (u8[i] === 0x61 && u8[i + 1] === 0x76 && u8[i + 2] === 0x63 && u8[i + 3] === 0x43) {
+          const prof = u8[i + 5].toString(16).padStart(2, '0').toUpperCase();
+          const comp = u8[i + 6].toString(16).padStart(2, '0').toUpperCase();
+          const lvl = u8[i + 7].toString(16).padStart(2, '0').toUpperCase();
+          return `video/mp4; codecs="avc1.${prof}${comp}${lvl}"`;
+        }
+      }
+      return null;
+    }
+
+    function appendBytes(acc, chunk) {
+      if (acc.length === 0) return chunk;
+      const merged = new Uint8Array(acc.length + chunk.length);
+      merged.set(acc, 0);
+      merged.set(chunk, acc.length);
+      return merged;
+    }
+
+    // Tier 3: Zero-Dependency Same-Origin FFmpeg fMP4 -> Native MediaSource (MSE) Relay
+    async function startTier3MseStream(cfg, isAutoRetry = false) {
+      if (typeof MediaSource === 'undefined') {
+        setLiveDialogBanner('MediaSource Extensions (MSE) unsupported in this browser. Use Tier 1 Tab Capture.', true);
+        return;
+      }
+      stopMediaCapture(isAutoRetry);
+      activeLiveConfig = cfg;
+      sampleVideoSelect.value = '';
+      if (activeResMode === 0) document.getElementById('btnResHd')?.click();
+      if (typeof cfg.targetLab === 'number' && currentLabMode !== cfg.targetLab) {
+        document.querySelector(`.lab-btn[data-lab="${cfg.targetLab}"]`)?.click();
+      }
+
+      const myEpoch = sourceEpoch;
+      const abortCtrl = new AbortController();
+      activeMseAbort = abortCtrl;
+      const ms = new MediaSource();
+      activeMseMediaSource = ms;
+      currentObjectUrl = URL.createObjectURL(ms);
+      activeVideoFps = cfg.fpsHint || 30.0;
+      videoEl.loop = false;
+      videoEl.src = currentObjectUrl;
+
+      setSourceButtons(btnLiveStream);
+      setActiveShowcaseChip(cfg.showcaseId || '');
+      syncContextualSourceUi('live');
+      dom.liveTierBadge.textContent = 'TIER 3 · FFmpeg fMP4 MSE';
+      dom.liveStreamMeta.textContent = 'CONNECTING LIVE HLS...';
+      dom.hudSourceLabel.textContent = `SOURCE: LIVE fMP4 MSE (${cfg.label.toUpperCase()})`;
+      if (!isAutoRetry) {
+        worker.postMessage({ type: 'set_source', sourceMode: 'live', fpsHint: activeVideoFps });
+        dom.liveCropSelect.dispatchEvent(new Event('change'));
+      }
+
+      ms.addEventListener('sourceopen', async () => {
+        if (myEpoch !== sourceEpoch) return;
+        let sb = null;
+        const appendQueue = [];
+        let queuedBytes = 0;
+        const MAX_QUEUE_BYTES = 16 * 1024 * 1024;
+        let initAccum = new Uint8Array(0);
+        let playbackStarted = false;
+        let healthySpanReached = false;
+        let retryResetDone = false;
+        let streamEnded = false;
+        let fatalMseError = null;
+        const mseSessionStartMs = performance.now();
+        const minStartBufferSec = cfg.presetId && cfg.presetId.startsWith('sim_') ? 0.45 : 1.20;
+
+        const maybeCloseMseStream = () => {
+          if (streamEnded && appendQueue.length === 0 && (!sb || !sb.updating) && ms.readyState === 'open') {
+            try {
+              ms.endOfStream();
+            } catch (_eosErr) { /* ignore */ }
+          }
+        };
+
+        const maybeStartMsePlayback = () => {
+          if (!sb || sb.buffered.length === 0 || myEpoch !== sourceEpoch) return;
+          const start0 = sb.buffered.start(0);
+          const endLast = sb.buffered.end(sb.buffered.length - 1);
+          const spanSec = endLast - start0;
+          if (!streamEnded && spanSec >= minStartBufferSec && performance.now() - mseSessionStartMs >= 15000) {
+            healthySpanReached = true;
+          }
+          if (!playbackStarted) {
+            if (spanSec < minStartBufferSec && !streamEnded) return;
+            if (spanSec <= 0.02) return;
+            playbackStarted = true;
+            if (videoEl.currentTime + 0.05 < start0) {
+              videoEl.currentTime = start0 + 0.02;
+            }
+            safePlayVideo().then((ok) => {
+              if (ok && myEpoch === sourceEpoch) {
+                if (healthySpanReached && !streamEnded && !retryResetDone) {
+                  activeLiveRetryCount = 0;
+                  retryResetDone = true;
+                }
+                startVideoPump();
+              }
+            });
+          } else if (healthySpanReached && !streamEnded && !retryResetDone && !videoEl.paused) {
+            activeLiveRetryCount = 0;
+            retryResetDone = true;
+          }
+        };
+
+        const pumpSourceBuffer = () => {
+          if (!sb || sb.updating || myEpoch !== sourceEpoch || ms.readyState !== 'open') return;
+          if (videoEl.currentTime > 12.0 && sb.buffered.length > 0) {
+            const start0 = sb.buffered.start(0);
+            const evictTo = videoEl.currentTime - 8.0;
+            if (evictTo - start0 > 2.0) {
+              try {
+                sb.remove(start0, evictTo);
+                return;
+              } catch (_e) {
+                // Continue to append if remove is rejected
+              }
+            }
+          }
+          if (appendQueue.length > 0) {
+            let nextChunk;
+            if (appendQueue.length === 1) {
+              nextChunk = appendQueue.shift();
+            } else {
+              let totalBytes = 0;
+              for (let i = 0; i < appendQueue.length; i++) totalBytes += appendQueue[i].byteLength;
+              nextChunk = new Uint8Array(totalBytes);
+              let off = 0;
+              for (let i = 0; i < appendQueue.length; i++) {
+                nextChunk.set(appendQueue[i], off);
+                off += appendQueue[i].byteLength;
+              }
+              appendQueue.length = 0;
+            }
+            queuedBytes = Math.max(0, queuedBytes - nextChunk.byteLength);
+            try {
+              sb.appendBuffer(nextChunk);
+            } catch (appendErr) {
+              if (myEpoch !== sourceEpoch || abortCtrl.signal.aborted) return;
+              if (appendErr && appendErr.name === 'QuotaExceededError' && sb.buffered.length > 0) {
+                appendQueue.unshift(nextChunk);
+                queuedBytes += nextChunk.byteLength;
+                const s0 = sb.buffered.start(0);
+                const sEnd = sb.buffered.end(sb.buffered.length - 1);
+                const evictTarget = Math.min(sEnd - 0.5, videoEl.currentTime - 1.5);
+                if (evictTarget > s0 + 0.2 && !sb.updating) {
+                  try {
+                    sb.remove(s0, evictTarget);
+                    return;
+                  } catch (_remErr) {
+                    // Fall through to stream recovery
+                  }
+                }
+              }
+              fatalMseError = appendErr;
+              abortCtrl.abort();
+            }
+          } else {
+            maybeCloseMseStream();
+          }
+        };
+
+        try {
+          const qs = cfg.customUrl
+            ? `url=${encodeURIComponent(cfg.customUrl)}`
+            : `preset=${encodeURIComponent(cfg.presetId)}`;
+          const resp = await fetch(`/api/live-stream?${qs}`, { signal: abortCtrl.signal });
+          if (!resp.ok || !resp.body) {
+            let errDetail = `HTTP ${resp.status}`;
+            try {
+              const j = await resp.json();
+              if (j && j.error) errDetail = j.error;
+            } catch (_e) { /* ignore */ }
+            const httpErr = new Error(errDetail);
+            httpErr.httpStatus = resp.status;
+            throw httpErr;
+          }
+
+          if (liveDialog.open) liveDialog.close('tier3');
+
+          const reader = resp.body.getReader();
+          while (myEpoch === sourceEpoch) {
+            if (ms.readyState !== 'open' || videoEl.error || fatalMseError) {
+              abortCtrl.abort();
+              break;
+            }
+            const { value, done } = await reader.read();
+            if (done || myEpoch !== sourceEpoch) break;
+            if (ms.readyState !== 'open' || videoEl.error || fatalMseError) {
+              abortCtrl.abort();
+              break;
+            }
+            if (!value || value.byteLength === 0) continue;
+
+            if (!sb) {
+              initAccum = appendBytes(initAccum, value);
+              const detectedMime = findAvcCodecMime(initAccum);
+              if (!detectedMime && initAccum.byteLength < 65536) continue;
+              const mime = detectedMime || 'video/mp4; codecs="avc1.42E01F"';
+              if (!MediaSource.isTypeSupported(mime)) {
+                throw new Error(`Unsupported fMP4 codec: ${mime}`);
+              }
+              sb = ms.addSourceBuffer(mime);
+              sb.mode = 'segments';
+              sb.addEventListener('error', () => {
+                if (myEpoch === sourceEpoch && !fatalMseError) {
+                  fatalMseError = new Error('MSE SourceBuffer decode error');
+                  abortCtrl.abort();
+                }
+              });
+              sb.addEventListener('updateend', () => {
+                maybeStartMsePlayback();
+                pumpSourceBuffer();
+              });
+              appendQueue.push(initAccum);
+              queuedBytes += initAccum.byteLength;
+              initAccum = new Uint8Array(0);
+              pumpSourceBuffer();
+            } else {
+              if (queuedBytes + value.byteLength > MAX_QUEUE_BYTES) {
+                fatalMseError = new Error('MSE append queue overflow');
+                abortCtrl.abort();
+                break;
+              }
+              appendQueue.push(value);
+              queuedBytes += value.byteLength;
+              pumpSourceBuffer();
+            }
+          }
+          streamEnded = true;
+          if (!fatalMseError && !videoEl.error) {
+            maybeStartMsePlayback();
+            maybeCloseMseStream();
+          }
+
+          // Reconnect automatically up to 3 times if continuous stream ended or glitched while still in live mode
+          if (myEpoch === sourceEpoch && activeSourceMode === 'live' && activeLiveConfig) {
+            if (activeLiveRetryCount < 3) {
+              activeLiveRetryCount++;
+              let extraPlayDrainMs = 0;
+              if (!fatalMseError && !videoEl.error && playbackStarted && sb && sb.buffered.length > 0) {
+                const remSec = sb.buffered.end(sb.buffered.length - 1) - videoEl.currentTime;
+                if (remSec > 0.25) {
+                  extraPlayDrainMs = Math.min(15000, Math.round(remSec * 1000));
+                }
+              }
+              const delayMs = 900 * activeLiveRetryCount + extraPlayDrainMs;
+              dom.liveStreamMeta.textContent = `RECONNECTING (${activeLiveRetryCount}/3)...`;
+              activeMseRetryTimer = setTimeout(() => {
+                if (activeSourceMode === 'live' && activeLiveConfig) {
+                  startTier3MseStream(activeLiveConfig, true);
+                }
+              }, delayMs);
+            } else {
+              dom.liveStreamMeta.textContent =
+                fatalMseError || videoEl.error ? 'STREAM ERROR (3/3)' : 'STREAM ENDED · CLICK RETRY';
+            }
+          }
+        } catch (err) {
+          if ((abortCtrl.signal.aborted && !fatalMseError) || myEpoch !== sourceEpoch) return;
+          const realErr = fatalMseError || err;
+          const status = realErr && typeof realErr.httpStatus === 'number' ? realErr.httpStatus : 0;
+          const nonRetryable4xx = status >= 400 && status < 500 && status !== 408 && status !== 429;
+          if (
+            !nonRetryable4xx &&
+            myEpoch === sourceEpoch &&
+            activeSourceMode === 'live' &&
+            activeLiveConfig &&
+            activeLiveRetryCount < 3
+          ) {
+            activeLiveRetryCount++;
+            const delayMs = 900 * activeLiveRetryCount;
+            dom.liveStreamMeta.textContent = `RECONNECTING (${activeLiveRetryCount}/3)...`;
+            activeMseRetryTimer = setTimeout(() => {
+              if (activeSourceMode === 'live' && activeLiveConfig) {
+                startTier3MseStream(activeLiveConfig, true);
+              }
+            }, delayMs);
+            return;
+          }
+          setLiveDialogBanner(`Tier 3 relay error: ${realErr.message || realErr}. Ensure dev_server.mjs + ffmpeg are running.`, true);
+          dom.liveStreamMeta.textContent = activeLiveRetryCount >= 3 ? 'STREAM ERROR (3/3)' : 'STREAM ERROR';
+        }
+      }, { once: true });
+    }
+
+    document.getElementById('btnStartTier3Mse').addEventListener('click', () => {
+      const customRaw = dom.tier3CustomHlsUrl.value.trim();
+      if (customRaw) {
+        if (!/^https?:\/\/.+/i.test(customRaw)) {
+          dom.tier3CustomHlsUrl.setCustomValidity('Enter a valid http:// or https:// URL.');
+          syncAria(dom.tier3CustomHlsUrl, true);
+          dom.tier3CustomHlsUrl.focus();
+          return;
+        }
+        dom.tier3CustomHlsUrl.setCustomValidity('');
+        syncAria(dom.tier3CustomHlsUrl, false);
+        startTier3MseStream({
+          presetId: '',
+          customUrl: customRaw,
+          label: 'Custom HLS Relay',
+          fpsHint: 30,
+          targetLab: currentLabMode,
+        });
+        return;
+      }
+      const opt = dom.tier3PresetSelect.selectedOptions[0];
+      const presetId = dom.tier3PresetSelect.value || 'sim_live_cut_demo';
+      const cleanLabel = opt ? opt.textContent.replace(/^\[[^\]]+\]\s*/, '') : presetId;
+      const targetLab = opt ? parseInt(opt.dataset.lab || '0', 10) : 0;
+      const fpsHint = opt ? parseFloat(opt.dataset.fps || '30') : 30;
+      startTier3MseStream({ presetId, customUrl: '', label: cleanLabel, fpsHint, targetLab });
+    });
+
+    // Tier 2: Direct CORS-Verified Stream URL with 1-px getImageData Readback Probe
+    document.getElementById('btnStartTier2Url').addEventListener('click', async () => {
+      const rawUrl = dom.tier2StreamUrl.value.trim();
+      if (!rawUrl || !/^https?:\/\/.+/i.test(rawUrl)) {
+        dom.tier2StreamUrl.setCustomValidity('Enter a valid http:// or https:// stream URL.');
+        syncAria(dom.tier2StreamUrl, true);
+        dom.tier2StreamUrl.focus();
+        return;
+      }
+      dom.tier2StreamUrl.setCustomValidity('');
+      syncAria(dom.tier2StreamUrl, false);
+      dom.btnFallbackTier2ToTier3.hidden = true;
+      setLiveDialogBanner('Probing direct CORS stream & verifying untainted RGBA pixel readback...');
+
+      const reqEpoch = sourceEpoch;
+      const probeVid = document.createElement('video');
+      probeVid.muted = true;
+      probeVid.playsInline = true;
+      probeVid.crossOrigin = 'anonymous';
+      try {
+        probeVid.src = rawUrl;
+        await new Promise((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error('Stream load timed out')), 5000);
+          probeVid.addEventListener('loadeddata', () => { clearTimeout(timer); resolve(); }, { once: true });
+          probeVid.addEventListener('error', () => { clearTimeout(timer); reject(new Error('Unsupported codec or CORS blocked')); }, { once: true });
+        });
+        if (reqEpoch !== sourceEpoch) return;
+
+        fallbackCapCanvas.width = 4;
+        fallbackCapCanvas.height = 4;
+        fallbackCapCtx.drawImage(probeVid, 0, 0, 4, 4);
+        fallbackCapCtx.getImageData(0, 0, 1, 1); // Throws SecurityError if CORS-tainted!
+
+        probeVid.pause();
+        probeVid.removeAttribute('src');
+        probeVid.load();
+
+        stopMediaCapture();
+        const myEpoch = sourceEpoch;
+        sampleVideoSelect.value = '';
+        if (activeResMode === 0) document.getElementById('btnResHd')?.click();
+        videoEl.crossOrigin = 'anonymous';
+        videoEl.loop = true;
+        videoEl.src = rawUrl;
+        await safePlayVideo();
+        if (myEpoch !== sourceEpoch) return;
+
+        setSourceButtons(btnLiveStream);
+        setActiveShowcaseChip('');
+        syncContextualSourceUi('live');
+        dom.liveTierBadge.textContent = 'TIER 2 · DIRECT CORS URL';
+        dom.hudSourceLabel.textContent = 'SOURCE: LIVE DIRECT CORS STREAM';
+        worker.postMessage({ type: 'set_source', sourceMode: 'live', fpsHint: 30 });
+        dom.liveCropSelect.dispatchEvent(new Event('change'));
+        startVideoPump();
+        if (liveDialog.open) liveDialog.close('tier2');
+      } catch (err) {
+        try {
+          probeVid.pause();
+          probeVid.removeAttribute('src');
+          probeVid.load();
+        } catch (_e) { /* ignore */ }
+        if (reqEpoch !== sourceEpoch) return;
+        dom.btnFallbackTier2ToTier3.hidden = false;
+        setLiveDialogBanner(
+          `Direct CORS / codec check failed (${err.message || err}). Click "Relay URL via Tier 3 FFmpeg Proxy" below or use Tier 1 Tab Capture.`,
+          true
+        );
+      }
+    });
+
+    dom.btnFallbackTier2ToTier3.addEventListener('click', () => {
+      const rawUrl = dom.tier2StreamUrl.value.trim();
+      if (!rawUrl) return;
+      dom.tier3CustomHlsUrl.value = rawUrl;
+      startTier3MseStream({
+        presetId: '',
+        customUrl: rawUrl,
+        label: 'Relayed Stream',
+        fpsHint: 30,
+        targetLab: currentLabMode,
+      });
+    });
+
     btnTestbench.addEventListener('click', () => {
       stopMediaCapture();
       sampleVideoSelect.value = '';
       setSourceButtons(btnTestbench);
+      setActiveShowcaseChip('');
       syncContextualSourceUi('testbench');
       dom.hudSourceLabel.textContent = 'SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)';
       worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
     });
 
     btnWebcam.addEventListener('click', async () => {
+      const reqEpoch = sourceEpoch;
+      let stream = null;
       try {
-        stopMediaCapture();
-        sampleVideoSelect.value = '';
-        const stream = await navigator.mediaDevices.getUserMedia({
+        stream = await navigator.mediaDevices.getUserMedia({
           video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
           audio: false,
         });
+        if (reqEpoch !== sourceEpoch) {
+          stream.getTracks().forEach((t) => t.stop());
+          return;
+        }
+        stopMediaCapture();
+        const myEpoch = sourceEpoch;
+        sampleVideoSelect.value = '';
         activeMediaStream = stream;
         activeVideoFps = 60.0;
         videoEl.srcObject = stream;
         await videoEl.play();
+        if (myEpoch !== sourceEpoch) return;
         setSourceButtons(btnWebcam);
+        setActiveShowcaseChip('');
         syncContextualSourceUi('webcam');
         dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
         worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
         startVideoPump();
       } catch (err) {
-        dom.hudSourceLabel.textContent = `WEBCAM UNAVAILABLE: ${err.message}`;
+        if (stream && activeMediaStream !== stream) {
+          stream.getTracks().forEach((t) => t.stop());
+        }
+        if (reqEpoch === sourceEpoch) {
+          dom.hudSourceLabel.textContent = `WEBCAM UNAVAILABLE: ${err.message}`;
+        }
       }
     });
 
@@ -1850,8 +4332,10 @@
       const file = ev.target.files && ev.target.files[0];
       if (!file) return;
       stopMediaCapture();
+      const myEpoch = sourceEpoch;
       sampleVideoSelect.value = '';
       setSourceButtons(null);
+      setActiveShowcaseChip('');
       if (activeResMode === 0) {
         document.getElementById('btnResHd')?.click();
       }
@@ -1859,29 +4343,55 @@
       currentObjectUrl = URL.createObjectURL(file);
       videoEl.src = currentObjectUrl;
       videoEl.loop = true;
-      if (!(await safePlayVideo())) return;
+      if (!(await safePlayVideo()) || myEpoch !== sourceEpoch) return;
       syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: MP4 FILE (${file.name})`;
       worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
       startVideoPump();
     });
 
+    const showcaseClipMap = {
+      model_rockets: { url: './samples/model_rocket_full_flights.mp4', cal: 'preset' },
+      rocket_vtvl: { url: './samples/rocket_vtvl_full_flight.mp4', cal: 'preset' },
+      water_rockets: { url: './samples/water_rocket_parachute_flights.mp4', cal: 'preset' },
+      cologne_motorway: { url: './samples/cologne_motorway_occlusion.mp4', cal: 'preset' },
+      rally_pan: { url: './samples/rally_ego_pan_tracking.mp4', cal: 'none' },
+      chaos_pendulum: { url: './samples/chaotic_magnetic_pendulum.mp4', cal: 'preset' },
+      coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
+      newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
+      juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
+      gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
+      galileo: { url: './samples/galileo_pendulum_peg.mp4', cal: 'preset' },
+      metronome: { url: './samples/harmonic_metronome_phase.mp4', cal: 'none' },
+      billiards: { url: './samples/carom_billiards_impulses.mp4', cal: 'preset' },
+    };
+
+    let pendingShowcaseCal = '';
+
     sampleVideoSelect.addEventListener('change', async () => {
       const url = sampleVideoSelect.value;
+      const queuedCal = pendingShowcaseCal;
+      pendingShowcaseCal = '';
       if (!url) return;
       const opt = sampleVideoSelect.selectedOptions[0];
       const fpsHint = parseFloat(opt.dataset.fps || '30');
       const targetLab = parseInt(opt.dataset.lab || '0', 10);
 
       stopMediaCapture();
+      const myEpoch = sourceEpoch;
       setSourceButtons(null);
+      const matchingBtn = Array.from(document.querySelectorAll('.showcase-btn')).find((b) => {
+        const cfg = showcaseClipMap[b.dataset.showcase];
+        return cfg && cfg.url === url;
+      });
+      setActiveShowcaseChip(matchingBtn ? matchingBtn.dataset.showcase : '');
       if (activeResMode === 0) {
         document.getElementById('btnResHd')?.click();
       }
       activeVideoFps = fpsHint;
       videoEl.src = url;
       videoEl.loop = true;
-      if (!(await safePlayVideo())) return;
+      if (!(await safePlayVideo()) || myEpoch !== sourceEpoch) return;
 
       const targetBtn = document.querySelector(`.lab-btn[data-lab="${targetLab}"]`);
       if (targetBtn && currentLabMode !== targetLab) {
@@ -1890,7 +4400,63 @@
       syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: SAMPLE MP4 (${opt.textContent.split(' (')[0].toUpperCase()})`;
       worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint });
+      if (queuedCal === 'preset') {
+        document.getElementById('btnCalPreset')?.click();
+      } else if (queuedCal === 'auto_g') {
+        document.getElementById('btnCalAutoG')?.click();
+      }
       startVideoPump();
+    });
+
+    // 1-Click Featured Showcases (Auto-Switch HD + Mode + Stream/Clip + Deterministic Post-Source Metric Preset)
+    function setActiveShowcaseChip(id) {
+      document.querySelectorAll('.showcase-btn').forEach((btn) => {
+        const on = btn.dataset.showcase === id;
+        btn.classList.toggle('active', on);
+        btn.setAttribute('aria-pressed', String(on));
+      });
+    }
+
+    document.querySelectorAll('.showcase-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        pendingShowcaseCal = '';
+        const key = btn.dataset.showcase;
+        setActiveShowcaseChip(key);
+        if (activeResMode === 0) {
+          document.getElementById('btnResHd')?.click();
+        }
+        if (key === 'live_i80') {
+          dom.tier3CustomHlsUrl.value = '';
+          const i80Opt = dom.tier3PresetSelect.querySelector('option[value="caltrans_d4_i80_ashby"]');
+          const i80Offline = i80Opt && i80Opt.textContent.includes('[OFFLINE]');
+          let chosenId = 'caltrans_d4_i80_ashby';
+          let chosenLabel = 'Caltrans D4: I-80 @ Ashby Ave (Berkeley Overpass · 1080p)';
+          if (i80Offline) {
+            const altOpt = Array.from(dom.tier3PresetSelect.options).find((o) => o.textContent.includes('[LIVE ONLINE]'));
+            if (altOpt) {
+              chosenId = altOpt.value;
+              chosenLabel = altOpt.textContent.replace(/^\[[^\]]+\]\s*/, '');
+            }
+          }
+          if (dom.tier3PresetSelect.querySelector(`option[value="${chosenId}"]`)) {
+            dom.tier3PresetSelect.value = chosenId;
+          }
+          startTier3MseStream({
+            presetId: chosenId,
+            customUrl: '',
+            label: chosenLabel,
+            fpsHint: 30,
+            targetLab: 0,
+            showcaseId: 'live_i80',
+          });
+          return;
+        }
+        const cfg = showcaseClipMap[key];
+        if (!cfg) return;
+        pendingShowcaseCal = cfg.cal;
+        sampleVideoSelect.value = cfg.url;
+        sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
     });
 
     // MP4 Frame-Accurate Transport Controls
@@ -1923,7 +4489,7 @@
       });
       lastMediaTime = videoEl.currentTime;
       updateVideoTimeLabel();
-      await captureAndSendCurrentVideoFrame(frameStepSec);
+      await captureAndSendCurrentVideoFrame(frameStepSec, videoEl.currentTime, sourceEpoch);
     }
 
     document.getElementById('btnVidStepBack').addEventListener('click', () => stepVideoByFrames(-1));
@@ -1956,7 +4522,7 @@
     const LAB_COPY = [
       {
         badge: 'MODE A',
-        html: '<strong>Mode A — Ballistic Parabola, Flight Angle θ &amp; Spline Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via curved Hermite arcs, and plots live tangent flight angles &amp; frozen apex reticles.',
+        html: '<strong>Mode A — Ballistic Parabola &amp; Hermite Bridge:</strong> Fits quadratic gravity priors, bridges bounded occlusions via Hermite splines, and plots tangent flight angles &amp; frozen apex reticles.',
         btn: '⚡ Launch Ballistic Arc Impulse',
         videoBtn: '⚡ Ballistic Impulse (Testbench Only)',
         action: 'ballistic_toss',
@@ -1964,7 +4530,7 @@
       },
       {
         badge: 'MODE B',
-        html: '<strong>Mode B — Kåsa Virtual Pendulum Pivot &amp; Hilbert Quadrature:</strong> Solves 2×2 algebraic tether/metronome pivots for plumb swing θ, equalizes 15-tap Hilbert phase, and timestamps stimulus-to-onset settle.',
+        html: '<strong>Mode B — Kåsa Pendulum Pivot &amp; Hilbert Scope:</strong> Solves 2×2 algebraic tether/metronome pivots for plumb swing θ, equalizes 15-tap Hilbert phase, and timestamps onset latency.',
         btn: '⚡ Arm & Trigger Saccade Stimulus',
         videoBtn: '⚡ Arm Stimulus Onset Timer',
         action: 'saccade_step',
@@ -1972,7 +4538,7 @@
       },
       {
         badge: 'MODE C',
-        html: '<strong>Mode C — CAD Deflection Δθ, Restitution e &amp; Impact Synth:</strong> Measures pre/post-impact deflection angles, coefficient of restitution v⁺/v⁻, and 2-body scatter wedges synchronized with WebAudio voices at t − K.',
+        html: '<strong>Mode C — Deflection Δθ, Ratio v⁺/v⁻ &amp; Synth:</strong> Measures pre/post-impact deflection wedges, speed ratio v⁺/v⁻, and 2-body scatter synchronized with WebAudio voices at t − K.',
         btn: '⚡ Snap Air-Percussion L1 Strike',
         videoBtn: '⚡ Synthetic Snap (Testbench Only)',
         action: 'air_strike',
@@ -2050,7 +4616,7 @@
 
     sliderK.addEventListener('input', () => {
       const k = parseInt(sliderK.value, 10);
-      const effRate = activeSourceMode === 'video' ? activeVideoFps : 60.0;
+      const effRate = (activeSourceMode === 'video' || activeSourceMode === 'live') ? activeVideoFps : 60.0;
       document.getElementById('valK').textContent = `${k} frames (${Math.round((k * 1000) / effRate)} ms)`;
       syncRangeFallbackProgress(sliderK);
       worker.postMessage({ type: 'params', lookaheadK: k });
@@ -2080,6 +4646,9 @@
     document.getElementById('chkKalman').addEventListener('change', (e) => {
       worker.postMessage({ type: 'params', showKalmanBaseline: e.target.checked });
     });
+    document.getElementById('chkAllOverlays').addEventListener('change', (e) => {
+      worker.postMessage({ type: 'params', showAllOverlays: e.target.checked });
+    });
     document.getElementById('chkEcaOverlay').addEventListener('change', (e) => {
       worker.postMessage({ type: 'params', showEcaOverlay: e.target.checked });
     });
@@ -2087,7 +4656,88 @@
       worker.postMessage({ type: 'params', strobeEnabled: e.target.checked });
     });
 
-    // Metric & Perspective Calibration Toolbar + Scale Form
+    // ========================================================================
+    // Accessible Validation & Polite Error Live Region (modern-web-guidance)
+    // ========================================================================
+    const linkError = (el, shown) => {
+      const errorId = el.dataset?.error;
+      if (!errorId) return;
+      const ids = (el.getAttribute('aria-describedby') || '')
+        .split(/\s+/)
+        .filter((id) => id && id !== errorId);
+      if (shown) ids.push(errorId);
+      if (ids.length) el.setAttribute('aria-describedby', ids.join(' '));
+      else el.removeAttribute('aria-describedby');
+    };
+
+    const announcer = document.createElement('div');
+    announcer.setAttribute('aria-live', 'polite');
+    announcer.classList.add('visually-hidden');
+    document.body.append(announcer);
+    let announceTimer;
+    let announcedField;
+
+    const spokenText = (node) => {
+      const copy = node.cloneNode(true);
+      copy.querySelectorAll('[aria-hidden="true"]').forEach((n) => n.remove());
+      copy.querySelectorAll('[role="img"][aria-label]').forEach((n) => n.replaceWith(`${n.getAttribute('aria-label')}: `));
+      return copy.textContent.replace(/\s+/g, ' ').trim();
+    };
+
+    const announceError = (el) => {
+      const error = el.dataset?.error ? document.getElementById(el.dataset.error) : null;
+      if (!error || liveDialog.open) return;
+      const label = el.labels?.[0] ? `${spokenText(el.labels[0])}: ` : '';
+      clearTimeout(announceTimer);
+      announcer.textContent = '';
+      announcedField = el;
+      announceTimer = setTimeout(() => {
+        if (!liveDialog.open) announcer.textContent = label + spokenText(error);
+      }, 500);
+    };
+
+    const flagged = new WeakSet();
+    const announced = new WeakSet();
+    const supportsUserInvalid = CSS.supports('selector(:user-invalid)');
+    function syncAria(el, announce = false) {
+      if (!el || !el.matches?.('input, select, textarea')) return;
+      const invalid = supportsUserInvalid
+        ? (el.matches(':user-invalid') || !el.validity.valid && flagged.has(el))
+        : el.classList.contains('user-invalid-fallback');
+      if (invalid) {
+        if (announce && !announced.has(el)) {
+          announceError(el);
+          announced.add(el);
+        }
+        el.setAttribute('aria-invalid', 'true');
+        linkError(el, true);
+        flagged.add(el);
+      } else if (flagged.has(el) || el.getAttribute('aria-invalid') !== 'true') {
+        el.setAttribute('aria-invalid', 'false');
+        linkError(el, false);
+        flagged.delete(el);
+        announced.delete(el);
+        if (announcedField === el) {
+          clearTimeout(announceTimer);
+          announcer.textContent = '';
+        }
+      }
+    }
+
+    document.querySelectorAll('input, select, textarea').forEach((el) => syncAria(el));
+    document.addEventListener('blur', (e) => syncAria(e.target, true), true);
+    document.addEventListener('input', (e) => {
+      if (e.target.hasAttribute?.('aria-invalid')) syncAria(e.target);
+    });
+    document.addEventListener('change', (e) => syncAria(e.target, true), true);
+    document.addEventListener('invalid', (e) => {
+      flagged.add(e.target);
+      e.target.classList.add('user-invalid-fallback');
+      announced.add(e.target);
+      syncAria(e.target);
+    }, true);
+
+    // Metric & Perspective Calibration Toolbar + Scale & Keyboard Coordinate Forms
     if (!('focusGroup' in HTMLElement.prototype)) {
       const toolbarItems = Array.from(dom.calToolbar.querySelectorAll('button'));
       toolbarItems.forEach((b, i) => {
@@ -2125,17 +4775,19 @@
 
     const calScaleInputs = [dom.calRulerM, dom.calPlaneW, dom.calPlaneH];
 
-    function parseAndValidateScaleField(inputEl) {
+    function parseAndValidateScaleField(inputEl, announce = false) {
       const raw = inputEl.value.trim();
       const num = Number(raw);
       if (!raw || !/^\d+(\.\d+)?$/.test(raw) || !Number.isFinite(num) || num < 0.05 || num > 500) {
-        const msg = 'Enter positive meters between 0.05 and 500 (e.g. 1.00 or 2.84).';
-        inputEl.setCustomValidity(msg);
-        inputEl.setAttribute('aria-invalid', 'true');
+        inputEl.setCustomValidity('Enter positive meters between 0.05 and 500.');
+        flagged.add(inputEl);
+        inputEl.classList.add('user-invalid-fallback');
+        syncAria(inputEl, announce);
         return null;
       }
       inputEl.setCustomValidity('');
-      inputEl.removeAttribute('aria-invalid');
+      inputEl.classList.remove('user-invalid-fallback');
+      syncAria(inputEl, false);
       return num;
     }
 
@@ -2143,7 +4795,7 @@
       let firstBad = null;
       const vals = [];
       for (const inp of calScaleInputs) {
-        const v = parseAndValidateScaleField(inp);
+        const v = parseAndValidateScaleField(inp, !routeFocusOnFail);
         if (v === null && !firstBad) {
           firstBad = inp;
         }
@@ -2160,17 +4812,18 @@
     calScaleInputs.forEach((inp) => {
       inp.addEventListener('input', () => {
         inp.setCustomValidity('');
-        inp.removeAttribute('aria-invalid');
+        inp.classList.remove('user-invalid-fallback');
+        syncAria(inp, false);
       });
       inp.addEventListener('blur', () => {
-        const v = parseAndValidateScaleField(inp);
+        const v = parseAndValidateScaleField(inp, true);
         if (v === null) {
           dom.calStatusLive.textContent = 'INVALID SCALE · ENTER POSITIVE METERS (0.05–500 m)';
           return;
         }
         const dims = readValidatedCalibrationDims(false);
         if (dims) {
-          worker.postMessage({ type: 'cal_control', action: 'update_dims', ...dims });
+          worker.postMessage({ type: 'cal_control', action: 'stage_dims', ...dims });
         }
       });
       inp.addEventListener('keydown', (ev) => {
@@ -2188,11 +4841,47 @@
       }
     });
 
+    dom.calCoordMode.addEventListener('change', () => {
+      const isQuad = dom.calCoordMode.value === 'homography';
+      document.querySelectorAll('.coord-quad-only').forEach((el) => {
+        el.hidden = !isQuad;
+      });
+    });
+
+    dom.calCoordForm.addEventListener('submit', (ev) => {
+      ev.preventDefault();
+      const dims = readValidatedCalibrationDims(true);
+      if (!dims) return;
+      const coordMode = dom.calCoordMode.value === 'homography' ? 'homography' : 'ruler';
+      const count = coordMode === 'homography' ? 4 : 2;
+      const pts = [];
+      for (let i = 1; i <= count; i++) {
+        const xEl = document.getElementById(`coordX${i}`);
+        const yEl = document.getElementById(`coordY${i}`);
+        const vx = Number(xEl.value.trim());
+        const vy = Number(yEl.value.trim());
+        if (!Number.isFinite(vx) || vx < 0 || vx > 1 || !Number.isFinite(vy) || vy < 0 || vy > 1) {
+          dom.calStatusLive.textContent = 'COORDINATES MUST BE IN [0.00, 1.00] · PRIOR CALIBRATION PRESERVED';
+          (Number.isFinite(vx) && vx >= 0 && vx <= 1 ? yEl : xEl).focus();
+          return;
+        }
+        pts.push([vx, vy]);
+      }
+      worker.postMessage({
+        type: 'cal_control',
+        action: 'set_coords',
+        coordMode,
+        pts,
+        ...dims,
+      });
+    });
+
     function getActivePresetKey() {
       if (activeSourceMode === 'video' && sampleVideoSelect.value) {
         return sampleVideoSelect.value.split('/').pop().replace(/\.[^.]+$/, '');
       }
-      return activeSourceMode === 'video' ? 'custom_video' : 'testbench';
+      if (activeSourceMode === 'testbench') return 'testbench';
+      return 'custom_uncalibrated';
     }
 
     dom.btnCalRuler.addEventListener('click', () => {
@@ -2220,7 +4909,7 @@
     });
 
     document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && uiCalArmed !== 'none') {
+      if (ev.key === 'Escape' && !liveDialog.open && uiCalArmed !== 'none') {
         worker.postMessage({ type: 'cal_control', action: 'cancel_arm' });
       }
     });

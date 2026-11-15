@@ -4809,11 +4809,13 @@
   "harmonic_metronome_phase.mp4": {
     "refWidth": 640,
     "refHeight": 360,
+    "fps": 30,
     "numFrames": 195,
+    "groundTruthNote": "Nikko mechanical metronome (96 BPM = 1.60 beats/s, 0.80 Hz full pendulum cycle)",
     "tracks": [
       {
         "id": 0,
-        "label": "metronome_oscillator",
+        "label": "nikko_metronome_96bpm_0p80hz",
         "matchRadiusHd": 48,
         "frames": [
           {
@@ -9146,6 +9148,7 @@
       {
         "id": 2,
         "label": "red_object_ball",
+        "stationary": true,
         "matchRadiusHd": 36,
         "frames": [
           {
