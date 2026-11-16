@@ -1,164 +1,181 @@
-# CHRONOS-SPECTRAL (`v2.0.0` · CHRONOS-1000)
+# CHRONOS-SPECTRAL
 
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
 
-`chronos_spectral` is a zero-ML, zero-training, `#![no_std]` Rust `wasm32-unknown-unknown` (`+simd128`) computer-vision, swarm-tracking, and continuum-physics engine (`2.13 MiB` binary) that runs inside a dedicated Web Worker with an `OffscreenCanvas` WebGL2/2D telemetry deck.
+CHRONOS-SPECTRAL turns raw video pixels directly into occlusion-bridged trajectories, symbolic differential equations, and continuum flow fields in under 2 milliseconds per CPU frame. It solves tracking, phase measurement, and system identification from classical signal processing and variational mechanics rather than trained neural networks.
 
-All pixel ring buffers, background subspace planes, Dual Projected-FISTA state vectors, spectral graph Laplacians, and the `1,536`-slot SoA micro-swarm + continuum physics fields live inside one contiguous `WebAssembly.Memory` arena pre-allocated at module instantiation (`320` fixed pages / `20.00 MB`, expanded from `288` pages in `v1.5.0`). The kernel imports zero host functions, performs zero runtime heap allocations or `memory.grow` calls, contains zero `MaybeUninit` blocks across `src/` (`0` `unsafe` in [src/continuum_physics.rs](./src/continuum_physics.rs)), and tracks up to `1,536` sub-pixel swarm targets alongside `16` full-physics non-causal Hero targets with live `320x180` SD ↔ `640x360` HD resolution switching.
+Everything runs inside one `2.13 MiB` (`2,234,437 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `20.00 MB` (`320`-page) static arena. The kernel has zero host imports, zero runtime heap allocations, zero GPU compute dependencies, zero `MaybeUninit` blocks, and zero `unsafe` code inside the continuum physics module.
 
-## Build, verify, and run
+## Live demonstrations
 
-Ensure `cargo` with the `wasm32-unknown-unknown` target, `node` (v22+), and `python3` are on `PATH`. Install `wabt` (`wasm-objdump`), `ffmpeg`, and Google Chrome to run the full calibration and headless browser suites.
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./docs/assets/demos/demo_starling_swarm.gif" alt="Real-camera 1,400+ starling murmuration swarm tracked with Hero-16 reticles hidden" width="100%" /><br />
+      <strong>Starling Murmuration Swarm (1,453 peak targets, 1.77 ms HD)</strong><br />
+      Real-camera <code>640x360</code> footage with single-object reticles toggled off (<code>HERO 16: HIDDEN</code>), isolating pure micro-track velocity stems and the bilinear <code>40x22</code> Eulerian speed field.
+    </td>
+    <td width="50%" align="center">
+      <img src="./docs/assets/demos/demo_model_rockets.gif" alt="Full-flight solid-motor model rocket tracked through liftoff, stage separation, apogee rollover, and twin parachute descent" width="100%" /><br />
+      <strong>Model Rockets: Ignition, Separation, and Parachutes</strong><br />
+      Single-core non-causal tracking across pad exhaust, supersonic booster separation, Hermite cloud bridges, apogee rollover, and twin canopy deployment.
+    </td>
+  </tr>
+</table>
 
-Run the release compile, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (Gates A–P), `5x2` interleaved SD/HD pillar benchmark, and Gate Q (`1,000+`-target swarm & continuum physics suite, `21/21` checks) without starting a server:
+*Both animations are unmodified `640x360` H.264 sample clips captured directly from headless Chromium running the `OffscreenCanvas` WebGL2/2D Command Deck (`node scripts/capture_docs_media.mjs`).*
 
-	./build.sh --check
+## Why this exists and what makes it unique
 
-Run the complete verification pipeline (`--check`, legacy SD/HD MP4 calibration gates, and the headless Chrome CDP full-stack E2E suite Steps `1..7` including Wave-2 `DeckUiFsm` UI checks & live fMP4 `MediaSource` stream audit):
+Most video perception stacks split into two camps: heavy neural detectors (`YOLO`/`SAM` paired with `ByteTrack`) that fail outside their training distribution and demand gigabytes of VRAM, or classical causal filters (`OpenCV` optical flow + Kalman) that smooth away sharp impacts, lag during phase estimation, and swap IDs whenever identical objects cross behind clutter. CHRONOS-SPECTRAL occupies the missing third quadrant: a deterministic visual physics instrument in `2.13 MiB` of portable WebAssembly.
 
-	./build.sh --e2e
+| Capability | Neural Detector + Sort (`YOLO`/`SAM`) | Classical Causal (`OpenCV` + Kalman) | CHRONOS-SPECTRAL (`v2.0.0`) |
+| :--- | :--- | :--- | :--- |
+| Object taxonomy / training | Requires labeled classes & weights | Class-agnostic blobs | Zero ML, zero weights: arbitrary unknown targets on frame 1 |
+| Auto-exposure & camera flicker | Vulnerable without domain augmentation | Thresholding breaks on exposure steps | Orthogonal Rank-2 ECA subspace (`36-64 dB` background suppression) |
+| Crossing identical targets | Re-ID struggles on indistinguishable objects | Spatial proximity causes ID swaps | Fiedler spectral partitioning + `i32.clz` Haar-Morton `v2` affinity |
+| Opaque occlusions & sharp impacts | Interpolates offline; Kalman rounds corners | Causal drift; corners smear across hits | 12-frame lookahead (`t - K`): backward re-tracking, Hermite bridges, 2-pass IRL1 FISTA |
+| Dense `1,000+` swarm association | Prohibitively slow without server GPUs | `O(N^2)` distance checks bottle at `< 300` | 16-bit Morton radix sort + `3x3` CSR (`21.94x` speedup) + fixed-point `epsilon`-Auction (`< 1.8 ms`) |
+| Output representation | 2D bounding boxes | Pixel centroids and `(vx, vy)` | Calibrated trajectories, symbolic ODEs, conservation metrics, vorticity, FTLE, `SE(2)` bodies |
+| Runtime footprint | `50 MB - 4 GB` weights + CUDA/ONNX | Variable C++ heap & OS threads | `2.13 MiB` Wasm, `20.00 MB` fixed static arena, zero imports, `0` heap allocs |
 
-Additional standalone certification suites (`CHRONOS_CI_BUDGET_SCALE=1.00`):
+Four architectural decisions create that difference:
 
-- `node scripts/calibrate_mp4.mjs --dual-mode --all --dual-res --gate` — `52/52` Off vs Auto-inactive parity & paired overhead gate across `624` length-preselected trials (`467,448` warm frames; pooled `upper95 = 0.00067 ms < 0.00500 ms`, `0` output mismatches).
-- `node scripts/calibrate_mp4.mjs --starling --hd --gate` — real-camera `640x360` [starling_murmuration_1000.mp4](./web/samples/starling_murmuration_1000.mp4) gate (`1,453` peak confirmed targets, `warmMean = 1.77 ms < 2.00 ms`).
-- `node scripts/benchmark_1000.mjs --gate --ablation` — Gate Q (`21/21` PASS) + `6`-tier association & spatial-CSR (`22.39x`) ablation table.
+1. **Deliberate 12-frame non-causal lookahead (`t - K`):** By holding `0..11` future frames (`0..183 ms` at `60 fps`) inside `Arena.rgba_ring`, the tracker inspects pixels *after* an occlusion clears, walks backward through buffered frames to recover missed detections, pins irreducible gaps with smooth Hermite boundary splines, preserves sharp corners during collisions or rocket ignition via 2-pass Iteratively Reweighted L1 (IRL1) Dual Projected-FISTA (exporting a convex primal-dual optimality certificate), and runs a symmetric centered 15-tap FIR Hilbert filter with zero group delay.
+2. **From pixels to physical laws rather than bounding boxes:** Trajectory histories feed compact-support weak-form quadrature (`phi(u) = (1 - u^2)^p`) and STRidge/AICc sparse regression (`src/physics_id.rs`) to discover symbolic governing ODEs (distinguishing inertial flight, ballistic drag, powered rocket boost, parachute terminal descent, nonlinear pendulums, and impacts), exact AGM elliptic periods, two-body collision momentum/energy conservation, `40x22` Eulerian vorticity, and coherent FTLE ridges.
+3. **Hard-real-time `#![no_std]` determinism:** Every pixel ring, pyramid, track slot, spectral workspace, and continuum field occupies fixed offsets computed at compile time. Nothing allocates, fragments, or calls back into the host operating system (`wasm-objdump` verified: `0` imports, `0` `memory.grow`, max shadow stack `13,712 / 16,384 B`).
+4. **Honest measurement provenance (`SURVEYED` vs `ASSUMED` vs `OUT OF PLANE`):** Pixel kinematics stay strictly in pixel units until explicit calibration. Built-in clip presets carry explicit `ASSUMED` tags, 2-point rulers and 4-point DLT homographies transform vectors via the analytical perspective Jacobian `J_H`, camera pans automatically suspend ground-plane calibration, and projective depth near the horizon (`w < 0.14`) refuses to extrapolate unbounded metric speeds.
 
-Compile `web/chronos_spectral.wasm`, run `--check`, and launch the interactive local server (`scripts/dev_server.mjs`, serving static assets, RFC 7233 HTTP 206 byte ranges, and `/api/live-stream` fMP4 live relays) at `http://127.0.0.1:8080`:
+## Standalone modules worth reusing
 
-	./build.sh
+Each subsystem is cleanly factored with narrow dependencies under the [Apache License 2.0](./LICENSE), so engineers can extract individual algorithms without adopting the whole browser deck:
 
-## Spatial resolution & swarm modes
+| Need in your project | Reusable module | What it implements and why extract it |
+| :--- | :--- | :--- |
+| Track `1,000-1,536` featureless points in `< 2 ms` on CPU (PIV fluid particles, microscopy cells, LiDAR/radar dots) | [src/soa_tracks.rs](./src/soa_tracks.rs) | Lock-free Structure-of-Arrays pipeline: 16-bit Morton Z-order 2-pass radix sort, `3x3` CSR spatial neighborhood pruning (`21.94x` speedup over dense scan), integer `Q`-scaled Bertsekas forward-reverse `epsilon`-Auction with explicit coasting, and `8x8` Huber IC-LK sub-pixel refinement. |
+| Turn sparse point velocities into fluid vorticity, FTLE ridges, rigid bodies, or vibration mode maps | [src/continuum_physics.rs](./src/continuum_physics.rs) | Pure safe Rust (`0` `unsafe` tokens): `k=6` spatial graph strain, Procrustes `SO(2)`/`SE(2)` connected-component clustering (`32` bodies, unwrapped `omega` rad/s), `40x22` Eulerian velocity gradient/curl/divergence, 2-bank Cauchy-Green FTLE, modal PLL resonators with nematic order `R_2`, and explicit per-subsystem validity masking (`0x00..0x1F`). |
+| Discover governing ODEs or check conservation laws on noisy time series | [src/physics_id.rs](./src/physics_id.rs) | Weak-form integration avoids taking noisy finite-difference accelerations: STRidge + AICc model selection across `9` physical regimes, exact `f64` cyclic Jacobi Taubin vs algebraic Kasa circle fitting, `f64` Arithmetic-Geometric Mean pendulum elliptic integral `K(m)`, staggered `4D` Rosenstein Lyapunov divergence, Kuramoto order `R`, and blur-excluded two-body collision conservation. |
+| Smooth noisy position signals without smearing step impacts or turns | `solve_noncausal_fista_irl1_target` in [src/lib.rs](./src/lib.rs) | Constant-time (`6`-iteration) Dual Projected-FISTA solver for weighted L1 second-difference trend filtering (`12`-sample window), computing an exact convex duality gap `P(X) - D(u)` and branching to IRL1 knot reweighting only when high-impulse corners exist. |
+| Suppress camera flicker and track fast targets under pan/exposure changes with SIMD128 | [src/simd_ops.rs](./src/simd_ops.rs) & [src/lib.rs](./src/lib.rs) | `v128` kernels (zero `MaybeUninit`): orthogonal Rank-2 ECA background subspace projection (`36-64 dB` clutter cancellation), Catmull-Rom sub-pixel background pan advection via an 8-row L1D ring, radial de-slipped dual-anchor templates, and single-instruction `i32.clz` Haar-Morton binary-prefix ultrametric signatures (`padic_ultrametric_val`). |
+| Build a zero-framework, zero-GC real-time browser instrument panel | [web/worker.js](./web/worker.js), [web/index.html](./web/index.html), [scripts/dev_server.mjs](./scripts/dev_server.mjs) | `OffscreenCanvas` WebGL2 instanced field compositor (`< 0.5 ms` per frame), batched Canvas2D scopes, `DeckUiFsm` finite-state reducer (`CLS = 0.000000`), SSRF-hardened FFmpeg fragmented-MP4 `MediaSource` live relay, `18,000 x 56` zero-GC typed recorder, and latency-compensated WebAudio phase/percussion synthesis. |
 
-| Mode | Frame size | Split PiP (`1x` vs `25x Δ`) | Coarse-to-fine proposal | Apple M4 Pro `warmMean` / median | Frame budget |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `0` (`SD` Hero-16) | `320x180` (`57,600` px) | `32x32` PiP (`16x16` patch) | `160x90` pyramid + `[2, 1]` px + 2D IC-LK | `0.121 ms` Pillar | `< 0.35 ms` |
-| `1` (`HD` Hero-16) | `640x360` (`230,400` px) | `64x64` PiP (`32x32` `2x2` pooled) | `160x90` pyramid + `[4, 1]` px + 2D IC-LK | `0.324 ms` Pillar | `< 1.00 ms` |
-| `1` (`HD` Swarm `1K+`) | `640x360` (`1,000–1,536` tgts) | WebGL2 instanced + `64x64` PiP | `8x8` pyr + 16-bit Morton-CSR + `ε`-Auction + IC-LK | `1.42–1.77 ms` (`p95 <= 2.12 ms`) | `< 2.00 ms` mean |
+## Quickstart
 
-## CHRONOS-1000 swarm & continuum benchmark (`Gate Q`)
+Prerequisites: Rust toolchain with `wasm32-unknown-unknown`, `node` (`v22+`), and `python3`. Install `wabt` (`wasm-objdump`), `ffmpeg`, and Google Chrome to run the full MP4 calibration and headless Chrome E2E verification suites.
 
-Evaluated headless via `node scripts/benchmark_1000.mjs --gate --ablation` (`640x360` HD, `CHRONOS_CI_BUDGET_SCALE = 1.00`, Apple M4 Pro):
+Compile `web/chronos_spectral.wasm`, run all static/mathematical/swarm gates (`--check`), and start the local Command Deck at `http://127.0.0.1:8080`:
 
-| Suite / Scenario | Confirmed Peak / `P10` | Accuracy & Physics Proof | `warmMean` / `p50` | `p95` |
+```bash
+./build.sh
+```
+
+Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (Gates A-P), the `5x2` interleaved SD/HD pillar benchmark, and Gate Q (`1,000+` target swarm & continuum verification) without launching a server:
+
+```bash
+./build.sh --check
+```
+
+Run the complete verification pipeline (`--check`, SD/HD MP4 CLEAR-MOT & physics calibration gates, and headless Chrome CDP Steps `1-7` including live fMP4 `MediaSource` camera-cut recovery):
+
+```bash
+./build.sh --e2e
+```
+
+## Command Deck tour
+
+![Full 3-column CHRONOS-SPECTRAL Command Deck tracking solid-motor model rockets](./docs/assets/panels/01_deck_overview.png)
+
+Every visual scope, HUD overlay, KPI state transition, and exported column is documented with high-DPI screenshots of each individual panel in the **[UI and Telemetry Guide](./docs/UI_TELEMETRY_GUIDE.md)**.
+
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./docs/assets/panels/05_split_pip_and_primary_kpis.png" alt="Split 1x Raw vs 25x Eulerian temporal delta picture-in-picture and primary KPIs" width="100%" /><br />
+      <strong>Split <code>1x</code> Raw / <code>25x</code> Eulerian Audit &amp; Primary KPIs</strong><br />
+      Target-locked <code>64x64</code> stabilized patch next to its <code>25x</code> temporal-contrast delta and binary-prefix signature (<code>v_2 = 10</code>).
+    </td>
+    <td width="50%" align="center">
+      <img src="./docs/assets/panels/08_hilbert_quadrature_scope.png" alt="Auto-ranging Hilbert quadrature phase portrait and 90-degree separated waveforms" width="100%" /><br />
+      <strong>Hilbert Quadrature Scope</strong><br />
+      Auto-scaled polar orbit paired with 15-tap centered FIR quadrature waveforms (<code>f = 0.76 Hz</code>, coherence <code>76%</code>) gated on turnaround crossings.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./docs/assets/panels/11_physics_id_and_phase_portrait.png" alt="In-situ symbolic ODE identification and phase-space portrait on Galileo pendulum" width="100%" /><br />
+      <strong>In-Situ Physics ID &amp; Conservation</strong><br />
+      Discovers symbolic governing ODEs (<code>R^2 = 0.882</code>), exact AGM elliptic period (<code>7.282 s</code>), Jacobi Taubin curvature, and live phase/energy conservation traces.
+    </td>
+    <td width="50%" align="center">
+      <img src="./docs/assets/panels/12_continuum_swarm_panel.png" alt="Continuum and swarm field telemetry with expanded expert solver diagnostics" width="100%" /><br />
+      <strong>Continuum &amp; Swarm Field + Solver Diagnostics</strong><br />
+      Separates kernel median latency (<code>1.70 ms</code>) from pipeline window, exposes click-to-inspect track state, vorticity/FTLE peaks, and <code>SE(2)</code> rigid bodies.
+    </td>
+  </tr>
+</table>
+
+## Certified performance and accuracy
+
+All numbers below come from deterministic Node + Wasmtime/V8/Chrome harnesses on an Apple M4 Pro (`CHRONOS_CI_BUDGET_SCALE = 1.00`, `640x360` HD unless noted). Full methodology, ablations, dual-mode standby overhead proofs, and standalone CLI commands live in **[Verification and Benchmarks](./docs/VERIFICATION_AND_BENCHMARKS.md)**.
+
+### High-density swarm and continuum performance (`Gate Q`)
+
+Evaluated headless via `scripts/benchmark_1000.mjs` with zero ground-truth hints passed to Wasm (`21/21` Gate Q checks passing):
+
+| Suite / Scenario | Peak / P10 Confirmed | Accuracy and Physics Verification | Mean / p50 Kernel | p95 Kernel |
 | :--- | :--- | :--- | :--- | :--- |
-| `Q1: vortex_swarm_1200` | `1,207` / `1,200` | `HOTA 99.9%`, `IDSW 0`, `vortPearsonR = 0.9957`, `ftleCells = 657` | `1.56 ms` / `1.48 ms` | `2.02 ms` |
-| `Q2: murmuration_1200` | `1,219` / `1,208` | `HOTA 99.8%`, `IDSW 0`, `3/3` SE(2) bodies (`joint 100/96/94%`) | `1.61 ms` / `1.65 ms` | `1.97 ms` |
-| `Q3: modal_beam_1152` | `1,143` / `1,135` | `3.000 Hz` (`med 2.999 Hz`), `coh 0.977`, `R2 0.953`, `|\Delta\phi - \pi| = 0.039` rad | `1.42 ms` / `1.44 ms` | `1.64 ms` |
+| `Q1: vortex_swarm_1200` | `1,207` / `1,200` | `HOTA 99.9%`, `IDSW 0`, vorticity Pearson `r = 0.9957`, `ftleCells = 657` | `1.56 ms` / `1.48 ms` | `2.02 ms` |
+| `Q2: murmuration_1200` | `1,219` / `1,208` | `HOTA 99.8%`, `IDSW 0`, `3/3` `SE(2)` bodies (`joint 100% / 96% / 94%`) | `1.61 ms` / `1.65 ms` | `1.97 ms` |
+| `Q3: modal_beam_1152` | `1,143` / `1,135` | `3.000 Hz` (median `2.999 Hz`), coh `0.977`, `R_2 = 0.953`, `\|Delta phi - pi\| = 0.039` rad | `1.42 ms` / `1.44 ms` | `1.64 ms` |
 | `Q4: starling_murmuration_1000.mp4` | `1,453` / `1,032` | Real `30 fps` H.264 flock (`movingDarkFeat1to1Prec = 70.3%`, `parityErr = 0`) | `1.76 ms` / `1.72 ms` | `2.12 ms` |
 | `SWEEP: N = 1,536` | `1,536` / `1,473` | `Recall 100.0%`, `MOTA 100.0%`, `RMSE 0.059 px`, `HOTA 100.0%` | `1.45 ms` / `1.48 ms` | `1.81 ms` |
 
-## Real-camera MP4 ground-truth benchmark
+Running the standalone Q2 association ablation (`node scripts/benchmark_1000.mjs --only=Q2,ABLATION`) measures a **`21.94x` speedup** from 16-bit Morton Z-order sorting + `3x3` CSR neighborhood indexing (`13.631 ms` JS Nearest-Greedy down to `0.621 ms` JS Morton-CSR+Greedy), while the full SIMD128 Wasm pipeline (Morton-CSR + integer `epsilon`-Auction + `8x8` Huber IC-LK) lifts accuracy from `96.9%` Recall / `0.178 px` RMSE / `121` IDSW (`94.7%` HOTA) to **`100.0%` Recall / `0.039 px` RMSE / `0` IDSW (`99.8%` HOTA)** in `1.703 ms` median compute.
 
-`scripts/calibrate_mp4.mjs` evaluates pixel-domain CLEAR-MOT ground-truth trajectories (`scripts/gt_mp4_reference.json`), precision bounds, negative non-periodic / non-pendulum gates, and mode-specific physics-proof invariants across all 5 open-licensed H.264 sample clips (`--gate` enforces per-clip `Recall >= minRecallPct`, `Prec >= minPrecisionPct`, `Teleports == 0`, `StaticPins <= 1`, `Hijacks <= 16`, `clutterDb >= minClutterDb`, p-adic vs Kalman swap ordering, physics/frequency/gravity gates, and SD/HD `2x` gravity consistency while also measuring and reporting `RMSE` and `IDSW`):
+### Real-camera physics and occlusion calibration clips
 
-| Sample clip | Mathematical proof target | `320x180` SD Recall / RMSE | SD Hijacks / Teleports | `640x360` HD Recall / RMSE | HD Hijacks / Teleports | Verified HD physics & trig proof |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| `juggling_ballistic.mp4` (`25 fps`) | Mode A multi-arc $\hat{g}$ & flight $\theta$ | `75.9%` / `9.30 px` | `3` / `0` | `77.6%` / `15.18 px` | `0` / `0` | `6`-arc Auto-$g$ (`1.7%` SD/HD $2\times$ err), `0` false Hz |
-| `roundabout_occlusion.mp4` (`24 fps`) | Mode A `< K` overhead gantry bridge + $H$ | `94.0%` / `9.99 px` | `3` / `0` | `93.0%` / `18.22 px` | `4` / `0` | `9f` Hermite bridges, `0` false pivots, `0` false Hz |
-| `galileo_pendulum_peg.mp4` (`30 fps`) | Kåsa virtual pendulum pivot & swing $\theta$ | `100.0%` / `7.81 px` | `0` / `0` | `100.0%` / `3.20 px` | `0` / `0` | `61f` synchronized virtual pivot (`0` IDSW) |
-| `harmonic_metronome_phase.mp4` (`30 fps`) | Mode B Nikko `96 BPM` (`0.80 Hz`) + pivot | `89.0%` / `14.05 px` | `0` / `0` | `96.0%` / `24.64 px` | `0` / `0` | `108f` `0.82 Hz` lock (`SD 0.80 Hz`) + `110f` pivot |
-| `carom_billiards_impulses.mp4` (`30 fps`) | Mode C deflection $\Delta\theta$, $v^+/v^-$, & $H$ | `92.6%` / `9.54 px` | `2` / `0` | `93.3%` / `19.80 px` | `2` / `0` | `30` L1 strikes + `117.3°` (`SD 27.2°`) scatter (`0` false Hz) |
+`scripts/calibrate_mp4.mjs` checks CLEAR-MOT trajectories, negative non-periodic gates, SD/HD gravity scaling, and physical invariants across compressed open-licensed H.264 clips:
+
+| Sample clip | Mathematical proof target | SD (`320x180`) Recall / RMSE | HD (`640x360`) Recall / RMSE | Verified HD physics proof |
+| :--- | :--- | :--- | :--- | :--- |
+| [juggling_ballistic.mp4](./web/samples/juggling_ballistic.mp4) (`25 fps`) | Mode A multi-arc `g_hat` and flight angle | `75.9%` / `9.30 px` | `77.6%` / `15.18 px` | `6`-arc Auto-`g` (`1.7%` SD/HD `2x` err), `0` false Hz |
+| [roundabout_occlusion.mp4](./web/samples/roundabout_occlusion.mp4) (`24 fps`) | Mode A gantry bridge + homography `H` | `94.0%` / `9.99 px` | `93.0%` / `18.22 px` | `9f` Hermite bridges, `0` false pivots, `0` false Hz |
+| [galileo_pendulum_peg.mp4](./web/samples/galileo_pendulum_peg.mp4) (`30 fps`) | Kasa virtual pivot & swing angle | `100.0%` / `7.81 px` | `100.0%` / `3.20 px` | `61f` synchronized virtual pivot (`0` IDSW) |
+| [harmonic_metronome_phase.mp4](./web/samples/harmonic_metronome_phase.mp4) (`30 fps`) | Mode B Nikko `96 BPM` (`0.80 Hz`) + pivot | `89.0%` / `14.05 px` | `96.0%` / `24.64 px` | `108f` `0.82 Hz` lock (`SD 0.80 Hz`) + `110f` pivot |
+| [carom_billiards_impulses.mp4](./web/samples/carom_billiards_impulses.mp4) (`30 fps`) | Mode C deflection, `v+/v-`, and `H` | `92.6%` / `9.54 px` | `93.3%` / `19.80 px` | `30` L1 strikes + `117.3 deg` (`SD 27.2 deg`) scatter (`0` false Hz) |
+
+In paired sparse-mode parity testing across all 13 non-swarm sample clips (`52/52` SD/HD checks, `624` length-preselected trials, `467,448` warm frames), enabling `Auto-Density` swarm probing imposes only `0.00067 ms` (`< 1 microsecond`) pooled upper-95th-percentile overhead with `0` output mismatches against `Swarm: Off`.
+
+## Documentation map
+
+| Document | Diataxis type | What it covers |
+| :--- | :--- | :--- |
+| [Architecture and Math](./docs/ARCHITECTURE_AND_MATH.md) | Explanation | Arena memory map (`20.00 MB`), ECA subspace math, 12-frame lookahead, IRL1 FISTA, `i32.clz` Haar-Morton, Lanczos Fiedler, Morton-CSR Auction, weak-form STRidge/AICc, continuum mechanics, and homography rectification. |
+| [UI and Telemetry Guide](./docs/UI_TELEMETRY_GUIDE.md) | Reference | Panel-by-panel manual with all 15 individual deck screenshots, `DeckUiFsm` states, dynamic KPI transitions, calibration rules, WebAudio synthesis, C-ABI memory offsets (`telemetry[0..1567]`, `swarm_telem[0..63]`), and `56`-column CSV/JSON export schema. |
+| [Verification and Benchmarks](./docs/VERIFICATION_AND_BENCHMARKS.md) | How-to and Reference | CLI verification recipes (`--check`, `--e2e`, `calibrate_mp4.mjs`, `benchmark_1000.mjs`, `capture_docs_media.mjs`), static binary audit gates, Gates A-P, full extended-clip tables, dual-mode parity proof, and Q2 ablation metrics. |
 
 ## Repository layout
 
-- `LICENSE` & `NOTICE` — [Apache License 2.0](./LICENSE) terms for all software, build/test tooling, documentation, and `chronos_spectral.wasm`, plus Section 4(d) attribution and separation notice for standalone sample videos.
-- `Cargo.toml` configures the `v2.0.0` `cdylib` release artifact (`Apache-2.0`) with `opt-level = 3`, fat LTO, `codegen-units = 1`, and `panic = "abort"`.
-- `.cargo/config.toml` sets `target = "wasm32-unknown-unknown"`, enables `+simd128`, sets a 16 KiB stack, and pins `WebAssembly.Memory` to a fixed zero-growth arena (`320` pages / `20,971,520` bytes in `v2.0.0`; expanded from `288` pages / `18,874,368` bytes in Wave 1).
-- `src/lib.rs` defines the static `Arena`, C ABI entrypoints (including exact-ID `chronos_inspect_micro_track`), `64`-frame trajectory rings (`HIST_RING_LEN = 64`, `HIST_MASK = 63`) and `hist_t_sec` (`f64`) discontinuity invalidation, pixel-domain Camera Cut / PTZ Pan detector (`find_best_win_shift_simd128` with `eval_cam_coarse_tile_simd128` + dense `-4..=4` core + stride-2 + exhaustive fallback plus `eval_ref_pt` exhaustive fine-grid fallback), `M-of-N` track confirmation and static-pin reaper, isoluminant chromatic seeding, viewport-exit ring drain, radial rod/rail de-slipped P-N dual-anchor templates (`apply_radial_deslip_weights`), 4-Mode IMM curved-arc & oscillatory prediction/update (CV + Ballistic-Drag Verlet + CTRV Taylor + Oscillatory modes with pan-advected states), Jonker-Volgenant `8x32` / `16x64` global bipartite matchers (up to `16` concurrent targets, `32`-node Laplacian), non-causal backward `rgba_ring` gap re-tracker with 2-frame capped pre-birth backtrack and `no_scene_grav` / `vel_aligned` / `achromatic_track` coasting guards, `32`-slot / `1200`-frame (`40 s` at `30 fps`) `DormantTrack` Re-ID archive (`16x16` zero-mean foreground templates + 4-mode corridor + 2-adic Haar-Morton + 2-hit fast re-confirmation), Track-Peak graph Laplacian builder, 2-pass IRL1 Dual Projected-FISTA trend filter (`solve_noncausal_fista_irl1_target`) with multi-arc consensus quadratic gravity estimation ($\hat{g}$), `t - K`-synchronized Kåsa $2 \times 2$ and `f64` Jacobi Taubin $3 \times 3$ pivot/curvature solvers, bi-directional turnaround periodicity gate, pre/post-impact deflection & speed-ratio kinematics, close-contact two-body scatter wedge detector, and `1568`-float telemetry buffer (`TELEMETRY_LEN = 1568`).
-- `src/soa_tracks.rs` implements the `1,536`-slot SoA micro-swarm tracker (`MicroTrackSoA`), zero-heap SIMD128 micro-peak extraction, 16-bit spatial Morton radix sorting + Haar-Morton `clz` signatures, sparse `CSR` (`k <= 8`) candidate lists, integer `Q`-scaled Bertsekas $\epsilon$-Auction + explicit coasting, `8x8` Huber IC-LK refinement, and `inspect_micro_track_by_id` exact identity lookup.
-- `src/continuum_physics.rs` (`0` `unsafe` tokens) implements sparse $k$-NN (`k = 6`) strain graphs, connected-component `SE(2)` rigid-body fitting (`32` bodies, direct `det = +1` rotation & $\omega$ rad/s), `40x22` Eulerian velocity/vorticity/divergence fields, 2-bank Cauchy-Green FTLE coherent ridges, and modal resonators with nematic anti-phase order $R_2$.
-- `src/physics_id.rs` implements `#![no_std]` in-situ physical law discovery and conservation telemetry inside the fixed arena (`LyapunovScratch`): staggered (`1:4` + event-driven) moment-matched weak-form STRidge + AICc symbolic ODE identification (`phys_regime` `0..8`, `ode_r2`, `aero_drag_beta`, `thrust_accel`), `f64` `3x3` Jacobi Taubin vs Kåsa curvature analysis & Galileo peg jump detector (`constraint_jump_code = 1`), `f64` AGM Jacobi elliptic period $T(\theta_0)$ and log-peak decrement damping ($\zeta, Q$), staggered (`1:8`) `4D` delay-coordinate Rosenstein Lyapunov divergence rate ($\lambda_{\max}$), Kuramoto ensemble synchronization ($R_{\text{sync}}, \Psi, N$), and causal blur-excluded two-body collision momentum/energy conservation ($m_2/m_1, e_n$, momentum residual, energy retention).
-- `src/simd_ops.rs` implements `v128` kernels (zero `MaybeUninit`, fully stack-initialized) for RGBA-to-planar conversion, anchor-shifted `f64x2` Rank-2 Extensive Cancellation Algorithm clutter projection (`eca_fit_affine_params_simd128`), fused pan `rgb_sum` streak caching and ECA/motion-grid projection (`eca_and_motion_grid_pan_fused_simd128`), coarse camera shift tile evaluation (`eval_cam_coarse_tile_simd128`), an 8-row L1D ring buffer for subpixel Catmull-Rom background advection with overlap-safe border filling, hoisted branch-free exposure/pan streak loops (`span_reset_u8=35`, `span_soft_u8=26`), `rgb_abs_sum_f32x4_simd128` (`extadd_pairwise`) motion-grid updates, `160x90` multi-channel box pyramids, 2D Shi-Tomasi structure-tensor cornerness, `2x2` SIMD128 box-pooled `32x32` Haar-Morton signatures, zero-mean gain-invariant foreground-weighted patch SAD & anchor L1 drift locks (`sad_patch_zm_score_simd128`, `sad_patch_zm_weighted_simd128`, `weighted_anchor_zm_l1_simd128`), `2x2` pooled HD PiP rendering, and luma-only Huber IRLS Inverse-Compositional Lucas-Kanade (`refine_subpixel_ic_lk_huber_simd128`) sub-pixel refinement.
-- `web/worker.js` runs the V8 Web Worker loop, aspect-preserving letterbox + normalized Crop ROI staging, `frame_ack` backpressure protocol, `OffscreenCanvas` HUD scopes (flight-angle protractors, Kåsa virtual pendulum pivot bullseyes & swing wedges, CAD collision deflection protractors & 2-body scatter wedges, $3 \times 3$ plane homography $H^{-1}$ iso-metric grids, frozen Euclidean Mode A apex crosshairs, enlarged split `1x RAW [t-K]` vs `25x TEMPORAL Δ` PiPs up to `64x64`, `16`-slot enlarged Split PiP roster cards, calm `2 Hz` Zero-GC multi-minute continuity & concurrency chart, auto-ranging Hilbert quadrature orbit, chronological `t-11 -> VIEW [t-K] -> NOW [t]` timeline, and `15 Hz` `#physicsPhaseCanvas` phase-space portrait & conservation trace), WebGL2 instanced / 2D Field Layer compositor (`40x22` bilinear continuum heatmap, `1,000+` micro-track stems/pips, and `SE(2)` convex hulls), atomic draft-staged 2-point metric ruler / multi-arc Auto-$g$ (`9.81 m/s²`) / 4-point projective homography engine ($J_H$ velocity & angle rectification with `OUT OF PLANE` horizon guard and `ASSUMED` vs `SURVEYED` provenance), 10-scenario Blind Pixel Pillar testbench (7 legacy scenarios plus `vortex_swarm_1200`, `murmuration_1200`, and `modal_beam_1152`), shifted 31-step Lanczos Fiedler eigensolver, and zero-GC `18,000 x 56` `Float64Array` segmented telemetry recorder (`REC_COLUMNS[0..55]`).
-- `web/index.html` provides the browser telemetry controls, SD/HD resolution toggle, **3-Tier Continuous Live-Stream Suite** (Tier 1 `getDisplayMedia` Tab/Window Capture + Crop ROI, Tier 2 Direct CORS-probed stream with 1-px readback guard, Tier 3 native `MediaSource` fragmented-MP4 live stream tuner `<dialog>`), built-in real-camera physics/traffic/rocketry/swarm MP4 selector, exact `1/fps` MP4 transport (`Pause/Play`, `-1f`, `+1f`, `Replay`), accessible Metric & Perspective Calibration toolbar + keyboard coordinate disclosure, `DeckUiFsm` pure state/pointer/viewport manager (`window.__chronosUiState`) with `#hudPanel` cinema fullscreen (`#btnHudFullscreen` / `F` / `.hud-maximized` fallback) and Hero-16 overlay toggle (`#btnHudHeroToggle` / `#chkHeroTargets` / `H`), enlarged `#pipCanvas` (`412x234`) & 2-column scrollable 16-slot `#rosterScrollWell` (`276x148` per slot) with click/button `[FOCUS]` target pin, calm `1 Hz` / `2 Hz` `#persistencePanel` multi-minute continuity view, `4 Hz`-throttled `#physicsIdPanel` & `#continuumFieldPanel` with collapsed `#expertDiagnosticsDrawer`, `56`-column CSV/JSON session exporter (`schemaVersion: "1.5.0"`, with `meta.chronos1000`), epoch-guarded `requestVideoFrameCallback` media ingestion, and WebAudio polyphonic synthesizer.
-- `docs/UI_TELEMETRY_GUIDE.md` documents every UI element (`#hudPanel`, `#btnHudHeroToggle`, `#btnHudFullscreen`, `#chkHeroTargets`, `#physicsIdPanel`, `#physicsPhaseCanvas`, `#continuumFieldPanel`, `#expertDiagnosticsDrawer`, and all sub-IDs), `DeckUiFsm`, `OffscreenCanvas` WebGL2/2D overlays, dynamic KPI state transitions, calibration provenance rules, WebAudio voices, dual Kernel vs Partial Pipeline latency accounting, and exported `telemetry[0..1567]` / `swarm_telem[0..63]` / `56`-column `v1.5.0` recorder fields. Architecture and milestone design notes live in [docs/CHRONOS_1000_ROADMAP.md](./docs/CHRONOS_1000_ROADMAP.md) and [docs/CHRONOS_IMPOSSIBLE_ROADMAP.md](./docs/CHRONOS_IMPOSSIBLE_ROADMAP.md).
-- `scripts/dev_server.mjs` implements the shared loopback HTTP server (`GET`/`HEAD` static files with RFC 7233 `206 Partial Content`, `GET /api/live-presets` probing public Caltrans `wzmedia.dot.ca.gov` highway HLS feeds alongside 3 deterministic local live/cut feeds, and `GET /api/live-stream` `ffmpeg` fragmented-MP4 live relay with strict loopback & SSRF guards).
-- `web/samples/` stores 14 open-licensed real-camera H.264 physics, rocketry, swarm, and traffic MP4 clips (8 extended `29` to `80 s` showcase clips including full-flight solid-motor model rockets with stage separation & twin parachutes, `79.9 s` pad-to-pad VTVL rocket ascent & landing, and parachute water-rocket flights, 5 pixel-calibrated `5.4` to `6.7 s` ground-truth benchmark clips, plus `starling_murmuration_1000.mp4` for `1,000+` target evaluation) documented in `web/samples/ATTRIBUTION.md`.
-- `scripts/calibrate_mp4.mjs` decodes `web/samples/*.mp4` via `ffmpeg` into raw RGBA buffers and validates CLEAR-MOT ground-truth metrics (`scripts/gt_mp4_reference.json`), precision bounds, SD/HD `2x` gravity consistency, physics/trigonometric/conservation invariants (plus `--extended` / `--all` / `--clip=<substr>` for the 8 extended HD showcases), ECA suppression, and zero NaNs across SD and HD modes.
-- `scripts/e2e_browser.mjs` drives headless Chrome over the DevTools Protocol (CDP) against `scripts/dev_server.mjs` to test SD/HD switching, exact `25 fps` frame-stepping, paused calibration sync, multi-clip MP4 physics & negative periodicity gates, `ASSUMED` vs `SURVEYED` provenance + atomic `Escape` cancel, `56`-column `v1.5.0` CSV/JSON telemetry exports, and live fMP4 `MediaSource` streaming across a hard camera cut.
-- `scripts/benchmark_1000.mjs` validates Gate Q high-density `1,000+` target tracking and continuum physics (`Q1 vortex_swarm_1200`, `Q2 murmuration_1200`, `Q3 modal_beam_1152`, `Q4 starling_murmuration_1000.mp4`), analytic vector-field checks, and association ablation (`--gate`, `--ablation`).
-- `.github/workflows/ci.yml` executes `./build.sh --e2e` on every push and pull request against `main`.
-
-## Mathematical subsystems
-
-### Non-causal 12-frame lookahead buffer & backward ring re-tracking
-
-`Arena.rgba_ring` stores 12 frames up to `640x360` RGBA resolution. `chronos_pre_tick` ingests incoming frames at `frame_idx % 12` while `chronos_post_tick` renders delayed display slot `(frame_idx + 12 - eff_k) % 12` for lookahead `K` from `0` through `11`. When a confirmed target re-emerges from occlusion or finishes `M-of-N` confirmation, `backtrack_gap_in_rgba_ring` unpacks historical ROIs from `rgba_ring` (`t - 1 .. t - K`) to recover missed visible sub-pixel detections before pinning residual opaque gaps with two-point Hermite boundary splines.
-
-### Rank-2 Extensive Cancellation Algorithm clutter suppression
-
-`eca_subspace_project_masked_simd128` in `src/simd_ops.rs` projects each incoming luma frame orthogonally against the mean-centered rank-2 background subspace $X = [b - \bar{b}\mathbf{1},\, \mathbf{1}]$, cancelling both static spatial structure and global camera auto-exposure offsets while guarding stationary background learning (`0.15x` rate on unverified moving pixels) against foreground absorption. `update_stat_streak_and_mask_simd128` tracks raw RGB pixel invariance across 12 consecutive frames to measure uncensored clutter attenuation in decibels prior to background adaptation (`> 64 dB` on the Blind Pixel Pillar scene and `36.5-45.7 dB` on compressed H.264 camera feeds).
-
-### Foreground-masked P-N templates, 2-adic signatures, 4-mode IMM, and Huber IC-LK
-
-`capture_template_scaled` weights each target patch by radial Gaussian times observed ECA motion mask (`sum(tpl_weight) = 1.0`, suppressing outer square-patch background corners by `> 12x`) alongside `apply_radial_deslip_weights` (dampening 1D pendulum/metronome rod peripheral texels along the radial tether axis) and an immutable birth anchor (`anchor_luma/rg/by`) that blocks cumulative P-N template drift. `haar_morton_signature_scaled_simd128` maps each `16x16` (SD) or `32x32` (HD `2x2`-pooled) target patch into a 32-bit signature:
-
-- Bit `31` gates chromatic confidence on opponent saturation.
-- Bits `30..27` encode opponent `R-G` and `B-Y` thermometer polarity with a `0.055` deadzone.
-- Bits `23..16` encode orthogonal 2D Haar quadrant wavelets.
-- Bits `15..0` encode Morton-interleaved sub-block polarity relative to parent quadrants.
-
-`padic_ultrametric_val` calls `(code_a ^ code_b).leading_zeros()`, which compiles to `i32.clz` and induces a binary-prefix ultrametric satisfying $d_2(A, C) \le \max(d_2(A, B), d_2(B, C))$. Candidate seeds must pass `patch16x16_shi_tomasi_simd128` 2D structure-tensor eigenvalue checks ($\lambda_{\min}$ vs $\lambda_{\max}$) and `3`-of-`8` tentative confirmation (or `2`-hit fast confirmation when matching the `32`-slot, `1200`-frame `DormantTrack` archive within `40 s` at `30 fps`) before entering telemetry. A 4-mode Interacting Multiple Model (IMM) filter couples Inertial Constant-Velocity (CV), Ballistic-Drag (Verlet integration under gravity clamped to $[150s, 3600s]\,\text{px/s}^2$), Coordinated-Turn (CTRV with 4th-order small-angle Taylor expansion for $|\psi| < 10^{-2}$), and Oscillatory state hypotheses with pan-advected equilibrium coordinates, exporting collapsed weights $(w_{\text{cv}}, w_{\text{bal}}, w_{\text{turn\_osc}})$. `propose_track_candidates_pyr` searches a `160x90` SIMD128 multi-channel pyramid around curved predictions, `solve_jv_assign_16x64` solves global minimum-cost bipartite matching (including zero-mean gain-invariant foreground SAD `sad_patch_zm_score_simd128` / `sad_patch_zm_weighted_simd128` / `weighted_anchor_zm_l1_simd128` against plume/glare contrast shifts, per-track coasting null columns, and Fiedler spectral penalties $\gamma_{\text{eff}}(v_m - v_{16+p})^2$), and `refine_subpixel_ic_lk_huber_simd128` extracts sub-pixel displacements via luma-only Huber IRLS Inverse-Compositional Lucas-Kanade.
-
-### Certified Dual Projected-FISTA & 2-pass IRL1 trend filter
-
-`solve_noncausal_fista_irl1_target` solves the iteratively reweighted weighted second-difference L1 trend-filtering problem across the 12-frame trajectory window:
-
-$$\min_{X \in \mathbb{R}^{12}} \frac{1}{2}\sum_{k=0}^{11} w_k (X_k - Y_k)^2 + \lambda_{\text{eff}} \sum_{j=0}^{9} w^{\text{IRL1}}_j |(D_2 X)_j|$$
-
-where $\lambda_{\text{eff}} = \lambda \cdot s$ scales linearly with the resolution factor $s \in \{1, 2\}$ to preserve trajectory curvature invariance. Pass 1 solves the smooth dual box problem over $u \in [-\lambda_{\text{eff}}, \lambda_{\text{eff}}]^{10}$ using `soft_threshold_branchless`, Gershgorin Lipschitz step bounds, coordinate warm-start sweeps, and 6 accelerated proximal-gradient steps with gradient restart, taking an immediate early-out when $\min_j w^{\text{IRL1}}_j > 0.48$ (`fista_sharp_knots = 0`). When localized high-impulse knots appear (carom strikes, Galileo peg stops, stage burnouts, or parachute deployments), Pass 2 reweights the per-knot $D_2$ bounds to sharpen corners while exporting $P(X) - D(u)$ to `telemetry[25]` and sharp knot counts to `telemetry[1280 + m*16 + 3]`.
-
-### In-situ weak-form physics identification & ensemble dynamics
-
-`src/physics_id.rs` runs `#![no_std]` in-situ physical law discovery and conservation verification over `HIST_RING_LEN = 64` frames (`TELEM_PHYSICS_START = 1280`, `TELEM_ENSEMBLE_START = 1536`, total `1568` floats):
-
-- **Weak-form STRidge + AICc symbolic ODE identification:** Integrates compact-support smooth test functions $\phi(u) = (1 - u^2)^p$ (`1:4` staggered cadence plus event-driven updates on sharp IRL1 knots; `15`-frame hysteresis hold and `56`-frame cooldown for jump events) across a compact $M \le 12$ library to classify `phys_regime` (`0..8`: Inertial CV, Ballistic, Ballistic AeroDrag, Powered Boost, Parachute Terminal, Pendulum Harmonic, Micro Tremor, Impulsive Collisional, Curved CTRV) alongside `ode_r2`, `aero_drag_beta`, `thrust_accel`, specific energy, and specific angular momentum.
-- **Jacobi Taubin curvature & Galileo peg jump:** Computes exact `f64` $3 \times 3$ cyclic Jacobi Taubin circle fits, center divergence against algebraic Kåsa fits (`taubin_vs_kasa_delta_px`), curvature (`taubin_curvature_inv_px`), and constraint jump `1` (3-frame hold) on sudden tether radius changes.
-- **AGM Jacobi elliptic period & log-decrement damping:** Evaluates the exact large-amplitude pendulum period $T(\theta_0) = 4\sqrt{L/g}\,K(\sin^2(\theta_0/2))$ (`elliptic_period_s`) via `f64` Arithmetic-Geometric Mean alongside peak-decrement damping $\zeta$ and $Q \in [0, 999]$.
-- **Rosenstein Lyapunov divergence & Kuramoto synchronization:** Computes staggered (`1:8`) `4D` delay-coordinate Rosenstein divergence rates (`lyapunov_div_rate`) via a `64`-slot `LyapunovScratch` reservoir on interior oscillatory/CTRV tracks, plus the ensemble Kuramoto complex order parameter $R_{\text{sync}} e^{i\Psi} = \frac{1}{N} \sum_j e^{i\theta_j}$ across $N \ge 2$ active oscillators.
-- **Causal two-body collision conservation:** Evaluates pre/post-impact windows once causally cleared (`f_c + 2 + win_w < frame_idx`, excluding `[f_c - 2 .. f_c + 2]` motion blur), latching SNR-conditioned mass ratio $m_2/m_1 \in [0.05, 20.0]$, normal restitution $e_n \in [0, 1]$, normalized momentum residual, and kinetic energy retention alongside constraint jump priority `4 > 1 > 3 > 2`.
-
-### Eulerian micro-motion PiP, Hilbert tremor phase, and telemetry export
-
-`chronos_post_tick` co-registers a border-clamped `32x32` (SD) or `64x64` (HD) Picture-in-Picture patch centered at the smoothed `disp_fista` coordinate and amplifies temporal luma contrast by `eulerian_gain`. For Mode B oscillator/tremor analysis, the kernel resamples the `hist_t_sec`-timestamped trajectory onto a uniform temporal grid, projects residuals onto their principal covariance axis, applies an analytically equalized 15-tap Hamming Hilbert filter when `K >= 7`, gates periodicity on bi-directional turnaround crossings, and forward-predicts instantaneous phase to compensate lookahead and WebAudio output latency.
-
-During active recording, `web/worker.js` appends `56` numeric columns per frame (`REC_COLUMNS[0..55]`: the core `48` kinematics/Hilbert/spectral/calibration columns including `heading_deg`, `speed_phys`, `ang_vel_deg_s`, `pend_swing_deg`, `strike_deflect_deg`, `strike_speed_ratio`, `metric_x_m`, `metric_y_m`, `cal_segment_id`, and `metric_valid`, plus columns `48..55` for `phys_regime`, `phys_regime_conf`, `ode_r2`, `aero_drag_beta`, `thrust_accel`, `damping_zeta`, `kuramoto_order_r`, and `lyapunov_div_rate`) into a pre-allocated `18,000 x 56` `Float64Array` ring buffer (5 minutes at 60 Hz with zero GC allocations) alongside `calibrationSegments` provenance metadata for CSV or JSON download (`schemaVersion: "1.5.0"`).
-
-## Exported Wasm ABI
-
-`src/lib.rs` exports zero-marshaling C functions over linear memory:
-
-- `chronos_init()` zeroes `ARENA` and sets default tracker parameters in `320x180` SD mode.
-- `chronos_reset_tracks()` clears active tracks, background planes, and swap counters while preserving user parameters and resolution mode.
-- `chronos_reset_calibration_priors()` clears accumulated multi-arc scene gravity priors (`scene_gravity_px_s2`, `scene_gravity_conf`, `scene_gravity_arcs`).
-- `chronos_set_ingest_pts(pts_sec)` attaches explicit `f64` media presentation timestamps to the next ingested frame for jitter-invariant velocity, gravity, and Hilbert kinematics.
-- `chronos_set_resolution(mode)` switches between `0` (`320x180` SD) and `1` (`640x360` HD) inside the static fixed-page arena (`288` pages in Wave 1; `320` pages in Wave 2+ CHRONOS-1000).
-- `chronos_get_resolution()`, `chronos_get_frame_w()`, `chronos_get_frame_h()`, and `chronos_get_pip_dim()` return active spatial dimensions.
-- `chronos_get_ring_slot_ptr(slot)` returns the linear-memory byte offset of RGBA ring slot `slot % 12`.
-- `chronos_set_params(lookahead_k, eca_adapt_rate, fista_lambda, eulerian_gain, phase_offset_rad, lab_mode)` updates runtime controls.
-- `chronos_set_spectral_weight(gamma)` and `chronos_set_audio_latency(latency_sec)` configure spectral coupling and phase lead compensation.
-- `chronos_set_focus_target(track_id)` and `chronos_get_focus_target()` pin or query the user-selected `[FOCUS]` track (`0` = automatic mode-aware selection) for the split Eulerian PiP and Hilbert/kinematic scopes.
-- `chronos_trigger_stimulus()` arms Mode B step-response onset latency measurement.
-- `chronos_pre_tick(dt_sec)` unpacks RGBA pixels, runs Camera Cut / PTZ Pan detection, updates ECA residuals, extracts candidate peaks, and writes the `32x32` Laplacian.
-- `chronos_set_fiedler_spectrum(lambda2, spectral_gap)` stores external Lanczos eigenvalues prior to `chronos_post_tick(dt_sec)`.
-- `chronos_tick(dt_sec)` executes `chronos_pre_tick`, internal Jacobi Fiedler eigensolve, and `chronos_post_tick` in one call.
-- `chronos_get_ingest_rgba_ptr()`, `chronos_get_display_rgba_ptr()`, `chronos_get_eca_res_ptr()`, `chronos_get_pip_rgba_ptr()`, `chronos_get_laplacian_ptr()`, `chronos_get_fiedler_ptr()`, and `chronos_get_telemetry_ptr()` return fixed linear-memory pointers.
-
-### CHRONOS-1000 Zero-ML Continuum, 1,000+ Target Swarm & Field HUD
-
-- **1,536-Slot `MicroTrackSoA` (`src/soa_tracks.rs`):** Zero-heap SIMD128 micro-peak extraction, `8x8` zero-mean quantized `i8` patch descriptors, `16`-bit spatial Morton radix sorting + Haar-Morton `clz` prefix signatures (distinct from true 2-adic `v_2` valuation), sparse `CSR` (`k <= 8`) innovation-gated candidates, integer `Q`-scaled Bertsekas epsilon-Auction with explicit private coasting and conflict-free repair, and conditioned `8x8` Huber IC-LK refinement. Defaults to `swarm_mode = 0` (`Off`), with `1` (`Auto-Density` coarse gate) and `2` (`Forced Active`).
-- **Continuum Physics (`src/continuum_physics.rs`):** Sparse `k`-NN (`k = 6`) graph strain monitoring, multi-frame `SE(2)` rigid-motion component discovery (`32` bodies, direct `det = +1` `atan2` rotation + unwrapped `omega` rad/s), normalized `40x22` (`880`-cell) Eulerian velocity gradient (`dv/dx - du/dy` vorticity, divergence), synchronized 2-bank Cauchy-Green FTLE coherent ridges, and multi-cycle modal resonators exporting both dominant frequency and anti-phase nematic order `R_2 = |mean(exp(2i * phi))|`. Every continuum estimator gates output via `diagnostic_validity_mask` (`bit0..bit4`) while preserving raw unclamped values for inspection.
-- **Latency Separation & Progressive Disclosure HUD (`?v=20261116c1k2`):** Both `worker.js` and `#kpiLatencySplit` report **Kernel Compute Median (`ms`, `wasmMedianMs`)** separately from **Lookahead Window (`lookaheadWindowMs` via `source_pts`, `accumulated_dt`, or `dt_estimate`)** and **Partial Pipeline Latency Estimate (`lookaheadWindowMs + kernel_ms + snapshotCopyMs + fieldRenderMs`, excluding capture/decode/present)**. An `OffscreenCanvas` WebGL2 instanced compositor (with batched 2D Canvas fallback) renders `40x22` continuum heatmaps (bilinear for velocity/vorticity/FTLE, unblended nearest-neighbor for `-9.0`-sentinel modal phase), `1,000+` micro-track stems/pips, and `SE(2)` convex hulls in `< 0.5 ms` per frame aligned to the `t - effK` display ring. High-density workflows include `./samples/starling_murmuration_1000.mp4` (`starling_1000` showcase / `#sampleVideoSelect`) and `vortex_swarm_1200`, `murmuration_1200`, `modal_beam_1152` testbench generators (auto-switching to `640x360` HD + `swarmMode = 2`), plus `#hudCanvas` click-to-inspect (`inspect_point` -> `chronos_inspect_micro_track(tid)` / `chronos_inspect_field_point(x, y)`), collapsed `#expertDiagnosticsDrawer`, `56`-column `v1.5.0` CSV preservation (`oracle_swaps` blank/`null` when dense oracle is unavailable), and JSON `meta.chronos1000` summaries.
-- **CHRONOS-1000 C-ABI Exports:** `chronos_set_swarm_mode`, `chronos_get_swarm_mode`, `chronos_get_micro_tracks_ptr`, `chronos_get_continuum_field_ptr`, `chronos_get_modal_field_ptr`, `chronos_get_rigid_bodies_ptr`, `chronos_get_swarm_telemetry_ptr`, `chronos_inspect_field_point`, `chronos_inspect_micro_track`, and `chronos_set_ingest_pts`.
+- [LICENSE](./LICENSE) and [NOTICE](./NOTICE): Apache License 2.0 terms for code, build/test scripts, docs, and `web/chronos_spectral.wasm`, plus Section 4(d) attribution notice separating standalone media clips.
+- [Cargo.toml](./Cargo.toml) and [.cargo/config.toml](./.cargo/config.toml): Zero-dependency `cdylib` build (`opt-level = 3`, fat LTO, `panic = "abort"`, `+simd128`, `16 KiB` stack, `initial-memory = max-memory = 320` Wasm pages).
+- [src/lib.rs](./src/lib.rs): `Arena` definition, C-ABI entrypoints, pixel-domain camera-cut/pan detector, 4-mode IMM + Jonker-Volgenant `16x64` matcher, backward `rgba_ring` re-tracking + Hermite bridges, 32-slot Dormant Re-ID archive, Lanczos Fiedler eigensolver, and Dual Projected-FISTA + multi-arc consensus Auto-`g`.
+- [src/soa_tracks.rs](./src/soa_tracks.rs): `1,536`-slot `MicroTrackSoA`, SIMD128 micro-peak extraction, 16-bit Morton Z-order radix sort, sparse `CSR`, and integer `Q`-scaled Bertsekas `epsilon`-Auction + `8x8` Huber IC-LK.
+- [src/continuum_physics.rs](./src/continuum_physics.rs): Zero-`unsafe` `k`-NN strain, `SE(2)` rigid-body clustering, `40x22` Eulerian velocity gradients, 2-bank Cauchy-Green FTLE, modal accelerometers (`R_2`), and validity masking.
+- [src/physics_id.rs](./src/physics_id.rs): Weak-form STRidge/AICc symbolic ODE discovery, `f64` Jacobi Taubin circle fitting, AGM elliptic pendulum period, Rosenstein `4D` Lyapunov divergence, Kuramoto synchronization, and two-body collision conservation.
+- [src/simd_ops.rs](./src/simd_ops.rs): `v128` SIMD kernels (`0` `MaybeUninit`) for RGBA unpacking, Rank-2 ECA projection, sub-pixel Catmull-Rom pan advection, Shi-Tomasi cornerness, `i32.clz` Haar-Morton wavelets, zero-mean gain-invariant patch SAD, and IC-LK refinement.
+- [web/](./web/): Command Deck UI ([web/index.html](./web/index.html)), Worker + WebGL2 field compositor ([web/worker.js](./web/worker.js)), prebuilt `web/chronos_spectral.wasm`, and 14 open-licensed `640x360` MP4 clips ([web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md)).
+- [scripts/](./scripts/): Static/math/E2E gates ([build.sh](./build.sh), [scripts/e2e_browser.mjs](./scripts/e2e_browser.mjs), [scripts/calibrate_mp4.mjs](./scripts/calibrate_mp4.mjs), [scripts/benchmark_1000.mjs](./scripts/benchmark_1000.mjs)), HTTP 206 / fMP4 live relay server ([scripts/dev_server.mjs](./scripts/dev_server.mjs)), and documentation media generator ([scripts/capture_docs_media.mjs](./scripts/capture_docs_media.mjs)).
+- [.github/workflows/ci.yml](./.github/workflows/ci.yml): Runs `./build.sh --e2e` on every push and pull request against `main`.
 
 ## Scope limits
 
-- Behind a 100% opaque occluder where visibility weight $w_k = 0$, two pixel-identical targets that exchange velocities produce the same exterior boundary observations as targets that pass straight through. Distinguishing hidden identical swaps requires distinct appearance signatures or non-crossing priors.
-- Six Dual Projected-FISTA iterations run in bounded constant time per frame and report an explicit upper-bound duality gap $P(X) - D(u)$ rather than iterating to machine precision.
-- Real-camera MP4 files exercise the identical `<video>` -> `createImageBitmap` -> `OffscreenCanvas` RGBA -> Wasm SIMD128 execution path as live `getUserMedia` feeds, adding H.264 quantization noise and camera auto-exposure drift deterministically, but they do not measure live camera-to-display photon latency on a physical human subject.
-- Mode B strobe cues fire at forward-predicted quadrature phase offsets. Confirming biological tremor attenuation on human subjects requires external closed-loop physiological measurement.
+- Behind a 100% opaque occluder where visibility weight `w_k = 0`, two pixel-identical targets that exchange velocities produce identical boundary observations to targets that pass straight through. Distinguishing hidden identical swaps requires distinct appearance signatures or non-crossing priors.
+- Six Dual Projected-FISTA iterations run in bounded constant time per frame and export an explicit upper-bound duality gap `P(X) - D(u)` instead of iterating to machine precision.
+- Real-camera MP4 files exercise the identical `<video>` to `createImageBitmap` to `OffscreenCanvas` RGBA to Wasm SIMD128 execution path as live `getUserMedia` feeds, deterministically testing H.264 compression and camera auto-exposure drift, but offline files do not measure physical camera-to-display photon latency on human subjects.
+- Mode B strobe cues fire at forward-predicted quadrature phase offsets. Confirming biological tremor attenuation requires external closed-loop physiological measurement.
 
-## License & media attribution
+## License and attribution
 
-All software source code, build/verification scripts, documentation, and compiled WebAssembly artifacts (`web/chronos_spectral.wasm`) are licensed under the **[Apache License, Version 2.0](./LICENSE)** (see [NOTICE](./NOTICE)). The standalone benchmark and showcase video clips under `web/samples/` remain under their respective open Creative Commons / Public Domain licenses documented in [web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md).
+All software source code, build and verification scripts, documentation, and compiled WebAssembly artifacts (`web/chronos_spectral.wasm`) are licensed under the **[Apache License, Version 2.0](./LICENSE)** (see [NOTICE](./NOTICE)).
+
+Standalone demonstration and benchmark MP4 clips under [web/samples/](./web/samples/) remain under their respective Creative Commons (`CC0 1.0`, `CC BY 2.0/3.0/4.0`, `CC BY-SA 3.0/4.0`) and U.S. Government Public Domain licenses as documented in [web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md).

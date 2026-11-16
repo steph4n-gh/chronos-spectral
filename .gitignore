@@ -5,4 +5,5 @@ decisions.tsv
 *.log
 *.tmp.*
 node_modules/
+docs/*ROADMAP*.md
 

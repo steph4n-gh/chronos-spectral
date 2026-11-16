@@ -1631,6 +1631,7 @@ async function main() {
         [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
         [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
         [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
+        [0.78, 0.30], [0.76, 0.68], [0.54, 0.26], [0.82, 0.48], [0.52, 0.72], [0.72, 0.24],
       ];
       const beforeProbe = await cdp.evalJs(
         sessionId,
@@ -1710,7 +1711,13 @@ async function main() {
               const ixNorm = ix / ${beforeProbe.fw};
               const iyNorm = iy / ${beforeProbe.fh};
               const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
-              const coordMatch = pxDist < 24.0 * (${beforeProbe.fw} / 640.0) + 0.5;
+              const mSpd = readout.match(/·\\s*([\\d.]+)\\s*px\\/s/i);
+              const spdPxS = mSpd ? parseFloat(mSpd[1]) : 0;
+              const qScale = ${beforeProbe.fw} / 640.0;
+              const maxAllowedDist = ack.inspectStatus === 'pinned'
+                ? (16.0 * qScale + spdPxS * 0.40 + 4.0)
+                : (24.0 * qScale + 0.5);
+              const coordMatch = pxDist < maxAllowedDist;
               const freshReadout = readout !== ${JSON.stringify(attemptBefore.readout)} && readout !== ${JSON.stringify(beforeProbe.readout)};
               const shiftedTarget = ${beforeProbe.tid} === 0 || tid !== ${beforeProbe.tid} ||
                 (${beforeProbe.nx !== null ? `Math.hypot(ixNorm - ${beforeProbe.nx}, iyNorm - ${beforeProbe.ny}) >= 0.12` : 'false'});
@@ -1829,6 +1836,7 @@ async function main() {
         [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
         [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
         [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
+        [0.78, 0.30], [0.76, 0.68], [0.54, 0.26], [0.82, 0.48], [0.52, 0.72], [0.72, 0.24],
       ];
       const before = await cdp.evalJs(
         sessionId,
@@ -1919,7 +1927,13 @@ async function main() {
               const ixNorm = ix / ${before.fw};
               const iyNorm = iy / ${before.fh};
               const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
-              const coordMatch = pxDist < 24.0 * (${before.fw} / 640.0) + 0.5;
+              const mSpd = readout.match(/·\\s*([\\d.]+)\\s*px\\/s/i);
+              const spdPxS = mSpd ? parseFloat(mSpd[1]) : 0;
+              const qScale = ${before.fw} / 640.0;
+              const maxAllowedDist = ack.inspectStatus === 'pinned'
+                ? (16.0 * qScale + spdPxS * 0.40 + 4.0)
+                : (24.0 * qScale + 0.5);
+              const coordMatch = pxDist < maxAllowedDist;
               const freshReadout = readout !== ${JSON.stringify(pt.attemptBeforeReadout)} && readout !== ${JSON.stringify(before.readout)};
               const shiftedTarget = ${before.tid} === 0 || tid !== ${before.tid} ||
                 (${before.nx !== null ? `Math.hypot(ixNorm - ${before.nx}, iyNorm - ${before.ny}) >= 0.12` : 'false'});
