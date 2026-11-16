@@ -1,6 +1,10 @@
 # Sample Video Attribution
 
-All thirteen real-camera demonstration and calibration clips in `web/samples/` are transcoded to `640x360` progressive H.264 (`yuv420p`, `+faststart`, `g=15`) from open-licensed Wikimedia Commons and NASA/Astrobotic footage:
+All fourteen real-camera demonstration and calibration clips in `web/samples/` are transcoded to `640x360` progressive H.264 (`yuv420p`, `+faststart`, `g=15`) from open-licensed Wikimedia Commons and NASA/Astrobotic footage:
+
+## CHRONOS-1000 High-Density Continuum Swarm Clips (1,000+ Targets)
+
+- `starling_murmuration_1000.mp4` (`13.0 s`, `30 fps`, Mode A High-Density Starling Murmuration Continuum Field): Cropped (`1440x810` at `(240, 0)`) and scaled to `640x360` from `82.0 s` to `95.0 s` of `File:Flock of starlings (Sturnus vulgaris).webm` (`https://commons.wikimedia.org/wiki/File:Flock_of_starlings_(Sturnus_vulgaris).webm`, original Flickr source `https://www.flickr.com/photos/karen_roe/38609728842/`) by Karen Roe (`https://www.flickr.com/photos/karen_roe/`), licensed under [CC BY 2.0](https://creativecommons.org/licenses/by/2.0/).
 
 ## Extended HD Showcase Clips (29 s to 80 s)
 

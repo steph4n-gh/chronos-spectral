@@ -9,6 +9,12 @@
 //! - Section C: Causal Two-Body Elastic/Inelastic Collision & Momentum/Energy Conservation Analyzer
 //!   (`JUMP_COLLISION = 4`, `PHYS_REGIME_IMPULSIVE = 7`, inverse mass ratio, restitution `e_n`).
 
+#[cfg(target_arch = "wasm32")]
+use core::arch::wasm32::{
+    f32x4, f32x4_add, f32x4_extract_lane, f32x4_gt, f32x4_lt, f32x4_mul, f32x4_nearest,
+    f32x4_splat, f32x4_sub, f64x2_extract_lane, f64x2_splat, f64x2_sqrt, v128, v128_bitselect,
+};
+#[cfg(not(target_arch = "wasm32"))]
 use core::arch::wasm32::{f64x2_extract_lane, f64x2_splat, f64x2_sqrt};
 
 #[allow(unused_imports)]
@@ -675,20 +681,52 @@ fn fit_quad_xy(t: &[f32], x: &[f32], y: &[f32], start: usize, end: usize) -> Opt
     let mut by0 = 0.0f32;
     let mut by1 = 0.0f32;
     let mut by2 = 0.0f32;
+    let tm64 = tm as f64;
+    let x0 = x[start] as f64;
+    let y0 = y[start] as f64;
+    let mut su1 = 0.0f64;
+    let mut su2 = 0.0f64;
+    let mut su3 = 0.0f64;
+    let mut su4 = 0.0f64;
+    let mut sdx = 0.0f64;
+    let mut sdx_u = 0.0f64;
+    let mut sdx_u2 = 0.0f64;
+    let mut sdy = 0.0f64;
+    let mut sdy_u = 0.0f64;
+    let mut sdy_u2 = 0.0f64;
+    let mut sdxy2 = 0.0f64;
     i = start;
     while i < end {
+        let xi = x[i];
+        let yi = y[i];
         let u = t[i] - tm;
         let u2 = u * u;
         s1 += u;
         s2 += u2;
         s3 += u2 * u;
         s4 += u2 * u2;
-        bx0 += x[i];
-        bx1 += u * x[i];
-        bx2 += u2 * x[i];
-        by0 += y[i];
-        by1 += u * y[i];
-        by2 += u2 * y[i];
+        bx0 += xi;
+        bx1 += u * xi;
+        bx2 += u2 * xi;
+        by0 += yi;
+        by1 += u * yi;
+        by2 += u2 * yi;
+
+        let u64 = (t[i] as f64) - tm64;
+        let u2_64 = u64 * u64;
+        let dx = (xi as f64) - x0;
+        let dy = (yi as f64) - y0;
+        su1 += u64;
+        su2 += u2_64;
+        su3 += u2_64 * u64;
+        su4 += u2_64 * u2_64;
+        sdx += dx;
+        sdx_u += dx * u64;
+        sdx_u2 += dx * u2_64;
+        sdy += dy;
+        sdy_u += dy * u64;
+        sdy_u2 += dy * u2_64;
+        sdxy2 += dx * dx + dy * dy;
         i += 1;
     }
     let nf = n as f32;
@@ -699,16 +737,22 @@ fn fit_quad_xy(t: &[f32], x: &[f32], y: &[f32], start: usize, end: usize) -> Opt
     ];
     let cx = solve_3x3(mat, [bx0, bx1, bx2])?;
     let cy = solve_3x3(mat, [by0, by1, by2])?;
-    let mut rss = 0.0f32;
-    i = start;
-    while i < end {
-        let u = t[i] - tm;
-        let u2 = u * u;
-        let ex = x[i] - (cx[0] + cx[1] * u + cx[2] * u2);
-        let ey = y[i] - (cy[0] + cy[1] * u + cy[2] * u2);
-        rss += ex * ex + ey * ey;
-        i += 1;
-    }
+    let nf64 = n as f64;
+    let cx0 = (cx[0] as f64) - x0;
+    let cx1 = cx[1] as f64;
+    let cx2 = cx[2] as f64;
+    let cy0 = (cy[0] as f64) - y0;
+    let cy1 = cy[1] as f64;
+    let cy2 = cy[2] as f64;
+    let qx = cx0 * (nf64 * cx0 + 2.0 * (su1 * cx1 + su2 * cx2))
+        + cx1 * (su2 * cx1 + 2.0 * su3 * cx2)
+        + cx2 * (su4 * cx2)
+        - 2.0 * (cx0 * sdx + cx1 * sdx_u + cx2 * sdx_u2);
+    let qy = cy0 * (nf64 * cy0 + 2.0 * (su1 * cy1 + su2 * cy2))
+        + cy1 * (su2 * cy1 + 2.0 * su3 * cy2)
+        + cy2 * (su4 * cy2)
+        - 2.0 * (cy0 * sdy + cy1 * sdy_u + cy2 * sdy_u2);
+    let rss = max_f32((sdxy2 + qx + qy) as f32, 0.0);
     Some((cx, cy, tm, rss))
 }
 
@@ -997,63 +1041,170 @@ fn build_weak_weights(sc: &mut PhysicsIdScratch, n: usize, center_t: f32, half_h
     if amp < 1.0e-6 { None } else { Some((i0, i1, amp)) }
 }
 
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn fast_sin4_wasm(vx: v128) -> v128 {
+    use core::f32::consts::{FRAC_PI_2, PI, TAU};
+    let v_inv_2pi = f32x4_splat(1.0 / TAU);
+    let v_2pi = f32x4_splat(TAU);
+    let v_pi = f32x4_splat(PI);
+    let v_neg_pi = f32x4_splat(-PI);
+    let v_hpi = f32x4_splat(FRAC_PI_2);
+    let v_nhpi = f32x4_splat(-FRAC_PI_2);
+    let vn = f32x4_nearest(f32x4_mul(vx, v_inv_2pi));
+    let va0 = f32x4_sub(vx, f32x4_mul(vn, v_2pi));
+    let gt_hpi = f32x4_gt(va0, v_hpi);
+    let lt_nhpi = f32x4_lt(va0, v_nhpi);
+    let va1 = v128_bitselect(f32x4_sub(v_pi, va0), va0, gt_hpi);
+    let a = v128_bitselect(f32x4_sub(v_neg_pi, va0), va1, lt_nhpi);
+    let a2 = f32x4_mul(a, a);
+    let poly = f32x4_add(
+        f32x4_splat(1.0),
+        f32x4_mul(
+            a2,
+            f32x4_add(
+                f32x4_splat(-0.16666657),
+                f32x4_mul(
+                    a2,
+                    f32x4_add(f32x4_splat(0.008333025), f32x4_mul(a2, f32x4_splat(-0.000198074))),
+                ),
+            ),
+        ),
+    );
+    f32x4_mul(a, poly)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+fn hsum_f32x4_f64(v: v128) -> f64 {
+    (f32x4_extract_lane::<0>(v) as f64)
+        + (f32x4_extract_lane::<1>(v) as f64)
+        + (f32x4_extract_lane::<2>(v) as f64)
+        + (f32x4_extract_lane::<3>(v) as f64)
+}
+
 /// Evaluate 1D sinusoid u1(t) = c0 + c1*cos(w*t) + c2*sin(w*t) at candidate omega + local refinement.
-/// Returns (r2, rms, amp, best_omega).
-fn eval_sinusoid_single(t_arr: &[f32], u: &[f32], n: usize, omega: f32) -> (f32, f32, f32) {
-    if omega <= 0.1 || omega > 60.0 || n < 5 {
+/// Returns (r2, rms, amp).
+#[inline(never)]
+fn eval_sinusoid_single(
+    t_arr: &[f32],
+    u: &[f32],
+    n: usize,
+    omega: f32,
+    u_sum_f32: f32,
+    sum_u2: f64,
+    tss: f32,
+) -> (f32, f32, f32) {
+    let lim = n.min(t_arr.len()).min(u.len());
+    if omega <= 0.1 || omega > 60.0 || lim < 5 {
         return (0.0, 999.0, 0.0);
     }
-    let mut a3 = [[0.0f32; 3]; 3];
-    let mut b3 = [0.0f32; 3];
-    let mut u_sum = 0.0f32;
     let mut i = 0usize;
-    while i < n {
-        let (s_p, c_p) = fast_sin_cos(omega * t_arr[i]);
-        let row = [1.0f32, c_p, s_p];
-        let ui = u[i];
-        u_sum += ui;
-        let mut r = 0usize;
-        while r < 3 {
-            b3[r] += row[r] * ui;
-            let mut c = 0usize;
-            while c < 3 {
-                a3[r][c] += row[r] * row[c];
-                c += 1;
-            }
-            r += 1;
+    #[cfg(target_arch = "wasm32")]
+    let (mut sc_sum, mut ss_sum, mut scc_sum, mut scs_sum, mut sss_sum, mut b1_sum, mut b2_sum) = {
+        let v_omega = f32x4_splat(omega);
+        let v_hpi = f32x4_splat(core::f32::consts::FRAC_PI_2);
+        let mut v_sc = f32x4_splat(0.0);
+        let mut v_ss = f32x4_splat(0.0);
+        let mut v_scc = f32x4_splat(0.0);
+        let mut v_scs = f32x4_splat(0.0);
+        let mut v_sss = f32x4_splat(0.0);
+        let mut v_b1 = f32x4_splat(0.0);
+        let mut v_b2 = f32x4_splat(0.0);
+        while i + 4 <= lim {
+            let vt = f32x4(t_arr[i], t_arr[i + 1], t_arr[i + 2], t_arr[i + 3]);
+            let vu = f32x4(u[i], u[i + 1], u[i + 2], u[i + 3]);
+            let vx = f32x4_mul(v_omega, vt);
+            let vs = fast_sin4_wasm(vx);
+            let vc = fast_sin4_wasm(f32x4_add(vx, v_hpi));
+            v_sc = f32x4_add(v_sc, vc);
+            v_ss = f32x4_add(v_ss, vs);
+            v_scc = f32x4_add(v_scc, f32x4_mul(vc, vc));
+            v_scs = f32x4_add(v_scs, f32x4_mul(vc, vs));
+            v_sss = f32x4_add(v_sss, f32x4_mul(vs, vs));
+            v_b1 = f32x4_add(v_b1, f32x4_mul(vc, vu));
+            v_b2 = f32x4_add(v_b2, f32x4_mul(vs, vu));
+            i += 4;
         }
+        (
+            hsum_f32x4_f64(v_sc),
+            hsum_f32x4_f64(v_ss),
+            hsum_f32x4_f64(v_scc),
+            hsum_f32x4_f64(v_scs),
+            hsum_f32x4_f64(v_sss),
+            hsum_f32x4_f64(v_b1),
+            hsum_f32x4_f64(v_b2),
+        )
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let (mut sc_sum, mut ss_sum, mut scc_sum, mut scs_sum, mut sss_sum, mut b1_sum, mut b2_sum) =
+        (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+
+    while i < lim {
+        let (s_p, c_p) = fast_sin_cos(omega * t_arr[i]);
+        let sf = s_p as f64;
+        let cf = c_p as f64;
+        let uf = u[i] as f64;
+        sc_sum += cf;
+        ss_sum += sf;
+        scc_sum += cf * cf;
+        scs_sum += cf * sf;
+        sss_sum += sf * sf;
+        b1_sum += cf * uf;
+        b2_sum += sf * uf;
         i += 1;
     }
-    a3[0][0] += 1.0e-7;
-    a3[1][1] += 1.0e-7;
-    a3[2][2] += 1.0e-7;
+
+    let nf_32 = lim as f32;
+    let sc = sc_sum as f32;
+    let ss = ss_sum as f32;
+    let scc = scc_sum as f32;
+    let scs = scs_sum as f32;
+    let sss = sss_sum as f32;
+    let a3 = [
+        [nf_32 + 1.0e-7, sc, ss],
+        [sc, scc + 1.0e-7, scs],
+        [ss, scs, sss + 1.0e-7],
+    ];
+    let b3 = [u_sum_f32, b1_sum as f32, b2_sum as f32];
     let coef = match solve_3x3(a3, b3) {
         Some(v) => v,
         None => return (0.0, 999.0, 0.0),
     };
-    let u_mean = u_sum / (n as f32);
-    let mut tss = 0.0f32;
-    let mut rss = 0.0f32;
-    i = 0;
-    while i < n {
-        let (s_p, c_p) = fast_sin_cos(omega * t_arr[i]);
-        let pred = coef[0] + coef[1] * c_p + coef[2] * s_p;
-        let du = u[i] - u_mean;
-        let err = u[i] - pred;
-        tss += du * du;
-        rss += err * err;
-        i += 1;
-    }
-    let r2 = max_f32(0.0, 1.0 - rss / max_f32(tss, 1.0e-6));
-    let rms = sqrt_f32(rss / (n as f32));
+    let c0 = coef[0] as f64;
+    let c1 = coef[1] as f64;
+    let c2 = coef[2] as f64;
+    let b0_64 = u_sum_f32 as f64;
+    let nf_64 = lim as f64;
+    let quad = c0 * (nf_64 * c0 + 2.0 * (sc_sum * c1 + ss_sum * c2))
+        + c1 * (scc_sum * c1 + 2.0 * scs_sum * c2)
+        + c2 * (sss_sum * c2);
+    let lin = 2.0 * (c0 * b0_64 + c1 * b1_sum + c2 * b2_sum);
+    let rss = max_f32((sum_u2 - lin + quad) as f32, 0.0);
+    let r2 = max_f32(0.0, 1.0 - rss / tss);
+    let rms = sqrt_f32(rss / (lim as f32));
     let amp = hypot_f32(coef[1], coef[2]);
     (r2, rms, amp)
 }
 
+#[inline(never)]
 fn eval_sinusoid_pos(t_arr: &[f32], u: &[f32], n: usize, omega_seed: f32) -> (f32, f32, f32, f32) {
-    if omega_seed <= 0.1 || omega_seed > 60.0 {
+    let lim = n.min(t_arr.len()).min(u.len());
+    if omega_seed <= 0.1 || omega_seed > 60.0 || lim < 5 {
         return (0.0, 999.0, 0.0, omega_seed);
     }
+    let mut u_sum = 0.0f64;
+    let mut sum_u2 = 0.0f64;
+    let mut i = 0usize;
+    while i < lim {
+        let ui = u[i] as f64;
+        u_sum += ui;
+        sum_u2 += ui * ui;
+        i += 1;
+    }
+    let tss = max_f32((sum_u2 - (u_sum * u_sum) / (lim as f64)) as f32, 1.0e-6);
+    let u_sum_f32 = u_sum as f32;
+
     const MULTS: [f32; 7] = [0.72, 0.82, 0.91, 1.0, 1.09, 1.19, 1.32];
     let mut best_r2 = 0.0f32;
     let mut best_rms = 999.0f32;
@@ -1062,7 +1213,7 @@ fn eval_sinusoid_pos(t_arr: &[f32], u: &[f32], n: usize, omega_seed: f32) -> (f3
     let mut m = 0usize;
     while m < 7 {
         let wt = omega_seed * MULTS[m];
-        let (r2, rms, amp) = eval_sinusoid_single(t_arr, u, n, wt);
+        let (r2, rms, amp) = eval_sinusoid_single(t_arr, u, lim, wt, u_sum_f32, sum_u2, tss);
         if rms < best_rms {
             best_r2 = r2;
             best_rms = rms;
@@ -1076,7 +1227,7 @@ fn eval_sinusoid_pos(t_arr: &[f32], u: &[f32], n: usize, omega_seed: f32) -> (f3
     let mut k = 0usize;
     while k < 4 {
         let wt = tries[k];
-        let (r2, rms, amp) = eval_sinusoid_single(t_arr, u, n, wt);
+        let (r2, rms, amp) = eval_sinusoid_single(t_arr, u, lim, wt, u_sum_f32, sum_u2, tss);
         if rms < best_rms {
             best_r2 = r2;
             best_rms = rms;
@@ -1086,6 +1237,144 @@ fn eval_sinusoid_pos(t_arr: &[f32], u: &[f32], n: usize, omega_seed: f32) -> (f3
         k += 1;
     }
     (best_r2, best_rms, best_amp, best_w)
+}
+
+#[derive(Clone, Copy)]
+struct LinearAccum {
+    cnt: f64,
+    st: f64,
+    st2: f64,
+    sx: f64,
+    sy: f64,
+    stx: f64,
+    sty: f64,
+    sxy2: f64,
+}
+
+impl LinearAccum {
+    #[inline(always)]
+    fn zero() -> Self {
+        Self {
+            cnt: 0.0,
+            st: 0.0,
+            st2: 0.0,
+            sx: 0.0,
+            sy: 0.0,
+            stx: 0.0,
+            sty: 0.0,
+            sxy2: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn add_pt(&mut self, t: f64, x: f64, y: f64) {
+        self.cnt += 1.0;
+        self.st += t;
+        self.st2 += t * t;
+        self.sx += x;
+        self.sy += y;
+        self.stx += t * x;
+        self.sty += t * y;
+        self.sxy2 += x * x + y * y;
+    }
+
+    #[inline(always)]
+    fn sub_pt(&mut self, t: f64, x: f64, y: f64) {
+        self.cnt -= 1.0;
+        self.st -= t;
+        self.st2 -= t * t;
+        self.sx -= x;
+        self.sy -= y;
+        self.stx -= t * x;
+        self.sty -= t * y;
+        self.sxy2 -= x * x + y * y;
+    }
+
+    #[inline(always)]
+    fn solve(&self) -> (f32, f32, f32, f32, f32) {
+        let inv_n = 1.0 / self.cnt;
+        let mt = self.st * inv_n;
+        let mx = self.sx * inv_n;
+        let my = self.sy * inv_n;
+        let denom = self.st2 - self.st * mt;
+        let num_x = self.stx - self.st * mx;
+        let num_y = self.sty - self.st * my;
+        let tss = (self.sxy2 - (self.sx * mx + self.sy * my)).max(0.0);
+        if denom > 1.0e-12 {
+            let inv_d = 1.0 / denom;
+            let slx = num_x * inv_d;
+            let sly = num_y * inv_d;
+            let ix = mx - slx * mt;
+            let iy = my - sly * mt;
+            let rss = (tss - (slx * num_x + sly * num_y)).max(0.0);
+            (ix as f32, slx as f32, iy as f32, sly as f32, rss as f32)
+        } else {
+            (mx as f32, 0.0, my as f32, 0.0, tss as f32)
+        }
+    }
+}
+
+#[inline(never)]
+fn find_best_impulsive_kink(
+    t: &[f32],
+    x: &[f32],
+    y: &[f32],
+    n: usize,
+    min_side: usize,
+) -> Option<(usize, f32, f32, f32, f32, f32, f32, f32)> {
+    let lim = n.min(t.len()).min(x.len()).min(y.len());
+    if lim <= 2 * min_side {
+        return None;
+    }
+    let mut left = LinearAccum::zero();
+    let mut right = LinearAccum::zero();
+    let mut i = 0usize;
+    while i < min_side {
+        left.add_pt(t[i] as f64, x[i] as f64, y[i] as f64);
+        i += 1;
+    }
+    i = min_side + 1;
+    while i < lim {
+        right.add_pt(t[i] as f64, x[i] as f64, y[i] as f64);
+        i += 1;
+    }
+    let mut best_obj = 1.0e18f32;
+    let mut best: Option<(usize, f32, f32, f32, f32, f32, f32, f32)> = None;
+    let end_k = lim - min_side;
+    let mut k = min_side;
+    while k < end_k {
+        if k >= 4 && (lim - (k + 1)) >= 4 {
+            let (ix1, vx1, iy1, vy1, rss1) = left.solve();
+            let (ix2, vx2, iy2, vy2, rss2) = right.solve();
+            let rss_split = rss1 + rss2;
+            let tk = t[k];
+            let x1k = ix1 + vx1 * tk;
+            let y1k = iy1 + vy1 * tk;
+            let x2k = ix2 + vx2 * tk;
+            let y2k = iy2 + vy2 * tk;
+            let pos_gap = hypot_f32(x2k - x1k, y2k - y1k);
+            let obj = rss_split + 2.0 * pos_gap * pos_gap;
+            if obj < best_obj {
+                best_obj = obj;
+                best = Some((
+                    k,
+                    rss_split,
+                    hypot_f32(vx2 - vx1, vy2 - vy1),
+                    pos_gap,
+                    vx1,
+                    vy1,
+                    vx2,
+                    vy2,
+                ));
+            }
+        }
+        if k + 1 < end_k {
+            left.add_pt(t[k] as f64, x[k] as f64, y[k] as f64);
+            right.sub_pt(t[k + 1] as f64, x[k + 1] as f64, y[k + 1] as f64);
+        }
+        k += 1;
+    }
+    best
 }
 
 /// Forward RK2 Verlet rollout of a = (0, g_val) - beta_val * |v| * v with linear drift subtraction.
@@ -1252,7 +1541,6 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
     let mut min_side = n / 4;
     if min_side < 5 { min_side = 5; }
     if min_side > 8 { min_side = 8; }
-    let mut best_imp_obj = 1.0e18f32;
     let mut imp_k = 0usize;
     let mut imp_rss = 0.0f32;
     let mut imp_dv = 0.0f32;
@@ -1262,34 +1550,19 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
     let mut imp_vx2 = 0.0f32;
     let mut imp_vy2 = 0.0f32;
     let mut has_imp = false;
-    if n > 2 * min_side {
-        let mut k = min_side;
-        while k < n - min_side {
-            if k >= 4 && (n - (k + 1)) >= 4 {
-                let (ix1, vx1, iy1, vy1, rss1, _) = fit_linear_xy(&sc.t_arr, &sc.xc, &sc.yc, 0, k);
-                let (ix2, vx2, iy2, vy2, rss2, _) = fit_linear_xy(&sc.t_arr, &sc.xc, &sc.yc, k + 1, n);
-                let rss_split = rss1 + rss2;
-                let tk = sc.t_arr[k];
-                let x1k = ix1 + vx1 * tk;
-                let y1k = iy1 + vy1 * tk;
-                let x2k = ix2 + vx2 * tk;
-                let y2k = iy2 + vy2 * tk;
-                let pos_gap = hypot_f32(x2k - x1k, y2k - y1k);
-                let obj = rss_split + 2.0 * pos_gap * pos_gap;
-                if obj < best_imp_obj {
-                    best_imp_obj = obj;
-                    imp_k = k;
-                    imp_rss = rss_split;
-                    imp_dv = hypot_f32(vx2 - vx1, vy2 - vy1);
-                    imp_gap = pos_gap;
-                    imp_vx1 = vx1;
-                    imp_vy1 = vy1;
-                    imp_vx2 = vx2;
-                    imp_vy2 = vy2;
-                    has_imp = true;
-                }
-            }
-            k += 1;
+    if n > 2 * min_side && rms_quad_pos > max_f32(2.5, 3.0 * sigma_pos) {
+        if let Some((bk, brss, bdv, bgap, bvx1, bvy1, bvx2, bvy2)) =
+            find_best_impulsive_kink(&sc.t_arr, &sc.xc, &sc.yc, n, min_side)
+        {
+            imp_k = bk;
+            imp_rss = brss;
+            imp_dv = bdv;
+            imp_gap = bgap;
+            imp_vx1 = bvx1;
+            imp_vy1 = bvy1;
+            imp_vx2 = bvx2;
+            imp_vy2 = bvy2;
+            has_imp = true;
         }
     }
 
@@ -1976,7 +2249,9 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
     let mut best_burn_score = 0.0f32;
     let mut best_chute_score = 0.0f32;
 
-    if n >= 18 {
+    let can_burn = !is_pend_valid && rms_quad_pos > max_f32(0.8, 1.3 * sigma_pos);
+    let can_chute = (sc.yc[n - 1] - sc.yc[0]) > 15.0;
+    if n >= 18 && (can_burn || can_chute) {
         let mut sp_k = 8usize;
         while sp_k < n - 7 {
             if let (Some((c1x, c1y, tm1, r_q1)), Some((c2x, c2y, tm2, r_q2))) =
@@ -2428,6 +2703,7 @@ pub fn extract_compensated_window_from_ring(
 }
 
 /// Zero-stack helper that extracts visible compensated samples normalized by `scale_s` directly into `PhysicsIdScratch`.
+#[allow(dead_code)]
 fn extract_compensated_vis_to_scratch(
     arc_raw_x: &[f32; 64],
     arc_raw_y: &[f32; 64],
@@ -2643,6 +2919,7 @@ pub fn step_ode_track(
     apply_discovered_ode_step(state, dt_f, res)
 }
 
+#[allow(dead_code)]
 #[inline(never)]
 pub fn step_ode_track_from_ring(
     st: &mut OdeTrackState,
@@ -2675,6 +2952,49 @@ pub fn step_ode_track_from_ring(
         s,
         scratch,
     );
+    let res = discover_from_normalized_vis(nv, s, st.prior_flight, scratch);
+    apply_discovered_ode_step(st, dt_f, res)
+}
+
+#[inline(never)]
+pub fn step_ode_track_from_window(
+    st: &mut OdeTrackState,
+    xs: &[f32],
+    ys: &[f32],
+    ts: &[f64],
+    vis_idx: &[u8],
+    n_vis: usize,
+    head_f: u32,
+    scale_s: f32,
+    run_discovery: bool,
+    scratch: &mut PhysicsIdScratch,
+) -> OdeResult {
+    let dt_f = begin_ode_tick_countdowns(st, head_f);
+    if !run_discovery {
+        return emit_cached_ode_step(st, dt_f);
+    }
+    let s = max_f32(scale_s, 0.25);
+    let inv_s = 1.0f32 / s;
+    let lim = n_vis.min(vis_idx.len()).min(HIST_RING_LEN);
+    let mut nv = 0usize;
+    let mut t0_sec = 0.0f64;
+    let mut has_t0 = false;
+    for k in 0..lim {
+        let i = vis_idx[k] as usize;
+        let wx = xs[i];
+        let wy = ys[i];
+        let t_i = ts[i];
+        if wx.is_finite() && wy.is_finite() && t_i.is_finite() {
+            if !has_t0 {
+                t0_sec = t_i;
+                has_t0 = true;
+            }
+            scratch.ts_v[nv] = (t_i - t0_sec) as f32;
+            scratch.xs_v[nv] = wx * inv_s;
+            scratch.ys_v[nv] = wy * inv_s;
+            nv += 1;
+        }
+    }
     let res = discover_from_normalized_vis(nv, s, st.prior_flight, scratch);
     apply_discovered_ode_step(st, dt_f, res)
 }
@@ -2917,50 +3237,42 @@ fn fit_taubin_circle_subpx_core(
     my *= inv_n;
     out.mean_y = my as f32;
 
-    let mut l2 = 0.0f64;
+    let mut s_xx = 0.0f64;
+    let mut s_yy = 0.0f64;
+    let mut s_xy = 0.0f64;
+    let mut s_xz = 0.0f64;
+    let mut s_yz = 0.0f64;
+    let mut s_zz = 0.0f64;
     for i in 0..m {
         if vis[i] != 0 && xs[i].is_finite() && ys[i].is_finite() {
             let ux = (xs[i] as f64) - mx;
             let vy = (ys[i] as f64) - my;
-            l2 += ux * ux + vy * vy;
+            let zz = ux * ux + vy * vy;
+            s_xx += ux * ux;
+            s_yy += vy * vy;
+            s_xy += ux * vy;
+            s_xz += ux * zz;
+            s_yz += vy * zz;
+            s_zz += zz * zz;
         }
     }
-    l2 *= inv_n;
+    let l2 = (s_xx + s_yy) * inv_n;
     if l2 <= (1e-6 * (s as f64) * (s as f64)) {
         return out;
     }
     let l_scale = wasm_sqrtd(l2);
     let inv_l = 1.0 / l_scale;
-
-    let mut mxx = 0.0f64;
-    let mut myy = 0.0f64;
-    let mut mxy = 0.0f64;
-    let mut mxz = 0.0f64;
-    let mut myz = 0.0f64;
-    let mut mzz = 0.0f64;
-    let mut zbar = 0.0f64;
-
-    for i in 0..m {
-        if vis[i] != 0 && xs[i].is_finite() && ys[i].is_finite() {
-            let u = ((xs[i] as f64) - mx) * inv_l;
-            let v = ((ys[i] as f64) - my) * inv_l;
-            let z = u * u + v * v;
-            mxx += u * u;
-            myy += v * v;
-            mxy += u * v;
-            mxz += u * z;
-            myz += v * z;
-            mzz += z * z;
-            zbar += z;
-        }
-    }
-    mxx *= inv_n;
-    myy *= inv_n;
-    mxy *= inv_n;
-    mxz *= inv_n;
-    myz *= inv_n;
-    mzz *= inv_n;
-    zbar *= inv_n;
+    let inv_l2 = 1.0 / l2;
+    let inv_n_l2 = inv_n * inv_l2;
+    let inv_n_l3 = inv_n_l2 * inv_l;
+    let inv_n_l4 = inv_n_l2 * inv_l2;
+    let mxx = s_xx * inv_n_l2;
+    let myy = s_yy * inv_n_l2;
+    let mxy = s_xy * inv_n_l2;
+    let mxz = s_xz * inv_n_l3;
+    let myz = s_yz * inv_n_l3;
+    let mzz = s_zz * inv_n_l4;
+    let zbar = mxx + myy;
 
     if zbar < 1e-12 {
         return out;

@@ -1,14 +1,16 @@
 #![no_std]
 
-mod simd_ops;
+pub(crate) mod simd_ops;
 #[allow(dead_code)]
 pub(crate) mod physics_id;
+pub(crate) mod soa_tracks;
+pub(crate) mod continuum_physics;
 
 use core::arch::wasm32::{
     f32x4_abs, f32x4_add, f32x4_div, f32x4_extract_lane, f32x4_floor, f32x4_ge, f32x4_gt,
     f32x4_lt, f32x4_mul, f32x4_nearest, f32x4_pmax, f32x4_pmin, f32x4_splat, f32x4_sqrt,
-    f32x4_sub, f64x2_extract_lane, f64x2_splat, f64x2_sqrt, i32x4, i32x4_bitmask, i32x4_shuffle,
-    v128, v128_bitselect, v128_load, v128_store,
+    f32x4_sub, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat, f64x2_sqrt, f64x2_sub,
+    i32x4, i32x4_bitmask, i32x4_shuffle, v128, v128_bitselect, v128_load, v128_store,
 };
 use core::panic::PanicInfo;
 use core::ptr::addr_of_mut;
@@ -31,10 +33,9 @@ use simd_ops::{
     pool_plane_rows_to_160x90_simd128,
     pool_plane_to_160x90_simd128, refine_subpixel_ic_lk_cached,
     render_eulerian_pip_fast_simd128, reorder_patch64_eo_simd128, rgba_roi_to_planar_simd128,
-    rgba_tile16_to_chroma_simd128, rgba_to_planar_and_pool160_simd128, sad8x8_pyr160_5x5_simd128,
+    rgba_tiles_run_to_chroma_simd128, rgba_to_planar_and_pool160_simd128, sad8x8_pyr160_5x5_simd128,
     sad8x8_pyr160_cutoff_simd128, sad_patch_zm_full_precomp_cutoff_simd128,
-    sad_patch_zm_score_simd128, tpl_full_stats_simd128,
-    sad_patch_zm_weighted_simd128, sample_luma_patch64_p2_simd128,
+    sad_patch_zm_score_simd128, sample_luma_patch64_p2_simd128, tpl_full_stats_simd128,
     subpx_patch_gain_norm_sad_p2_18_simd128,
     subpx_patch_gain_norm_sad_simd128, TplIcLkCache, unpack_rgba_luma_win18_p2_simd128,
     unpack_rgba_luma_win_p2_simd128, unpack_rgba_luma_window_simd128,
@@ -57,10 +58,26 @@ pub(crate) fn wasm_nearestf(x: f32) -> f32 {
     f32x4_extract_lane::<0>(f32x4_nearest(f32x4_splat(x)))
 }
 
-#[allow(dead_code)]
 #[inline(always)]
 pub(crate) fn wasm_sqrt_f64(x: f64) -> f64 {
     f64x2_extract_lane::<0>(f64x2_sqrt(f64x2_splat(x)))
+}
+
+#[inline(always)]
+fn abs_f64(x: f64) -> f64 {
+    f64::from_bits(x.to_bits() & 0x7FFF_FFFF_FFFF_FFFF)
+}
+
+#[inline(always)]
+fn hypot_f64(a: f64, b: f64) -> f64 {
+    let aa = abs_f64(a);
+    let bb = abs_f64(b);
+    let (hi, lo) = if aa >= bb { (aa, bb) } else { (bb, aa) };
+    if hi == 0.0 {
+        return 0.0;
+    }
+    let u = lo / hi;
+    hi * wasm_sqrt_f64(1.0 + u * u)
 }
 
 #[panic_handler]
@@ -76,7 +93,9 @@ pub const MAX_FRAME_PIXELS: usize = MAX_FRAME_W * MAX_FRAME_H; // 230,400
 pub const MAX_FRAME_RGBA_BYTES: usize = MAX_FRAME_PIXELS * 4; // 921,600
 pub const RING_LEN: usize = 12;
 pub const MAX_TARGETS: usize = 16;
+pub const DENSE_SWARM_HERO_CAP: usize = 3;
 pub const GRAPH_NODES: usize = 32;
+pub const MAX_KRYLOV: usize = GRAPH_NODES - 1;
 pub const MAX_GRID_W: usize = 40;
 pub const MAX_GRID_H: usize = 22;
 pub const MAX_GRID_CELLS: usize = MAX_GRID_W * MAX_GRID_H; // 880
@@ -654,6 +673,23 @@ pub struct CausalKalmanTrack {
 }
 
 #[repr(C, align(16))]
+pub struct LanczosScratch {
+    pub sub_l: [f64; GRAPH_NODES * GRAPH_NODES],
+    pub q: [f64; MAX_KRYLOV * GRAPH_NODES],
+    pub z: [f64; MAX_KRYLOV * GRAPH_NODES],
+    pub alpha: [f64; MAX_KRYLOV],
+    pub beta: [f64; MAX_KRYLOV],
+    pub d_diag: [f64; MAX_KRYLOV],
+    pub e_sub: [f64; GRAPH_NODES],
+    pub w: [f64; GRAPH_NODES],
+    pub eig_vec: [f64; GRAPH_NODES],
+    pub prev_track: [f64; MAX_TARGETS],
+    pub act_idx: [usize; GRAPH_NODES],
+    pub last_lambda2: f64,
+    pub last_n: usize,
+}
+
+#[repr(C, align(16))]
 pub struct Arena {
     // 1. 12-Frame Circular RGBA Display & Lossless Pixel Ring Buffer (up to 640x360: 11,059,200 B)
     pub rgba_ring: [[u8; MAX_FRAME_RGBA_BYTES]; RING_LEN],
@@ -804,10 +840,24 @@ pub struct Arena {
     pub active_rgba_slot: u32,
     pub chroma_tile_mask: [u64; 24],
     pub ic_lk_cache: [TplIcLkCache; MAX_TARGETS],
+    pub micro_swarm: soa_tracks::MicroSwarmState,
+    pub continuum: continuum_physics::ContinuumState,
+    pub continuum_was_active: u8,
+    pub swarm_mode_cached: u8,
+    pub swarm_telem_zeroed: u8,
+    pub last_scene_cut: u8,
+    pub pre_tick_seen: u8,
+    pub last_pan_dx_f: f32,
+    pub last_pan_dy_f: f32,
+    pub inspected_hero_tid: u32,
+    pub inspected_micro_tid_pin: u32,
+    pub last_pre_tick_frame: u32,
+    pub physics_telem_dirty_mask: u16,
+    pub lanczos_scratch: LanczosScratch,
 }
 
-// Compile-time structural bound: Arena + 16 KiB stack + .rodata <= 288 pages (18,874,368 B)
-const _: () = assert!(core::mem::size_of::<Arena>() <= 18_800_000);
+// Compile-time structural bound: Arena + 16 KiB stack + .rodata <= 320 pages (20,971,520 B)
+const _: () = assert!(core::mem::size_of::<Arena>() <= 20_800_000);
 
 static mut ARENA: Arena = unsafe { core::mem::zeroed() };
 
@@ -842,15 +892,22 @@ unsafe fn fill_chroma_tiles_slow(
         let y0 = ty << 4;
         let y_end = (y0 + 16).min(frame_h);
         while todo != 0 {
-            let tx = todo.trailing_zeros() as usize;
-            todo &= todo - 1;
-            rgba_tile16_to_chroma_simd128(
+            let tx0 = todo.trailing_zeros() as usize;
+            let run = (!(todo >> tx0)).trailing_zeros() as usize;
+            let run_mask = if run >= 64 {
+                !0u64
+            } else {
+                ((1u64 << run) - 1) << tx0
+            };
+            todo &= !run_mask;
+            rgba_tiles_run_to_chroma_simd128(
                 rgba_ptr,
                 luma_ptr,
                 rg_ptr,
                 by_ptr,
                 frame_w,
-                tx << 4,
+                tx0 << 4,
+                run,
                 y0,
                 y_end,
             );
@@ -1333,22 +1390,16 @@ fn solve_jv_assign_8x32(
     }
 
     let mut u = [0.0f32; MAX_TARGETS + 1];
-    let mut v_uninit = core::mem::MaybeUninit::<[f32; ASSIGN_COLS + 1]>::uninit();
-    let v = unsafe { core::slice::from_raw_parts_mut(v_uninit.as_mut_ptr() as *mut f32, nc + 1) };
-    v.fill(0.0);
-    let mut p_uninit = core::mem::MaybeUninit::<[usize; ASSIGN_COLS + 1]>::uninit();
-    let p = unsafe { core::slice::from_raw_parts_mut(p_uninit.as_mut_ptr() as *mut usize, nc + 1) };
-    p.fill(0);
-    let mut way_uninit = core::mem::MaybeUninit::<[usize; ASSIGN_COLS + 1]>::uninit();
-    let way =
-        unsafe { core::slice::from_raw_parts_mut(way_uninit.as_mut_ptr() as *mut usize, nc + 1) };
-    way.fill(0);
-    let mut minv_uninit = core::mem::MaybeUninit::<[f32; ASSIGN_COLS + 1]>::uninit();
-    let minv =
-        unsafe { core::slice::from_raw_parts_mut(minv_uninit.as_mut_ptr() as *mut f32, nc + 1) };
-    let mut used_uninit = core::mem::MaybeUninit::<[bool; ASSIGN_COLS + 1]>::uninit();
-    let used =
-        unsafe { core::slice::from_raw_parts_mut(used_uninit.as_mut_ptr() as *mut bool, nc + 1) };
+    let mut v_buf = [0.0f32; ASSIGN_COLS + 1];
+    let v = &mut v_buf[..=nc];
+    let mut p_buf = [0usize; ASSIGN_COLS + 1];
+    let p = &mut p_buf[..=nc];
+    let mut way_buf = [0usize; ASSIGN_COLS + 1];
+    let way = &mut way_buf[..=nc];
+    let mut minv_buf = [1e30f32; ASSIGN_COLS + 1];
+    let minv = &mut minv_buf[..=nc];
+    let mut used_buf = [false; ASSIGN_COLS + 1];
+    let used = &mut used_buf[..=nc];
 
     for i in 1..=nr {
         p[0] = i;
@@ -2253,6 +2304,56 @@ unsafe fn eval_track_hypothesis_fine_cached(
                 frame_w,
                 frame_h
             );
+            if scale_px == 1
+                && (st == 1 || st == 2)
+                && cx0 - st >= 1
+                && cx0 + st <= max_tlx_i
+                && cy0 - st >= 1
+                && cy0 + st <= max_tly_i
+            {
+                if st == 2 {
+                    simd_ops::sad_patch_zm_full_sd_ring3x3_simd128::<2>(
+                        a.luma.as_ptr(),
+                        a.chroma_rg.as_ptr(),
+                        a.chroma_by.as_ptr(),
+                        a.eca_res.as_ptr(),
+                        frame_w,
+                        cx0 as usize,
+                        cy0 as usize,
+                        t.tpl_luma.as_ptr(),
+                        t.tpl_rg.as_ptr(),
+                        t.tpl_by.as_ptr(),
+                        t.tpl_weight.as_ptr(),
+                        full_inv_w,
+                        full_mu_t,
+                        &mut b_tlx,
+                        &mut b_tly,
+                        &mut best_base_c,
+                        &mut best_weca,
+                    );
+                } else {
+                    simd_ops::sad_patch_zm_full_sd_ring3x3_simd128::<1>(
+                        a.luma.as_ptr(),
+                        a.chroma_rg.as_ptr(),
+                        a.chroma_by.as_ptr(),
+                        a.eca_res.as_ptr(),
+                        frame_w,
+                        cx0 as usize,
+                        cy0 as usize,
+                        t.tpl_luma.as_ptr(),
+                        t.tpl_rg.as_ptr(),
+                        t.tpl_by.as_ptr(),
+                        t.tpl_weight.as_ptr(),
+                        full_inv_w,
+                        full_mu_t,
+                        &mut b_tlx,
+                        &mut b_tly,
+                        &mut best_base_c,
+                        &mut best_weca,
+                    );
+                }
+                continue;
+            }
             for dy in -1i32..=1 {
                 for dx in -1i32..=1 {
                     if dx == 0 && dy == 0 {
@@ -2387,6 +2488,18 @@ unsafe fn eval_track_hypothesis_fine_cached(
         if st == 1 {
             if best_half_c > (max_base_c + 0.18).min(0.82) {
                 return (b_tlx as usize, b_tly as usize, 1e9, 1e9, 1e9, 0.0, t.curr_sig, false);
+            }
+            if scale_px == 2 && !skip_st1 && !prop_cache.is_null() {
+                let cs = &*prop_cache;
+                for ci in 0..2usize {
+                    let c = cs[ci];
+                    if (c.flags & 5) == 5 && (c.tlx as i32) == b_tlx && (c.tly as i32) == b_tly {
+                        best_half_c = c.half_c;
+                        best_weca = c.weca;
+                        skip_st1 = true;
+                        break;
+                    }
+                }
             }
             if skip_st1 {
                 continue;
@@ -2815,32 +2928,25 @@ unsafe fn backtrack_gap_in_rgba_ring(
             }
         }
 
-        if best_base_c >= 1e8 {
+        let max_bt_err = if use_entry_guide { 0.22 } else { 0.135 };
+        if best_base_c >= max_bt_err + 1e-4 {
             continue;
         }
-        let mut best_sig = anchor_sig;
-        let best_rc = sad_patch_zm_weighted_simd128(
+        let best_sig = haar_morton_signature_hyst_simd128(
             a.roi_luma.as_ptr(),
             a.roi_rg.as_ptr(),
             a.roi_by.as_ptr(),
-            core::ptr::null(),
             roi_dim,
             best_lx as usize,
             best_ly as usize,
-            a.targets[m].tpl_luma.as_ptr(),
-            a.targets[m].tpl_rg.as_ptr(),
-            a.targets[m].tpl_by.as_ptr(),
-            a.targets[m].tpl_weight.as_ptr(),
-            anchor_sig,
-            &mut best_sig,
-            core::ptr::null_mut(),
             scale_px,
+            anchor_sig,
+            true,
         );
-        if has_opposite_chroma_pole(anchor_sig, best_sig) || best_rc >= 1e8 {
+        if has_opposite_chroma_pole(anchor_sig, best_sig) {
             continue;
         }
-        let val = padic_ultrametric_val(anchor_sig, best_sig);
-        let app_err = best_rc - 0.55 * padic_distance_from_val(val);
+        let app_err = best_base_c;
         let anchor_l1 = weighted_anchor_zm_l1_simd128(
             a.roi_luma.as_ptr(),
             a.roi_rg.as_ptr(),
@@ -2857,7 +2963,6 @@ unsafe fn backtrack_gap_in_rgba_ring(
 
         // Strict acceptance so genuinely occluded frames (inside pillar/behind book) remain vis == 0
         // for Hermite spline bridging while missed visible frames recover sub-pixel lock!
-        let max_bt_err = if use_entry_guide { 0.22 } else { 0.135 };
         if app_err < max_bt_err && anchor_l1 < max_bt_err {
             let tl_ptr = a.targets[m].tpl_luma.as_ptr();
             let trg_ptr = a.targets[m].tpl_rg.as_ptr();
@@ -3133,6 +3238,19 @@ fn classify_eca_connectivity(
     }
 }
 
+#[inline(always)]
+fn div_rem_grid_w(cell: usize, grid_w: usize) -> (usize, usize) {
+    if grid_w == 40 {
+        let gy = (cell * 3277) >> 17;
+        (cell - gy * 40, gy)
+    } else if grid_w == 20 {
+        let gy = (cell * 3277) >> 16;
+        (cell - gy * 20, gy)
+    } else {
+        (cell % grid_w, cell / grid_w)
+    }
+}
+
 /// Extract Connected Components / Energy Peaks over the active ECA motion-residual grid
 /// (`20x11` in 320x180 SD, `40x22` in 640x360 HD).
 #[inline(never)]
@@ -3142,6 +3260,11 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
     let patch_dim = 16 * scale_px;
     let half_patch = 8.0 * s;
 
+    let macro_peak_cap = if dense_swarm_hero_cap_active(a) {
+        6usize.min(MAX_TARGETS)
+    } else {
+        MAX_TARGETS
+    };
     a.cc_visited[..grid_cells].fill(0);
     for p in 0..MAX_TARGETS {
         a.peaks[p].valid = 0;
@@ -3248,8 +3371,7 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
             q_head += 1;
             comp_cells += 1;
 
-            let gx = cur % grid_w;
-            let gy = cur / grid_w;
+            let (gx, gy) = div_rem_grid_w(cur, grid_w);
             if gx < min_gx {
                 min_gx = gx;
             }
@@ -3306,8 +3428,7 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
                 if ce < seed_thresh * 1.15 {
                     continue;
                 }
-                let cgx = cell % grid_w;
-                let cgy = cell / grid_w;
+                let (cgx, cgy) = div_rem_grid_w(cell, grid_w);
                 let mut is_local_max = true;
                 let ny0 = cgy.saturating_sub(1);
                 let ny1 = (cgy + 1).min(grid_h - 1);
@@ -3586,13 +3707,13 @@ unsafe fn extract_connected_component_peaks(a: &mut Arena) {
                 _pad: [0; 2],
             };
 
-            if a.num_peaks < MAX_TARGETS {
+            if a.num_peaks < macro_peak_cap {
                 a.peaks[a.num_peaks] = cand;
                 a.num_peaks += 1;
             } else {
                 let mut min_slot = 0usize;
                 let mut min_val = a.peaks[0].energy;
-                for k in 1..MAX_TARGETS {
+                for k in 1..macro_peak_cap {
                     if a.peaks[k].energy < min_val {
                         min_val = a.peaks[k].energy;
                         min_slot = k;
@@ -4810,8 +4931,7 @@ fn solve_noncausal_fista_target(
 #[no_mangle]
 pub unsafe extern "C" fn chronos_init() {
     let a = arena_mut();
-    core::ptr::write_bytes(a as *mut Arena as *mut u8, 0, 1);
-    *a = core::mem::zeroed();
+    core::ptr::write_bytes(a as *mut Arena as *mut u8, 0, core::mem::size_of::<Arena>());
     a.res_mode = 0;
     a.lookahead_k = 8;
     a.eca_adapt_rate = 0.035;
@@ -4825,6 +4945,14 @@ pub unsafe extern "C" fn chronos_init() {
     a.reset_base_track_id = 1;
     a.clutter_db = 0.0;
     a.clutter_db_valid = 0;
+    a.micro_swarm.init_in_place();
+    a.continuum.reset();
+    a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
+    a.lanczos_scratch.last_lambda2 = 0.0;
+    a.lanczos_scratch.last_n = 0;
+    a.swarm_mode_cached = 0;
+    a.swarm_telem_zeroed = 1;
+    a.telemetry[20] = core::mem::size_of::<Arena>() as f32;
 }
 
 #[no_mangle]
@@ -4850,6 +4978,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.lyap_scratch.reset();
     a.collision_state.reset();
     a.telemetry[TELEM_PHYSICS_START..TELEMETRY_LEN].fill(0.0);
+    a.physics_telem_dirty_mask = 0;
     for di in 0..MAX_DORMANT {
         a.dormant[di] = core::mem::zeroed();
     }
@@ -4933,6 +5062,21 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.sustained_60s_count = 0;
     a.last_reid_gap_frames = 0;
     a.reset_base_track_id = a.next_track_id;
+    a.micro_swarm.reset_active_keep_mode();
+    a.continuum.reset();
+    a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
+    a.lanczos_scratch.last_lambda2 = 0.0;
+    a.lanczos_scratch.last_n = 0;
+    a.micro_swarm.swarm_telem[1..soa_tracks::SWARM_TELEM_LEN].fill(0.0);
+    a.continuum_was_active = 0;
+    a.swarm_telem_zeroed = if a.swarm_mode_cached == 0 { 1 } else { 0 };
+    a.last_scene_cut = 0;
+    a.last_pan_dx_f = 0.0;
+    a.last_pan_dy_f = 0.0;
+    a.inspected_hero_tid = 0;
+    a.inspected_micro_tid_pin = 0;
+    a.pre_tick_seen = 0;
+    a.last_pre_tick_frame = 0;
 }
 
 #[no_mangle]
@@ -4946,7 +5090,20 @@ pub unsafe extern "C" fn chronos_set_ingest_pts(pts_sec: f64) {
 
 #[no_mangle]
 pub unsafe extern "C" fn chronos_set_focus_target(track_id: u32) {
-    arena_mut().focus_target_id = track_id;
+    let a = arena_mut();
+    if track_id != 0 && track_id == a.inspected_micro_tid_pin && a.inspected_hero_tid != 0 {
+        a.focus_target_id = a.inspected_hero_tid;
+    } else {
+        a.focus_target_id = track_id;
+        if !(track_id != 0 && track_id == a.inspected_hero_tid) {
+            a.inspected_micro_tid_pin = 0;
+            a.inspected_hero_tid = 0;
+            a.micro_swarm.inspected_micro_tid = 0;
+            a.micro_swarm.inspected_body_id = 0;
+            a.micro_swarm.swarm_telem[11] = 0.0;
+            a.micro_swarm.swarm_telem[12] = 0.0;
+        }
+    }
 }
 
 #[no_mangle]
@@ -5107,10 +5264,883 @@ pub unsafe extern "C" fn chronos_set_fiedler_spectrum(lambda2: f32, spectral_gap
     a.fiedler_gap = if spectral_gap.is_finite() { spectral_gap.max(0.0) } else { 0.0 };
 }
 
+#[inline(always)]
+unsafe fn dot_f64_padded4(a_ptr: *const f64, b_ptr: *const f64, n4: usize) -> f64 {
+    let mut s0 = f64x2_splat(0.0);
+    let mut s1 = f64x2_splat(0.0);
+    let mut i = 0usize;
+    while i < n4 {
+        let a0 = v128_load(a_ptr.add(i) as *const v128);
+        let b0 = v128_load(b_ptr.add(i) as *const v128);
+        s0 = f64x2_add(s0, f64x2_mul(a0, b0));
+        let a1 = v128_load(a_ptr.add(i + 2) as *const v128);
+        let b1 = v128_load(b_ptr.add(i + 2) as *const v128);
+        s1 = f64x2_add(s1, f64x2_mul(a1, b1));
+        i += 4;
+    }
+    let s = f64x2_add(s0, s1);
+    f64x2_extract_lane::<0>(s) + f64x2_extract_lane::<1>(s)
+}
+
+#[inline(always)]
+unsafe fn sub_scaled_f64_padded4(w_ptr: *mut f64, q_ptr: *const f64, scale: f64, n4: usize) {
+    let vs = f64x2_splat(scale);
+    let mut i = 0usize;
+    while i < n4 {
+        let w0 = v128_load(w_ptr.add(i) as *const v128);
+        let q0 = v128_load(q_ptr.add(i) as *const v128);
+        v128_store(w_ptr.add(i) as *mut v128, f64x2_sub(w0, f64x2_mul(vs, q0)));
+        let w1 = v128_load(w_ptr.add(i + 2) as *const v128);
+        let q1 = v128_load(q_ptr.add(i + 2) as *const v128);
+        v128_store(w_ptr.add(i + 2) as *mut v128, f64x2_sub(w1, f64x2_mul(vs, q1)));
+        i += 4;
+    }
+}
+
+unsafe fn find_orthogonal_basis_seed_f64(
+    ls: &mut LanczosScratch,
+    n: usize,
+    n4: usize,
+    num_existing: usize,
+    out_offset: usize,
+) -> bool {
+    let inv_n = 1.0f64 / (n as f64);
+    for cand in 0..n {
+        for idx in 0..n {
+            ls.w[idx] = if idx == cand { 1.0 } else { 0.0 } - inv_n;
+        }
+        for idx in n..n4 {
+            ls.w[idx] = 0.0;
+        }
+        for _pass in 0..2usize {
+            for k in 0..num_existing {
+                let k_off = k * GRAPH_NODES;
+                let dot = dot_f64_padded4(ls.q.as_ptr().add(k_off), ls.w.as_ptr(), n4);
+                sub_scaled_f64_padded4(ls.w.as_mut_ptr(), ls.q.as_ptr().add(k_off), dot, n4);
+            }
+            let mut mean = 0.0f64;
+            for idx in 0..n {
+                mean += ls.w[idx];
+            }
+            mean *= inv_n;
+            for idx in 0..n {
+                ls.w[idx] -= mean;
+            }
+            for idx in n..n4 {
+                ls.w[idx] = 0.0;
+            }
+        }
+        let norm2 = dot_f64_padded4(ls.w.as_ptr(), ls.w.as_ptr(), n4);
+        if norm2 > 1e-12 {
+            let inv_norm = 1.0 / wasm_sqrt_f64(norm2);
+            for idx in 0..n {
+                ls.q[out_offset + idx] = ls.w[idx] * inv_norm;
+            }
+            for idx in n..n4 {
+                ls.q[out_offset + idx] = 0.0;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+unsafe fn solve_tridiag_tql2_f64(ls: &mut LanczosScratch, m_dim: usize) -> (usize, i32, f64, f64) {
+    let m4 = (m_dim + 3) & !3;
+    for i in 0..m_dim {
+        ls.d_diag[i] = ls.alpha[i];
+        ls.e_sub[i] = if i + 1 < m_dim { ls.beta[i] } else { 0.0 };
+        let r_off = i * GRAPH_NODES;
+        ls.z[r_off..(r_off + m4)].fill(0.0);
+        ls.z[r_off + i] = 1.0;
+    }
+
+    for l in 0..m_dim {
+        let mut iter = 0usize;
+        while iter < 40 {
+            iter += 1;
+            let mut m = l;
+            while m < m_dim - 1 {
+                if abs_f64(ls.e_sub[m])
+                    <= 1e-14 * (abs_f64(ls.d_diag[m]) + abs_f64(ls.d_diag[m + 1])) + 1e-30
+                {
+                    break;
+                }
+                m += 1;
+            }
+            if m == l {
+                break;
+            }
+            let mut g = (ls.d_diag[l + 1] - ls.d_diag[l]) / (2.0 * ls.e_sub[l]);
+            let ag = abs_f64(g);
+            let mut r = if ag < 1e100 {
+                wasm_sqrt_f64(g * g + 1.0)
+            } else {
+                ag
+            };
+            g = ls.d_diag[m] - ls.d_diag[l] + ls.e_sub[l] / (g + if g >= 0.0 { r } else { -r });
+            let mut s = 1.0f64;
+            let mut c = 1.0f64;
+            let mut p = 0.0f64;
+            for i in (l..m).rev() {
+                let f = s * ls.e_sub[i];
+                let b = c * ls.e_sub[i];
+                let r2 = f * f + g * g;
+                r = if r2 > 1e-200 && r2 < 1e200 {
+                    wasm_sqrt_f64(r2)
+                } else {
+                    hypot_f64(f, g)
+                };
+                ls.e_sub[i + 1] = r;
+                if r < 1e-30 {
+                    ls.d_diag[i + 1] -= p;
+                    ls.e_sub[m] = 0.0;
+                    break;
+                }
+                s = f / r;
+                c = g / r;
+                g = ls.d_diag[i + 1] - p;
+                r = (ls.d_diag[i] - g) * s + 2.0 * c * b;
+                p = s * r;
+                ls.d_diag[i + 1] = g + p;
+                g = c * r - b;
+                let vs = f64x2_splat(s);
+                let vc = f64x2_splat(c);
+                let z_ptr = ls.z.as_mut_ptr();
+                let row_i = i * GRAPH_NODES;
+                let row_i1 = row_i + GRAPH_NODES;
+                let mut k = 0usize;
+                while k < m4 {
+                    let fz0 = v128_load(z_ptr.add(row_i1 + k) as *const v128);
+                    let zk0 = v128_load(z_ptr.add(row_i + k) as *const v128);
+                    v128_store(
+                        z_ptr.add(row_i1 + k) as *mut v128,
+                        f64x2_add(f64x2_mul(vs, zk0), f64x2_mul(vc, fz0)),
+                    );
+                    v128_store(
+                        z_ptr.add(row_i + k) as *mut v128,
+                        f64x2_sub(f64x2_mul(vc, zk0), f64x2_mul(vs, fz0)),
+                    );
+                    let fz1 = v128_load(z_ptr.add(row_i1 + k + 2) as *const v128);
+                    let zk1 = v128_load(z_ptr.add(row_i + k + 2) as *const v128);
+                    v128_store(
+                        z_ptr.add(row_i1 + k + 2) as *mut v128,
+                        f64x2_add(f64x2_mul(vs, zk1), f64x2_mul(vc, fz1)),
+                    );
+                    v128_store(
+                        z_ptr.add(row_i + k + 2) as *mut v128,
+                        f64x2_sub(f64x2_mul(vc, zk1), f64x2_mul(vs, fz1)),
+                    );
+                    k += 4;
+                }
+            }
+            if r < 1e-30 && ls.e_sub[m] == 0.0 {
+                continue;
+            }
+            ls.d_diag[l] -= p;
+            ls.e_sub[l] = g;
+            ls.e_sub[m] = 0.0;
+        }
+    }
+
+    let mut best_col = 0usize;
+    let mut sec_col = -1i32;
+    let mut theta_max = -1e30f64;
+    let mut theta_second = -1e30f64;
+    for c in 0..m_dim {
+        let val = ls.d_diag[c];
+        if val > theta_max {
+            theta_second = theta_max;
+            sec_col = best_col as i32;
+            theta_max = val;
+            best_col = c;
+        } else if val > theta_second {
+            theta_second = val;
+            sec_col = c as i32;
+        }
+    }
+    (best_col, sec_col, theta_max, theta_second)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_solve_fiedler_lanczos() -> f32 {
+    let a = arena_mut();
+    let ls = &mut a.lanczos_scratch;
+    let mut n = 0usize;
+    for i in 0..GRAPH_NODES {
+        if a.laplacian[i * GRAPH_NODES + i] > 1e-6 {
+            ls.act_idx[n] = i;
+            n += 1;
+        }
+    }
+    a.fiedler_vec.fill(0.0);
+    if n < 2 {
+        ls.last_n = 0;
+        ls.last_lambda2 = 0.0;
+        a.fiedler_lambda2 = 0.0;
+        a.fiedler_gap = 0.0;
+        return 0.0;
+    }
+
+    let n4 = (n + 3) & !3;
+    let mut mu = 0.0f64;
+    for idx in 0..n {
+        let ia = ls.act_idx[idx] * GRAPH_NODES;
+        let r_off = idx * GRAPH_NODES;
+        let diag = a.laplacian[ia + ls.act_idx[idx]] as f64;
+        ls.sub_l[r_off + idx] = diag;
+        for b in 0..idx {
+            let v = a.laplacian[ia + ls.act_idx[b]] as f64;
+            ls.sub_l[r_off + b] = v;
+            ls.sub_l[b * GRAPH_NODES + idx] = v;
+        }
+        for b in n..n4 {
+            ls.sub_l[r_off + b] = 0.0;
+        }
+    }
+    for idx in 0..n {
+        let r_off = idx * GRAPH_NODES;
+        let mut row_sum = ls.sub_l[r_off + idx];
+        for b in 0..n {
+            if idx != b {
+                row_sum += abs_f64(ls.sub_l[r_off + b]);
+            }
+        }
+        if row_sum > mu {
+            mu = row_sum;
+        }
+    }
+    mu += 0.1;
+
+    let m_steps = (n - 1).min(MAX_KRYLOV);
+    let inv_n = 1.0f64 / (n as f64);
+    let mut mean0 = 0.0f64;
+    for idx in 0..n {
+        let val = ((idx + 1) as f64) - 0.5 * ((n + 1) as f64);
+        ls.q[idx] = val;
+        mean0 += val;
+    }
+    mean0 *= inv_n;
+    let mut norm0 = 0.0f64;
+    for idx in 0..n {
+        ls.q[idx] -= mean0;
+        norm0 += ls.q[idx] * ls.q[idx];
+    }
+    let inv_norm0 = 1.0f64 / wasm_sqrt_f64(norm0.max(1e-18));
+    for idx in 0..n {
+        ls.q[idx] *= inv_norm0;
+    }
+    for idx in n..n4 {
+        ls.q[idx] = 0.0;
+        ls.w[idx] = 0.0;
+    }
+
+    let mut actual_m = 0usize;
+    for j in 0..m_steps {
+        let q_off = j * GRAPH_NODES;
+        let q_ptr = ls.q.as_ptr().add(q_off);
+        for idx in 0..n {
+            let sum_l = dot_f64_padded4(ls.sub_l.as_ptr().add(idx * GRAPH_NODES), q_ptr, n4);
+            ls.w[idx] = mu * ls.q[q_off + idx] - sum_l;
+        }
+        let mut w_mean = 0.0f64;
+        for idx in 0..n {
+            w_mean += ls.w[idx];
+        }
+        w_mean *= inv_n;
+        if j > 0 && ls.beta[j - 1] > 0.0 {
+            let prev_off = (j - 1) * GRAPH_NODES;
+            let beta_prev = ls.beta[j - 1];
+            for idx in 0..n {
+                ls.w[idx] = (ls.w[idx] - w_mean) - beta_prev * ls.q[prev_off + idx];
+            }
+        } else {
+            for idx in 0..n {
+                ls.w[idx] -= w_mean;
+            }
+        }
+        for idx in n..n4 {
+            ls.w[idx] = 0.0;
+        }
+
+        let alpha = dot_f64_padded4(q_ptr, ls.w.as_ptr(), n4);
+        ls.alpha[j] = alpha;
+        sub_scaled_f64_padded4(ls.w.as_mut_ptr(), q_ptr, alpha, n4);
+        let pre_norm2 = dot_f64_padded4(ls.w.as_ptr(), ls.w.as_ptr(), n4);
+
+        for pass in 0..2usize {
+            for k in 0..=j {
+                let k_ptr = ls.q.as_ptr().add(k * GRAPH_NODES);
+                let dot = dot_f64_padded4(k_ptr, ls.w.as_ptr(), n4);
+                sub_scaled_f64_padded4(ls.w.as_mut_ptr(), k_ptr, dot, n4);
+            }
+            let mut wm = 0.0f64;
+            for idx in 0..n {
+                wm += ls.w[idx];
+            }
+            wm *= inv_n;
+            for idx in 0..n {
+                ls.w[idx] -= wm;
+            }
+            for idx in n..n4 {
+                ls.w[idx] = 0.0;
+            }
+            let post2 = dot_f64_padded4(ls.w.as_ptr(), ls.w.as_ptr(), n4);
+            if pass == 0 && post2 > 0.5 * pre_norm2 {
+                break;
+            }
+        }
+
+        let beta2 = dot_f64_padded4(ls.w.as_ptr(), ls.w.as_ptr(), n4);
+        let beta = wasm_sqrt_f64(beta2.max(0.0));
+        actual_m = j + 1;
+
+        if j + 1 >= m_steps {
+            ls.beta[j] = 0.0;
+            break;
+        }
+        let next_off = (j + 1) * GRAPH_NODES;
+        if beta < 1e-8 {
+            ls.beta[j] = 0.0;
+            if !find_orthogonal_basis_seed_f64(ls, n, n4, j + 1, next_off) {
+                break;
+            }
+        } else {
+            ls.beta[j] = beta;
+            let inv_beta = 1.0 / beta;
+            for idx in 0..n {
+                ls.q[next_off + idx] = ls.w[idx] * inv_beta;
+            }
+            for idx in n..n4 {
+                ls.q[next_off + idx] = 0.0;
+            }
+        }
+    }
+
+    let (best_col, _, theta_max, theta_second) = solve_tridiag_tql2_f64(ls, actual_m);
+    let lambda2 = (mu - theta_max).max(0.0);
+    let lambda3 = if actual_m >= 2 {
+        (mu - theta_second).max(lambda2)
+    } else {
+        lambda2
+    };
+    let spectral_gap = (lambda3 - lambda2).max(0.0);
+
+    let mut eig_acc0 = [f64x2_splat(0.0); GRAPH_NODES / 2];
+    let best_z_off = best_col * GRAPH_NODES;
+    let n2 = (n + 1) >> 1;
+    for j in 0..actual_m {
+        let vz = f64x2_splat(ls.z[best_z_off + j]);
+        let q_ptr = ls.q.as_ptr().add(j * GRAPH_NODES);
+        for u in 0..n2 {
+            let qv = v128_load(q_ptr.add(u * 2) as *const v128);
+            eig_acc0[u] = f64x2_add(eig_acc0[u], f64x2_mul(qv, vz));
+        }
+    }
+    for u in 0..n2 {
+        v128_store(ls.eig_vec.as_mut_ptr().add(u * 2) as *mut v128, eig_acc0[u]);
+    }
+    for idx in n..n4 {
+        ls.eig_vec[idx] = 0.0;
+    }
+
+    let mut dot_prev = 0.0f64;
+    for idx in 0..n {
+        let node_idx = ls.act_idx[idx];
+        if node_idx < MAX_TARGETS {
+            dot_prev += ls.eig_vec[idx] * ls.prev_track[node_idx];
+        }
+    }
+
+    let sign_fix = if dot_prev < -1e-4 || (abs_f64(dot_prev) <= 1e-4 && ls.eig_vec[0] < 0.0) {
+        -1.0f64
+    } else {
+        1.0f64
+    };
+    for idx in 0..n {
+        let node_idx = ls.act_idx[idx];
+        let val = ls.eig_vec[idx] * sign_fix;
+        a.fiedler_vec[node_idx] = val as f32;
+        if node_idx < MAX_TARGETS {
+            ls.prev_track[node_idx] = val;
+        }
+    }
+
+    ls.last_n = n;
+    ls.last_lambda2 = lambda2;
+    let l2_f = lambda2 as f32;
+    let gap_f = spectral_gap as f32;
+    a.fiedler_lambda2 = if l2_f.is_finite() { l2_f.max(0.0) } else { 0.0 };
+    a.fiedler_gap = if gap_f.is_finite() { gap_f.max(0.0) } else { 0.0 };
+    a.fiedler_lambda2
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_fiedler_res_norm() -> f32 {
+    let a = arena_mut();
+    let ls = &a.lanczos_scratch;
+    let n = ls.last_n;
+    if n < 2 {
+        return 0.0;
+    }
+    let n4 = (n + 3) & !3;
+    let lambda2 = ls.last_lambda2;
+    let mut res2 = 0.0f64;
+    for idx in 0..n {
+        let lv = dot_f64_padded4(
+            ls.sub_l.as_ptr().add(idx * GRAPH_NODES),
+            ls.eig_vec.as_ptr(),
+            n4,
+        );
+        let diff = lv - lambda2 * ls.eig_vec[idx];
+        res2 += diff * diff;
+    }
+    wasm_sqrt_f64(res2) as f32
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chronos_get_telemetry_ptr() -> *const f32 {
     let a = arena_mut();
     a.telemetry.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_swarm_mode(mode: u32) {
+    let a = arena_mut();
+    let sanitized = mode.min(2);
+    a.micro_swarm.swarm_mode = sanitized;
+    a.micro_swarm.swarm_telem[0] = sanitized as f32;
+    a.swarm_mode_cached = sanitized as u8;
+    if sanitized == 0 {
+        a.micro_swarm.reset_active_keep_mode();
+        a.continuum.reset();
+        a.micro_swarm.swarm_telem[1..soa_tracks::SWARM_TELEM_LEN].fill(0.0);
+        a.continuum_was_active = 0;
+        a.inspected_hero_tid = 0;
+        a.inspected_micro_tid_pin = 0;
+        a.swarm_telem_zeroed = 1;
+    } else {
+        a.swarm_telem_zeroed = 0;
+        if sanitized == 2 {
+            a.micro_swarm.swarm_active = 1;
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_swarm_mode() -> u32 {
+    arena_mut().micro_swarm.swarm_mode
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_micro_tracks_ptr() -> *const f32 {
+    arena_mut().micro_swarm.export_micro.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_continuum_field_ptr() -> *const f32 {
+    arena_mut().continuum.export_field.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_rigid_bodies_ptr() -> *const f32 {
+    arena_mut().continuum.export_bodies.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_swarm_telemetry_ptr() -> *const f32 {
+    arena_mut().micro_swarm.swarm_telem.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_modal_field_ptr() -> *const f32 {
+    arena_mut().continuum.export_modal_field.as_ptr()
+}
+
+#[inline(never)]
+unsafe fn promote_or_bind_hero_slot(
+    a: &mut Arena,
+    raw_mx: f32,
+    raw_my: f32,
+    raw_mvx: f32,
+    raw_mvy: f32,
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
+    s: f32,
+) -> u32 {
+    let mx = if raw_mx.is_finite() {
+        raw_mx.clamp(0.0, (frame_w.saturating_sub(1)) as f32)
+    } else {
+        (frame_w as f32) * 0.5
+    };
+    let my = if raw_my.is_finite() {
+        raw_my.clamp(0.0, (frame_h.saturating_sub(1)) as f32)
+    } else {
+        (frame_h as f32) * 0.5
+    };
+    let mvx = if raw_mvx.is_finite() { raw_mvx } else { 0.0 };
+    let mvy = if raw_mvy.is_finite() { raw_mvy } else { 0.0 };
+
+    let match_r2 = (20.0 * s) * (20.0 * s);
+    let mut best_existing: Option<usize> = None;
+    let mut best_d2 = match_r2;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 && a.targets[m].confirmed != 0 && a.targets[m].track_id != 0 {
+            let dx = a.targets[m].pos_x - mx;
+            let dy = a.targets[m].pos_y - my;
+            let d2 = dx * dx + dy * dy;
+            if d2.is_finite() && d2 < best_d2 {
+                best_d2 = d2;
+                best_existing = Some(m);
+            }
+        }
+    }
+    if let Some(m) = best_existing {
+        return a.targets[m].track_id;
+    }
+
+    let dense_cap = dense_swarm_hero_cap_active(a);
+    let eff_cap = if dense_cap { DENSE_SWARM_HERO_CAP } else { MAX_TARGETS };
+    let mut act_cnt = 0usize;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 {
+            act_cnt += 1;
+        }
+    }
+
+    let mut chosen: Option<usize> = None;
+    if act_cnt < eff_cap {
+        for m in 0..MAX_TARGETS {
+            if a.targets[m].active == 0 {
+                chosen = Some(m);
+                break;
+            }
+        }
+    }
+    if chosen.is_none() {
+        let mut worst_score = 1e9f32;
+        let mut worst_any_score = 1e9f32;
+        let mut worst_any_m = 0usize;
+        for m in 0..MAX_TARGETS {
+            let t = &a.targets[m];
+            if dense_cap && t.active == 0 {
+                continue;
+            }
+            let is_pinned = (a.focus_target_id != 0 && t.track_id == a.focus_target_id)
+                || (a.pip_target_id != 0 && t.track_id == a.pip_target_id)
+                || (a.inspected_hero_tid != 0 && t.track_id == a.inspected_hero_tid);
+            let sc = t.vis_eca_ema
+                + if t.confirmed != 0 { 0.04 } else { 0.0 }
+                - 0.002 * (t.coasting as f32)
+                + if is_pinned { 100.0 } else { 0.0 };
+            if sc < worst_any_score {
+                worst_any_score = sc;
+                worst_any_m = m;
+            }
+            if !is_pinned && sc < worst_score {
+                worst_score = sc;
+                chosen = Some(m);
+            }
+        }
+        if chosen.is_none() {
+            chosen = Some(worst_any_m);
+        }
+    }
+
+    let m = chosen.unwrap_or(0);
+    let f_last = a.frame_idx.saturating_sub(1);
+    let slot_in = (f_last as usize) % RING_LEN;
+    let arc_slot_in = (f_last as usize) & (ARC_HIST_LEN - 1);
+    let s2 = s * s;
+    let patch_dim = 16 * scale_px;
+    let half_patch = 8.0 * s;
+
+    if a.targets[m].active != 0 {
+        if a.targets[m].confirmed != 0 {
+            let ev_x = a.targets[m].pos_x;
+            let ev_y = a.targets[m].pos_y;
+            archive_dormant_track(a, m, f_last, ev_x, ev_y, s);
+        }
+        a.all_pip_tid[m] = 0;
+        let mbase = m * 8;
+        for q in 0..8 {
+            a.slot_meta[mbase + q] = 0.0;
+        }
+    }
+    let clear_bit = !(1u16 << m);
+    for o in 0..MAX_TARGETS {
+        a.targets[o].proximity_mask &= clear_bit;
+    }
+
+    let tlx = ((mx - half_patch).max(0.0) as usize).min(frame_w.saturating_sub(patch_dim));
+    let tly = ((my - half_patch).max(0.0) as usize).min(frame_h.saturating_sub(patch_dim));
+    ensure_chroma!(a, tlx, tly, patch_dim, patch_dim, frame_w, frame_h);
+    core::ptr::write_bytes(
+        &mut a.targets[m] as *mut TargetTrack as *mut u8,
+        0,
+        core::mem::size_of::<TargetTrack>(),
+    );
+    capture_template_scaled(
+        &a.luma,
+        &a.chroma_rg,
+        &a.chroma_by,
+        &a.eca_res,
+        frame_w,
+        frame_h,
+        scale_px,
+        tlx,
+        tly,
+        &mut a.targets[m],
+    );
+    simd_ops::compute_anchor_luma_stats_simd128(
+        a.targets[m].anchor_luma.as_ptr(),
+        a.targets[m].tpl_weight.as_ptr(),
+        &mut a.targets[m].anchor_mu_a,
+        &mut a.targets[m].anchor_std_a,
+    );
+
+    let hero_tid = a.next_track_id.max(1);
+    a.next_track_id = hero_tid.wrapping_add(1).max(1);
+
+    let t = &mut a.targets[m];
+    t.active = 1;
+    t.confirmed = 1;
+    t.just_confirmed = 1;
+    t.hit_mask_8 = 0x07;
+    t.owner_slot = m as u8;
+    t.track_id = hero_tid;
+    t.birth_frame = f_last;
+    t.orig_birth_frame = f_last;
+    t.entry_frame = f_last;
+    t.anchor_sig = t.curr_sig;
+    t.last_padic_val = 32;
+    t.age = 3;
+    t.pos_x = mx;
+    t.pos_y = my;
+    t.vel_x = mvx;
+    t.vel_y = mvy;
+    t.prev_inst_vx = mvx;
+    t.prev_inst_vy = mvy;
+    t.pred_cx = mx;
+    t.pred_cy = my;
+    t.entry_x = mx;
+    t.entry_y = my;
+    t.entry_vx = mvx;
+    t.entry_vy = mvy;
+    t.birth_x = mx;
+    t.birth_y = my;
+    t.osc_mean_x = mx;
+    t.osc_mean_y = my;
+    t.osc_ext_min_x = mx;
+    t.osc_ext_max_x = mx;
+    t.disp_fista_x = mx;
+    t.disp_fista_y = my;
+    t.disp_raw_x = mx;
+    t.disp_raw_y = my;
+    t.disp_vis = 1.0;
+    t.vis_eca_ema = 0.08;
+    t.step_ref_x = mx;
+    t.step_ref_y = my;
+    t.stim_ref_x = mx;
+    t.stim_ref_y = my;
+    t.axis_y = 1.0;
+    let asig = t.anchor_sig;
+    for sr in 0..RING_LEN {
+        t.ring_raw_x[sr] = mx;
+        t.ring_raw_y[sr] = my;
+        t.ring_sig[sr] = asig;
+        t.ring_vis[sr] = if sr == slot_in { 1 } else { 0 };
+        t.fista_x[sr] = mx;
+        t.fista_y[sr] = my;
+    }
+    t.arc_raw_x[arc_slot_in] = mx;
+    t.arc_raw_y[arc_slot_in] = my;
+    t.arc_vis[arc_slot_in] = 1;
+
+    a.imm[m].reset();
+    a.imm[m].active = 1;
+    a.imm[m].x = [mx; 4];
+    a.imm[m].y = [my; 4];
+    a.imm[m].vx = [mvx; 4];
+    a.imm[m].vy = [mvy; 4];
+    a.imm[m].pred_x = mx;
+    a.imm[m].pred_y = my;
+    a.imm[m].pred_vx = mvx;
+    a.imm[m].pred_vy = mvy;
+    a.ode_states[m].reset();
+    a.pend_states[m].reset();
+    physics_id::reset_collision_slot(&mut a.collision_state, m);
+
+    a.kalman[m].active = 1;
+    a.kalman[m].current_owner = m as u8;
+    a.kalman[m].mismatch_streak = 0;
+    a.kalman[m]._pad = 0;
+    a.kalman[m].anchor_sig = asig;
+    a.kalman[m].x = mx;
+    a.kalman[m].y = my;
+    a.kalman[m].vx = mvx;
+    a.kalman[m].vy = mvy;
+    a.kalman[m].p_xx = 4.0 * s2;
+    a.kalman[m].p_xv = 0.0;
+    a.kalman[m].p_vv = 8.0 * s2;
+    a.kalman[m].coasting = 0;
+    a.kalman[m].ring_x.fill(mx);
+    a.kalman[m].ring_y.fill(my);
+
+    let base = 32 + m * 56;
+    a.telemetry[base] = 1.0;
+    a.telemetry[base + 1] = hero_tid as f32;
+    a.telemetry[base + 2] = mx;
+    a.telemetry[base + 3] = my;
+    a.telemetry[base + 4] = mx;
+    a.telemetry[base + 5] = my;
+    a.telemetry[base + 6] = mx;
+    a.telemetry[base + 7] = my;
+    a.telemetry[base + 8] = mx;
+    a.telemetry[base + 9] = my;
+    a.telemetry[base + 10] = 1.0;
+    let mut active_confirmed = 0u32;
+    for k in 0..MAX_TARGETS {
+        if a.targets[k].active != 0 && a.targets[k].confirmed != 0 {
+            active_confirmed += 1;
+        }
+    }
+    a.telemetry[3] = active_confirmed as f32;
+
+    hero_tid
+}
+
+#[inline(never)]
+unsafe fn refresh_hero_pin_bridge(
+    a: &mut Arena,
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
+    s: f32,
+) {
+    if a.inspected_micro_tid_pin == 0 {
+        return;
+    }
+    let mut found_ti: Option<usize> = None;
+    let mut ti = 0usize;
+    while ti < soa_tracks::MAX_MICRO {
+        if a.micro_swarm.tracks.state[ti] != soa_tracks::MICRO_STATE_INACTIVE
+            && a.micro_swarm.tracks.track_id[ti] == a.inspected_micro_tid_pin
+        {
+            found_ti = Some(ti);
+            break;
+        }
+        ti += 1;
+    }
+    if let Some(ti) = found_ti {
+        a.micro_swarm.inspected_micro_tid = a.inspected_micro_tid_pin;
+        a.micro_swarm.inspected_body_id = a.micro_swarm.tracks.body_id[ti] as u32;
+        a.micro_swarm.swarm_telem[11] = a.micro_swarm.inspected_micro_tid as f32;
+        a.micro_swarm.swarm_telem[12] = a.micro_swarm.inspected_body_id as f32;
+        let mut hero_alive = false;
+        if a.inspected_hero_tid != 0 {
+            for m in 0..MAX_TARGETS {
+                if a.targets[m].active != 0 && a.targets[m].track_id == a.inspected_hero_tid {
+                    hero_alive = true;
+                    break;
+                }
+            }
+            if !hero_alive {
+                for di in 0..MAX_DORMANT {
+                    if a.dormant[di].active != 0 && a.dormant[di].track_id == a.inspected_hero_tid {
+                        hero_alive = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !hero_alive && a.micro_swarm.tracks.state[ti] == soa_tracks::MICRO_STATE_CONFIRMED {
+            let mx = a.micro_swarm.tracks.pos_x[ti];
+            let my = a.micro_swarm.tracks.pos_y[ti];
+            let mvx = a.micro_swarm.tracks.vel_x[ti];
+            let mvy = a.micro_swarm.tracks.vel_y[ti];
+            let hero_tid =
+                promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+            a.inspected_hero_tid = hero_tid;
+            a.focus_target_id = hero_tid;
+        }
+    } else {
+        a.inspected_micro_tid_pin = 0;
+        a.inspected_hero_tid = 0;
+        a.micro_swarm.inspected_micro_tid = 0;
+        a.micro_swarm.inspected_body_id = 0;
+        a.micro_swarm.swarm_telem[11] = 0.0;
+        a.micro_swarm.swarm_telem[12] = 0.0;
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_inspect_field_point(x: f32, y: f32) -> u32 {
+    let a = arena_mut();
+    let (frame_w, frame_h, _gw, _gh, scale_px, _pip_dim, s) = mode_dims(a.res_mode);
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < 0.0
+        || y < 0.0
+        || x >= (frame_w as f32)
+        || y >= (frame_h as f32)
+    {
+        return 0;
+    }
+
+    let micro_tid =
+        soa_tracks::inspect_nearest_micro_track(&mut a.micro_swarm, x, y, frame_w, frame_h);
+    if micro_tid == 0 {
+        a.inspected_micro_tid_pin = 0;
+        a.inspected_hero_tid = 0;
+        return 0;
+    }
+
+    let mut mx = x;
+    let mut my = y;
+    let mut mvx = 0.0f32;
+    let mut mvy = 0.0f32;
+    let mut ti = 0usize;
+    while ti < soa_tracks::MAX_MICRO {
+        if a.micro_swarm.tracks.state[ti] == soa_tracks::MICRO_STATE_CONFIRMED
+            && a.micro_swarm.tracks.track_id[ti] == micro_tid
+        {
+            mx = a.micro_swarm.tracks.pos_x[ti];
+            my = a.micro_swarm.tracks.pos_y[ti];
+            mvx = a.micro_swarm.tracks.vel_x[ti];
+            mvy = a.micro_swarm.tracks.vel_y[ti];
+            break;
+        }
+        ti += 1;
+    }
+
+    let hero_tid =
+        promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+    a.focus_target_id = hero_tid;
+    a.inspected_hero_tid = hero_tid;
+    a.inspected_micro_tid_pin = micro_tid;
+    micro_tid
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_inspect_micro_track(track_id: u32) -> u32 {
+    let a = arena_mut();
+    let (frame_w, frame_h, _gw, _gh, scale_px, _pip_dim, s) = mode_dims(a.res_mode);
+    let Some((mx, my, mvx, mvy)) =
+        soa_tracks::inspect_micro_track_by_id(&mut a.micro_swarm, track_id, frame_w, frame_h)
+    else {
+        a.focus_target_id = 0;
+        a.inspected_micro_tid_pin = 0;
+        a.inspected_hero_tid = 0;
+        return 0;
+    };
+    let hero_tid =
+        promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+    a.focus_target_id = hero_tid;
+    a.inspected_hero_tid = hero_tid;
+    a.inspected_micro_tid_pin = track_id;
+    track_id
 }
 
 
@@ -5925,6 +6955,89 @@ unsafe fn cam_coarse_3x3_fallback(
     }
 }
 
+#[inline(never)]
+unsafe fn swarm_pan_flat_canvas_reject(
+    a: &Arena,
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
+) -> bool {
+    if frame_w < 8 || frame_h < 4 || scale_px == 0 {
+        return false;
+    }
+    let w_m6 = frame_w.saturating_sub(6);
+    let h_m3 = frame_h.saturating_sub(3);
+    let r0 = a.luma[2 * frame_w + 2];
+    let r1 = a.luma[h_m3 * frame_w + w_m6];
+    let r2 = a.luma[2 * frame_w + (frame_w >> 1)];
+    let bg_ref = if (r0 - r1).abs() <= 0.012 || (r0 - r2).abs() <= 0.012 {
+        r0
+    } else {
+        r1
+    };
+    let y_step = 2 * scale_px;
+    let n_x = (frame_w - 4) / 4;
+    let n_y = (frame_h - 4) / y_step + 1;
+    let tot_expected = n_x * 4 * n_y;
+    let max_non_flat = tot_expected / 4;
+    let mut flat_cnt = 0usize;
+    let mut tot_cnt = 0usize;
+    let mut y = 2usize;
+    #[cfg(target_arch = "wasm32")]
+    let (v_gthresh, v_cthresh, v_bg) = {
+        use core::arch::wasm32::f32x4_splat;
+        (f32x4_splat(0.003), f32x4_splat(0.012), f32x4_splat(bg_ref))
+    };
+    while y + 1 < frame_h {
+        let row0 = y * frame_w;
+        let row1 = row0 + frame_w;
+        let mut x = 2usize;
+        while x + 5 < frame_w {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use core::arch::wasm32::{
+                    f32x4_abs, f32x4_add, f32x4_le, f32x4_sub, i32x4_bitmask, v128, v128_and,
+                };
+                let p0 = a.luma.as_ptr().add(row0 + x);
+                let p1 = a.luma.as_ptr().add(row1 + x);
+                let v0 = core::ptr::read_unaligned(p0 as *const v128);
+                let vx = core::ptr::read_unaligned(p0.add(1) as *const v128);
+                let vy = core::ptr::read_unaligned(p1 as *const v128);
+                let gsum = f32x4_add(
+                    f32x4_abs(f32x4_sub(vx, v0)),
+                    f32x4_abs(f32x4_sub(vy, v0)),
+                );
+                let m = i32x4_bitmask(v128_and(
+                    f32x4_le(gsum, v_gthresh),
+                    f32x4_le(f32x4_abs(f32x4_sub(v0, v_bg)), v_cthresh),
+                ));
+                flat_cnt += (m as u32).count_ones() as usize;
+                tot_cnt += 4;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut k = 0usize;
+                while k < 4 {
+                    let v0 = a.luma[row0 + x + k];
+                    let vx = a.luma[row0 + x + k + 1];
+                    let vy = a.luma[row1 + x + k];
+                    if (vx - v0).abs() + (vy - v0).abs() <= 0.003 && (v0 - bg_ref).abs() <= 0.012 {
+                        flat_cnt += 1;
+                    }
+                    k += 1;
+                }
+                tot_cnt += 4;
+            }
+            x += 4;
+        }
+        if tot_cnt - flat_cnt > max_non_flat {
+            return false;
+        }
+        y += y_step;
+    }
+    tot_cnt > 0 && flat_cnt * 4 >= tot_cnt * 3
+}
+
 /// Coarse 16-tile demeaned `160x90` pyramid camera-motion and scene-cut detector,
 /// coupled with 1-px slow-pan fallback, gain-invariant eighth-pixel 2D bilinear SAD refinement,
 /// symmetric exposure-step compensation, 4-tap SIMD128 bilinear background advection, and world-frame registration.
@@ -6196,12 +7309,18 @@ unsafe fn detect_camera_motion_coarse(
     let mut subpixel_zero_probe = false;
     let mut sparse_used = false;
     let mut coast_only_pan = false;
+    let swarm_pan_guard = a.swarm_mode_cached != 0 && a.micro_swarm.swarm_active != 0;
 
     if best_cluster >= 5 {
         est_dx = round_f(sum_cx * (2.0 * s));
         est_dy = round_f(sum_cy * (2.0 * s));
+        let max_ref_patches = if swarm_pan_guard && best_cluster >= 6 && a.cam_pan_streak >= 2 {
+            5
+        } else {
+            8
+        };
         for j in 0..pan_votes {
-            if n_patches >= 8 {
+            if n_patches >= max_ref_patches {
                 break;
             }
             if (vx_votes[best_anchor] - vx_votes[j]).abs() > 1
@@ -6232,7 +7351,11 @@ unsafe fn detect_camera_motion_coarse(
         }
         have_pan_candidate = n_patches >= 2;
         have_int_consensus = have_pan_candidate;
-    } else if hard_cut_tiles < 8 && subtle_tiles >= 5 {
+    } else if hard_cut_tiles < 8
+        && subtle_tiles >= 5
+        && (!swarm_pan_guard || uniform_tiles < 9)
+        && !(swarm_pan_guard && a.cam_pan_streak == 0 && stat_tiles >= 6)
+    {
         // Coarse 2*s pyramid cells quantize away <= 1.5*s px/frame camera motion, so fall back
         // to full-resolution integer shifts buffered in `a.eca_res`.
         let prev_rgba = &a.rgba_ring[slot_prev];
@@ -6465,7 +7588,7 @@ unsafe fn detect_camera_motion_coarse(
     let mut sp_cand_cnt = 0usize;
     let mut sp_cand_bx = [0usize; 16];
     let mut sp_cand_by = [0usize; 16];
-    if !have_pan_candidate && hard_cut_tiles < 8 && uniform_tiles >= 9 && anchored_2d_tiles == 0 {
+    if !swarm_pan_guard && !have_pan_candidate && hard_cut_tiles < 8 && uniform_tiles >= 9 && anchored_2d_tiles == 0 {
         const PREV_WIN_OFF: usize = 4608;
         let prev_rgba = &a.rgba_ring[slot_prev];
         let f_r = 6 * (scale_px as i32);
@@ -6643,6 +7766,7 @@ unsafe fn detect_camera_motion_coarse(
     if !have_pan_candidate
         && a.cam_pan_streak >= 1
         && anchored_2d_tiles == 0
+        && (!swarm_pan_guard || uniform_tiles < 9)
         && (prev_vx * prev_vx + prev_vy * prev_vy) >= 0.06
     {
         est_dx = round_f(prev_vx);
@@ -6676,12 +7800,16 @@ unsafe fn detect_camera_motion_coarse(
             }
         }
         if n_patches < 5
-            && (uniform_tiles >= 9 || (fast_pan_active && (uniform_tiles + subtle_tiles as u32) >= 9))
+            && (if swarm_pan_guard {
+                fast_pan_active && (uniform_tiles + subtle_tiles as u32) >= 9
+            } else {
+                uniform_tiles >= 9 || (fast_pan_active && (uniform_tiles + subtle_tiles as u32) >= 9)
+            })
             && hard_cut_tiles < 8
         {
             n_patches = 0;
             let mut reused = false;
-            if sp_cand_ran && sp_cand_cnt >= 8 {
+            if !swarm_pan_guard && sp_cand_ran && sp_cand_cnt >= 8 {
                 for ci in 0..sp_cand_cnt {
                     if n_patches >= 8 {
                         break;
@@ -6738,11 +7866,12 @@ unsafe fn detect_camera_motion_coarse(
             have_int_consensus = true;
             subpixel_zero_probe = true;
             from_pan_fallback = true;
-        } else if uniform_tiles >= 9 && a.cam_pan_streak >= 2 && n_patches >= 1 {
+        } else if !swarm_pan_guard && uniform_tiles >= 9 && a.cam_pan_streak >= 2 && n_patches >= 1 {
             have_pan_candidate = true;
             have_int_consensus = true;
             sparse_used = true;
-        } else if uniform_tiles >= 9
+        } else if !swarm_pan_guard
+            && uniform_tiles >= 9
             && a.cam_pan_streak >= 2
             && anchored_2d_tiles == 0
             && hard_cut_tiles < 8
@@ -6764,6 +7893,12 @@ unsafe fn detect_camera_motion_coarse(
             est_dx = round_f(prev_vx);
             est_dy = round_f(prev_vy);
         }
+    }
+
+    if swarm_pan_guard && have_pan_candidate && swarm_pan_flat_canvas_reject(a, frame_w, frame_h, scale_px) {
+        have_pan_candidate = false;
+        have_int_consensus = false;
+        subpixel_zero_probe = false;
     }
 
     if have_pan_candidate {
@@ -7482,6 +8617,7 @@ unsafe fn detect_camera_motion_coarse(
                 }
             }
             if !valid_pan
+                && !swarm_pan_guard
                 && uniform_tiles >= 9
                 && a.cam_pan_streak >= 2
                 && anchored_2d_tiles == 0
@@ -7657,6 +8793,7 @@ unsafe fn detect_camera_motion_coarse(
         a.lyap_scratch.reset();
         a.collision_state.reset();
         a.telemetry[TELEM_PHYSICS_START..TELEMETRY_LEN].fill(0.0);
+        a.physics_telem_dirty_mask = 0;
         for di in 0..MAX_DORMANT {
             a.dormant[di] = core::mem::zeroed();
         }
@@ -7821,6 +8958,60 @@ unsafe fn detect_camera_motion_coarse(
         exp_gain: stat_exp_gain,
         exp_off: stat_exp_off,
         exp_regime: exp_hold > 0,
+    }
+}
+
+#[inline(always)]
+fn dense_swarm_hero_cap_active(a: &Arena) -> bool {
+    a.swarm_mode_cached != 0
+        && a.micro_swarm.swarm_active != 0
+        && a.micro_swarm.active_count >= 128
+}
+
+#[inline(never)]
+fn enforce_dense_swarm_hero_cap(a: &mut Arena, cap: usize, f_idx: u32, s: f32) {
+    let mut act_cnt = 0usize;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 {
+            act_cnt += 1;
+        }
+    }
+    while act_cnt > cap {
+        let mut best_evict: Option<usize> = None;
+        let mut worst_score = 1.0e9f32;
+        for m in 0..MAX_TARGETS {
+            let t = &a.targets[m];
+            if t.active == 0 {
+                continue;
+            }
+            let is_pinned = (a.focus_target_id != 0 && t.track_id == a.focus_target_id)
+                || (a.inspected_hero_tid != 0 && t.track_id == a.inspected_hero_tid)
+                || (a.pip_target_id != 0 && t.track_id == a.pip_target_id);
+            let sc = if is_pinned { 1000.0 } else { 0.0 }
+                + if t.confirmed != 0 { 100.0 } else { 0.0 }
+                + if t.coasting == 0 { 20.0 } else { 0.0 }
+                + 0.01 * (t.age.min(500) as f32)
+                + t.vis_eca_ema
+                - 0.1 * (t.coasting as f32);
+            if sc < worst_score {
+                worst_score = sc;
+                best_evict = Some(m);
+            }
+        }
+        let Some(m) = best_evict else { break };
+        if a.targets[m].confirmed != 0 {
+            let ev_x = a.targets[m].pos_x;
+            let ev_y = a.targets[m].pos_y;
+            archive_dormant_track(a, m, f_idx, ev_x, ev_y, s);
+        }
+        retire_target_slot(a, m);
+        a.telemetry[32 + m * 56] = 0.0;
+        a.all_pip_tid[m] = 0;
+        let mbase = m * 8;
+        for q in 0..8 {
+            a.slot_meta[mbase + q] = 0.0;
+        }
+        act_cnt -= 1;
     }
 }
 
@@ -8203,6 +9394,23 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     let frame_pixels = frame_w * frame_h;
     let half_patch = 8.0 * s;
     let f_idx = a.frame_idx;
+    let need_swarm_inval_check = a.swarm_mode_cached != 0 || a.swarm_telem_zeroed == 0;
+    let f_discont_wrap = a.pre_tick_seen != 0
+        && ((f_idx == 0
+            && (a.last_pre_tick_frame != 0
+                || (need_swarm_inval_check
+                    && (a.micro_swarm.active_count != 0
+                        || a.continuum.initialized != 0))))
+            || (f_idx != a.last_pre_tick_frame
+                && f_idx != a.last_pre_tick_frame.wrapping_add(1)));
+    if f_discont_wrap && need_swarm_inval_check {
+        continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+    }
+    a.last_pre_tick_frame = f_idx;
+    a.pre_tick_seen = 1;
+    a.last_scene_cut = 0;
+    a.last_pan_dx_f = 0.0;
+    a.last_pan_dy_f = 0.0;
     let slot_in = (f_idx as usize) % RING_LEN;
     let slot_prev = if f_idx == 0 {
         slot_in
@@ -8246,6 +9454,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         if !raw_step.is_finite() || raw_step < -0.02 || raw_step > 0.25 {
             a.last_discont_frame = f_idx;
             a.discont_count = a.discont_count.saturating_add(1);
+            continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
         }
         let mono_step = if raw_step.is_finite() && raw_step > 5e-4 {
             raw_step.min(1.0)
@@ -8264,6 +9473,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         if raw_step > 0.25 {
             a.last_discont_frame = f_idx;
             a.discont_count = a.discont_count.saturating_add(1);
+            continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
         }
         a.cum_time_sec += raw_step.min(1.0);
         a.hist_t_sec[(f_idx as usize) & HIST_MASK] = a.cum_time_sec;
@@ -8297,6 +9507,14 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         s,
         step_dt_f,
     );
+    a.last_pan_dx_f = pan.dx_f;
+    a.last_pan_dy_f = pan.dy_f;
+    a.last_scene_cut = if pan.scene_cut { 1 } else { 0 };
+    if pan.scene_cut {
+        continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+        a.inspected_hero_tid = 0;
+        a.inspected_micro_tid_pin = 0;
+    }
 
     // 2. Construct independent stationary-clutter evaluation mask on pan-registered frames,
     //    then evaluate Rank-2 ECA `X = [b, 1]` against pan-warped `bg_luma`.
@@ -8480,6 +9698,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
                     a.eca_adapt_rate,
                     mask_warm,
                     stat_single_pass,
+                    a.micro_swarm.swarm_active != 0 && a.micro_swarm.active_count >= 512,
                     &mut err2,
                     &mut sig2,
                     &mut eval_count,
@@ -8549,7 +9768,19 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
 
 
     // 3. Connected-Component Peaks (active through camera pans!)
-    if f_idx > 0 && !pan.scene_cut {
+    let skip_hero_cc_peaks = if dense_swarm_hero_cap_active(a) && a.inspected_micro_tid_pin == 0 {
+        let mut live_conf_heroes = 0usize;
+        for m in 0..MAX_TARGETS {
+            let t = &a.targets[m];
+            if t.active != 0 && t.confirmed != 0 && t.coasting == 0 {
+                live_conf_heroes += 1;
+            }
+        }
+        live_conf_heroes >= DENSE_SWARM_HERO_CAP
+    } else {
+        false
+    };
+    if f_idx > 0 && !pan.scene_cut && !skip_hero_cc_peaks {
         extract_connected_component_peaks(a);
     } else {
         a.num_peaks = 0;
@@ -8565,6 +9796,11 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     let mut node_x = [0.0f32; GRAPH_NODES];
     let mut node_y = [0.0f32; GRAPH_NODES];
     let mut node_sig = [0u32; GRAPH_NODES];
+    let lap_peak_cap = if dense_swarm_hero_cap_active(a) {
+        5usize.min(MAX_TARGETS)
+    } else {
+        MAX_TARGETS
+    };
 
     for m in 0..MAX_TARGETS {
         if a.targets[m].active != 0 {
@@ -8638,7 +9874,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
             node_y[m] = py;
             node_sig[m] = a.targets[m].anchor_sig;
         }
-        if m < a.num_peaks && a.peaks[m].valid != 0 {
+        if m < a.num_peaks && m < lap_peak_cap && a.peaks[m].valid != 0 {
             node_active[MAX_TARGETS + m] = true;
             node_x[MAX_TARGETS + m] = a.peaks[m].x;
             node_y[MAX_TARGETS + m] = a.peaks[m].y;
@@ -8899,6 +10135,57 @@ fn update_physics_and_telemetry(
     let f_at_u = |u: usize| -> u32 {
         ((f_idx as usize) + u).saturating_sub(RING_LEN - 1) as u32
     };
+
+    if dense_swarm_hero_cap_active(a)
+        && a.inspected_micro_tid_pin == 0
+        && a.focus_target_id == 0
+        && (a.micro_swarm.confirmed_count >= 960 || f_idx < 21 || (f_idx & 7) != 5)
+    {
+        for m in 0..MAX_TARGETS {
+            let bit = 1u16 << m;
+            if a.targets[m].active != 0 {
+                let (bx_cur, by_cur, vis_cur) = if a.targets[m].coasting == 0 {
+                    (a.targets[m].pos_x, a.targets[m].pos_y, 1u8)
+                } else {
+                    (a.targets[m].arc_raw_x[head_slot], a.targets[m].arc_raw_y[head_slot], 0u8)
+                };
+                physics_id::push_chaos_reservoir(
+                    &mut a.pend_states[m],
+                    f_idx,
+                    bx_cur + cam_hx,
+                    by_cur + cam_hy,
+                    a.hist_t_sec[head_slot],
+                    vis_cur,
+                );
+            } else {
+                a.lyap_cache[m] = 0.0;
+            }
+            if a.targets[m].active == 0
+                || a.targets[m].confirmed == 0
+                || a.telemetry[32 + m * 56] < 0.5
+            {
+                if a.targets[m].confirmed == 0 {
+                    a.lyap_cache[m] = 0.0;
+                }
+                if (a.physics_telem_dirty_mask & bit) != 0 {
+                    let b = TELEM_PHYSICS_START + m * 16;
+                    for q in 0..16 {
+                        a.telemetry[b + q] = 0.0;
+                    }
+                    a.physics_telem_dirty_mask &= !bit;
+                }
+            }
+        }
+        let z_start = if a.physics_telem_dirty_mask == 0 {
+            TELEM_ENSEMBLE_START
+        } else {
+            TELEM_ENSEMBLE_START + 14
+        };
+        for ti in z_start..TELEMETRY_LEN {
+            a.telemetry[ti] = 0.0;
+        }
+        return;
+    }
 
     let mut taubin_fits = [physics_id::TaubinFitResult::zeroed(); MAX_TARGETS];
     let mut osc_samples = [physics_id::OscSample::zeroed(); MAX_TARGETS];
@@ -9254,16 +10541,14 @@ fn update_physics_and_telemetry(
         {
             run_disc = true;
         }
-        let ode_res = physics_id::step_ode_track_from_ring(
+        let ode_res = physics_id::step_ode_track_from_window(
             &mut a.ode_states[m],
-            &a.targets[m].arc_raw_x,
-            &a.targets[m].arc_raw_y,
-            &a.targets[m].arc_vis,
-            &a.hist_cam_x,
-            &a.hist_cam_y,
-            &a.hist_t_sec,
+            &a.phys_xs[..n_win],
+            &a.phys_ys[..n_win],
+            &a.phys_ts[..n_win],
+            &vis_idx[..n_vis],
+            n_vis,
             f_idx,
-            start_f,
             s,
             run_disc,
             &mut a.ode_scratch,
@@ -9389,7 +10674,7 @@ fn update_physics_and_telemetry(
                     && vert_sep >= (14.0 * s).max(0.42 * tfit.radius)
                     && dx_span >= 0.90 * dy_span
                     && tethered_orig));
-        if has_arc_bend
+        if (has_arc_bend && !(cv_now && !ols_cv_dev && tfit.valid_circle == 0))
             || a.pend_states[m].has_stable_piv != 0
             || a.pend_states[m].jump_hold > 0
             || a.pend_states[m].jump_cooldown > 0
@@ -9838,12 +11123,17 @@ fn update_physics_and_telemetry(
     // 4. Write Locked Telemetry Schema (1280..1535 per-target + 1536..1549 ensemble + 1550..1567 == 0.0)
     for m in 0..MAX_TARGETS {
         let b = TELEM_PHYSICS_START + m * 16;
+        let bit = 1u16 << m;
         if a.targets[m].active == 0 || a.targets[m].confirmed == 0 || a.telemetry[32 + m * 56] < 0.5 {
-            for q in 0..16 {
-                a.telemetry[b + q] = 0.0;
+            if (a.physics_telem_dirty_mask & bit) != 0 {
+                for q in 0..16 {
+                    a.telemetry[b + q] = 0.0;
+                }
+                a.physics_telem_dirty_mask &= !bit;
             }
             continue;
         }
+        a.physics_telem_dirty_mask |= bit;
         let mut w0 = if a.imm[m].mu[0].is_finite() { a.imm[m].mu[0].max(0.0) } else { 0.25 };
         let mut w1 = if a.imm[m].mu[1].is_finite() { a.imm[m].mu[1].max(0.0) } else { 0.25 };
         let mut w23 = if a.imm[m].mu[2].is_finite() && a.imm[m].mu[3].is_finite() {
@@ -9921,6 +11211,26 @@ fn update_physics_and_telemetry(
         a.telemetry[ti] = 0.0;
     }
 
+    #[cfg(target_arch = "wasm32")]
+    {
+        use core::arch::wasm32::{f32x4_abs, f32x4_lt, f32x4_splat, v128, v128_and};
+        const _: () = assert!(TELEMETRY_LEN % 4 == 0);
+        let vinf = f32x4_splat(f32::INFINITY);
+        let p = a.telemetry.as_mut_ptr() as *mut v128;
+        let n4 = TELEMETRY_LEN / 4;
+        // SAFETY: `a.telemetry` has `TELEMETRY_LEN` (`1568`, divisible by 4) `f32` lanes.
+        unsafe {
+            let mut i = 0usize;
+            while i < n4 {
+                let vp = p.add(i);
+                let v = core::ptr::read_unaligned(vp);
+                let fin = f32x4_lt(f32x4_abs(v), vinf);
+                core::ptr::write_unaligned(vp, v128_and(v, fin));
+                i += 1;
+            }
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
     for ti in 0..TELEMETRY_LEN {
         if !a.telemetry[ti].is_finite() {
             a.telemetry[ti] = 0.0;
@@ -10273,6 +11583,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         if !fv.is_finite() {
             *fv = 0.0;
         }
+    }
+
+    if dense_swarm_hero_cap_active(a) {
+        enforce_dense_swarm_hero_cap(a, DENSE_SWARM_HERO_CAP, f_idx, s);
     }
 
     let mut n_active_tracks = 0usize;
@@ -12054,7 +13368,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 } else {
                     None
                 };
-                if std_confirm || fast_projectile_confirm || fast_dormant_di.is_some() {
+                let dense_swarm_hero_confirm = a.swarm_mode_cached != 0
+                    && a.micro_swarm.swarm_active != 0
+                    && a.micro_swarm.active_count >= 192
+                    && a.cam_pan_streak < 2
+                    && a.targets[m].age >= 4
+                    && a.targets[m].max_excursion2 >= (0.50 * s) * (0.50 * s);
+                if std_confirm || fast_projectile_confirm || fast_dormant_di.is_some() || dense_swarm_hero_confirm {
                     a.targets[m].confirmed = 1;
                     a.targets[m].just_confirmed = 1;
                     if a.targets[m].track_id == 0 {
@@ -12240,10 +13560,14 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 && a.targets[m].tremor_amp > 0.30 * s
                 && a.targets[m].tremor_coherence > 0.30;
             let slot_age = f_idx.saturating_sub(a.targets[m].birth_frame).saturating_add(1);
+            let dense_swarm_hero = a.swarm_mode_cached != 0
+                && a.micro_swarm.swarm_active != 0
+                && a.micro_swarm.active_count >= 192;
             let traveled_body = a.targets[m].dormant_reid != 0
                 || a.targets[m].max_excursion2 >= (20.0 * s) * (20.0 * s);
             let max_stat_streak = if traveled_body { 135 } else { 18 };
-            let unconfirmed_expired = a.targets[m].confirmed == 0 && slot_age >= 7;
+            let unconfirmed_expired =
+                a.targets[m].confirmed == 0 && slot_age >= if dense_swarm_hero { 10 } else { 7 };
             let mode_b_wake_pinned = a.lab_mode == 1
                 && a.stimulus_armed == 0
                 && ((a.targets[m].anchor_sig & (1 << 31)) == 0
@@ -12407,8 +13731,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             a.targets[m].arc_vis[arc_slot_in] = 0;
 
             let traveled_coast = a.targets[m].max_excursion2 >= (18.0 * s) * (18.0 * s);
+            let dense_swarm_coast = a.swarm_mode_cached != 0
+                && a.micro_swarm.swarm_active != 0
+                && a.micro_swarm.active_count >= 192;
             let max_coast = if a.targets[m].confirmed == 0 {
-                2
+                if dense_swarm_coast { 4 } else { 2 }
             } else if exited_viewport {
                 (eff_k as u32 + 2).max(4)
             } else if a.targets[m].age < 10 {
@@ -12423,7 +13750,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 64
             };
             if a.targets[m].coasting >= max_coast
-                || (a.targets[m].confirmed == 0 && a.targets[m].age >= 6)
+                || (a.targets[m].confirmed == 0
+                    && a.targets[m].age >= if dense_swarm_coast { 10 } else { 6 })
             {
                 if !exited_viewport && a.targets[m].confirmed != 0 {
                     archive_dormant_track(a, m, f_idx, coast_x, coast_y, s);
@@ -12570,7 +13898,20 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     //    and active during ego-motion pans via interior border & energy guards.
     // ------------------------------------------------------------------------
     let active_pan_seed = a.cam_pan_streak >= 1 || a.last_pan_dx != 0 || a.last_pan_dy != 0;
+    let dense_hero_cap = dense_swarm_hero_cap_active(a);
+    let eff_hero_cap = if dense_hero_cap {
+        DENSE_SWARM_HERO_CAP
+    } else {
+        MAX_TARGETS
+    };
+    let mut act_hero_cnt = 0usize;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 {
+            act_hero_cnt += 1;
+        }
+    }
     if f_idx >= 4
+        && (!dense_hero_cap || act_hero_cnt < eff_hero_cap)
         && (a.lab_mode == 2
             || a.last_discont_frame == 0
             || f_idx >= a.last_discont_frame.saturating_add(3))
@@ -12627,6 +13968,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
         for p in 0..a.num_peaks {
             if births_this_frame >= 2
+                || (dense_hero_cap && act_hero_cnt >= eff_hero_cap)
                 || peak_claimed[p] != 0
                 || (a.peaks[p].energy < eff_min_peak_energy
                     && !(allow_sd_base && a.peaks[p].energy >= if quiet_sd_base { 1.25 } else { 1.65 }))
@@ -12678,51 +14020,54 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let mut best_inner_eca = 0.0f32;
             let mut best_outer_eca = 0.0f32;
 
+            let (center_c_eca, center_inner_eca, center_max_eca) = patch_eca_core_inner_max_simd128(
+                a.eca_res.as_ptr(),
+                frame_w,
+                base_tlx as usize,
+                base_tly as usize,
+                scale_px,
+            );
+            let center_isolum_chroma = peak_chromatic
+                && a.peaks[p].energy >= 2.2 * min_peak_energy
+                && center_c_eca >= 0.16 * min_patch_eca;
+            let center_compact_hd = !active_pan_seed
+                && a.lab_mode == 0
+                && scale_px > 1
+                && comp_sz <= 10
+                && a.peaks[p].energy >= 16.0
+                && center_c_eca >= 12.5
+                && center_max_eca >= 0.30;
+            let center_fog_hd = quiet_scene_hd
+                && comp_sz <= 14
+                && raw_py < (frame_h as f32) - 20.0 * s
+                && a.peaks[p].energy >= 6.5
+                && center_c_eca >= 5.5
+                && center_max_eca >= 0.12;
+            let center_compact_sd = allow_sd_base
+                && comp_sz <= if quiet_sd_base { 6 } else { 4 }
+                && raw_py > 18.0
+                && raw_py < (frame_h as f32) - 18.0
+                && a.peaks[p].energy >= if quiet_sd_base { 1.25 } else { 1.65 }
+                && (center_inner_eca >= if quiet_sd_base { 0.85 } else { 1.35 }
+                    || (quiet_sd_base && center_c_eca >= 2.1))
+                && center_max_eca >= if quiet_sd_base { 0.065 } else { 0.09 };
+            let center_eca_pass = if a.peaks[p].energy < eff_min_peak_energy {
+                center_compact_sd
+            } else {
+                center_c_eca >= min_patch_eca
+                    || (center_inner_eca >= min_inner6_eca && center_max_eca >= 0.16)
+                    || center_isolum_chroma
+                    || center_compact_hd
+                    || center_fog_hd
+                    || center_compact_sd
+            };
+            let mut center_lam_min = -1.0f32;
+            let mut center_lam_max = 0.0f32;
+
             {
                 let qx = base_tlx as usize;
                 let qy = base_tly as usize;
-                let (c_eca, inner_eca, max_eca) = patch_eca_core_inner_max_simd128(
-                    a.eca_res.as_ptr(),
-                    frame_w,
-                    qx,
-                    qy,
-                    scale_px,
-                );
-                let isolum_chroma_pass = peak_chromatic
-                    && a.peaks[p].energy >= 2.2 * min_peak_energy
-                    && c_eca >= 0.16 * min_patch_eca;
-                let compact_hd_pass = !active_pan_seed
-                    && a.lab_mode == 0
-                    && scale_px > 1
-                    && comp_sz <= 10
-                    && a.peaks[p].energy >= 16.0
-                    && c_eca >= 12.5
-                    && max_eca >= 0.30;
-                let fog_hd_pass = quiet_scene_hd
-                    && comp_sz <= 14
-                    && raw_py < (frame_h as f32) - 20.0 * s
-                    && a.peaks[p].energy >= 6.5
-                    && c_eca >= 5.5
-                    && max_eca >= 0.12;
-                let compact_sd_pass = allow_sd_base
-                    && comp_sz <= if quiet_sd_base { 6 } else { 4 }
-                    && raw_py > 18.0
-                    && raw_py < (frame_h as f32) - 18.0
-                    && a.peaks[p].energy >= if quiet_sd_base { 1.25 } else { 1.65 }
-                    && (inner_eca >= if quiet_sd_base { 0.85 } else { 1.35 }
-                        || (quiet_sd_base && c_eca >= 2.1))
-                    && max_eca >= if quiet_sd_base { 0.065 } else { 0.09 };
-                let eca_pass = if a.peaks[p].energy < eff_min_peak_energy {
-                    compact_sd_pass
-                } else {
-                    c_eca >= min_patch_eca
-                        || (inner_eca >= min_inner6_eca && max_eca >= 0.16)
-                        || isolum_chroma_pass
-                        || compact_hd_pass
-                        || fog_hd_pass
-                        || compact_sd_pass
-                };
-                if eca_pass {
+                if center_eca_pass {
                     ensure_chroma!(
                         a,
                         qx.saturating_sub(scale_px),
@@ -12741,18 +14086,20 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         qy,
                         scale_px,
                     );
-                    let min_center_lam = if fog_hd_pass {
+                    center_lam_min = lam_min;
+                    center_lam_max = lam_max;
+                    let min_center_lam = if center_fog_hd {
                         0.00018
-                    } else if compact_sd_pass {
+                    } else if center_compact_sd {
                         if quiet_sd_base { 0.00028 } else { 0.00040 }
                     } else {
                         0.00050
                     };
                     if lam_min >= min_center_lam && lam_min >= 0.20 * lam_max {
                         best_st_score = lam_min;
-                        best_patch_eca = c_eca.max(inner_eca * 3.0);
-                        best_inner_eca = inner_eca;
-                        best_outer_eca = (c_eca - inner_eca).max(0.0);
+                        best_patch_eca = center_c_eca.max(center_inner_eca * 3.0);
+                        best_inner_eca = center_inner_eca;
+                        best_outer_eca = (center_c_eca - center_inner_eca).max(0.0);
                     }
                 }
             }
@@ -12762,71 +14109,89 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     for dx in [-snap_step, 0, snap_step] {
                         let qx = (base_tlx + dx).clamp(st_min_tlx, st_max_tlx) as usize;
                         let qy = (base_tly + dy).clamp(st_min_tly, st_max_tly) as usize;
+                        let is_center_coord =
+                            qx == (base_tlx as usize) && qy == (base_tly as usize);
 
-                        let (p_eca, inner_eca, max_eca) = patch_eca_core_inner_max_simd128(
-                            a.eca_res.as_ptr(),
-                            frame_w,
-                            qx,
-                            qy,
-                            scale_px,
-                        );
-                        let isolum_chroma_pass = peak_chromatic
-                            && a.peaks[p].energy >= 2.2 * min_peak_energy
-                            && p_eca >= 0.16 * min_patch_eca;
-                        let compact_hd_pass = !active_pan_seed
-                            && a.lab_mode == 0
-                            && scale_px > 1
-                            && comp_sz <= 10
-                            && a.peaks[p].energy >= 16.0
-                            && p_eca >= 12.5
-                            && max_eca >= 0.30;
-                        let fog_hd_pass = quiet_scene_hd
-                            && comp_sz <= 14
-                            && raw_py < (frame_h as f32) - 20.0 * s
-                            && a.peaks[p].energy >= 6.5
-                            && p_eca >= 5.5
-                            && max_eca >= 0.12;
-                        let compact_sd_pass = allow_sd_base
-                            && comp_sz <= if quiet_sd_base { 6 } else { 4 }
-                            && raw_py > 18.0
-                            && raw_py < (frame_h as f32) - 18.0
-                            && a.peaks[p].energy >= if quiet_sd_base { 1.25 } else { 1.65 }
-                            && (inner_eca >= if quiet_sd_base { 0.85 } else { 1.35 }
-                                || (quiet_sd_base && p_eca >= 2.1))
-                            && max_eca >= if quiet_sd_base { 0.065 } else { 0.09 };
-                        let eca_pass = if a.peaks[p].energy < eff_min_peak_energy {
-                            compact_sd_pass
-                        } else {
-                            p_eca >= min_patch_eca
-                                || (inner_eca >= min_inner6_eca && max_eca >= 0.16)
-                                || isolum_chroma_pass
-                                || compact_hd_pass
-                                || fog_hd_pass
-                                || compact_sd_pass
-                        };
-                        if !eca_pass {
-                            continue;
-                        }
+                        let (p_eca, inner_eca, fog_hd_pass, compact_sd_pass, lam_min, lam_max) =
+                            if is_center_coord {
+                                if !center_eca_pass {
+                                    continue;
+                                }
+                                (
+                                    center_c_eca,
+                                    center_inner_eca,
+                                    center_fog_hd,
+                                    center_compact_sd,
+                                    center_lam_min,
+                                    center_lam_max,
+                                )
+                            } else {
+                                let (p_eca, inner_eca, max_eca) = patch_eca_core_inner_max_simd128(
+                                    a.eca_res.as_ptr(),
+                                    frame_w,
+                                    qx,
+                                    qy,
+                                    scale_px,
+                                );
+                                let isolum_chroma_pass = peak_chromatic
+                                    && a.peaks[p].energy >= 2.2 * min_peak_energy
+                                    && p_eca >= 0.16 * min_patch_eca;
+                                let compact_hd_pass = !active_pan_seed
+                                    && a.lab_mode == 0
+                                    && scale_px > 1
+                                    && comp_sz <= 10
+                                    && a.peaks[p].energy >= 16.0
+                                    && p_eca >= 12.5
+                                    && max_eca >= 0.30;
+                                let fog_hd_pass = quiet_scene_hd
+                                    && comp_sz <= 14
+                                    && raw_py < (frame_h as f32) - 20.0 * s
+                                    && a.peaks[p].energy >= 6.5
+                                    && p_eca >= 5.5
+                                    && max_eca >= 0.12;
+                                let compact_sd_pass = allow_sd_base
+                                    && comp_sz <= if quiet_sd_base { 6 } else { 4 }
+                                    && raw_py > 18.0
+                                    && raw_py < (frame_h as f32) - 18.0
+                                    && a.peaks[p].energy >= if quiet_sd_base { 1.25 } else { 1.65 }
+                                    && (inner_eca >= if quiet_sd_base { 0.85 } else { 1.35 }
+                                        || (quiet_sd_base && p_eca >= 2.1))
+                                    && max_eca >= if quiet_sd_base { 0.065 } else { 0.09 };
+                                let eca_pass = if a.peaks[p].energy < eff_min_peak_energy {
+                                    compact_sd_pass
+                                } else {
+                                    p_eca >= min_patch_eca
+                                        || (inner_eca >= min_inner6_eca && max_eca >= 0.16)
+                                        || isolum_chroma_pass
+                                        || compact_hd_pass
+                                        || fog_hd_pass
+                                        || compact_sd_pass
+                                };
+                                if !eca_pass {
+                                    continue;
+                                }
+                                ensure_chroma!(
+                                    a,
+                                    qx.saturating_sub(scale_px),
+                                    qy.saturating_sub(scale_px),
+                                    patch_dim + 2 * scale_px,
+                                    patch_dim + 2 * scale_px,
+                                    frame_w,
+                                    frame_h
+                                );
+                                let (lam_min, lam_max) = patch16x16_shi_tomasi_simd128(
+                                    a.luma.as_ptr(),
+                                    a.chroma_rg.as_ptr(),
+                                    a.chroma_by.as_ptr(),
+                                    frame_w,
+                                    qx,
+                                    qy,
+                                    scale_px,
+                                );
+                                (p_eca, inner_eca, fog_hd_pass, compact_sd_pass, lam_min, lam_max)
+                            };
                         let eff_eca = p_eca.max(inner_eca * 3.0);
 
-                        ensure_chroma!(
-                            a,
-                            qx.saturating_sub(scale_px),
-                            qy.saturating_sub(scale_px),
-                            patch_dim + 2 * scale_px,
-                            patch_dim + 2 * scale_px,
-                            frame_w,
-                            frame_h
-                        );
-                        let (lam_min, lam_max) = patch16x16_shi_tomasi_simd128(
-                            a.luma.as_ptr(),
-                            a.chroma_rg.as_ptr(),
-                            a.chroma_by.as_ptr(),
-                            frame_w,
-                            qx,
-                            qy,
-                            scale_px,
-                        );
                         // Require genuine 2D corner/blob structure (reject flat blocks & 1D straight edges)
                         let min_snap_lam = if fog_hd_pass {
                             0.00010
@@ -13056,6 +14421,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 }
             }
             if let Some(m) = free_slot {
+                let was_inactive = a.targets[m].active == 0;
                 if a.targets[m].active != 0 && a.targets[m].confirmed != 0 {
                     let ev_x = a.targets[m].pos_x;
                     let ev_y = a.targets[m].pos_y;
@@ -13161,6 +14527,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 };
                 if cid > 0 && cid < 32 {
                     comp_track_cnt[cid] = comp_track_cnt[cid].saturating_add(1);
+                }
+                if was_inactive {
+                    act_hero_cnt += 1;
                 }
                 births_this_frame += 1;
             }
@@ -13665,6 +15034,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let recent_strike_at_disp = a.targets[m].has_struck != 0
             && disp_f <= a.targets[m].last_strike_event_frame.saturating_add(5);
         if (f_idx as usize) >= eff_k
+            && !(a.micro_swarm.confirmed_count >= 960
+                && a.inspected_micro_tid_pin == 0
+                && a.focus_target_id == 0)
             && vis_d != 0
             && a.targets[m].age >= 8
             && a.targets[m].strike_fired == 0
@@ -14696,6 +16068,16 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let max_pip_y = (frame_h.saturating_sub(pip_dim + 2)) as f32;
 
     let disp_f_slot = f_idx.saturating_sub(eff_k as u32);
+    let dense_cap_odd = dense_swarm_hero_cap_active(a) && (f_idx & 1) != 0;
+    let cold_dense_pip_defer =
+        a.micro_swarm.confirmed_count >= 960 && a.inspected_micro_tid_pin == 0 && f_idx < 9;
+    let mut conf_hero_cnt = 0u32;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 && a.targets[m].confirmed != 0 {
+            conf_hero_cnt += 1;
+        }
+    }
+    let multi_hero_stagger = conf_hero_cnt >= 4;
     for m in 0..MAX_TARGETS {
         let mbase = m * 8;
         if a.targets[m].active == 0 || a.targets[m].confirmed == 0 {
@@ -14738,10 +16120,15 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             false
         };
         if !exited_past_disp {
-            let skip_occ_bg_pip = (m as i32) != primary_idx
-                && a.targets[m].coasting >= 2
-                && a.targets[m].disp_vis < 0.5
-                && a.all_pip_tid[m] == a.targets[m].track_id;
+            let sec_pip_mask = if conf_hero_cnt >= 7 { 7usize } else { 3usize };
+            let secondary_stagger =
+                multi_hero_stagger && ((((f_idx as usize).wrapping_add(m)) & sec_pip_mask) != 0);
+            let skip_occ_bg_pip = cold_dense_pip_defer
+                || ((m as i32) != primary_idx
+                    && a.all_pip_tid[m] == a.targets[m].track_id
+                    && ((a.targets[m].coasting >= 2 && a.targets[m].disp_vis < 0.5)
+                        || dense_cap_odd
+                        || secondary_stagger));
             if skip_occ_bg_pip {
                 a.slot_meta[mbase] = a.targets[m].age as f32;
                 a.slot_meta[mbase + 1] = a.targets[m].coasting as f32;
@@ -14781,58 +16168,63 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     if primary_idx >= 0 {
         let pm = primary_idx as usize;
         let tid = a.targets[pm].track_id;
-        if a.pip_target_id == tid {
-            a.pip_hold_frames = a.pip_hold_frames.saturating_add(1);
+        if cold_dense_pip_defer {
+            a.pip_target_id = 0;
+            a.pip_hold_frames = 0;
         } else {
-            a.pip_target_id = tid;
-            a.pip_hold_frames = 1;
-        }
+            if a.pip_target_id == tid {
+                a.pip_hold_frames = a.pip_hold_frames.saturating_add(1);
+            } else {
+                a.pip_target_id = tid;
+                a.pip_hold_frames = 1;
+            }
 
-        if a.all_pip_tid[pm] == tid && tid != 0 {
-            a.pip_rgba[..pip_bytes].copy_from_slice(&a.all_pip_rgba[pm][..pip_bytes]);
-        } else {
-            let fx = a.targets[pm].disp_fista_x;
-            let fy = a.targets[pm].disp_fista_y;
-            let reset_ref = a.pip_hold_frames <= 1;
-            let pip_x0 = (fx - pip_center_off).clamp(0.0, max_pip_x);
-            let pip_y0 = (fy - pip_center_off).clamp(0.0, max_pip_y);
-            if !unsafe {
-                render_eulerian_pip_fast_simd128(
-                    &a.rgba_ring[slot_disp],
-                    frame_w,
-                    frame_h,
-                    pip_x0,
-                    pip_y0,
-                    pip_dim,
-                    gain,
-                    reset_ref,
-                    &mut a.pip_ref_luma,
-                    &mut a.pip_rgba,
-                )
-            } {
-                for py in 0..pip_dim {
-                    for px in 0..pip_dim {
-                        let sx = pip_x0 + (px as f32);
-                        let sy = pip_y0 + (py as f32);
-                        let (r, g, b, luma) =
-                            sample_rgba_bilinear(&a.rgba_ring[slot_disp], frame_w, frame_h, sx, sy);
-                        let idx = py * pip_dim + px;
-                        if reset_ref {
-                            a.pip_ref_luma[idx] = luma;
+            if a.all_pip_tid[pm] == tid && tid != 0 {
+                a.pip_rgba[..pip_bytes].copy_from_slice(&a.all_pip_rgba[pm][..pip_bytes]);
+            } else {
+                let fx = a.targets[pm].disp_fista_x;
+                let fy = a.targets[pm].disp_fista_y;
+                let reset_ref = a.pip_hold_frames <= 1;
+                let pip_x0 = (fx - pip_center_off).clamp(0.0, max_pip_x);
+                let pip_y0 = (fy - pip_center_off).clamp(0.0, max_pip_y);
+                if !unsafe {
+                    render_eulerian_pip_fast_simd128(
+                        &a.rgba_ring[slot_disp],
+                        frame_w,
+                        frame_h,
+                        pip_x0,
+                        pip_y0,
+                        pip_dim,
+                        gain,
+                        reset_ref,
+                        &mut a.pip_ref_luma,
+                        &mut a.pip_rgba,
+                    )
+                } {
+                    for py in 0..pip_dim {
+                        for px in 0..pip_dim {
+                            let sx = pip_x0 + (px as f32);
+                            let sy = pip_y0 + (py as f32);
+                            let (r, g, b, luma) =
+                                sample_rgba_bilinear(&a.rgba_ring[slot_disp], frame_w, frame_h, sx, sy);
+                            let idx = py * pip_dim + px;
+                            if reset_ref {
+                                a.pip_ref_luma[idx] = luma;
+                            }
+                            let dl = luma - a.pip_ref_luma[idx];
+                            a.pip_ref_luma[idx] = 0.80 * a.pip_ref_luma[idx] + 0.20 * luma;
+                            let amp_l = gain * dl;
+                            let shear_pos = amp_l.max(0.0);
+                            let shear_neg = (-amp_l).max(0.0);
+                            let out_r = (r + amp_l * 0.70 + shear_neg * 0.65).clamp(0.0, 1.0);
+                            let out_g = (g + amp_l * 0.80 + shear_pos * 0.45).clamp(0.0, 1.0);
+                            let out_b = (b + amp_l * 0.70 + shear_pos * 0.85).clamp(0.0, 1.0);
+                            let rgba_off = idx * 4;
+                            a.pip_rgba[rgba_off] = (out_r * 255.0) as u8;
+                            a.pip_rgba[rgba_off + 1] = (out_g * 255.0) as u8;
+                            a.pip_rgba[rgba_off + 2] = (out_b * 255.0) as u8;
+                            a.pip_rgba[rgba_off + 3] = 255;
                         }
-                        let dl = luma - a.pip_ref_luma[idx];
-                        a.pip_ref_luma[idx] = 0.80 * a.pip_ref_luma[idx] + 0.20 * luma;
-                        let amp_l = gain * dl;
-                        let shear_pos = amp_l.max(0.0);
-                        let shear_neg = (-amp_l).max(0.0);
-                        let out_r = (r + amp_l * 0.70 + shear_neg * 0.65).clamp(0.0, 1.0);
-                        let out_g = (g + amp_l * 0.80 + shear_pos * 0.45).clamp(0.0, 1.0);
-                        let out_b = (b + amp_l * 0.70 + shear_pos * 0.85).clamp(0.0, 1.0);
-                        let rgba_off = idx * 4;
-                        a.pip_rgba[rgba_off] = (out_r * 255.0) as u8;
-                        a.pip_rgba[rgba_off + 1] = (out_g * 255.0) as u8;
-                        a.pip_rgba[rgba_off + 2] = (out_b * 255.0) as u8;
-                        a.pip_rgba[rgba_off + 3] = 255;
                     }
                 }
             }
@@ -15110,6 +16502,57 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     }
 
     update_physics_and_telemetry(a, f_idx, frame_w, frame_h, s, fps, eff_k, safe_dt);
+
+    let need_px = frame_w * frame_h;
+    let rgba_bytes = need_px * 4;
+    let swarm_active = if a.swarm_mode_cached != 0 {
+        a.swarm_telem_zeroed = 0;
+        soa_tracks::soa_step(
+            &mut a.micro_swarm,
+            &a.luma[..need_px],
+            &a.bg_luma[..need_px],
+            &a.eca_res[..need_px],
+            &a.rgba_ring[slot_in][..rgba_bytes],
+            &a.cc_energy[..grid_w * grid_h],
+            frame_w,
+            frame_h,
+            safe_dt,
+            f_idx,
+            a.last_pan_dx_f,
+            a.last_pan_dy_f,
+            a.last_scene_cut != 0,
+        )
+    } else {
+        if a.swarm_telem_zeroed == 0 {
+            a.micro_swarm.reset_active_keep_mode();
+            a.micro_swarm.cut_cooldown = 0;
+            a.micro_swarm.probe_backoff = 0;
+            a.micro_swarm.probe_fail_streak = 0;
+            a.micro_swarm.swarm_telem[1..16].fill(0.0);
+            a.swarm_telem_zeroed = 1;
+        }
+        false
+    };
+    if swarm_active {
+        continuum_physics::continuum_step(
+            &mut a.micro_swarm,
+            &mut a.continuum,
+            f_idx,
+            frame_w,
+            frame_h,
+            safe_dt,
+        );
+        a.continuum_was_active = 1;
+        if a.inspected_micro_tid_pin != 0 {
+            refresh_hero_pin_bridge(a, frame_w, frame_h, scale_px, s);
+        }
+    } else if a.continuum_was_active != 0 {
+        a.continuum.reset();
+        a.micro_swarm.swarm_telem[16..soa_tracks::SWARM_TELEM_LEN].fill(0.0);
+        a.continuum_was_active = 0;
+        a.inspected_hero_tid = 0;
+        a.inspected_micro_tid_pin = 0;
+    }
 
     a.frame_idx = f_idx.wrapping_add(1);
     slot_disp as u32

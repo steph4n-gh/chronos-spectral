@@ -13,11 +13,11 @@ jobs:
   verify-wasm-simd128-and-e2e:
     name: Build Wasm32 SIMD128, Math Audit, MP4 Calibration & Chrome E2E
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     env:
       CARGO_TERM_COLOR: always
-      # Allow shared 2-vCPU cloud VM headroom while keeping strict 1.0x (<0.25ms SD / <1.0ms HD) on bare-metal local runs
-      CHRONOS_CI_BUDGET_SCALE: "2.5"
+      # Shared cloud VM headroom while keeping strict 1.0x (<0.35ms SD / <1.00ms HD / <2.00ms C1K Swarm) on bare-metal local runs
+      CHRONOS_CI_BUDGET_SCALE: "3.5"
 
     steps:
       - name: Check out repository

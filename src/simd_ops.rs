@@ -118,9 +118,83 @@ pub unsafe fn rgba_to_planar_simd128(
     }
 }
 
+/// On-demand horizontal run of `n_tiles` contiguous `16x16` (clamped at frame bottom) tiles
+/// RGBA8 -> planar `chroma_rg`, `chroma_by` using precomputed `luma_ptr` (`rg = (r - g)/255`,
+/// `by = b/255 - y`, bit-identical to planar pass).
+#[inline(always)]
+pub unsafe fn rgba_tiles_run_to_chroma_simd128(
+    rgba_ptr: *const u8,
+    luma_ptr: *const f32,
+    rg_ptr: *mut f32,
+    by_ptr: *mut f32,
+    stride: usize,
+    x0: usize,
+    n_tiles: usize,
+    y0: usize,
+    y_end: usize,
+) {
+    let inv_255 = f32x4_splat(1.0 / 255.0);
+    for y in y0..y_end {
+        let mut row = y * stride + x0;
+        for _ in 0..n_tiles {
+            let (r16, g16, b16) = deinterleave_rgb16_simd128(rgba_ptr.add(row * 4));
+            let rg_lo = i16x8_sub(u16x8_extend_low_u8x16(r16), u16x8_extend_low_u8x16(g16));
+            let rg_hi = i16x8_sub(u16x8_extend_high_u8x16(r16), u16x8_extend_high_u8x16(g16));
+            v128_store(
+                rg_ptr.add(row) as *mut v128,
+                f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(rg_lo)), inv_255),
+            );
+            v128_store(
+                rg_ptr.add(row + 4) as *mut v128,
+                f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(rg_lo)), inv_255),
+            );
+            v128_store(
+                rg_ptr.add(row + 8) as *mut v128,
+                f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(rg_hi)), inv_255),
+            );
+            v128_store(
+                rg_ptr.add(row + 12) as *mut v128,
+                f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(rg_hi)), inv_255),
+            );
+
+            let b_lo = u16x8_extend_low_u8x16(b16);
+            let b_hi = u16x8_extend_high_u8x16(b16);
+            v128_store(
+                by_ptr.add(row) as *mut v128,
+                f32x4_sub(
+                    f32x4_mul(f32x4_convert_u32x4(u32x4_extend_low_u16x8(b_lo)), inv_255),
+                    v128_load(luma_ptr.add(row) as *const v128),
+                ),
+            );
+            v128_store(
+                by_ptr.add(row + 4) as *mut v128,
+                f32x4_sub(
+                    f32x4_mul(f32x4_convert_u32x4(u32x4_extend_high_u16x8(b_lo)), inv_255),
+                    v128_load(luma_ptr.add(row + 4) as *const v128),
+                ),
+            );
+            v128_store(
+                by_ptr.add(row + 8) as *mut v128,
+                f32x4_sub(
+                    f32x4_mul(f32x4_convert_u32x4(u32x4_extend_low_u16x8(b_hi)), inv_255),
+                    v128_load(luma_ptr.add(row + 8) as *const v128),
+                ),
+            );
+            v128_store(
+                by_ptr.add(row + 12) as *mut v128,
+                f32x4_sub(
+                    f32x4_mul(f32x4_convert_u32x4(u32x4_extend_high_u16x8(b_hi)), inv_255),
+                    v128_load(luma_ptr.add(row + 12) as *const v128),
+                ),
+            );
+            row += 16;
+        }
+    }
+}
+
 /// On-demand single `16x16` (clamped at frame bottom) tile RGBA8 -> planar `chroma_rg`, `chroma_by`
 /// using precomputed `luma_ptr` (`rg = (r - g)/255`, `by = b/255 - y`, bit-identical to planar pass).
-#[inline(never)]
+#[inline(always)]
 pub unsafe fn rgba_tile16_to_chroma_simd128(
     rgba_ptr: *const u8,
     luma_ptr: *const f32,
@@ -131,60 +205,7 @@ pub unsafe fn rgba_tile16_to_chroma_simd128(
     y0: usize,
     y_end: usize,
 ) {
-    let inv_255 = f32x4_splat(1.0 / 255.0);
-    for y in y0..y_end {
-        let row = y * stride + x0;
-        let (r16, g16, b16) = deinterleave_rgb16_simd128(rgba_ptr.add(row * 4));
-        let rg_lo = i16x8_sub(u16x8_extend_low_u8x16(r16), u16x8_extend_low_u8x16(g16));
-        let rg_hi = i16x8_sub(u16x8_extend_high_u8x16(r16), u16x8_extend_high_u8x16(g16));
-        v128_store(
-            rg_ptr.add(row) as *mut v128,
-            f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(rg_lo)), inv_255),
-        );
-        v128_store(
-            rg_ptr.add(row + 4) as *mut v128,
-            f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(rg_lo)), inv_255),
-        );
-        v128_store(
-            rg_ptr.add(row + 8) as *mut v128,
-            f32x4_mul(f32x4_convert_i32x4(i32x4_extend_low_i16x8(rg_hi)), inv_255),
-        );
-        v128_store(
-            rg_ptr.add(row + 12) as *mut v128,
-            f32x4_mul(f32x4_convert_i32x4(i32x4_extend_high_i16x8(rg_hi)), inv_255),
-        );
-
-        let b_lo = u16x8_extend_low_u8x16(b16);
-        let b_hi = u16x8_extend_high_u8x16(b16);
-        v128_store(
-            by_ptr.add(row) as *mut v128,
-            f32x4_sub(
-                f32x4_mul(f32x4_convert_u32x4(u32x4_extend_low_u16x8(b_lo)), inv_255),
-                v128_load(luma_ptr.add(row) as *const v128),
-            ),
-        );
-        v128_store(
-            by_ptr.add(row + 4) as *mut v128,
-            f32x4_sub(
-                f32x4_mul(f32x4_convert_u32x4(u32x4_extend_high_u16x8(b_lo)), inv_255),
-                v128_load(luma_ptr.add(row + 4) as *const v128),
-            ),
-        );
-        v128_store(
-            by_ptr.add(row + 8) as *mut v128,
-            f32x4_sub(
-                f32x4_mul(f32x4_convert_u32x4(u32x4_extend_low_u16x8(b_hi)), inv_255),
-                v128_load(luma_ptr.add(row + 8) as *const v128),
-            ),
-        );
-        v128_store(
-            by_ptr.add(row + 12) as *mut v128,
-            f32x4_sub(
-                f32x4_mul(f32x4_convert_u32x4(u32x4_extend_high_u16x8(b_hi)), inv_255),
-                v128_load(luma_ptr.add(row + 12) as *const v128),
-            ),
-        );
-    }
+    rgba_tiles_run_to_chroma_simd128(rgba_ptr, luma_ptr, rg_ptr, by_ptr, stride, x0, 1, y0, y_end);
 }
 
 /// Fused single-pass RGBA8 -> planar `luma` unpack AND `160x90` box-pooled pyramid
@@ -413,6 +434,7 @@ pub unsafe fn rgba_to_planar_and_pool160_simd128(
 /// Internal Pass-1 helper for Rank-2 Extensive Cancellation Algorithm (ECA):
 /// computes optimal affine parameters `(alpha, offset_c)` over the stationary subset `Omega`
 /// via single-pass anchor-shifted `f64x2` SIMD128 accumulators, or `None` on cold start (`raw_b2 < 1e-5`).
+#[inline(always)]
 pub unsafe fn eca_fit_affine_params_simd128(
     luma_ptr: *const f32,
     bg_luma_ptr: *const f32,
@@ -421,6 +443,29 @@ pub unsafe fn eca_fit_affine_params_simd128(
     prev_rgba: *const u8,
     stat_streak_ptr: *const u8,
     len: usize,
+) -> Option<(f32, f32)> {
+    eca_fit_affine_params_ex_simd128(
+        luma_ptr,
+        bg_luma_ptr,
+        eval_mask_ptr,
+        curr_rgba,
+        prev_rgba,
+        stat_streak_ptr,
+        len,
+        false,
+    )
+}
+
+#[inline(never)]
+pub unsafe fn eca_fit_affine_params_ex_simd128(
+    luma_ptr: *const f32,
+    bg_luma_ptr: *const f32,
+    eval_mask_ptr: *const u8,
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    stat_streak_ptr: *const u8,
+    len: usize,
+    dense_swarm: bool,
 ) -> Option<(f32, f32)> {
     let guard_thresh = f32x4_splat(0.045);
     let guard_stat = f32x4_splat(0.15);
@@ -552,16 +597,21 @@ pub unsafe fn eca_fit_affine_params_simd128(
     }
 
     // Single-pass anchor-shifted sufficient statistics over Omega (staggered coprime diagonal lattice for SD/HD)
-    let use_stride7 = len >= 131_072;
+    let use_stride13 = dense_swarm && len >= 131_072;
+    let use_stride7 = !use_stride13 && len >= 131_072;
     let use_stride3 = len >= 32768;
-    let step16 = if use_stride7 {
+    let step16 = if use_stride13 {
+        208usize
+    } else if use_stride7 {
         112usize
     } else if use_stride3 {
         48usize
     } else {
         16usize
     };
-    let step_scale = if use_stride7 {
+    let step_scale = if use_stride13 {
+        13i64
+    } else if use_stride7 {
         7i64
     } else if use_stride3 {
         3i64
@@ -6465,9 +6515,10 @@ unsafe fn stat_fused_hd40_row<
                         v128_and($mv, f32x4_lt(rv, v_eval_gate)),
                     );
                 }
+                let bv_new = f32x4_add(bv, f32x4_mul(r_eff, f32x4_sub(yv, bv)));
                 v128_store(
                     bg_luma_ptr.add(p_base + $off) as *mut v128,
-                    f32x4_add(bv, f32x4_mul(r_eff, f32x4_sub(yv, bv))),
+                    bv_new,
                 );
                 if HAS_MASK {
                     (
@@ -6604,11 +6655,11 @@ unsafe fn stat_fused_hd40_grid_loop<const HAS_MASK: bool, const UPDATE_STREAK: b
     let mut acc_sig2 = zero_v;
     let mut acc_cnt_i = i32x4_splat(0);
 
-    let mut acc_r_buf = core::mem::MaybeUninit::<[v128; 40]>::uninit();
+    let mut acc_r_buf = [i32x4_splat(0); 40];
     let acc_eca_ptr = acc_r_buf.as_mut_ptr() as *mut v128;
-    let mut acc_rgb_buf = core::mem::MaybeUninit::<[v128; 40]>::uninit();
+    let mut acc_rgb_buf = [i32x4_splat(0); 40];
     let acc_rgb_ptr = acc_rgb_buf.as_mut_ptr() as *mut v128;
-    let mut pyr_a_buf = core::mem::MaybeUninit::<[v128; 40]>::uninit();
+    let mut pyr_a_buf = [i32x4_splat(0); 40];
     let pyr_a_ptr = pyr_a_buf.as_mut_ptr() as *mut v128;
 
     for gy in 0..grid_h {
@@ -6616,7 +6667,8 @@ unsafe fn stat_fused_hd40_grid_loop<const HAS_MASK: bool, const UPDATE_STREAK: b
         let grid_row = grid_out.add(gy * 40);
         for ry_blk in 0..4usize {
             let pyr_out_row = pyr_eca_ptr.add((gy * 4 + ry_blk) * 160);
-            let row0 = (base_y + ry_blk * 4) * 640;
+            let y_blk = base_y + ry_blk * 4;
+            let row0 = y_blk * 640;
             if ry_blk == 0 {
                 stat_fused_hd40_row::<HAS_MASK, UPDATE_STREAK, true, 0, false>(
                     row0, curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, eval_mask_ptr,
@@ -6658,6 +6710,326 @@ unsafe fn stat_fused_hd40_grid_loop<const HAS_MASK: bool, const UPDATE_STREAK: b
                     pyr_a_ptr, pyr_out_row, grid_row, v_alpha, v_c, v_rate_bg, v_rate_fg,
                     v_motion_gate, v_rate_eval, v_eval_gate, v_rate_bg_heal, v_rate_fg_heal,
                     v_rate_eval_heal, w_eca, w_rgb, q16, &mut acc_err2, &mut acc_sig2, &mut acc_cnt_i,
+                );
+            }
+        }
+    }
+
+    *out_err2 = f32x4_add(*out_err2, acc_err2);
+    *out_sig2 = f32x4_add(*out_sig2, acc_sig2);
+    *out_cnt_i = i32x4_add(*out_cnt_i, acc_cnt_i);
+}
+
+#[inline(always)]
+unsafe fn stat_fused_sd20_row<
+    const HAS_MASK: bool,
+    const UPDATE_STREAK: bool,
+    const FIRST_GY: bool,
+    const PYR_ODD: bool,
+    const LAST_GY: bool,
+>(
+    row_p0: usize,
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    luma_ptr: *const f32,
+    bg_luma_ptr: *mut f32,
+    eval_mask_ptr: *mut u8,
+    eval_mask_const: *const u8,
+    stat_streak_ptr: *mut u8,
+    eca_res_ptr: *mut f32,
+    acc_eca_ptr: *mut v128,
+    acc_rgb_ptr: *mut v128,
+    pyr_a_ptr: *mut v128,
+    pyr_b_ptr: *mut v128,
+    pyr_out_row: *mut f32,
+    grid_row: *mut f32,
+    v_alpha: v128,
+    v_c: v128,
+    v_rate_bg: v128,
+    v_rate_fg: v128,
+    v_motion_gate: v128,
+    v_rate_eval: v128,
+    v_eval_gate: v128,
+    v_rate_bg_heal: v128,
+    v_rate_fg_heal: v128,
+    v_rate_eval_heal: v128,
+    w_eca: v128,
+    w_rgb: v128,
+    q4: v128,
+    out_err2: &mut v128,
+    out_sig2: &mut v128,
+    out_cnt_i: &mut v128,
+) {
+    let rgb_mask = u32x4_splat(0x00FF_FFFF);
+    let tol3 = u8x16_splat(3);
+    let zero_i32 = i32x4_splat(0);
+    let one_u8 = u8x16_splat(1);
+    let min_streak = u8x16_splat(12);
+    let heal_gate_i32 = i32x4_splat(9);
+
+    let mut acc_err2 = *out_err2;
+    let mut acc_sig2 = *out_sig2;
+    let mut row_cnt_u8 = zero_i32;
+
+    let mut p_base = row_p0;
+    for gx in 0..20usize {
+        let cb = p_base * 4;
+        let d0 = {
+            let c0 = v128_load(curr_rgba.add(cb) as *const v128);
+            let p0 = v128_load(prev_rgba.add(cb) as *const v128);
+            v128_and(v128_or(u8x16_sub_sat(c0, p0), u8x16_sub_sat(p0, c0)), rgb_mask)
+        };
+        let d1 = {
+            let c1 = v128_load(curr_rgba.add(cb + 16) as *const v128);
+            let p1 = v128_load(prev_rgba.add(cb + 16) as *const v128);
+            v128_and(v128_or(u8x16_sub_sat(c1, p1), u8x16_sub_sat(p1, c1)), rgb_mask)
+        };
+        let d2 = {
+            let c2 = v128_load(curr_rgba.add(cb + 32) as *const v128);
+            let p2 = v128_load(prev_rgba.add(cb + 32) as *const v128);
+            v128_and(v128_or(u8x16_sub_sat(c2, p2), u8x16_sub_sat(p2, c2)), rgb_mask)
+        };
+        let d3 = {
+            let c3 = v128_load(curr_rgba.add(cb + 48) as *const v128);
+            let p3 = v128_load(prev_rgba.add(cb + 48) as *const v128);
+            v128_and(v128_or(u8x16_sub_sat(c3, p3), u8x16_sub_sat(p3, c3)), rgb_mask)
+        };
+
+        let eval16 = if UPDATE_STREAK {
+            let within16 = pack4_le_tol16_simd128(d0, d1, d2, d3, tol3, zero_i32);
+            let old_streak = v128_load(stat_streak_ptr.add(p_base) as *const v128);
+            let new_streak = v128_and(u8x16_add_sat(old_streak, one_u8), within16);
+            v128_store(stat_streak_ptr.add(p_base) as *mut v128, new_streak);
+            let ev16 = u8x16_ge(new_streak, min_streak);
+            v128_store(eval_mask_ptr.add(p_base) as *mut v128, ev16);
+            ev16
+        } else if HAS_MASK {
+            v128_load(eval_mask_const.add(p_base) as *const v128)
+        } else {
+            zero_i32
+        };
+        if HAS_MASK {
+            row_cnt_u8 = i8x16_add(row_cnt_u8, v128_and(eval16, one_u8));
+        }
+
+        let s0 = abs_rgb_to_sum_u32x4_simd128(d0);
+        let s1 = abs_rgb_to_sum_u32x4_simd128(d1);
+        let s2 = abs_rgb_to_sum_u32x4_simd128(d2);
+        let s3 = abs_rgb_to_sum_u32x4_simd128(d3);
+        let cur_rgb = i32x4_add(i32x4_add(s0, s1), i32x4_add(s2, s3));
+        *acc_rgb_ptr.add(gx) = if FIRST_GY {
+            cur_rgb
+        } else {
+            i32x4_add(*acc_rgb_ptr.add(gx), cur_rgb)
+        };
+        let st0 = i32x4_lt(s0, heal_gate_i32);
+        let st1 = i32x4_lt(s1, heal_gate_i32);
+        let st2 = i32x4_lt(s2, heal_gate_i32);
+        let st3 = i32x4_lt(s3, heal_gate_i32);
+
+        macro_rules! eca_bg_vec4_sd {
+            ($off:expr, $mv:expr, $st:expr) => {{
+                let yv = v128_load(luma_ptr.add(p_base + $off) as *const v128);
+                let bv = v128_load(bg_luma_ptr.add(p_base + $off) as *const v128);
+                let df = f32x4_sub(yv, f32x4_add(f32x4_mul(v_alpha, bv), v_c));
+                let rv = f32x4_abs(df);
+                v128_store(eca_res_ptr.add(p_base + $off) as *mut v128, rv);
+                let r_bg_s = v128_bitselect(v_rate_bg_heal, v_rate_bg, $st);
+                let r_fg_s = v128_bitselect(v_rate_fg_heal, v_rate_fg, $st);
+                let mut r_eff = v128_bitselect(r_bg_s, r_fg_s, f32x4_lt(rv, v_motion_gate));
+                if HAS_MASK {
+                    let r_ev_s = v128_bitselect(v_rate_eval_heal, v_rate_eval, $st);
+                    r_eff = v128_bitselect(
+                        r_ev_s,
+                        r_eff,
+                        v128_and($mv, f32x4_lt(rv, v_eval_gate)),
+                    );
+                }
+                let bv_new = f32x4_add(bv, f32x4_mul(r_eff, f32x4_sub(yv, bv)));
+                v128_store(
+                    bg_luma_ptr.add(p_base + $off) as *mut v128,
+                    bv_new,
+                );
+                if HAS_MASK {
+                    (
+                        rv,
+                        v128_and(f32x4_mul(df, df), $mv),
+                        v128_and(f32x4_mul(yv, yv), $mv),
+                    )
+                } else {
+                    (rv, zero_i32, zero_i32)
+                }
+            }};
+        }
+
+        let (r0, e01, sy01, r1) = if HAS_MASK {
+            let lo8 = i16x8_extend_low_i8x16(eval16);
+            let mv0 = i32x4_extend_low_i16x8(lo8);
+            let mv1 = i32x4_extend_high_i16x8(lo8);
+            let (r0, e0, sy0) = eca_bg_vec4_sd!(0, mv0, st0);
+            let (r1, e1, sy1) = eca_bg_vec4_sd!(4, mv1, st1);
+            (r0, f32x4_add(e0, e1), f32x4_add(sy0, sy1), r1)
+        } else {
+            let (r0, _, _) = eca_bg_vec4_sd!(0, zero_i32, st0);
+            let (r1, _, _) = eca_bg_vec4_sd!(4, zero_i32, st1);
+            (r0, zero_i32, zero_i32, r1)
+        };
+        let s01 = f32x4_add(
+            i32x4_shuffle::<0, 2, 4, 6>(r0, r1),
+            i32x4_shuffle::<1, 3, 5, 7>(r0, r1),
+        );
+        let cur_r01 = f32x4_add(v128_andnot(r0, st0), v128_andnot(r1, st1));
+
+        let (r2, e2, sy2, r3, e3, sy3) = if HAS_MASK {
+            let hi8 = i16x8_extend_high_i8x16(eval16);
+            let mv2 = i32x4_extend_low_i16x8(hi8);
+            let mv3 = i32x4_extend_high_i16x8(hi8);
+            let (r2, e2, sy2) = eca_bg_vec4_sd!(8, mv2, st2);
+            let (r3, e3, sy3) = eca_bg_vec4_sd!(12, mv3, st3);
+            (r2, e2, sy2, r3, e3, sy3)
+        } else {
+            let (r2, _, _) = eca_bg_vec4_sd!(8, zero_i32, st2);
+            let (r3, _, _) = eca_bg_vec4_sd!(12, zero_i32, st3);
+            (r2, zero_i32, zero_i32, r3, zero_i32, zero_i32)
+        };
+        if HAS_MASK {
+            acc_err2 = f32x4_add(acc_err2, f32x4_add(e01, f32x4_add(e2, e3)));
+            acc_sig2 = f32x4_add(acc_sig2, f32x4_add(sy01, f32x4_add(sy2, sy3)));
+        }
+
+        let cur_r = f32x4_add(
+            cur_r01,
+            f32x4_add(v128_andnot(r2, st2), v128_andnot(r3, st3)),
+        );
+        let acc_eca_x = if FIRST_GY {
+            cur_r
+        } else {
+            f32x4_add(*acc_eca_ptr.add(gx), cur_r)
+        };
+        if LAST_GY {
+            let acc_rgb_x = *acc_rgb_ptr.add(gx);
+            let tile_v = f32x4_add(
+                f32x4_mul(acc_eca_x, w_eca),
+                f32x4_mul(f32x4_convert_u32x4(acc_rgb_x), w_rgb),
+            );
+            *grid_row.add(gx) = hsum_f32x4(tile_v);
+        } else {
+            *acc_eca_ptr.add(gx) = acc_eca_x;
+        }
+
+        let s23 = f32x4_add(
+            i32x4_shuffle::<0, 2, 4, 6>(r2, r3),
+            i32x4_shuffle::<1, 3, 5, 7>(r2, r3),
+        );
+        if !PYR_ODD {
+            *pyr_a_ptr.add(gx) = s01;
+            *pyr_b_ptr.add(gx) = s23;
+        } else {
+            let v0 = f32x4_mul(f32x4_add(*pyr_a_ptr.add(gx), s01), q4);
+            let v1 = f32x4_mul(f32x4_add(*pyr_b_ptr.add(gx), s23), q4);
+            let dst = pyr_out_row.add(gx * 8);
+            v128_store(dst as *mut v128, v0);
+            v128_store(dst.add(4) as *mut v128, v1);
+        }
+        p_base += 16;
+    }
+
+    if HAS_MASK {
+        *out_err2 = acc_err2;
+        *out_sig2 = acc_sig2;
+        let sum16 = u16x8_extadd_pairwise_u8x16(row_cnt_u8);
+        *out_cnt_i = i32x4_add(*out_cnt_i, u32x4_extadd_pairwise_u16x8(sum16));
+    }
+}
+
+#[inline(never)]
+unsafe fn stat_fused_sd20_grid_loop<const HAS_MASK: bool, const UPDATE_STREAK: bool>(
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    luma_ptr: *const f32,
+    bg_luma_ptr: *mut f32,
+    eval_mask_ptr: *mut u8,
+    eval_mask_const: *const u8,
+    stat_streak_ptr: *mut u8,
+    eca_res_ptr: *mut f32,
+    pyr_eca_ptr: *mut f32,
+    grid_out: *mut f32,
+    grid_h: usize,
+    alpha: f32,
+    offset_c: f32,
+    adapt_rate: f32,
+    out_err2: &mut v128,
+    out_sig2: &mut v128,
+    out_cnt_i: &mut v128,
+) {
+    let v_alpha = f32x4_splat(alpha);
+    let v_c = f32x4_splat(offset_c);
+    let v_rate_bg = f32x4_splat(adapt_rate);
+    let v_rate_fg = f32x4_splat(adapt_rate * 0.008);
+    let v_motion_gate = f32x4_splat(0.045);
+    let v_rate_eval = f32x4_splat(0.80);
+    let v_eval_gate = f32x4_splat(0.053);
+    let w_eca = f32x4_splat(0.75);
+    let w_rgb = f32x4_splat(0.25 / 765.0);
+    let heal_alpha = f32x4_splat(0.65);
+    let one_minus_heal = f32x4_sub(f32x4_splat(1.0), heal_alpha);
+    let v_rate_bg_heal = f32x4_add(heal_alpha, f32x4_mul(one_minus_heal, v_rate_bg));
+    let v_rate_fg_heal = f32x4_add(heal_alpha, f32x4_mul(one_minus_heal, v_rate_fg));
+    let v_rate_eval_heal = f32x4_add(heal_alpha, f32x4_mul(one_minus_heal, v_rate_eval));
+    let q4 = f32x4_splat(0.25);
+
+    let zero_v = f32x4_splat(0.0);
+    let mut acc_err2 = zero_v;
+    let mut acc_sig2 = zero_v;
+    let mut acc_cnt_i = i32x4_splat(0);
+
+    let mut acc_r_buf = [i32x4_splat(0); 20];
+    let acc_eca_ptr = acc_r_buf.as_mut_ptr() as *mut v128;
+    let mut acc_rgb_buf = [i32x4_splat(0); 20];
+    let acc_rgb_ptr = acc_rgb_buf.as_mut_ptr() as *mut v128;
+    let mut pyr_a_buf = [i32x4_splat(0); 20];
+    let pyr_a_ptr = pyr_a_buf.as_mut_ptr() as *mut v128;
+    let mut pyr_b_buf = [i32x4_splat(0); 20];
+    let pyr_b_ptr = pyr_b_buf.as_mut_ptr() as *mut v128;
+
+    for gy in 0..grid_h {
+        let base_y = gy * 16;
+        let grid_row = grid_out.add(gy * 20);
+        for ry_pair in 0..8usize {
+            let pyr_out_row = pyr_eca_ptr.add((gy * 8 + ry_pair) * 160);
+            let row0 = (base_y + ry_pair * 2) * 320;
+            if ry_pair == 0 {
+                stat_fused_sd20_row::<HAS_MASK, UPDATE_STREAK, true, false, false>(
+                    row0, curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, eval_mask_ptr,
+                    eval_mask_const, stat_streak_ptr, eca_res_ptr, acc_eca_ptr, acc_rgb_ptr,
+                    pyr_a_ptr, pyr_b_ptr, pyr_out_row, grid_row, v_alpha, v_c, v_rate_bg, v_rate_fg,
+                    v_motion_gate, v_rate_eval, v_eval_gate, v_rate_bg_heal, v_rate_fg_heal,
+                    v_rate_eval_heal, w_eca, w_rgb, q4, &mut acc_err2, &mut acc_sig2, &mut acc_cnt_i,
+                );
+            } else {
+                stat_fused_sd20_row::<HAS_MASK, UPDATE_STREAK, false, false, false>(
+                    row0, curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, eval_mask_ptr,
+                    eval_mask_const, stat_streak_ptr, eca_res_ptr, acc_eca_ptr, acc_rgb_ptr,
+                    pyr_a_ptr, pyr_b_ptr, pyr_out_row, grid_row, v_alpha, v_c, v_rate_bg, v_rate_fg,
+                    v_motion_gate, v_rate_eval, v_eval_gate, v_rate_bg_heal, v_rate_fg_heal,
+                    v_rate_eval_heal, w_eca, w_rgb, q4, &mut acc_err2, &mut acc_sig2, &mut acc_cnt_i,
+                );
+            }
+            if ry_pair == 7 {
+                stat_fused_sd20_row::<HAS_MASK, UPDATE_STREAK, false, true, true>(
+                    row0 + 320, curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, eval_mask_ptr,
+                    eval_mask_const, stat_streak_ptr, eca_res_ptr, acc_eca_ptr, acc_rgb_ptr,
+                    pyr_a_ptr, pyr_b_ptr, pyr_out_row, grid_row, v_alpha, v_c, v_rate_bg, v_rate_fg,
+                    v_motion_gate, v_rate_eval, v_eval_gate, v_rate_bg_heal, v_rate_fg_heal,
+                    v_rate_eval_heal, w_eca, w_rgb, q4, &mut acc_err2, &mut acc_sig2, &mut acc_cnt_i,
+                );
+            } else {
+                stat_fused_sd20_row::<HAS_MASK, UPDATE_STREAK, false, true, false>(
+                    row0 + 320, curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, eval_mask_ptr,
+                    eval_mask_const, stat_streak_ptr, eca_res_ptr, acc_eca_ptr, acc_rgb_ptr,
+                    pyr_a_ptr, pyr_b_ptr, pyr_out_row, grid_row, v_alpha, v_c, v_rate_bg, v_rate_fg,
+                    v_motion_gate, v_rate_eval, v_eval_gate, v_rate_bg_heal, v_rate_fg_heal,
+                    v_rate_eval_heal, w_eca, w_rgb, q4, &mut acc_err2, &mut acc_sig2, &mut acc_cnt_i,
                 );
             }
         }
@@ -6724,6 +7096,26 @@ unsafe fn eca_and_motion_grid_stat_fused_impl<const HAS_MASK: bool, const UPDATE
 
     if fuse_pyr && scale_px == 2 && grid_w == 40 && (!UPDATE_STREAK || write_eval_mask) {
         stat_fused_hd40_grid_loop::<HAS_MASK, UPDATE_STREAK>(
+            curr_rgba,
+            prev_rgba,
+            luma_ptr,
+            bg_luma_ptr,
+            eval_mask_ptr,
+            eval_mask_const,
+            stat_streak_ptr,
+            eca_res_ptr,
+            pyr_eca_ptr,
+            grid_out,
+            grid_h,
+            alpha,
+            offset_c,
+            adapt_rate,
+            &mut acc_eval_err2,
+            &mut acc_eval_sig2,
+            &mut acc_eval_cnt_i,
+        );
+    } else if fuse_pyr && scale_px == 1 && grid_w == 20 && (!UPDATE_STREAK || write_eval_mask) {
+        stat_fused_sd20_grid_loop::<HAS_MASK, UPDATE_STREAK>(
             curr_rgba,
             prev_rgba,
             luma_ptr,
@@ -7144,6 +7536,7 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
     adapt_rate: f32,
     mask_warm: bool,
     update_streak: bool,
+    dense_swarm: bool,
     out_err2: *mut f32,
     out_sig2: *mut f32,
     out_eval_count: *mut u32,
@@ -7152,7 +7545,7 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
     let do_streak = update_streak && !stat_streak_ptr.is_null() && frame_w == grid_w * 16;
     let fit_params = if do_streak {
         if mask_warm {
-            eca_fit_affine_params_simd128(
+            eca_fit_affine_params_ex_simd128(
                 luma_ptr,
                 bg_luma_ptr,
                 core::ptr::null(),
@@ -7160,9 +7553,10 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
                 prev_rgba,
                 stat_streak_ptr as *const u8,
                 len,
+                dense_swarm,
             )
         } else {
-            eca_fit_affine_params_simd128(
+            eca_fit_affine_params_ex_simd128(
                 luma_ptr,
                 bg_luma_ptr,
                 core::ptr::null(),
@@ -7170,6 +7564,7 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
                 core::ptr::null(),
                 core::ptr::null(),
                 len,
+                dense_swarm,
             )
         }
     } else {
@@ -7178,7 +7573,7 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
         } else {
             core::ptr::null()
         };
-        eca_fit_affine_params_simd128(
+        eca_fit_affine_params_ex_simd128(
             luma_ptr,
             bg_luma_ptr,
             fit_mask,
@@ -7186,6 +7581,7 @@ pub unsafe fn eca_and_motion_grid_stat_fused_simd128(
             core::ptr::null(),
             core::ptr::null(),
             len,
+            dense_swarm,
         )
     };
     let Some((alpha, offset_c)) = fit_params else {
@@ -7951,7 +8347,7 @@ unsafe fn pan_hd40_band<
 >(
     ctx: &mut PanFusedHd40Ctx,
     gy: usize,
-    gy_valid: bool,
+    _gy_valid: bool,
     int_lo: usize,
     int_hi: usize,
     band_rgb_ptr: *const u16,
@@ -7962,13 +8358,10 @@ unsafe fn pan_hd40_band<
     let zero_v = i32x4_splat(0);
     let mut loc_ctx = *ctx;
     let mut acc_row = [zero_v; 40];
-    let mut pyr_a_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let pyr_a_row = &mut *pyr_a_uninit.as_mut_ptr();
-    let mut acc_rgb_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let acc_rgb_row = &mut *acc_rgb_uninit.as_mut_ptr();
-    if gy_valid {
-        *acc_rgb_row = [zero_v; 40];
-    }
+    let mut pyr_a_row_buf = [zero_v; 40];
+    let pyr_a_row = &mut pyr_a_row_buf;
+    let mut acc_rgb_row_buf = [zero_v; 40];
+    let acc_rgb_row = &mut acc_rgb_row_buf;
     let acc_rgb_ptr = acc_rgb_row.as_mut_ptr();
     let y0 = gy * 16;
     for ry_blk in 0..4usize {
@@ -9590,11 +9983,10 @@ unsafe fn subpx_hd40_band_fused<
     let one_u8 = u8x16_splat(1);
 
     let mut acc_row = [zero_v; 40];
-    let mut pyr_a_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let pyr_a_row = &mut *pyr_a_uninit.as_mut_ptr();
-    let mut acc_rgb_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let acc_rgb_row = &mut *acc_rgb_uninit.as_mut_ptr();
-    *acc_rgb_row = [zero_v; 40];
+    let mut pyr_a_row_buf = [zero_v; 40];
+    let pyr_a_row = &mut pyr_a_row_buf;
+    let mut acc_rgb_row_buf = [zero_v; 40];
+    let acc_rgb_row = &mut acc_rgb_row_buf;
     let acc_rgb_ptr = acc_rgb_row.as_mut_ptr();
     let mut dummy_cnt = zero_v;
     let y0 = gy * 16;
@@ -9829,12 +10221,12 @@ unsafe fn pan_subpx_fused_hd40_no_scratch<
     w_rgb: v128,
 ) {
     let zero_v = i32x4_splat(0);
-    let mut rgb_row_uninit = core::mem::MaybeUninit::<[v128; 80]>::uninit();
-    let rgb_row_ptr = rgb_row_uninit.as_mut_ptr() as *mut u16;
-    let mut pyr_a_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let pyr_a_row = &mut *pyr_a_uninit.as_mut_ptr();
-    let mut acc_rgb_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-    let acc_rgb_row = &mut *acc_rgb_uninit.as_mut_ptr();
+    let mut rgb_row_buf = [zero_v; 80];
+    let rgb_row_ptr = rgb_row_buf.as_mut_ptr() as *mut u16;
+    let mut pyr_a_row_buf = [zero_v; 40];
+    let pyr_a_row = &mut pyr_a_row_buf;
+    let mut acc_rgb_row_buf = [zero_v; 40];
+    let acc_rgb_row = &mut acc_rgb_row_buf;
     for gy in 0..grid_h {
         let gy_valid = gy >= gy_lo && gy < gy_hi;
         let (int_lo, int_hi) = if gy_valid {
@@ -9951,7 +10343,7 @@ unsafe fn pan_subpx_fused_grid_fallback<
     acc_eval_sig2: &mut v128,
     acc_eval_cnt_i: &mut v128,
 ) {
-    let mut rgb_row_uninit = core::mem::MaybeUninit::<[v128; 80]>::uninit();
+    let mut rgb_row_uninit = [i32x4_splat(0); 80];
     let rgb_row_ptr = rgb_row_uninit.as_mut_ptr() as *mut u16;
     for gy in 0..grid_h {
         let gy_valid = gy >= gy_lo && gy < gy_hi;
@@ -10381,6 +10773,361 @@ unsafe fn pan_streak_and_eca_fused_subpx_impl<
     }
 }
 
+#[inline(always)]
+unsafe fn pan_subpx_eval_bit_scalar(
+    p: usize,
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    stat_streak_ptr: *const u8,
+    frame_w: usize,
+    w_i: i32,
+    h_i: i32,
+    row_bytes: usize,
+    ix0: i32,
+    iy0: i32,
+    w00: u16,
+    w10: u16,
+    w01: u16,
+    w11: u16,
+    exp_active: bool,
+    eff_exp_regime: bool,
+    dg_q15: i16,
+    off_i16: i16,
+    span_soft_u8: u8,
+    span_reset_u8: u8,
+) -> bool {
+    let old_s = *stat_streak_ptr.add(p);
+    if old_s < 10 {
+        return false;
+    }
+    let y = p / frame_w;
+    let x = p - y * frame_w;
+    let sy = (y as i32) + iy0;
+    let sx = (x as i32) + ix0;
+    if sy < 0 || sy + 1 >= h_i || sx < 0 || sx + 1 >= w_i {
+        return false;
+    }
+    let c_b = p * 4;
+    let p00_b = ((sy as usize) * frame_w + (sx as usize)) * 4;
+    let p10_b = p00_b + 4;
+    let p01_b = p00_b + row_bytes;
+    let p11_b = p01_b + 4;
+    let mut max_d = 0u8;
+    let mut max_span = 0u8;
+    let mut pv_raw3 = [0u8; 3];
+    for ch in 0..3usize {
+        let v00 = *prev_rgba.add(p00_b + ch);
+        let v10 = *prev_rgba.add(p10_b + ch);
+        let v01 = *prev_rgba.add(p01_b + ch);
+        let v11 = *prev_rgba.add(p11_b + ch);
+        let sp = v00.max(v10).max(v01).max(v11) - v00.min(v10).min(v01).min(v11);
+        if sp > max_span {
+            max_span = sp;
+        }
+        let pv = ((w00 as u32) * (v00 as u32)
+            + (w10 as u32) * (v10 as u32)
+            + (w01 as u32) * (v01 as u32)
+            + (w11 as u32) * (v11 as u32)
+            + 128)
+            >> 8;
+        let pv_raw = pv as u8;
+        pv_raw3[ch] = pv_raw;
+        let c_ch = *curr_rgba.add(c_b + ch);
+        let pv_u8 = if exp_active {
+            apply_exposure_u8_scalar(pv_raw, dg_q15, off_i16)
+        } else {
+            pv_raw
+        };
+        let d = c_ch.abs_diff(pv_u8);
+        if ch == 2
+            && eff_exp_regime
+            && (pv_raw >= 250 || c_ch >= 250)
+            && pv_raw3[0].min(pv_raw3[1]) < 230
+        {
+            continue;
+        }
+        if d > max_d {
+            max_d = d;
+        }
+    }
+    let white_clip = eff_exp_regime
+        && ((pv_raw3[0] >= 251 && pv_raw3[1] >= 251)
+            || (*curr_rgba.add(c_b) >= 253 && *curr_rgba.add(c_b + 1) >= 253));
+    if white_clip && max_d <= 4 {
+        max_d = 5;
+    }
+    if max_span > span_reset_u8 {
+        max_d = 255;
+    } else if max_span > span_soft_u8 && max_d <= 4 {
+        max_d = 5;
+    }
+    let ns = if max_d <= 4 {
+        old_s.saturating_add(2).min(20)
+    } else if max_d <= 5 {
+        old_s.saturating_sub(1)
+    } else if max_d <= 8 {
+        old_s.min(14).saturating_sub(6)
+    } else {
+        0
+    };
+    ns >= 12 && !white_clip
+}
+
+#[inline(never)]
+unsafe fn eca_fit_affine_params_pan_subpx_live_simd128(
+    luma_ptr: *const f32,
+    bg_luma_ptr: *const f32,
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    stat_streak_ptr: *const u8,
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
+    pan_dx_f: f32,
+    pan_dy_f: f32,
+    ix0: i32,
+    iy0: i32,
+    wx0: u16,
+    wx1: u16,
+    wy0: u16,
+    wy1: u16,
+    exp_active: bool,
+    eff_exp_regime: bool,
+    dg_q15: i16,
+    off_i16: i16,
+) -> Option<(f32, f32)> {
+    let len = frame_w * frame_h;
+    let w_i = frame_w as i32;
+    let h_i = frame_h as i32;
+    let row_bytes = frame_w * 4;
+    let w00 = wx0 * wy0;
+    let w10 = wx1 * wy0;
+    let w01 = wx0 * wy1;
+    let w11 = wx1 * wy1;
+    let fast_pan = pan_dx_f.abs() + pan_dy_f.abs() >= 3.2 * (scale_px as f32);
+    let span_reset_u8 = if fast_pan { 68u8 } else { 35u8 };
+    let span_soft_u8 = if fast_pan { 50u8 } else { 26u8 };
+
+    let guard_thresh = f32x4_splat(0.045);
+    let guard_stat = f32x4_splat(0.15);
+    let ten_u8 = u8x16_splat(10);
+    let four_i32 = i32x4_splat(4);
+
+    let mut b_ref = 0.5f32;
+    let mut y_ref = 0.5f32;
+    for k in 0..len {
+        let bk = *bg_luma_ptr.add(k);
+        let yk = *luma_ptr.add(k);
+        let ad = (yk - bk).abs();
+        if ad < 0.045f32
+            || (ad < 0.15f32
+                && pan_subpx_eval_bit_scalar(
+                    k, curr_rgba, prev_rgba, stat_streak_ptr, frame_w, w_i, h_i,
+                    row_bytes, ix0, iy0, w00, w10, w01, w11, exp_active,
+                    eff_exp_regime, dg_q15, off_i16, span_soft_u8, span_reset_u8,
+                ))
+        {
+            b_ref = bk;
+            y_ref = yk;
+            break;
+        }
+    }
+    let b_ref_vec = f32x4_splat(b_ref);
+    let y_ref_vec = f32x4_splat(y_ref);
+
+    let mut acc_raw_b2_0 = f32x4_splat(0.0);
+    let mut acc_raw_b2_1 = f32x4_splat(0.0);
+    let mut acc_cnt_i32_0 = i32x4_splat(0);
+    let mut acc_cnt_i32_1 = i32x4_splat(0);
+    let mut tot_u = 0.0f64;
+    let mut tot_v = 0.0f64;
+    let mut tot_uu = 0.0f64;
+    let mut tot_uv = 0.0f64;
+    let mut c_u0 = f32x4_splat(0.0);
+    let mut c_v0 = f32x4_splat(0.0);
+    let mut c_uu0 = f32x4_splat(0.0);
+    let mut c_uv0 = f32x4_splat(0.0);
+    let mut c_u1 = f32x4_splat(0.0);
+    let mut c_v1 = f32x4_splat(0.0);
+    let mut c_uu1 = f32x4_splat(0.0);
+    let mut c_uv1 = f32x4_splat(0.0);
+
+    let use_stride7 = len >= 131_072;
+    let use_stride3 = !use_stride7 && len >= 32768;
+    let step16 = if use_stride7 { 112usize } else if use_stride3 { 48usize } else { 16usize };
+    let step_scale = if use_stride7 { 7i64 } else if use_stride3 { 3i64 } else { 1i64 };
+
+    let mut i = 0usize;
+    let mut blk_rem = 64usize;
+    while i + 16 <= len {
+        let y0 = v128_load(luma_ptr.add(i) as *const v128);
+        let b0 = v128_load(bg_luma_ptr.add(i) as *const v128);
+        let y1 = v128_load(luma_ptr.add(i + 4) as *const v128);
+        let b1 = v128_load(bg_luma_ptr.add(i + 4) as *const v128);
+        let y2 = v128_load(luma_ptr.add(i + 8) as *const v128);
+        let b2 = v128_load(bg_luma_ptr.add(i + 8) as *const v128);
+        let y3 = v128_load(luma_ptr.add(i + 12) as *const v128);
+        let b3 = v128_load(bg_luma_ptr.add(i + 12) as *const v128);
+
+        let d0 = f32x4_abs(f32x4_sub(y0, b0));
+        let d1 = f32x4_abs(f32x4_sub(y1, b1));
+        let d2 = f32x4_abs(f32x4_sub(y2, b2));
+        let d3 = f32x4_abs(f32x4_sub(y3, b3));
+
+        let mut w0 = f32x4_lt(d0, guard_thresh);
+        let mut w1 = f32x4_lt(d1, guard_thresh);
+        let mut w2 = f32x4_lt(d2, guard_thresh);
+        let mut w3 = f32x4_lt(d3, guard_thresh);
+
+        if i32x4_all_true(v128_and(v128_and(w0, w1), v128_and(w2, w3))) {
+            acc_raw_b2_0 = f32x4_add(f32x4_add(acc_raw_b2_0, f32x4_mul(b0, b0)), f32x4_mul(b2, b2));
+            acc_raw_b2_1 = f32x4_add(f32x4_add(acc_raw_b2_1, f32x4_mul(b1, b1)), f32x4_mul(b3, b3));
+            acc_cnt_i32_0 = i32x4_add(acc_cnt_i32_0, four_i32);
+            let u0 = f32x4_sub(b0, b_ref_vec);
+            let v0 = f32x4_sub(y0, y_ref_vec);
+            let u2 = f32x4_sub(b2, b_ref_vec);
+            let v2 = f32x4_sub(y2, y_ref_vec);
+            c_u0 = f32x4_add(f32x4_add(c_u0, u0), u2);
+            c_v0 = f32x4_add(f32x4_add(c_v0, v0), v2);
+            c_uu0 = f32x4_add(f32x4_add(c_uu0, f32x4_mul(u0, u0)), f32x4_mul(u2, u2));
+            c_uv0 = f32x4_add(f32x4_add(c_uv0, f32x4_mul(u0, v0)), f32x4_mul(u2, v2));
+            let u1 = f32x4_sub(b1, b_ref_vec);
+            let v1 = f32x4_sub(y1, y_ref_vec);
+            let u3 = f32x4_sub(b3, b_ref_vec);
+            let v3 = f32x4_sub(y3, y_ref_vec);
+            c_u1 = f32x4_add(f32x4_add(c_u1, u1), u3);
+            c_v1 = f32x4_add(f32x4_add(c_v1, v1), v3);
+            c_uu1 = f32x4_add(f32x4_add(c_uu1, f32x4_mul(u1, u1)), f32x4_mul(u3, u3));
+            c_uv1 = f32x4_add(f32x4_add(c_uv1, f32x4_mul(u1, v1)), f32x4_mul(u3, v3));
+        } else {
+            let mid0 = v128_andnot(f32x4_lt(d0, guard_stat), w0);
+            let mid1 = v128_andnot(f32x4_lt(d1, guard_stat), w1);
+            let mid2 = v128_andnot(f32x4_lt(d2, guard_stat), w2);
+            let mid3 = v128_andnot(f32x4_lt(d3, guard_stat), w3);
+            let mid_or = v128_or(v128_or(mid0, mid1), v128_or(mid2, mid3));
+            if v128_any_true(mid_or) {
+                let old_s = v128_load(stat_streak_ptr.add(i) as *const v128);
+                let ge10 = u8x16_ge(old_s, ten_u8);
+                let mid16 = i8x16_narrow_i16x8(
+                    i16x8_narrow_i32x4(mid0, mid1),
+                    i16x8_narrow_i32x4(mid2, mid3),
+                );
+                let cmask = i8x16_bitmask(v128_and(mid16, ge10));
+                if cmask != 0 {
+                    let mut bits = [0u8; 16];
+                    for k in 0..16usize {
+                        if ((cmask >> k) & 1) != 0
+                            && pan_subpx_eval_bit_scalar(
+                                i + k, curr_rgba, prev_rgba, stat_streak_ptr, frame_w,
+                                w_i, h_i, row_bytes, ix0, iy0, w00, w10, w01, w11,
+                                exp_active, eff_exp_regime, dg_q15, off_i16,
+                                span_soft_u8, span_reset_u8,
+                            )
+                        {
+                            bits[k] = 0xFF;
+                        }
+                    }
+                    let eval16 = v128_load(bits.as_ptr() as *const v128);
+                    let lo8 = i16x8_extend_low_i8x16(eval16);
+                    let hi8 = i16x8_extend_high_i8x16(eval16);
+                    w0 = v128_or(w0, v128_and(mid0, i32x4_extend_low_i16x8(lo8)));
+                    w1 = v128_or(w1, v128_and(mid1, i32x4_extend_high_i16x8(lo8)));
+                    w2 = v128_or(w2, v128_and(mid2, i32x4_extend_low_i16x8(hi8)));
+                    w3 = v128_or(w3, v128_and(mid3, i32x4_extend_high_i16x8(hi8)));
+                }
+            }
+            macro_rules! accum_live_subpx {
+                ($lane:tt, $yv:expr, $bv:expr, $wv:expr) => {{
+                    let um = v128_and(f32x4_sub($bv, b_ref_vec), $wv);
+                    let vm = v128_and(f32x4_sub($yv, y_ref_vec), $wv);
+                    if $lane == 0 {
+                        acc_raw_b2_0 = f32x4_add(acc_raw_b2_0, f32x4_mul($bv, $bv));
+                        acc_cnt_i32_0 = i32x4_sub(acc_cnt_i32_0, $wv);
+                        c_u0 = f32x4_add(c_u0, um);
+                        c_v0 = f32x4_add(c_v0, vm);
+                        c_uu0 = f32x4_add(c_uu0, f32x4_mul(um, um));
+                        c_uv0 = f32x4_add(c_uv0, f32x4_mul(um, vm));
+                    } else {
+                        acc_raw_b2_1 = f32x4_add(acc_raw_b2_1, f32x4_mul($bv, $bv));
+                        acc_cnt_i32_1 = i32x4_sub(acc_cnt_i32_1, $wv);
+                        c_u1 = f32x4_add(c_u1, um);
+                        c_v1 = f32x4_add(c_v1, vm);
+                        c_uu1 = f32x4_add(c_uu1, f32x4_mul(um, um));
+                        c_uv1 = f32x4_add(c_uv1, f32x4_mul(um, vm));
+                    }
+                }};
+            }
+            accum_live_subpx!(0, y0, b0, w0);
+            accum_live_subpx!(1, y1, b1, w1);
+            accum_live_subpx!(0, y2, b2, w2);
+            accum_live_subpx!(1, y3, b3, w3);
+        }
+
+        i += step16;
+        blk_rem -= 1;
+        if blk_rem == 0 {
+            tot_u += hsum_f32x4(f32x4_add(c_u0, c_u1)) as f64;
+            tot_v += hsum_f32x4(f32x4_add(c_v0, c_v1)) as f64;
+            tot_uu += hsum_f32x4(f32x4_add(c_uu0, c_uu1)) as f64;
+            tot_uv += hsum_f32x4(f32x4_add(c_uv0, c_uv1)) as f64;
+            c_u0 = f32x4_splat(0.0);
+            c_v0 = f32x4_splat(0.0);
+            c_uu0 = f32x4_splat(0.0);
+            c_uv0 = f32x4_splat(0.0);
+            c_u1 = f32x4_splat(0.0);
+            c_v1 = f32x4_splat(0.0);
+            c_uu1 = f32x4_splat(0.0);
+            c_uv1 = f32x4_splat(0.0);
+            blk_rem = 64;
+        }
+    }
+    let mut tail_raw_b2 = 0.0f32;
+    let mut tail_cnt = 0i64;
+    let mut tail_u = 0.0f64;
+    let mut tail_v = 0.0f64;
+    let mut tail_uu = 0.0f64;
+    let mut tail_uv = 0.0f64;
+    while i < len {
+        let y = *luma_ptr.add(i);
+        let b = *bg_luma_ptr.add(i);
+        tail_raw_b2 += b * b;
+        let ad = (y - b).abs();
+        if ad < 0.045f32
+            || (ad < 0.15f32
+                && pan_subpx_eval_bit_scalar(
+                    i, curr_rgba, prev_rgba, stat_streak_ptr, frame_w, w_i, h_i,
+                    row_bytes, ix0, iy0, w00, w10, w01, w11, exp_active,
+                    eff_exp_regime, dg_q15, off_i16, span_soft_u8, span_reset_u8,
+                ))
+        {
+            let u = (b - b_ref) as f64;
+            let v = (y - y_ref) as f64;
+            tail_cnt += 1;
+            tail_u += u;
+            tail_v += v;
+            tail_uu += u * u;
+            tail_uv += u * v;
+        }
+        i += 1;
+    }
+
+    tot_u += hsum_f32x4(f32x4_add(c_u0, c_u1)) as f64 + tail_u;
+    tot_v += hsum_f32x4(f32x4_add(c_v0, c_v1)) as f64 + tail_v;
+    tot_uu += hsum_f32x4(f32x4_add(c_uu0, c_uu1)) as f64 + tail_uu;
+    tot_uv += hsum_f32x4(f32x4_add(c_uv0, c_uv1)) as f64 + tail_uv;
+    let acc_cnt_i32 = i32x4_add(acc_cnt_i32_0, acc_cnt_i32_1);
+    let raw_b2 = hsum_f32x4(f32x4_add(acc_raw_b2_0, acc_raw_b2_1)) + tail_raw_b2;
+    let n_cnt = (i32x4_extract_lane::<0>(acc_cnt_i32) as i64)
+        + (i32x4_extract_lane::<1>(acc_cnt_i32) as i64)
+        + (i32x4_extract_lane::<2>(acc_cnt_i32) as i64)
+        + (i32x4_extract_lane::<3>(acc_cnt_i32) as i64)
+        + tail_cnt;
+
+    eca_fit_affine_finish(
+        raw_b2, n_cnt, step_scale, b_ref, y_ref, tot_u, tot_v, tot_uu, tot_uv,
+    )
+}
+
 /// True 1-pass fused subpixel pan/streak/ECA/pyr_eca/motion-grid kernel.
 /// Returns `None` without mutating buffers if preconditions aren't met or on ECA cold-start,
 /// allowing callers to fall back to the 2-pass pan pipeline cleanly.
@@ -10419,7 +11166,7 @@ pub unsafe fn pan_streak_and_eca_fused_subpx_simd128(
         || frame_w != grid_w * 16
         || frame_w > 640
         || frame_h < grid_h * 16
-        || (mask_warm && !(mask_luma_tol > 0.0 && mask_luma_tol <= 0.045))
+        || (mask_warm && mask_luma_tol > 0.045)
     {
         return None;
     }
@@ -10452,21 +11199,49 @@ pub unsafe fn pan_streak_and_eca_fused_subpx_simd128(
     }
 
     let len = frame_w * frame_h;
-    let (alpha, offset_c) = eca_fit_affine_params_simd128(
-        luma_ptr,
-        bg_luma_ptr,
-        core::ptr::null(),
-        core::ptr::null(),
-        core::ptr::null(),
-        core::ptr::null(),
-        len,
-    )?;
-
     let (exp_active, dg_q15, off_i16) = exposure_q15_params(exp_gain, exp_off);
     let eff_exp_regime = exp_regime || exp_active;
+    let has_mask = mask_warm && !eval_mask_ptr.is_null();
+    let filter_mask = has_mask && mask_luma_tol > 0.0;
+
+    let (alpha, offset_c) = if has_mask && !filter_mask {
+        eca_fit_affine_params_pan_subpx_live_simd128(
+            luma_ptr,
+            bg_luma_ptr,
+            curr_rgba,
+            prev_rgba,
+            stat_streak_ptr,
+            frame_w,
+            frame_h,
+            scale_px,
+            pan_dx_f,
+            pan_dy_f,
+            ix0,
+            iy0,
+            wx0,
+            wx1,
+            wy0,
+            wy1,
+            exp_active,
+            eff_exp_regime,
+            dg_q15,
+            off_i16,
+        )?
+    } else {
+        eca_fit_affine_params_simd128(
+            luma_ptr,
+            bg_luma_ptr,
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            core::ptr::null(),
+            len,
+        )?
+    };
+
     macro_rules! call_1pass {
-        ($hm:expr, $eh:expr, $ea:expr, $ee:expr) => {
-            pan_streak_and_eca_fused_subpx_impl::<$hm, $eh, $hm, $ea, $ee>(
+        ($hm:expr, $eh:expr, $fm:expr, $ea:expr, $ee:expr) => {
+            pan_streak_and_eca_fused_subpx_impl::<$hm, $eh, $fm, $ea, $ee>(
                 curr_rgba, prev_rgba, luma_ptr, bg_luma_ptr, stat_streak_ptr, eval_mask_ptr,
                 mask_luma_tol, eca_res_ptr, pyr_eca_ptr, grid_out, scratch_ptr,
                 frame_w, frame_h, grid_w, grid_h, scale_px, alpha, offset_c, adapt_rate,
@@ -10475,13 +11250,16 @@ pub unsafe fn pan_streak_and_eca_fused_subpx_simd128(
             )
         };
     }
-    let ratio = match (mask_warm, exp_active, eff_exp_regime) {
-        (true, false, false) => call_1pass!(true, true, false, false),
-        (true, false, true) => call_1pass!(true, false, false, true),
-        (true, true, _) => call_1pass!(true, false, true, true),
-        (false, false, false) => call_1pass!(false, false, false, false),
-        (false, false, true) => call_1pass!(false, false, false, true),
-        (false, true, _) => call_1pass!(false, false, true, true),
+    let ratio = match (has_mask, filter_mask, exp_active, eff_exp_regime) {
+        (true, true, false, false) => call_1pass!(true, true, true, false, false),
+        (true, false, false, false) => call_1pass!(true, true, false, false, false),
+        (true, true, false, true) => call_1pass!(true, false, true, false, true),
+        (true, false, false, true) => call_1pass!(true, false, false, false, true),
+        (true, true, true, _) => call_1pass!(true, false, true, true, true),
+        (true, false, true, _) => call_1pass!(true, false, false, true, true),
+        (false, _, false, false) => call_1pass!(false, false, false, false, false),
+        (false, _, false, true) => call_1pass!(false, false, false, false, true),
+        (false, _, true, _) => call_1pass!(false, false, false, true, true),
     };
     Some(ratio)
 }
@@ -10801,9 +11579,10 @@ unsafe fn eca_fit_affine_params_pan_int_live_simd128(
     let mut c_uu1 = f32x4_splat(0.0);
     let mut c_uv1 = f32x4_splat(0.0);
 
-    let use_stride3 = len >= 32768;
-    let step16 = if use_stride3 { 48usize } else { 16usize };
-    let step_scale = if use_stride3 { 3i64 } else { 1i64 };
+    let use_stride7 = len >= 131_072;
+    let use_stride3 = !use_stride7 && len >= 32768;
+    let step16 = if use_stride7 { 112usize } else if use_stride3 { 48usize } else { 16usize };
+    let step_scale = if use_stride7 { 7i64 } else if use_stride3 { 3i64 } else { 1i64 };
 
     let rgb_mask = u32x4_splat(0x00FF_FFFF);
     let rg_mask = u32x4_splat(0x0000_FFFF);
@@ -11354,7 +12133,7 @@ unsafe fn pan_streak_and_eca_fused_int_impl<
     let mut acc_eval_err2 = zero_v;
     let mut acc_eval_sig2 = zero_v;
     let mut acc_eval_cnt_i = i32x4_splat(0);
-    let mut rgb_row_uninit = core::mem::MaybeUninit::<[v128; 80]>::uninit();
+    let mut rgb_row_uninit = [i32x4_splat(0); 80];
     let rgb_row_ptr = rgb_row_uninit.as_mut_ptr() as *mut u16;
 
     if fuse_pyr && scale_px == 2 && grid_w == 40 && frame_w == 640 {
@@ -11408,8 +12187,8 @@ unsafe fn pan_streak_and_eca_fused_int_impl<
                 );
             };
         }
-        let mut pyr_a_uninit = core::mem::MaybeUninit::<[v128; 40]>::uninit();
-        let pyr_a_row = &mut *pyr_a_uninit.as_mut_ptr();
+        let mut pyr_a_row_buf = [zero_v; 40];
+        let pyr_a_row = &mut pyr_a_row_buf;
         for gy in 0..grid_h {
             let gy_valid = gy >= gy_lo && gy < gy_hi;
             let (int_lo, int_hi) = if gy_valid {
@@ -11560,9 +12339,6 @@ pub unsafe fn pan_streak_and_eca_fused_int_simd128(
     let len = frame_w * frame_h;
     let has_mask = mask_warm && !eval_mask_ptr.is_null();
     let use_live_fit_mask = has_mask && !(mask_luma_tol > 0.0 && mask_luma_tol <= 0.045);
-    if use_live_fit_mask && eff_exp_regime {
-        return None;
-    }
 
     let fit = if use_live_fit_mask {
         eca_fit_affine_params_pan_int_live_simd128(
@@ -12556,7 +13332,7 @@ pub unsafe fn sad8x8_pyr160_cutoff_simd128(
 
     let mut sw0 = f32x4_splat(0.0);
     let mut sw1 = f32x4_splat(0.0);
-    let mut dl_uninit = core::mem::MaybeUninit::<[v128; 16]>::uninit();
+    let mut dl_uninit = [i32x4_splat(0); 16];
     let dl = dl_uninit.as_mut_ptr() as *mut v128;
     for ry in 0..8usize {
         let ioff = (py + ry) * 160 + px;
@@ -12641,9 +13417,9 @@ pub unsafe fn sad8x8_pyr160_5x5_simd128(
     let y0 = cy0 - 2;
 
     let zero = f32x4_splat(0.0);
-    let mut rg_uninit = core::mem::MaybeUninit::<[[v128; 3]; 12]>::uninit();
-    let mut by_uninit = core::mem::MaybeUninit::<[[v128; 3]; 12]>::uninit();
-    let mut lum_uninit = core::mem::MaybeUninit::<[[v128; 3]; 12]>::uninit();
+    let mut rg_uninit = [[zero; 3]; 12];
+    let mut by_uninit = [[zero; 3]; 12];
+    let mut lum_uninit = [[zero; 3]; 12];
     let rg_c = rg_uninit.as_mut_ptr() as *mut [v128; 3];
     let by_c = by_uninit.as_mut_ptr() as *mut [v128; 3];
     let lum_c = lum_uninit.as_mut_ptr() as *mut [v128; 3];
@@ -12810,7 +13586,7 @@ pub unsafe fn sad8x8_pyr160_5x5_simd128(
             }
 
             let mut sw = zero;
-            let mut dl_uninit = core::mem::MaybeUninit::<[v128; 16]>::uninit();
+            let mut dl_uninit = [i32x4_splat(0); 16];
             let dl = dl_uninit.as_mut_ptr() as *mut v128;
             for ry in 0..8usize {
                 ensure_l!(dy_i + ry);
@@ -13708,6 +14484,7 @@ pub unsafe fn refine_subpixel_ic_lk_cached(
 
 /// 2D Foreground-Weighted Inverse-Compositional Lucas-Kanade (IC-LK) Sub-Pixel Refinement
 /// with separable weighted parabolic SSD fallback when template Hessian is ill-conditioned.
+#[inline(never)]
 pub unsafe fn refine_subpixel_ic_lk_weighted(
     luma_ptr: *const f32,
     rg_ptr: *const f32,
@@ -13721,8 +14498,29 @@ pub unsafe fn refine_subpixel_ic_lk_weighted(
     tpl_weight: *const f32,
     scale_px: usize,
 ) -> (f32, f32) {
-    let mut cache_uninit = core::mem::MaybeUninit::<TplIcLkCache>::uninit();
-    let cache = &mut *cache_uninit.as_mut_ptr();
+    let z = i32x4_splat(0);
+    let mut cache_val = TplIcLkCache {
+        buf_wxl: [z; 56],
+        buf_wyl: [z; 56],
+        buf_wxrg: [z; 56],
+        buf_wyrg: [z; 56],
+        buf_wxby: [z; 56],
+        buf_wyby: [z; 56],
+        h_xx_raw: 0.0,
+        h_xy_raw: 0.0,
+        h_yy_raw: 0.0,
+        sum_w_tl: 0.0,
+        sum_w_in: 0.0,
+        gx_w_sum_raw: 0.0,
+        gy_w_sum_raw: 0.0,
+        tpl_inv_w: 0.0,
+        tpl_mu_t: 0.0,
+        full_inv_w: 0.0,
+        full_mu_t: 0.0,
+        bx_tpl_raw: 0.0,
+        by_tpl_raw: 0.0,
+    };
+    let cache = &mut cache_val;
     build_tpl_ic_lk_cache(tpl_luma, tpl_rg, tpl_by, tpl_weight, cache);
     ic_lk_solve_from_cache(
         luma_ptr, rg_ptr, by_ptr, stride, best_tlx, best_tly,
@@ -15751,7 +16549,7 @@ pub unsafe fn sad_patch_zm_score_simd128(
     let has_eca = !eca_res_ptr.is_null();
 
     if scale_px <= 1 {
-        let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+        let mut diff_l_uninit = [i32x4_splat(0); 64];
         let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
         let mut k = 0usize;
         for ry in 0..16usize {
@@ -15802,7 +16600,7 @@ pub unsafe fn sad_patch_zm_score_simd128(
         return sad_l + 1.85 * sad_c - 0.16 * w_eca.min(0.85);
     }
 
-    let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut diff_l_uninit = [i32x4_splat(0); 64];
     let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
     let mut k = 0usize;
     for ry in 0..16usize {
@@ -15976,7 +16774,7 @@ unsafe fn sad_patch_zm_full_precomp_cutoff_impl<const S: usize>(
     }
 
     let mut sum_wi = f32x4_splat(0.0);
-    let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut diff_l_uninit = [i32x4_splat(0); 64];
     let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
     let mut k = 0usize;
     if S == 1 {
@@ -16063,31 +16861,72 @@ pub unsafe fn sad_patch_zm_full_sd_eca_cutoff_simd128(
     let eca_slack = if has_eca { 0.1361f32 } else { 0.0f32 };
     let c_cutoff = cutoff + eca_slack;
 
-    let mut acc_sad_c = f32x4_splat(0.0);
+    let mut acc_sad_c0 = f32x4_splat(0.0);
+    let mut acc_sad_c1 = f32x4_splat(0.0);
     macro_rules! chroma_row_sd {
         ($ry:expr) => {{
             let ry: usize = $ry;
             let tpl_row = ry * 16;
             let img_row = (cy + ry) * stride + cx;
-            for vec_idx in 0..4usize {
-                let ioff = img_row + vec_idx * 4;
-                let toff = tpl_row + vec_idx * 4;
-                let vw = v128_load(tpl_weight.add(toff) as *const v128);
-                let irg = v128_load(rg_ptr.add(ioff) as *const v128);
-                let trg = v128_load(tpl_rg.add(toff) as *const v128);
-                let iby = v128_load(by_ptr.add(ioff) as *const v128);
-                let tby = v128_load(tpl_by.add(toff) as *const v128);
-                let diff_c =
-                    f32x4_add(f32x4_abs(f32x4_sub(irg, trg)), f32x4_abs(f32x4_sub(iby, tby)));
-                acc_sad_c = f32x4_add(acc_sad_c, f32x4_mul(vw, diff_c));
-            }
+
+            let vw0 = v128_load(tpl_weight.add(tpl_row) as *const v128);
+            let dc0 = f32x4_add(
+                f32x4_abs(f32x4_sub(
+                    v128_load(rg_ptr.add(img_row) as *const v128),
+                    v128_load(tpl_rg.add(tpl_row) as *const v128),
+                )),
+                f32x4_abs(f32x4_sub(
+                    v128_load(by_ptr.add(img_row) as *const v128),
+                    v128_load(tpl_by.add(tpl_row) as *const v128),
+                )),
+            );
+            acc_sad_c0 = f32x4_add(acc_sad_c0, f32x4_mul(vw0, dc0));
+
+            let vw1 = v128_load(tpl_weight.add(tpl_row + 4) as *const v128);
+            let dc1 = f32x4_add(
+                f32x4_abs(f32x4_sub(
+                    v128_load(rg_ptr.add(img_row + 4) as *const v128),
+                    v128_load(tpl_rg.add(tpl_row + 4) as *const v128),
+                )),
+                f32x4_abs(f32x4_sub(
+                    v128_load(by_ptr.add(img_row + 4) as *const v128),
+                    v128_load(tpl_by.add(tpl_row + 4) as *const v128),
+                )),
+            );
+            acc_sad_c1 = f32x4_add(acc_sad_c1, f32x4_mul(vw1, dc1));
+
+            let vw2 = v128_load(tpl_weight.add(tpl_row + 8) as *const v128);
+            let dc2 = f32x4_add(
+                f32x4_abs(f32x4_sub(
+                    v128_load(rg_ptr.add(img_row + 8) as *const v128),
+                    v128_load(tpl_rg.add(tpl_row + 8) as *const v128),
+                )),
+                f32x4_abs(f32x4_sub(
+                    v128_load(by_ptr.add(img_row + 8) as *const v128),
+                    v128_load(tpl_by.add(tpl_row + 8) as *const v128),
+                )),
+            );
+            acc_sad_c0 = f32x4_add(acc_sad_c0, f32x4_mul(vw2, dc2));
+
+            let vw3 = v128_load(tpl_weight.add(tpl_row + 12) as *const v128);
+            let dc3 = f32x4_add(
+                f32x4_abs(f32x4_sub(
+                    v128_load(rg_ptr.add(img_row + 12) as *const v128),
+                    v128_load(tpl_rg.add(tpl_row + 12) as *const v128),
+                )),
+                f32x4_abs(f32x4_sub(
+                    v128_load(by_ptr.add(img_row + 12) as *const v128),
+                    v128_load(tpl_by.add(tpl_row + 12) as *const v128),
+                )),
+            );
+            acc_sad_c1 = f32x4_add(acc_sad_c1, f32x4_mul(vw3, dc3));
         }};
     }
 
     for ry in 4usize..12usize {
         chroma_row_sd!(ry);
     }
-    if 1.85 * hsum_f32x4(acc_sad_c) >= c_cutoff {
+    if 1.85 * hsum_f32x4(f32x4_add(acc_sad_c0, acc_sad_c1)) >= c_cutoff {
         return (cutoff, 0.0);
     }
     for ry in 0usize..4usize {
@@ -16096,16 +16935,18 @@ pub unsafe fn sad_patch_zm_full_sd_eca_cutoff_simd128(
     for ry in 12usize..16usize {
         chroma_row_sd!(ry);
     }
-    let sad_c_weighted = 1.85 * hsum_f32x4(acc_sad_c);
+    let sad_c_weighted = 1.85 * hsum_f32x4(f32x4_add(acc_sad_c0, acc_sad_c1));
     if sad_c_weighted >= c_cutoff {
         return (cutoff, 0.0);
     }
 
     // Tight mathematical lower-bound slack: |dc| <= 0.048 => sum(vw*|dc|) <= 0.048/inv_w.
     let raw_cutoff = (c_cutoff - sad_c_weighted) + (0.048 / inv_w.max(1e-6));
-    let mut sum_wi = f32x4_splat(0.0);
-    let mut acc_l_raw = f32x4_splat(0.0);
-    let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut sum_wi0 = f32x4_splat(0.0);
+    let mut sum_wi1 = f32x4_splat(0.0);
+    let mut acc_l_raw0 = f32x4_splat(0.0);
+    let mut acc_l_raw1 = f32x4_splat(0.0);
+    let mut diff_l_uninit = [i32x4_splat(0); 64];
     let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
 
     macro_rules! luma_row_sd {
@@ -16114,24 +16955,41 @@ pub unsafe fn sad_patch_zm_full_sd_eca_cutoff_simd128(
             let img_row = (cy + ry) * stride + cx;
             let tpl_row = ry * 16;
             let dst_base = ry * 4;
-            for vec_idx in 0..4usize {
-                let ioff = img_row + vec_idx * 4;
-                let toff = tpl_row + vec_idx * 4;
-                let vw = v128_load(tpl_weight.add(toff) as *const v128);
-                let il = v128_load(luma_ptr.add(ioff) as *const v128);
-                let tl = v128_load(tpl_luma.add(toff) as *const v128);
-                let d = f32x4_sub(il, tl);
-                sum_wi = f32x4_add(sum_wi, f32x4_mul(vw, il));
-                acc_l_raw = f32x4_add(acc_l_raw, f32x4_mul(vw, f32x4_abs(d)));
-                *diff_l_ptr.add(dst_base + vec_idx) = d;
-            }
+
+            let vw0 = v128_load(tpl_weight.add(tpl_row) as *const v128);
+            let il0 = v128_load(luma_ptr.add(img_row) as *const v128);
+            let d0 = f32x4_sub(il0, v128_load(tpl_luma.add(tpl_row) as *const v128));
+            sum_wi0 = f32x4_add(sum_wi0, f32x4_mul(vw0, il0));
+            acc_l_raw0 = f32x4_add(acc_l_raw0, f32x4_mul(vw0, f32x4_abs(d0)));
+            *diff_l_ptr.add(dst_base) = d0;
+
+            let vw1 = v128_load(tpl_weight.add(tpl_row + 4) as *const v128);
+            let il1 = v128_load(luma_ptr.add(img_row + 4) as *const v128);
+            let d1 = f32x4_sub(il1, v128_load(tpl_luma.add(tpl_row + 4) as *const v128));
+            sum_wi1 = f32x4_add(sum_wi1, f32x4_mul(vw1, il1));
+            acc_l_raw1 = f32x4_add(acc_l_raw1, f32x4_mul(vw1, f32x4_abs(d1)));
+            *diff_l_ptr.add(dst_base + 1) = d1;
+
+            let vw2 = v128_load(tpl_weight.add(tpl_row + 8) as *const v128);
+            let il2 = v128_load(luma_ptr.add(img_row + 8) as *const v128);
+            let d2 = f32x4_sub(il2, v128_load(tpl_luma.add(tpl_row + 8) as *const v128));
+            sum_wi0 = f32x4_add(sum_wi0, f32x4_mul(vw2, il2));
+            acc_l_raw0 = f32x4_add(acc_l_raw0, f32x4_mul(vw2, f32x4_abs(d2)));
+            *diff_l_ptr.add(dst_base + 2) = d2;
+
+            let vw3 = v128_load(tpl_weight.add(tpl_row + 12) as *const v128);
+            let il3 = v128_load(luma_ptr.add(img_row + 12) as *const v128);
+            let d3 = f32x4_sub(il3, v128_load(tpl_luma.add(tpl_row + 12) as *const v128));
+            sum_wi1 = f32x4_add(sum_wi1, f32x4_mul(vw3, il3));
+            acc_l_raw1 = f32x4_add(acc_l_raw1, f32x4_mul(vw3, f32x4_abs(d3)));
+            *diff_l_ptr.add(dst_base + 3) = d3;
         }};
     }
 
     for ry in 4usize..12usize {
         luma_row_sd!(ry);
     }
-    if hsum_f32x4(acc_l_raw) >= raw_cutoff {
+    if hsum_f32x4(f32x4_add(acc_l_raw0, acc_l_raw1)) >= raw_cutoff {
         return (cutoff, 0.0);
     }
     for ry in 0usize..4usize {
@@ -16140,43 +16998,428 @@ pub unsafe fn sad_patch_zm_full_sd_eca_cutoff_simd128(
     for ry in 12usize..16usize {
         luma_row_sd!(ry);
     }
-    if hsum_f32x4(acc_l_raw) >= raw_cutoff {
+    if hsum_f32x4(f32x4_add(acc_l_raw0, acc_l_raw1)) >= raw_cutoff {
         return (cutoff, 0.0);
     }
 
-    let mu_i = hsum_f32x4(sum_wi) * inv_w;
+    let mu_i = hsum_f32x4(f32x4_add(sum_wi0, sum_wi1)) * inv_w;
     let dc = (mu_i - mu_t).clamp(-0.12, 0.12) * 0.40;
     let v_dc = f32x4_splat(dc);
-    let mut acc_sad_l = f32x4_splat(0.0);
-    for idx in 0..64usize {
-        let vw = v128_load(tpl_weight.add(idx * 4) as *const v128);
-        let dl = f32x4_abs(f32x4_sub(*diff_l_ptr.add(idx), v_dc));
-        acc_sad_l = f32x4_add(acc_sad_l, f32x4_mul(vw, dl));
+    let mut acc_sad_l0 = f32x4_splat(0.0);
+    let mut acc_sad_l1 = f32x4_splat(0.0);
+    let mut idx = 0usize;
+    while idx < 64 {
+        let vw0 = v128_load(tpl_weight.add(idx * 4) as *const v128);
+        let dl0 = f32x4_abs(f32x4_sub(*diff_l_ptr.add(idx), v_dc));
+        acc_sad_l0 = f32x4_add(acc_sad_l0, f32x4_mul(vw0, dl0));
+
+        let vw1 = v128_load(tpl_weight.add((idx + 1) * 4) as *const v128);
+        let dl1 = f32x4_abs(f32x4_sub(*diff_l_ptr.add(idx + 1), v_dc));
+        acc_sad_l1 = f32x4_add(acc_sad_l1, f32x4_mul(vw1, dl1));
+        idx += 2;
     }
-    let sad_l = hsum_f32x4(acc_sad_l);
+    let sad_l = hsum_f32x4(f32x4_add(acc_sad_l0, acc_sad_l1));
     let tot_no_eca = sad_l + sad_c_weighted;
     if tot_no_eca - eca_slack >= cutoff {
         return (cutoff, 0.0);
     }
 
     let w_eca = if has_eca {
-        let mut acc_eca = f32x4_splat(0.0);
+        let mut acc_eca0 = f32x4_splat(0.0);
+        let mut acc_eca1 = f32x4_splat(0.0);
         for ry in 0..16usize {
             let img_row = (cy + ry) * stride + cx;
             let tpl_row = ry * 16;
-            for vec_idx in 0..4usize {
-                let ioff = img_row + vec_idx * 4;
-                let toff = tpl_row + vec_idx * 4;
-                let vw = v128_load(tpl_weight.add(toff) as *const v128);
-                let eca = v128_load(eca_res_ptr.add(ioff) as *const v128);
-                acc_eca = f32x4_add(acc_eca, f32x4_mul(vw, eca));
-            }
+            acc_eca0 = f32x4_add(
+                acc_eca0,
+                f32x4_mul(
+                    v128_load(tpl_weight.add(tpl_row) as *const v128),
+                    v128_load(eca_res_ptr.add(img_row) as *const v128),
+                ),
+            );
+            acc_eca1 = f32x4_add(
+                acc_eca1,
+                f32x4_mul(
+                    v128_load(tpl_weight.add(tpl_row + 4) as *const v128),
+                    v128_load(eca_res_ptr.add(img_row + 4) as *const v128),
+                ),
+            );
+            acc_eca0 = f32x4_add(
+                acc_eca0,
+                f32x4_mul(
+                    v128_load(tpl_weight.add(tpl_row + 8) as *const v128),
+                    v128_load(eca_res_ptr.add(img_row + 8) as *const v128),
+                ),
+            );
+            acc_eca1 = f32x4_add(
+                acc_eca1,
+                f32x4_mul(
+                    v128_load(tpl_weight.add(tpl_row + 12) as *const v128),
+                    v128_load(eca_res_ptr.add(img_row + 12) as *const v128),
+                ),
+            );
         }
-        hsum_f32x4(acc_eca)
+        hsum_f32x4(f32x4_add(acc_eca0, acc_eca1))
     } else {
         0.0
     };
     (tot_no_eca - 0.16 * w_eca.min(0.85), w_eca)
+}
+
+#[inline(always)]
+unsafe fn sad_full_weca_at_sd_simd128(
+    eca_res_ptr: *const f32,
+    stride: usize,
+    cx: usize,
+    cy: usize,
+    tpl_weight: *const f32,
+) -> f32 {
+    if eca_res_ptr.is_null() {
+        return 0.0;
+    }
+    let mut acc0 = f32x4_splat(0.0);
+    let mut acc1 = f32x4_splat(0.0);
+    for ry in 0..16usize {
+        let img_row = (cy + ry) * stride + cx;
+        let tpl_row = ry * 16;
+        acc0 = f32x4_add(
+            acc0,
+            f32x4_mul(
+                v128_load(tpl_weight.add(tpl_row) as *const v128),
+                v128_load(eca_res_ptr.add(img_row) as *const v128),
+            ),
+        );
+        acc1 = f32x4_add(
+            acc1,
+            f32x4_mul(
+                v128_load(tpl_weight.add(tpl_row + 4) as *const v128),
+                v128_load(eca_res_ptr.add(img_row + 4) as *const v128),
+            ),
+        );
+        acc0 = f32x4_add(
+            acc0,
+            f32x4_mul(
+                v128_load(tpl_weight.add(tpl_row + 8) as *const v128),
+                v128_load(eca_res_ptr.add(img_row + 8) as *const v128),
+            ),
+        );
+        acc1 = f32x4_add(
+            acc1,
+            f32x4_mul(
+                v128_load(tpl_weight.add(tpl_row + 12) as *const v128),
+                v128_load(eca_res_ptr.add(img_row + 12) as *const v128),
+            ),
+        );
+    }
+    hsum_f32x4(f32x4_add(acc0, acc1))
+}
+
+#[inline(always)]
+unsafe fn load5_full_sd_row_f32(ptr: *const f32) -> [v128; 5] {
+    [
+        v128_load(ptr as *const v128),
+        v128_load(ptr.add(4) as *const v128),
+        v128_load(ptr.add(8) as *const v128),
+        v128_load(ptr.add(12) as *const v128),
+        v128_load(ptr.add(16) as *const v128),
+    ]
+}
+
+#[inline(always)]
+unsafe fn shift5_sd_ring_vecs<const ST: usize>(
+    row: &[v128; 5],
+) -> ([v128; 4], [v128; 4], [v128; 4]) {
+    let x0 = [row[0], row[1], row[2], row[3]];
+    if ST == 1 {
+        let x1 = [
+            i32x4_shuffle::<1, 2, 3, 4>(row[0], row[1]),
+            i32x4_shuffle::<1, 2, 3, 4>(row[1], row[2]),
+            i32x4_shuffle::<1, 2, 3, 4>(row[2], row[3]),
+            i32x4_shuffle::<1, 2, 3, 4>(row[3], row[4]),
+        ];
+        let x2 = [
+            i32x4_shuffle::<2, 3, 4, 5>(row[0], row[1]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[1], row[2]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[2], row[3]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[3], row[4]),
+        ];
+        (x0, x1, x2)
+    } else {
+        let x1 = [
+            i32x4_shuffle::<2, 3, 4, 5>(row[0], row[1]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[1], row[2]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[2], row[3]),
+            i32x4_shuffle::<2, 3, 4, 5>(row[3], row[4]),
+        ];
+        let x2 = [row[1], row[2], row[3], row[4]];
+        (x0, x1, x2)
+    }
+}
+
+/// Fused multi-offset 8-neighbor full-`16x16` SD ring evaluator (`ST` in `{1, 2}`) around `(cx0, cy0)`.
+/// Streams each image and template row once across overlapping horizontal and vertical offsets.
+#[inline(never)]
+pub unsafe fn sad_patch_zm_full_sd_ring3x3_simd128<const ST: usize>(
+    luma_ptr: *const f32,
+    rg_ptr: *const f32,
+    by_ptr: *const f32,
+    eca_res_ptr: *const f32,
+    stride: usize,
+    cx0: usize,
+    cy0: usize,
+    tpl_luma: *const f32,
+    tpl_rg: *const f32,
+    tpl_by: *const f32,
+    tpl_weight: *const f32,
+    inv_w: f32,
+    mu_t: f32,
+    out_b_tlx: &mut i32,
+    out_b_tly: &mut i32,
+    out_best_cost: &mut f32,
+    out_best_weca: &mut f32,
+) {
+    const RING_OFFSETS: [(i32, i32); 8] = [
+        (-1, -1),
+        (0, -1),
+        (1, -1),
+        (-1, 0),
+        (1, 0),
+        (-1, 1),
+        (0, 1),
+        (1, 1),
+    ];
+
+    let has_eca = !eca_res_ptr.is_null();
+    let eca_slack = if has_eca { 0.1361f32 } else { 0.0f32 };
+    let c_cutoff = *out_best_cost + eca_slack;
+
+    let zero = f32x4_splat(0.0);
+    let mut sum_wi = [zero; 8];
+    let mut acc_sad_c = [zero; 8];
+
+    let x_base = cx0 - ST;
+    let y_base = cy0 - ST;
+    let s_rows = 16 + 2 * ST;
+
+    macro_rules! load_sd_ring_row {
+        ($ptr:expr) => {{
+            if ST == 1 {
+                load5_sd_row_f32($ptr)
+            } else {
+                load5_full_sd_row_f32($ptr)
+            }
+        }};
+    }
+
+    for s_row in 0..s_rows {
+        let row_off = (y_base + s_row) * stride + x_base;
+        let il_row = load_sd_ring_row!(luma_ptr.add(row_off));
+        let irg_row = load_sd_ring_row!(rg_ptr.add(row_off));
+        let iby_row = load_sd_ring_row!(by_ptr.add(row_off));
+
+        let (il_x0, il_x1, il_x2) = shift5_sd_ring_vecs::<ST>(&il_row);
+        let (rg_x0, rg_x1, rg_x2) = shift5_sd_ring_vecs::<ST>(&irg_row);
+        let (by_x0, by_x1, by_x2) = shift5_sd_ring_vecs::<ST>(&iby_row);
+
+        if s_row < 16 {
+            let tpl_row = s_row * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let trg = v128_load(tpl_rg.add(toff) as *const v128);
+                let tby = v128_load(tpl_by.add(toff) as *const v128);
+
+                let dc0 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x0[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x0[vec_idx], tby)),
+                );
+                sum_wi[0] = f32x4_add(sum_wi[0], f32x4_mul(vw, il_x0[vec_idx]));
+                acc_sad_c[0] = f32x4_add(acc_sad_c[0], f32x4_mul(vw, dc0));
+
+                let dc1 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x1[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x1[vec_idx], tby)),
+                );
+                sum_wi[1] = f32x4_add(sum_wi[1], f32x4_mul(vw, il_x1[vec_idx]));
+                acc_sad_c[1] = f32x4_add(acc_sad_c[1], f32x4_mul(vw, dc1));
+
+                let dc2 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x2[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x2[vec_idx], tby)),
+                );
+                sum_wi[2] = f32x4_add(sum_wi[2], f32x4_mul(vw, il_x2[vec_idx]));
+                acc_sad_c[2] = f32x4_add(acc_sad_c[2], f32x4_mul(vw, dc2));
+            }
+        }
+        if s_row >= ST && s_row < 16 + ST {
+            let tpl_row = (s_row - ST) * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let trg = v128_load(tpl_rg.add(toff) as *const v128);
+                let tby = v128_load(tpl_by.add(toff) as *const v128);
+
+                let dc3 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x0[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x0[vec_idx], tby)),
+                );
+                sum_wi[3] = f32x4_add(sum_wi[3], f32x4_mul(vw, il_x0[vec_idx]));
+                acc_sad_c[3] = f32x4_add(acc_sad_c[3], f32x4_mul(vw, dc3));
+
+                let dc4 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x2[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x2[vec_idx], tby)),
+                );
+                sum_wi[4] = f32x4_add(sum_wi[4], f32x4_mul(vw, il_x2[vec_idx]));
+                acc_sad_c[4] = f32x4_add(acc_sad_c[4], f32x4_mul(vw, dc4));
+            }
+        }
+        if s_row >= 2 * ST {
+            let tpl_row = (s_row - 2 * ST) * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let trg = v128_load(tpl_rg.add(toff) as *const v128);
+                let tby = v128_load(tpl_by.add(toff) as *const v128);
+
+                let dc5 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x0[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x0[vec_idx], tby)),
+                );
+                sum_wi[5] = f32x4_add(sum_wi[5], f32x4_mul(vw, il_x0[vec_idx]));
+                acc_sad_c[5] = f32x4_add(acc_sad_c[5], f32x4_mul(vw, dc5));
+
+                let dc6 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x1[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x1[vec_idx], tby)),
+                );
+                sum_wi[6] = f32x4_add(sum_wi[6], f32x4_mul(vw, il_x1[vec_idx]));
+                acc_sad_c[6] = f32x4_add(acc_sad_c[6], f32x4_mul(vw, dc6));
+
+                let dc7 = f32x4_add(
+                    f32x4_abs(f32x4_sub(rg_x2[vec_idx], trg)),
+                    f32x4_abs(f32x4_sub(by_x2[vec_idx], tby)),
+                );
+                sum_wi[7] = f32x4_add(sum_wi[7], f32x4_mul(vw, il_x2[vec_idx]));
+                acc_sad_c[7] = f32x4_add(acc_sad_c[7], f32x4_mul(vw, dc7));
+            }
+        }
+    }
+
+    let mut sad_c_w = [0.0f32; 8];
+    let mut alive = [false; 8];
+    let mut any_alive = false;
+    let mut v_dc = [zero; 8];
+    for c in 0..8usize {
+        let sc = 1.85 * hsum_f32x4(acc_sad_c[c]);
+        sad_c_w[c] = sc;
+        if sc < c_cutoff {
+            alive[c] = true;
+            any_alive = true;
+            let mu_i = hsum_f32x4(sum_wi[c]) * inv_w;
+            let dc = (mu_i - mu_t).clamp(-0.12, 0.12) * 0.40;
+            v_dc[c] = f32x4_splat(dc);
+        }
+    }
+    if !any_alive {
+        return;
+    }
+
+    let top_alive = alive[0] || alive[1] || alive[2];
+    let mid_alive = alive[3] || alive[4];
+    let bot_alive = alive[5] || alive[6] || alive[7];
+
+    let mut acc_sad_l = [zero; 8];
+    for s_row in 0..s_rows {
+        let need_top = top_alive && s_row < 16;
+        let need_mid = mid_alive && s_row >= ST && s_row < 16 + ST;
+        let need_bot = bot_alive && s_row >= 2 * ST;
+        if !(need_top || need_mid || need_bot) {
+            continue;
+        }
+        let row_off = (y_base + s_row) * stride + x_base;
+        let il_row = load_sd_ring_row!(luma_ptr.add(row_off));
+        let (il_x0, il_x1, il_x2) = shift5_sd_ring_vecs::<ST>(&il_row);
+
+        if need_top {
+            let tpl_row = s_row * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let tl = v128_load(tpl_luma.add(toff) as *const v128);
+                if alive[0] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x0[vec_idx], tl), v_dc[0]));
+                    acc_sad_l[0] = f32x4_add(acc_sad_l[0], f32x4_mul(vw, dl));
+                }
+                if alive[1] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x1[vec_idx], tl), v_dc[1]));
+                    acc_sad_l[1] = f32x4_add(acc_sad_l[1], f32x4_mul(vw, dl));
+                }
+                if alive[2] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x2[vec_idx], tl), v_dc[2]));
+                    acc_sad_l[2] = f32x4_add(acc_sad_l[2], f32x4_mul(vw, dl));
+                }
+            }
+        }
+        if need_mid {
+            let tpl_row = (s_row - ST) * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let tl = v128_load(tpl_luma.add(toff) as *const v128);
+                if alive[3] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x0[vec_idx], tl), v_dc[3]));
+                    acc_sad_l[3] = f32x4_add(acc_sad_l[3], f32x4_mul(vw, dl));
+                }
+                if alive[4] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x2[vec_idx], tl), v_dc[4]));
+                    acc_sad_l[4] = f32x4_add(acc_sad_l[4], f32x4_mul(vw, dl));
+                }
+            }
+        }
+        if need_bot {
+            let tpl_row = (s_row - 2 * ST) * 16;
+            for vec_idx in 0..4usize {
+                let toff = tpl_row + vec_idx * 4;
+                let vw = v128_load(tpl_weight.add(toff) as *const v128);
+                let tl = v128_load(tpl_luma.add(toff) as *const v128);
+                if alive[5] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x0[vec_idx], tl), v_dc[5]));
+                    acc_sad_l[5] = f32x4_add(acc_sad_l[5], f32x4_mul(vw, dl));
+                }
+                if alive[6] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x1[vec_idx], tl), v_dc[6]));
+                    acc_sad_l[6] = f32x4_add(acc_sad_l[6], f32x4_mul(vw, dl));
+                }
+                if alive[7] {
+                    let dl = f32x4_abs(f32x4_sub(f32x4_sub(il_x2[vec_idx], tl), v_dc[7]));
+                    acc_sad_l[7] = f32x4_add(acc_sad_l[7], f32x4_mul(vw, dl));
+                }
+            }
+        }
+    }
+
+    let st_i = ST as i32;
+    for c in 0..8usize {
+        if !alive[c] || sad_c_w[c] >= *out_best_cost + eca_slack {
+            continue;
+        }
+        let tot_no_eca = hsum_f32x4(acc_sad_l[c]) + sad_c_w[c];
+        if tot_no_eca - eca_slack >= *out_best_cost {
+            continue;
+        }
+        let (dx, dy) = RING_OFFSETS[c];
+        let qx = (cx0 as i32 + dx * st_i) as usize;
+        let qy = (cy0 as i32 + dy * st_i) as usize;
+        let w_eca = sad_full_weca_at_sd_simd128(eca_res_ptr, stride, qx, qy, tpl_weight);
+        let rc = tot_no_eca - 0.16 * w_eca.min(0.85);
+        if rc < *out_best_cost {
+            *out_best_cost = rc;
+            *out_best_weca = w_eca;
+            *out_b_tlx = qx as i32;
+            *out_b_tly = qy as i32;
+        }
+    }
 }
 
 #[inline(never)]
@@ -16350,7 +17593,7 @@ unsafe fn sad_patch_zm_half_precomp_cutoff_impl<const S: usize>(
     }
 
     let mut sum_wi = f32x4_splat(0.0);
-    let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 32]>::uninit();
+    let mut diff_l_uninit = [i32x4_splat(0); 32];
     let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
     let mut k = 0usize;
     let mut ry = 0usize;
@@ -16534,7 +17777,7 @@ pub unsafe fn sad_patch_zm_half_simd128(
     let mut acc_eca = f32x4_splat(0.0);
     let has_eca = !eca_res_ptr.is_null();
 
-    let mut diff_l_uninit = core::mem::MaybeUninit::<[v128; 32]>::uninit();
+    let mut diff_l_uninit = [i32x4_splat(0); 32];
     let diff_l_ptr = diff_l_uninit.as_mut_ptr() as *mut v128;
     let mut k = 0usize;
     let mut ry = 0usize;
@@ -17130,7 +18373,7 @@ unsafe fn sad_patch_zm_half_ring3x3_precomp_impl<const SCALE_PX: usize>(
         let (dx, dy) = RING_OFFSETS[c];
         let tx = (cx0 as isize + (dx as isize) * (st as isize)) as usize;
         let ty = (cy0 as isize + (dy as isize) * (st as isize)) as usize;
-        let mut il_single_uninit = core::mem::MaybeUninit::<[v128; 32]>::uninit();
+        let mut il_single_uninit = [i32x4_splat(0); 32];
         let il_single = il_single_uninit.as_mut_ptr() as *mut v128;
         let mut sum_wi_1 = zero;
         if SCALE_PX <= 1 {
@@ -17580,7 +18823,7 @@ unsafe fn sad_patch_zm_half_ring3x3_multi_impl<const SCALE_PX: usize>(
     let need_0 = (alive_mask & 0b0001_1000) != 0;
     let need_p1 = (alive_mask & 0b1110_0000) != 0;
     let mut sum_wi = [zero; 8];
-    let mut il_uninit = core::mem::MaybeUninit::<[v128; 50]>::uninit();
+    let mut il_uninit = [i32x4_splat(0); 50];
     let il_ptr = il_uninit.as_mut_ptr() as *mut v128;
 
     // 2) Luma pass ONLY for surviving rows/candidates.
@@ -17993,7 +19236,7 @@ unsafe fn sad_patch_zm_half_st1_ring_sd_simd128(
     let x_base = cx0 - 1;
     let y_base = cy0 - 1;
 
-    let mut il_uninit = core::mem::MaybeUninit::<[v128; 85]>::uninit();
+    let mut il_uninit = [i32x4_splat(0); 85];
     let il_ptr = il_uninit.as_mut_ptr() as *mut v128;
 
     for s_row in 0..17usize {
@@ -18590,7 +19833,7 @@ unsafe fn sad_patch_zm_half_st1_ring_hd_simd128(
         return;
     }
 
-    let mut il_uninit = core::mem::MaybeUninit::<[v128; 160]>::uninit();
+    let mut il_uninit = [i32x4_splat(0); 160];
     let il_ptr = il_uninit.as_mut_ptr() as *mut v128;
 
     if (alive_mask & (alive_mask - 1)) == 0 {
@@ -19192,7 +20435,7 @@ pub unsafe fn weighted_anchor_zm_l1_simd128(
         return hsum_f32x4(acc_l) + 1.65 * hsum_f32x4(acc_c);
     }
 
-    let mut il_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut il_uninit = [i32x4_splat(0); 64];
     let il_ptr = il_uninit.as_mut_ptr() as *mut v128;
 
     if scale_px == 2 {
@@ -19498,8 +20741,8 @@ pub unsafe fn eval_winner_patch_hd_simd128(
 ) -> u8 {
     let mut blk_rg = [0.0f32; 16];
     let mut blk_by = [0.0f32; 16];
-    let mut irg_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
-    let mut iby_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut irg_uninit = [i32x4_splat(0); 64];
+    let mut iby_uninit = [i32x4_splat(0); 64];
     let irg_ptr = irg_uninit.as_mut_ptr() as *mut v128;
     let iby_ptr = iby_uninit.as_mut_ptr() as *mut v128;
 
@@ -19610,7 +20853,7 @@ pub unsafe fn eval_winner_patch_hd_simd128(
     }
 
     // Stage 2: Luma SAD FIRST (defer block sums & sum_wi2 until winner passes gate).
-    let mut il_uninit = core::mem::MaybeUninit::<[v128; 64]>::uninit();
+    let mut il_uninit = [i32x4_splat(0); 64];
     let il_ptr = il_uninit.as_mut_ptr() as *mut v128;
     let mut sum_wi0 = zero_v;
     let mut sum_wi1 = zero_v;
@@ -19924,7 +21167,7 @@ pub unsafe fn refine_subpixel_ic_lk_huber_simd128(
         let v_eps = f32x4_splat(1e-6);
         let v_inv2s = f32x4_splat(inv_2s);
         let v_inv2s2 = f32x4_splat(inv_2s2);
-        let mut il_uninit = core::mem::MaybeUninit::<[v128; 56]>::uninit();
+        let mut il_uninit = [i32x4_splat(0); 56];
         let il_cache = il_uninit.as_mut_ptr() as *mut v128;
 
         for iter in 0..3usize {
@@ -20472,11 +21715,11 @@ pub unsafe fn eval_cam_coarse_3x3_simd128(
                 )
             };
         }
-        let mut e_lo_uninit = core::mem::MaybeUninit::<[v128; 13]>::uninit();
-        let mut e_hi_uninit = core::mem::MaybeUninit::<[v128; 13]>::uninit();
-        let mut e2_hi_uninit = core::mem::MaybeUninit::<[v128; 13]>::uninit();
-        let mut o_lo_uninit = core::mem::MaybeUninit::<[v128; 13]>::uninit();
-        let mut o_hi_uninit = core::mem::MaybeUninit::<[v128; 13]>::uninit();
+        let mut e_lo_uninit = [i32x4_splat(0); 13];
+        let mut e_hi_uninit = [i32x4_splat(0); 13];
+        let mut e2_hi_uninit = [i32x4_splat(0); 13];
+        let mut o_lo_uninit = [i32x4_splat(0); 13];
+        let mut o_hi_uninit = [i32x4_splat(0); 13];
         let e_lo = e_lo_uninit.as_mut_ptr() as *mut v128;
         let e_hi = e_hi_uninit.as_mut_ptr() as *mut v128;
         let e2_hi = e2_hi_uninit.as_mut_ptr() as *mut v128;
@@ -20693,8 +21936,8 @@ pub unsafe fn eval_cam_coarse_tile_simd128(
             };
         }
         let y_base = ((ty as i32) - center_dy - 3) as usize;
-        let mut all_e_uninit = core::mem::MaybeUninit::<[v128; 51]>::uninit();
-        let mut all_o_uninit = core::mem::MaybeUninit::<[v128; 51]>::uninit();
+        let mut all_e_uninit = [i32x4_splat(0); 51];
+        let mut all_o_uninit = [i32x4_splat(0); 51];
         let all_e = all_e_uninit.as_mut_ptr() as *mut v128;
         let all_o = all_o_uninit.as_mut_ptr() as *mut v128;
         let p0 = prev_pyr_ptr.add(y_base * pyr_w + bx);

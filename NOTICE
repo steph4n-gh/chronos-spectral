@@ -1,0 +1,16 @@
+CHRONOS-SPECTRAL
+Copyright 2026 steph4n-gh and contributors
+
+This product includes zero-allocation non-causal spatiotemporal wavefield
+tracking, continuum mechanics, and in-situ physical law discovery software
+developed by steph4n-gh (https://github.com/steph4n-gh/chronos-spectral).
+
+Media & Benchmark Sample Assets Notice:
+All software source code, build/verification scripts, documentation, and
+compiled WebAssembly binaries (including web/chronos_spectral.wasm) are
+licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The standalone demonstration and calibration video files under web/samples/
+are separate third-party open-licensed media assets (CC BY, CC BY-SA, CC0,
+and U.S. Public Domain) retained under their respective licenses and
+attributions documented in web/samples/ATTRIBUTION.md.

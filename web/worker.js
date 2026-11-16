@@ -33,7 +33,7 @@ let resScale = 1;
 let wasmExports = null;
 let wasmMemory = null;
 
-// Pre-allocated permanent views into 288-page (18 MB) static Wasm linear memory
+// Pre-allocated permanent views into 320-page (20 MB, up from 288-page Wave-1 baseline) static Wasm linear memory
 const ringSlotU8 = new Array(RING_LEN);
 const ringSlotImgData = new Array(RING_LEN);
 const ecaOverlayBackingBuf = new Uint8ClampedArray(MAX_FRAME_BYTES);
@@ -44,6 +44,144 @@ let fiedlerView = null;
 let telemView = null;
 let slotMetaView = null;
 const slotPipImgData = new Array(MAX_TARGETS).fill(null);
+
+// CHRONOS-1000 Zero-ML Continuum & Micro-Swarm C-ABI Constants (parameterized grid)
+const MAX_MICRO = 1536;
+const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
+const MAX_RIGID_BODIES = 32;
+const BODY_STRIDE = 8; // [body_id, member_count, cx, cy, vx, vy, omega_rad_s, se2_rmse_px]
+const FIELD_GRID_W = 40;
+const FIELD_GRID_H = 22;
+const FIELD_CELLS = FIELD_GRID_W * FIELD_GRID_H; // 880
+const FIELD_STRIDE = 6; // [u_px_s, v_px_s, vorticity_s1, divergence_s1, ftle_s1, valid_weight]
+const SWARM_TELEM_LEN = 64;
+
+let microTracksView = null;
+let continuumFieldView = null;
+let rigidBodiesView = null;
+let modalFieldView = null;
+let swarmTelemView = null;
+
+let userSwarmMode = 0; // Persistent user selection (default Off per Astra-1 gate: 0=off, 1=auto, 2=forced)
+let swarmMode = 0; // Active mode applied to Wasm (includes dense scenario/sample overrides)
+let denseSwarmOverrideActive = false;
+let chronos1000AbiValid = false;
+let fieldOverlayMode = 0; // 0=off (tracks+hulls only), 1=velocity, 2=vorticity, 3=ftle, 4=modal_phase
+let inspectedMicroTid = 0;
+let lastInspectStatus = 'idle';
+let lastInspectReqSeq = 0;
+let lastInspectResSeq = 0;
+let lastInspectReqX = null;
+let lastInspectReqY = null;
+let lastInspectReqNormX = null;
+let lastInspectReqNormY = null;
+
+function clearActiveInspectionSelection() {
+  inspectedMicroTid = 0;
+  lastInspectStatus = 'idle';
+  lastInspectReqX = null;
+  lastInspectReqY = null;
+  lastInspectReqNormX = null;
+  lastInspectReqNormY = null;
+}
+let lastFieldRenderMs = 0.0;
+let lastSwarmCopyMs = 0.0;
+let lastFieldBackend = 'none';
+let lastDtSecUsed = 1.0 / 30.0;
+let ingestElapsedMs = 0.0;
+let latestCausalTimeMs = 0.0;
+let latestCausalPtsMs = -1.0;
+
+function hasChronos1000Exports() {
+  return Boolean(
+    chronos1000AbiValid &&
+    wasmExports &&
+    typeof wasmExports.chronos_get_micro_tracks_ptr === 'function' &&
+    typeof wasmExports.chronos_get_continuum_field_ptr === 'function' &&
+    typeof wasmExports.chronos_get_modal_field_ptr === 'function' &&
+    typeof wasmExports.chronos_get_rigid_bodies_ptr === 'function' &&
+    typeof wasmExports.chronos_get_swarm_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_set_swarm_mode === 'function' &&
+    typeof wasmExports.chronos_get_swarm_mode === 'function' &&
+    typeof wasmExports.chronos_inspect_field_point === 'function' &&
+    typeof wasmExports.chronos_set_focus_target === 'function'
+  );
+}
+
+function clearChronos1000Views() {
+  chronos1000AbiValid = false;
+  microTracksView = null;
+  continuumFieldView = null;
+  rigidBodiesView = null;
+  modalFieldView = null;
+  swarmTelemView = null;
+}
+
+function refreshChronos1000Views() {
+  if (
+    !wasmMemory ||
+    !wasmExports ||
+    typeof wasmExports.chronos_get_micro_tracks_ptr !== 'function' ||
+    typeof wasmExports.chronos_get_continuum_field_ptr !== 'function' ||
+    typeof wasmExports.chronos_get_modal_field_ptr !== 'function' ||
+    typeof wasmExports.chronos_get_rigid_bodies_ptr !== 'function' ||
+    typeof wasmExports.chronos_get_swarm_telemetry_ptr !== 'function' ||
+    typeof wasmExports.chronos_set_swarm_mode !== 'function' ||
+    typeof wasmExports.chronos_get_swarm_mode !== 'function' ||
+    typeof wasmExports.chronos_inspect_field_point !== 'function' ||
+    typeof wasmExports.chronos_set_focus_target !== 'function'
+  ) {
+    clearChronos1000Views();
+    return false;
+  }
+  const buf = wasmMemory.buffer;
+  const specs = [
+    { ptr: wasmExports.chronos_get_micro_tracks_ptr(), len: MAX_MICRO * MICRO_STRIDE },
+    { ptr: wasmExports.chronos_get_continuum_field_ptr(), len: FIELD_CELLS * FIELD_STRIDE },
+    { ptr: wasmExports.chronos_get_modal_field_ptr(), len: FIELD_CELLS },
+    { ptr: wasmExports.chronos_get_rigid_bodies_ptr(), len: MAX_RIGID_BODIES * BODY_STRIDE },
+    { ptr: wasmExports.chronos_get_swarm_telemetry_ptr(), len: SWARM_TELEM_LEN },
+  ];
+  for (let i = 0; i < specs.length; i++) {
+    const p = specs[i].ptr;
+    const byteLen = specs[i].len * 4;
+    if (!Number.isInteger(p) || p <= 0 || (p & 3) !== 0 || p + byteLen > buf.byteLength) {
+      clearChronos1000Views();
+      return false;
+    }
+    for (let j = i + 1; j < specs.length; j++) {
+      const q = specs[j].ptr;
+      const qByteLen = specs[j].len * 4;
+      if (p < q + qByteLen && q < p + byteLen) {
+        clearChronos1000Views();
+        return false;
+      }
+    }
+  }
+  microTracksView = new Float32Array(buf, specs[0].ptr, specs[0].len);
+  continuumFieldView = new Float32Array(buf, specs[1].ptr, specs[1].len);
+  modalFieldView = new Float32Array(buf, specs[2].ptr, specs[2].len);
+  rigidBodiesView = new Float32Array(buf, specs[3].ptr, specs[3].len);
+  swarmTelemView = new Float32Array(buf, specs[4].ptr, specs[4].len);
+  chronos1000AbiValid = true;
+  wasmExports.chronos_set_swarm_mode(swarmMode);
+  return true;
+}
+
+function isChronos1000Scenario(sc) {
+  return sc === 'vortex_swarm_1200' || sc === 'murmuration_1200' || sc === 'modal_beam_1152';
+}
+
+// Pre-allocated ring-aligned snapshot buffers so t-effK HUD renders stay locked to dispSlot
+const swarmRingValid = new Uint8Array(RING_LEN);
+const ringIngestFrameId = new Int32Array(RING_LEN).fill(-1);
+const ringIngestTimeMs = new Float64Array(RING_LEN).fill(-1.0);
+const ringIngestPtsMs = new Float64Array(RING_LEN).fill(-1.0);
+const swarmRingMicro = Array.from({ length: RING_LEN }, () => new Float32Array(MAX_MICRO * MICRO_STRIDE));
+const swarmRingField = Array.from({ length: RING_LEN }, () => new Float32Array(FIELD_CELLS * FIELD_STRIDE));
+const swarmRingBodies = Array.from({ length: RING_LEN }, () => new Float32Array(MAX_RIGID_BODIES * BODY_STRIDE));
+const swarmRingModal = Array.from({ length: RING_LEN }, () => new Float32Array(FIELD_CELLS));
+const swarmRingTelem = Array.from({ length: RING_LEN }, () => new Float32Array(SWARM_TELEM_LEN));
 
 // OffscreenCanvases & 2D contexts (pre-allocated once at boot)
 let hudCanvas = null;
@@ -105,6 +243,7 @@ let sourceMode = 'testbench'; // 'testbench' | 'webcam' | 'video'
 let benchScenario = 'pillar_crossing'; // 'pillar_crossing' | 'short_gap_bridge' | 'ballistic_cascade' | 'harmonic_tremor' | 'percussion_ricochet'
 let showEcaOverlay = false;
 let showKalmanBaseline = true;
+let showHeroTargets = true;
 let showAllOverlays = false;
 let strobeEnabled = true;
 const cropNorm = new Float64Array([0.0, 0.0, 1.0, 1.0]); // [x, y, w, h] in [0..1]
@@ -231,12 +370,14 @@ const trailY = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
 // Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 31 = N - 1)
 const MAX_KRYLOV = 31;
 const activeNodeIdx = new Int32Array(GRAPH_NODES);
+const subL = new Float64Array(GRAPH_NODES * GRAPH_NODES);
 const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
 const lanczosAlpha = new Float64Array(MAX_KRYLOV);
 const lanczosBeta = new Float64Array(MAX_KRYLOV);
+const dDiag = new Float64Array(MAX_KRYLOV);
+const eSub = new Float64Array(GRAPH_NODES);
 const lanczosW = new Float64Array(GRAPH_NODES);
-const jacobiA = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
-const jacobiV = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
+const zVec = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
 const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
 const eigVecBuf = new Float64Array(GRAPH_NODES);
 
@@ -306,6 +447,7 @@ let calProvenance = 'none'; // 'none' | 'assumed' | 'surveyed'
 let calArmed = 'none';      // 'none' | 'ruler' | 'homography'
 let calPtCount = 0;
 let calDraftCount = 0;
+let lastCalSyncSeq = 0;
 let calRulerMeters = 1.0;
 let calPlaneW = 2.84;
 let calPlaneH = 1.42;
@@ -859,6 +1001,7 @@ function emitCalibrationState(overrideNotice) {
     calArmed,
     calPtCount,
     calDraftCount,
+    calSyncSeq: lastCalSyncSeq,
     rulerMeters: calArmed === 'ruler' ? calDraftRulerMeters : calRulerMeters,
     planeW: calArmed === 'homography' ? calDraftPlaneW : calPlaneW,
     planeH: calArmed === 'homography' ? calDraftPlaneH : calPlaneH,
@@ -1034,6 +1177,371 @@ function getActiveSimDiscCount() {
   return benchScenario === 'multi_target_swarm' ? 12 : 4;
 }
 
+// ============================================================================
+// CHRONOS-1000 High-Density Blind Scene Generators (Matched to benchmark_1000.mjs Q1-Q3)
+// ============================================================================
+
+const C1K_REF_W = 640.0;
+const C1K_REF_H = 360.0;
+const C1K_BG_U32 = (new Uint8Array(new Uint32Array([0x11223344]).buffer)[0] === 0x44)
+  ? 0xFF160E0A
+  : 0x0A0E16FF;
+
+let c1kPixelBuf = new Uint8ClampedArray(640 * 360 * 4);
+let c1kPixelU32 = new Uint32Array(c1kPixelBuf.buffer);
+let c1kPixelImgData = new ImageData(c1kPixelBuf, 640, 360);
+
+const C1K_MAX_PTS = 1208;
+const c1kX = new Float32Array(C1K_MAX_PTS);
+const c1kY = new Float32Array(C1K_MAX_PTS);
+const c1kVx = new Float32Array(C1K_MAX_PTS);
+const c1kVy = new Float32Array(C1K_MAX_PTS);
+const c1kBaseX = new Float32Array(C1K_MAX_PTS);
+const c1kBaseY = new Float32Array(C1K_MAX_PTS);
+const c1kModeShape = new Float32Array(C1K_MAX_PTS);
+const c1kPeak = new Float32Array(C1K_MAX_PTS);
+const c1kTintR = new Float32Array(C1K_MAX_PTS);
+const c1kTintG = new Float32Array(C1K_MAX_PTS);
+const c1kTintB = new Float32Array(C1K_MAX_PTS);
+const c1kBoidCellHead = new Int16Array(60 * 35);
+const c1kBoidCellNext = new Int16Array(1100);
+const c1kVortexList = [];
+const c1kRigidDefs = [
+  { cx: 140.0, cy: 135.0, vx: 16.0, vy: 8.0, omega: 0.90, theta: 0.0 },
+  { cx: 330.0, cy: 235.0, vx: 8.0, vy: -10.0, omega: -0.70, theta: 0.0 },
+  { cx: 505.0, cy: 135.0, vx: -14.0, vy: 12.0, omega: 0.60, theta: 0.0 },
+];
+const c1kPolyOffsetsX = new Float32Array(36);
+const c1kPolyOffsetsY = new Float32Array(36);
+let c1kSimCount = 0;
+let c1kTimeSec = 0.0;
+
+(function initC1kPolyOffsets() {
+  for (let k = 0; k < 24; k++) {
+    const a = (2.0 * Math.PI * k) / 24.0;
+    const r = 42.0 + ((k & 1) === 0 ? 2.0 : -2.0);
+    c1kPolyOffsetsX[k] = r * Math.cos(a);
+    c1kPolyOffsetsY[k] = r * Math.sin(a);
+  }
+  for (let k = 0; k < 12; k++) {
+    const a = (2.0 * Math.PI * k) / 12.0 + Math.PI / 12.0;
+    c1kPolyOffsetsX[24 + k] = 22.0 * Math.cos(a);
+    c1kPolyOffsetsY[24 + k] = 22.0 * Math.sin(a);
+  }
+})();
+
+function seedC1kParticleVisual(slot, seedId) {
+  const h1 = Math.abs(Math.sin(seedId * 12.9898 + 0.5) * 43758.5453) % 1.0;
+  const h2 = Math.abs(Math.sin(seedId * 78.233 + 1.9) * 43758.5453) % 1.0;
+  c1kPeak[slot] = 212.0 + h1 * 38.0;
+  c1kTintR[slot] = 0.88 + 0.22 * h2;
+  c1kTintG[slot] = 0.94 + 0.12 * (1.0 - h1);
+  c1kTintB[slot] = 1.05 - 0.18 * h2;
+}
+
+function ensureC1kPixelSurface(w, h) {
+  if (c1kPixelImgData.width === w && c1kPixelImgData.height === h) return;
+  c1kPixelBuf = new Uint8ClampedArray(w * h * 4);
+  c1kPixelU32 = new Uint32Array(c1kPixelBuf.buffer);
+  c1kPixelImgData = new ImageData(c1kPixelBuf, w, h);
+}
+
+function c1kVortexVelocity(x, y, out) {
+  let u = 0.0;
+  let v = 0.0;
+  const invRc2 = 1.0 / (48.0 * 48.0);
+  for (let i = 0; i < c1kVortexList.length; i++) {
+    const vo = c1kVortexList[i];
+    const dx = x - vo.cx;
+    const dy = y - vo.cy;
+    const r2 = dx * dx + dy * dy;
+    if (r2 > 1e-6) {
+      const f = (vo.k / r2) * (1.0 - Math.exp(-r2 * invRc2));
+      u += -dy * f;
+      v += dx * f;
+    }
+  }
+  out[0] = u;
+  out[1] = v;
+}
+
+const _c1kK1 = new Float32Array(2);
+const _c1kK2 = new Float32Array(2);
+const _c1kK3 = new Float32Array(2);
+const _c1kK4 = new Float32Array(2);
+
+function resetChronos1000Scenario() {
+  c1kTimeSec = 0.0;
+  c1kSimCount = 0;
+  if (benchScenario === 'vortex_swarm_1200') {
+    c1kVortexList.length = 0;
+    const K = 4600.0;
+    const bases = [
+      [210.0, 180.0, K],
+      [430.0, 180.0, -K],
+    ];
+    for (const mx of [-1, 0, 1]) {
+      for (const my of [-1, 0, 1]) {
+        const sign = (mx !== 0 ? -1 : 1) * (my !== 0 ? -1 : 1);
+        for (const [bx, by, bk] of bases) {
+          const vx = mx === 0 ? bx : mx === -1 ? 2.0 * 14.0 - bx : 2.0 * 626.0 - bx;
+          const vy = my === 0 ? by : my === -1 ? 2.0 * 14.0 - by : 2.0 * 346.0 - by;
+          c1kVortexList.push({ cx: vx, cy: vy, k: bk * sign });
+        }
+      }
+    }
+    const nx = 48;
+    const ny = 25;
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        const idx = j * nx + i;
+        const h1 = Math.sin(idx * 12.9898 + 1.23) * 43758.5453;
+        const h2 = Math.sin(idx * 78.233 + 4.56) * 43758.5453;
+        c1kX[idx] = 22.0 + ((i + 0.5) * (618.0 - 22.0)) / nx + (h1 - Math.floor(h1) - 0.5) * 3.0;
+        c1kY[idx] = 20.0 + ((j + 0.5) * (340.0 - 20.0)) / ny + (h2 - Math.floor(h2) - 0.5) * 3.0;
+        seedC1kParticleVisual(idx, idx + 1);
+      }
+    }
+    c1kSimCount = 1200;
+  } else if (benchScenario === 'murmuration_1200') {
+    c1kRigidDefs[0] = { cx: 140.0, cy: 135.0, vx: 16.0, vy: 8.0, omega: 0.90, theta: 0.0 };
+    c1kRigidDefs[1] = { cx: 330.0, cy: 235.0, vx: 8.0, vy: -10.0, omega: -0.70, theta: 0.0 };
+    c1kRigidDefs[2] = { cx: 505.0, cy: 135.0, vx: -14.0, vy: 12.0, omega: 0.60, theta: 0.0 };
+    let bSeed = 0;
+    for (let b = 0; b < 3; b++) {
+      for (let k = 0; k < 36; k++) {
+        seedC1kParticleVisual(b * 36 + k, 1 + b * 40 + k);
+        bSeed++;
+      }
+    }
+    const candX = [];
+    const candY = [];
+    const nx = 50;
+    const ny = 28;
+    for (let j = 0; j < ny; j++) {
+      for (let i = 0; i < nx; i++) {
+        const idx = j * nx + i;
+        const h1 = Math.sin(idx * 17.13 + 0.7) * 43758.5453;
+        const h2 = Math.sin(idx * 91.7 + 2.1) * 43758.5453;
+        const px = 22.0 + ((i + 0.5) * 596.0) / nx + (h1 - Math.floor(h1) - 0.5) * 3.0;
+        const py = 20.0 + ((j + 0.5) * 320.0) / ny + (h2 - Math.floor(h2) - 0.5) * 3.0;
+        let ok = true;
+        for (let b = 0; b < 3; b++) {
+          if (Math.hypot(px - c1kRigidDefs[b].cx, py - c1kRigidDefs[b].cy) < 58.0) {
+            ok = false;
+            break;
+          }
+        }
+        if (ok) {
+          candX.push(px);
+          candY.push(py);
+        }
+      }
+    }
+    const step = candX.length / 1100.0;
+    for (let m = 0; m < 1100; m++) {
+      const si = Math.floor(m * step);
+      const px = candX[si];
+      c1kX[108 + m] = px;
+      c1kY[108 + m] = candY[si];
+      c1kVx[108 + m] = 32.0;
+      c1kVy[108 + m] = 6.0 * Math.sin(0.02 * px);
+      seedC1kParticleVisual(108 + m, 200 + m);
+    }
+    c1kSimCount = 1208;
+  } else if (benchScenario === 'modal_beam_1152') {
+    const nx = 48;
+    const ny = 24;
+    for (let j = 0; j < ny; j++) {
+      const y0 = 72.0 + (j * (288.0 - 72.0)) / (ny - 1);
+      for (let i = 0; i < nx; i++) {
+        const idx = j * nx + i;
+        const x0 = 44.0 + (i * (596.0 - 44.0)) / (nx - 1);
+        const u = (x0 - 320.0) / 276.0;
+        c1kBaseX[idx] = x0;
+        c1kBaseY[idx] = y0;
+        c1kModeShape[idx] = Math.sin(0.5 * Math.PI * u);
+        c1kX[idx] = x0;
+        c1kY[idx] = y0;
+        seedC1kParticleVisual(idx, idx + 1);
+      }
+    }
+    c1kSimCount = 1152;
+  }
+}
+
+function stepAndRenderChronos1000Scene(dtSec) {
+  const dt = Math.min(0.05, Math.max(0.005, dtSec));
+  const sx = frameW / C1K_REF_W;
+  const sy = frameH / C1K_REF_H;
+  ensureC1kPixelSurface(frameW, frameH);
+  c1kPixelU32.fill(C1K_BG_U32);
+
+  if (benchScenario === 'vortex_swarm_1200') {
+    for (let i = 0; i < 1200; i++) {
+      const x = c1kX[i];
+      const y = c1kY[i];
+      c1kVortexVelocity(x, y, _c1kK1);
+      c1kVortexVelocity(x + 0.5 * dt * _c1kK1[0], y + 0.5 * dt * _c1kK1[1], _c1kK2);
+      c1kVortexVelocity(x + 0.5 * dt * _c1kK2[0], y + 0.5 * dt * _c1kK2[1], _c1kK3);
+      c1kVortexVelocity(x + dt * _c1kK3[0], y + dt * _c1kK3[1], _c1kK4);
+      let nx = x + ((_c1kK1[0] + 2.0 * _c1kK2[0] + 2.0 * _c1kK3[0] + _c1kK4[0]) / 6.0) * dt;
+      let ny = y + ((_c1kK1[1] + 2.0 * _c1kK2[1] + 2.0 * _c1kK3[1] + _c1kK4[1]) / 6.0) * dt;
+      if (nx < 14.0) nx = 14.0;
+      else if (nx > 626.0) nx = 626.0;
+      if (ny < 14.0) ny = 14.0;
+      else if (ny > 346.0) ny = 346.0;
+      c1kX[i] = nx;
+      c1kY[i] = ny;
+    }
+  } else if (benchScenario === 'murmuration_1200') {
+    const t = c1kTimeSec;
+    for (let b = 0; b < 3; b++) {
+      const bd = c1kRigidDefs[b];
+      bd.cx += bd.vx * dt;
+      bd.cy += bd.vy * dt;
+      bd.theta += bd.omega * dt;
+      if (bd.cx < 62.0) { bd.cx = 62.0; bd.vx = Math.abs(bd.vx); }
+      else if (bd.cx > 578.0) { bd.cx = 578.0; bd.vx = -Math.abs(bd.vx); }
+      if (bd.cy < 62.0) { bd.cy = 62.0; bd.vy = Math.abs(bd.vy); }
+      else if (bd.cy > 298.0) { bd.cy = 298.0; bd.vy = -Math.abs(bd.vy); }
+      const ct = Math.cos(bd.theta);
+      const st = Math.sin(bd.theta);
+      for (let k = 0; k < 36; k++) {
+        const lx = c1kPolyOffsetsX[k];
+        const ly = c1kPolyOffsetsY[k];
+        c1kX[b * 36 + k] = bd.cx + lx * ct - ly * st;
+        c1kY[b * 36 + k] = bd.cy + lx * st + ly * ct;
+      }
+    }
+    c1kBoidCellHead.fill(-1);
+    for (let m = 0; m < 1100; m++) {
+      const idx = 108 + m;
+      const gx = Math.max(0, Math.min(59, Math.floor(c1kX[idx] / 12.0)));
+      const gy = Math.max(0, Math.min(34, Math.floor(c1kY[idx] / 12.0)));
+      const cIdx = gy * 60 + gx;
+      c1kBoidCellNext[m] = c1kBoidCellHead[cIdx];
+      c1kBoidCellHead[cIdx] = m;
+    }
+    for (let m = 0; m < 1100; m++) {
+      const idx = 108 + m;
+      const bx = c1kX[idx];
+      const by = c1kY[idx];
+      let ux = 36.0 * Math.cos(0.45 * t) + 18.0 * Math.sin(0.012 * by + 1.2 * t);
+      let uy = 22.0 * Math.sin(0.65 * t) + 14.0 * Math.cos(0.009 * bx - 0.9 * t);
+      if (bx < 40.0) ux += (40.0 - bx) * 2.5;
+      if (bx > 600.0) ux -= (bx - 600.0) * 2.5;
+      if (by < 36.0) uy += (36.0 - by) * 2.5;
+      if (by > 324.0) uy -= (by - 324.0) * 2.5;
+      for (let b = 0; b < 3; b++) {
+        const dx = bx - c1kRigidDefs[b].cx;
+        const dy = by - c1kRigidDefs[b].cy;
+        const d = Math.hypot(dx, dy);
+        if (d < 58.0 && d > 1e-3) {
+          const push = (58.0 - d) * 4.5;
+          ux += (dx / d) * push;
+          uy += (dy / d) * push;
+        }
+      }
+      const gx = Math.max(0, Math.min(59, Math.floor(bx / 12.0)));
+      const gy = Math.max(0, Math.min(34, Math.floor(by / 12.0)));
+      for (let oy = -1; oy <= 1; oy++) {
+        const yy = gy + oy;
+        if (yy < 0 || yy >= 35) continue;
+        for (let ox = -1; ox <= 1; ox++) {
+          const xx = gx + ox;
+          if (xx < 0 || xx >= 60) continue;
+          let other = c1kBoidCellHead[yy * 60 + xx];
+          while (other !== -1) {
+            if (other !== m) {
+              const jIdx = 108 + other;
+              const dx = bx - c1kX[jIdx];
+              const dy = by - c1kY[jIdx];
+              const d2 = dx * dx + dy * dy;
+              if (d2 < 90.25 && d2 > 1e-4) {
+                const d = Math.sqrt(d2);
+                const push = (9.5 - d) * 6.0;
+                ux += (dx / d) * push;
+                uy += (dy / d) * push;
+              }
+            }
+            other = c1kBoidCellNext[other];
+          }
+        }
+      }
+      let nvx = c1kVx[idx] * 0.65 + ux * 0.35;
+      let nvy = c1kVy[idx] * 0.65 + uy * 0.35;
+      const spd = Math.hypot(nvx, nvy);
+      if (spd > 75.0) {
+        nvx *= 75.0 / spd;
+        nvy *= 75.0 / spd;
+      }
+      c1kVx[idx] = nvx;
+      c1kVy[idx] = nvy;
+    }
+    for (let m = 0; m < 1100; m++) {
+      const idx = 108 + m;
+      let nbx = Math.min(624.0, Math.max(16.0, c1kX[idx] + c1kVx[idx] * dt));
+      let nby = Math.min(344.0, Math.max(16.0, c1kY[idx] + c1kVy[idx] * dt));
+      for (let b = 0; b < 3; b++) {
+        const dx = nbx - c1kRigidDefs[b].cx;
+        const dy = nby - c1kRigidDefs[b].cy;
+        const d = Math.hypot(dx, dy);
+        if (d < 50.0 && d > 1e-3) {
+          nbx = c1kRigidDefs[b].cx + (dx / d) * 50.0;
+          nby = c1kRigidDefs[b].cy + (dy / d) * 50.0;
+        }
+      }
+      c1kX[idx] = nbx;
+      c1kY[idx] = nby;
+    }
+  } else if (benchScenario === 'modal_beam_1152') {
+    const phase = Math.sin(2.0 * Math.PI * 3.00 * c1kTimeSec);
+    for (let i = 0; i < 1152; i++) {
+      c1kX[i] = c1kBaseX[i];
+      c1kY[i] = c1kBaseY[i] + 1.25 * c1kModeShape[i] * phase;
+    }
+  }
+
+  c1kTimeSec += dt;
+
+  // Stamp textured Gaussian sub-pixel blobs matching benchmark_1000.mjs appearance
+  const invTwoSig2 = 1.0 / (2.0 * (0.85 * sx) * (0.85 * sx));
+  const r2Max = 4.84 * sx * sx;
+  const radPx = Math.max(1, Math.ceil(2.2 * sx));
+  for (let i = 0; i < c1kSimCount; i++) {
+    const cx = c1kX[i] * sx;
+    const cy = c1kY[i] * sy;
+    const x0 = Math.max(0, Math.floor(cx) - radPx);
+    const x1 = Math.min(frameW - 1, Math.floor(cx) + radPx);
+    const y0 = Math.max(0, Math.floor(cy) - radPx);
+    const y1 = Math.min(frameH - 1, Math.floor(cy) + radPx);
+    const pk = c1kPeak[i];
+    const tR = c1kTintR[i];
+    const tG = c1kTintG[i];
+    const tB = c1kTintB[i];
+    for (let py = y0; py <= y1; py++) {
+      const dy = py - cy;
+      for (let px = x0; px <= x1; px++) {
+        const dx = px - cx;
+        const r2 = dx * dx + dy * dy;
+        if (r2 > r2Max) continue;
+        const g = Math.exp(-r2 * invTwoSig2);
+        const off = (py * frameW + px) * 4;
+        const r = Math.min(255, Math.round(10 + pk * tR * g));
+        const gr = Math.min(255, Math.round(14 + pk * tG * g));
+        const b = Math.min(255, Math.round(22 + pk * tB * g));
+        if (r > c1kPixelBuf[off]) c1kPixelBuf[off] = r;
+        if (gr > c1kPixelBuf[off + 1]) c1kPixelBuf[off + 1] = gr;
+        if (b > c1kPixelBuf[off + 2]) c1kPixelBuf[off + 2] = b;
+      }
+    }
+  }
+
+  simCtx.putImageData(c1kPixelImgData, 0, 0);
+  return c1kPixelBuf;
+}
+
 const simDiscs = [
   { id: 0,  x: 52,  y: 56,  baseX: 66,  baseY: 56,  vx: 3.0,  vy: 0.0, ballistic: false, r: '#f83a44', core: '#ffe66e' },
   { id: 1,  x: 172, y: 56,  baseX: 254, baseY: 56,  vx: -3.0, vy: 0.0, ballistic: false, r: '#1ee1fa', core: '#0f2d55' },
@@ -1081,6 +1589,16 @@ const TARGET_COLORS = [
 const ZONE_COLORS = ['#00f0ff', '#ffb703', '#38f27a', '#ff4d6d'];
 
 function clearVisualQueues() {
+  swarmRingValid.fill(0);
+  ringIngestFrameId.fill(-1);
+  ringIngestTimeMs.fill(-1.0);
+  ringIngestPtsMs.fill(-1.0);
+  clearActiveInspectionSelection();
+  lastSwarmCopyMs = 0.0;
+  lastFieldRenderMs = 0.0;
+  ingestElapsedMs = 0.0;
+  latestCausalTimeMs = 0.0;
+  latestCausalPtsMs = -1.0;
   shockTriggerFrame.fill(-1);
   shockAge.fill(-1);
   shockInDeg.fill(0.0);
@@ -1411,7 +1929,9 @@ function renderPersistenceTimeline(force = false) {
 
 function resetTestbenchState() {
   const s = resScale;
-  if (benchScenario === 'ballistic_cascade') {
+  if (isChronos1000Scenario(benchScenario)) {
+    resetChronos1000Scenario();
+  } else if (benchScenario === 'ballistic_cascade') {
     simDiscs[0].x = 42 * s;  simDiscs[0].y = 146 * s; simDiscs[0].baseY = 146 * s; simDiscs[0].vx = 2.6 * s;  simDiscs[0].vy = -6.8 * s; simDiscs[0].ballistic = true;
     simDiscs[1].x = 278 * s; simDiscs[1].y = 138 * s; simDiscs[1].baseY = 146 * s; simDiscs[1].vx = -2.8 * s; simDiscs[1].vy = -5.6 * s; simDiscs[1].ballistic = true;
     simDiscs[2].x = 112 * s; simDiscs[2].y = 148 * s; simDiscs[2].baseY = 148 * s; simDiscs[2].vx = 2.2 * s;  simDiscs[2].vy = -6.2 * s; simDiscs[2].ballistic = true;
@@ -1486,6 +2006,9 @@ function resetTestbenchState() {
 }
 
 function stepAndRenderBlindPillarScene(dtSec) {
+  if (isChronos1000Scenario(benchScenario)) {
+    return stepAndRenderChronos1000Scene(dtSec);
+  }
   const ctx = simCtx;
   const s = resScale;
   const stepScale = Math.min(2.0, Math.max(0.25, dtSec * 60.0));
@@ -1933,7 +2456,96 @@ function findOrthogonalBasisSeed(n, numExisting, outOffset) {
   return false;
 }
 
+let tqlBestCol = 0;
+let tqlSecCol = -1;
+let tqlThetaMax = -1e30;
+let tqlThetaSecond = -1e30;
+
+function solveTridiagTql2(mDim) {
+  for (let i = 0; i < mDim; i++) {
+    dDiag[i] = lanczosAlpha[i];
+    eSub[i] = i + 1 < mDim ? lanczosBeta[i] : 0.0;
+  }
+  zVec.fill(0.0, 0, mDim * mDim);
+  for (let i = 0; i < mDim; i++) zVec[i * mDim + i] = 1.0;
+
+  for (let l = 0; l < mDim; l++) {
+    let iter = 0;
+    while (iter++ < 40) {
+      let m = l;
+      for (; m < mDim - 1; m++) {
+        if (Math.abs(eSub[m]) <= 1e-14 * (Math.abs(dDiag[m]) + Math.abs(dDiag[m + 1])) + 1e-30) {
+          break;
+        }
+      }
+      if (m === l) break;
+      let g = (dDiag[l + 1] - dDiag[l]) / (2.0 * eSub[l]);
+      const ag = Math.abs(g);
+      let r = ag < 1e100 ? Math.sqrt(g * g + 1.0) : ag;
+      g = dDiag[m] - dDiag[l] + eSub[l] / (g + (g >= 0.0 ? r : -r));
+      let s = 1.0;
+      let c = 1.0;
+      let p = 0.0;
+      for (let i = m - 1; i >= l; i--) {
+        const f = s * eSub[i];
+        const b = c * eSub[i];
+        const r2 = f * f + g * g;
+        r = (r2 > 1e-200 && r2 < 1e200) ? Math.sqrt(r2) : Math.hypot(f, g);
+        eSub[i + 1] = r;
+        if (r < 1e-30) {
+          dDiag[i + 1] -= p;
+          eSub[m] = 0.0;
+          break;
+        }
+        s = f / r;
+        c = g / r;
+        g = dDiag[i + 1] - p;
+        r = (dDiag[i] - g) * s + 2.0 * c * b;
+        p = s * r;
+        dDiag[i + 1] = g + p;
+        g = c * r - b;
+        const rowI = i * mDim;
+        const rowI1 = rowI + mDim;
+        for (let k = 0; k < mDim; k++) {
+          const fz = zVec[rowI1 + k];
+          const zki = zVec[rowI + k];
+          zVec[rowI1 + k] = s * zki + c * fz;
+          zVec[rowI + k] = c * zki - s * fz;
+        }
+      }
+      if (r < 1e-30 && eSub[m] === 0.0) continue;
+      dDiag[l] -= p;
+      eSub[l] = g;
+      eSub[m] = 0.0;
+    }
+  }
+
+  let bestCol = 0;
+  let secCol = -1;
+  let thetaMax = -1e30;
+  let thetaSecond = -1e30;
+  for (let c = 0; c < mDim; c++) {
+    const val = dDiag[c];
+    if (val > thetaMax) {
+      thetaSecond = thetaMax;
+      secCol = bestCol;
+      thetaMax = val;
+      bestCol = c;
+    } else if (val > thetaSecond) {
+      thetaSecond = val;
+      secCol = c;
+    }
+  }
+  tqlBestCol = bestCol;
+  tqlSecCol = secCol;
+  tqlThetaMax = thetaMax;
+  tqlThetaSecond = thetaSecond;
+}
+
 function solveShiftedLanczosFiedler() {
+  if (wasmExports && typeof wasmExports.chronos_solve_fiedler_lanczos === 'function') {
+    return wasmExports.chronos_solve_fiedler_lanczos();
+  }
   let n = 0;
   for (let i = 0; i < GRAPH_NODES; i++) {
     if (laplacianView[i * GRAPH_NODES + i] > 1e-6) {
@@ -1947,13 +2559,24 @@ function solveShiftedLanczosFiedler() {
     return 0.0;
   }
 
+  for (let a = 0; a < n; a++) {
+    const ia = activeNodeIdx[a] * GRAPH_NODES;
+    const rOff = a * n;
+    subL[rOff + a] = laplacianView[ia + activeNodeIdx[a]];
+    for (let b = 0; b < a; b++) {
+      const v = laplacianView[ia + activeNodeIdx[b]];
+      subL[rOff + b] = v;
+      subL[b * n + a] = v;
+    }
+  }
+
   let mu = 0.0;
   for (let a = 0; a < n; a++) {
-    const ia = activeNodeIdx[a];
-    let rowSum = laplacianView[ia * GRAPH_NODES + ia];
+    const rOff = a * n;
+    let rowSum = subL[rOff + a];
     for (let b = 0; b < n; b++) {
       if (a !== b) {
-        rowSum += Math.abs(laplacianView[ia * GRAPH_NODES + activeNodeIdx[b]]);
+        rowSum += Math.abs(subL[rOff + b]);
       }
     }
     if (rowSum > mu) mu = rowSum;
@@ -1961,6 +2584,7 @@ function solveShiftedLanczosFiedler() {
   mu += 0.1;
 
   const mSteps = Math.min(n - 1, MAX_KRYLOV);
+  const invN = 1.0 / n;
 
   let mean0 = 0.0;
   for (let a = 0; a < n; a++) {
@@ -1968,7 +2592,7 @@ function solveShiftedLanczosFiedler() {
     lanczosQ[a] = val;
     mean0 += val;
   }
-  mean0 /= n;
+  mean0 *= invN;
   let norm0 = 0.0;
   for (let a = 0; a < n; a++) {
     lanczosQ[a] -= mean0;
@@ -1980,29 +2604,30 @@ function solveShiftedLanczosFiedler() {
   }
 
   let actualM = 0;
+  let convergedEarly = false;
   for (let j = 0; j < mSteps; j++) {
     const qOff = j * GRAPH_NODES;
 
     for (let a = 0; a < n; a++) {
-      const ia = activeNodeIdx[a];
+      const rOff = a * n;
       let sumL = 0.0;
       for (let b = 0; b < n; b++) {
-        sumL += laplacianView[ia * GRAPH_NODES + activeNodeIdx[b]] * lanczosQ[qOff + b];
+        sumL += subL[rOff + b] * lanczosQ[qOff + b];
       }
       lanczosW[a] = mu * lanczosQ[qOff + a] - sumL;
     }
 
     let wMean = 0.0;
     for (let a = 0; a < n; a++) wMean += lanczosW[a];
-    wMean /= n;
-    for (let a = 0; a < n; a++) lanczosW[a] -= wMean;
-
+    wMean *= invN;
     if (j > 0 && lanczosBeta[j - 1] > 0.0) {
       const prevOff = (j - 1) * GRAPH_NODES;
       const betaPrev = lanczosBeta[j - 1];
       for (let a = 0; a < n; a++) {
-        lanczosW[a] -= betaPrev * lanczosQ[prevOff + a];
+        lanczosW[a] = (lanczosW[a] - wMean) - betaPrev * lanczosQ[prevOff + a];
       }
+    } else {
+      for (let a = 0; a < n; a++) lanczosW[a] -= wMean;
     }
 
     let alpha = 0.0;
@@ -2011,8 +2636,11 @@ function solveShiftedLanczosFiedler() {
     }
     lanczosAlpha[j] = alpha;
 
+    let preNorm2 = 0.0;
     for (let a = 0; a < n; a++) {
-      lanczosW[a] -= alpha * lanczosQ[qOff + a];
+      const nv = lanczosW[a] - alpha * lanczosQ[qOff + a];
+      lanczosW[a] = nv;
+      preNorm2 += nv * nv;
     }
 
     for (let pass = 0; pass < 2; pass++) {
@@ -2024,8 +2652,14 @@ function solveShiftedLanczosFiedler() {
       }
       let wm = 0.0;
       for (let a = 0; a < n; a++) wm += lanczosW[a];
-      wm /= n;
-      for (let a = 0; a < n; a++) lanczosW[a] -= wm;
+      wm *= invN;
+      let post2 = 0.0;
+      for (let a = 0; a < n; a++) {
+        const nv = lanczosW[a] - wm;
+        lanczosW[a] = nv;
+        post2 += nv * nv;
+      }
+      if (pass === 0 && post2 > 0.5 * preNorm2) break;
     }
 
     let beta2 = 0.0;
@@ -2049,6 +2683,15 @@ function solveShiftedLanczosFiedler() {
       }
     } else {
       lanczosBeta[j] = beta;
+      if (n > 12 && (j === 9 || j === 15)) {
+        solveTridiagTql2(actualM);
+        const ritzRes1 = beta * Math.abs(zVec[tqlBestCol * actualM + (actualM - 1)]);
+        const ritzRes2 = tqlSecCol >= 0 ? beta * Math.abs(zVec[tqlSecCol * actualM + (actualM - 1)]) : 0.0;
+        if ((mu - tqlThetaMax) > 1e-4 && ritzRes1 < 1e-8 && ritzRes2 < 1e-7) {
+          convergedEarly = true;
+          break;
+        }
+      }
       const invBeta = 1.0 / beta;
       for (let a = 0; a < n; a++) {
         lanczosQ[nextOff + a] = lanczosW[a] * invBeta;
@@ -2056,85 +2699,21 @@ function solveShiftedLanczosFiedler() {
     }
   }
 
-  jacobiA.fill(0.0);
-  jacobiV.fill(0.0);
-  for (let r = 0; r < actualM; r++) {
-    jacobiV[r * actualM + r] = 1.0;
-    jacobiA[r * actualM + r] = lanczosAlpha[r];
-    if (r + 1 < actualM) {
-      const b = lanczosBeta[r];
-      jacobiA[r * actualM + (r + 1)] = b;
-      jacobiA[(r + 1) * actualM + r] = b;
-    }
-  }
-
-  for (let sweep = 0; sweep < 20; sweep++) {
-    let maxOff = 0.0;
-    for (let p = 0; p < actualM; p++) {
-      for (let q = p + 1; q < actualM; q++) {
-        const apq = jacobiA[p * actualM + q];
-        const absApq = Math.abs(apq);
-        if (absApq > maxOff) maxOff = absApq;
-        if (absApq < 1e-12) continue;
-
-        const app = jacobiA[p * actualM + p];
-        const aqq = jacobiA[q * actualM + q];
-        const tau = (aqq - app) / (2.0 * apq);
-        const t = tau >= 0.0
-          ? 1.0 / (tau + Math.sqrt(1.0 + tau * tau))
-          : -1.0 / (-tau + Math.sqrt(1.0 + tau * tau));
-        const c = 1.0 / Math.sqrt(1.0 + t * t);
-        const s = t * c;
-
-        jacobiA[p * actualM + p] = app - t * apq;
-        jacobiA[q * actualM + q] = aqq + t * apq;
-        jacobiA[p * actualM + q] = 0.0;
-        jacobiA[q * actualM + p] = 0.0;
-
-        for (let k = 0; k < actualM; k++) {
-          if (k !== p && k !== q) {
-            const akp = jacobiA[k * actualM + p];
-            const akq = jacobiA[k * actualM + q];
-            const nkp = c * akp - s * akq;
-            const nkq = s * akp + c * akq;
-            jacobiA[k * actualM + p] = nkp;
-            jacobiA[p * actualM + k] = nkp;
-            jacobiA[k * actualM + q] = nkq;
-            jacobiA[q * actualM + k] = nkq;
-          }
-          const vkp = jacobiV[k * actualM + p];
-          const vkq = jacobiV[k * actualM + q];
-          jacobiV[k * actualM + p] = c * vkp - s * vkq;
-          jacobiV[k * actualM + q] = s * vkp + c * vkq;
-        }
-      }
-    }
-    if (maxOff < 1e-11) break;
-  }
-
-  let bestCol = 0;
-  let thetaMax = -1e30;
-  let thetaSecond = -1e30;
-  for (let c = 0; c < actualM; c++) {
-    const val = jacobiA[c * actualM + c];
-    if (val > thetaMax) {
-      thetaSecond = thetaMax;
-      thetaMax = val;
-      bestCol = c;
-    } else if (val > thetaSecond) {
-      thetaSecond = val;
-    }
-  }
+  if (!convergedEarly) solveTridiagTql2(actualM);
+  const bestCol = tqlBestCol;
+  const thetaMax = tqlThetaMax;
+  const thetaSecond = tqlThetaSecond;
 
   const lambda2 = Math.max(0.0, mu - thetaMax);
   const lambda3 = actualM >= 2 ? Math.max(lambda2, mu - thetaSecond) : lambda2;
   const spectralGap = Math.max(0.0, lambda3 - lambda2);
 
   let dotPrev = 0.0;
+  const bestZOff = bestCol * actualM;
   for (let a = 0; a < n; a++) {
     let comp = 0.0;
     for (let j = 0; j < actualM; j++) {
-      comp += lanczosQ[j * GRAPH_NODES + a] * jacobiV[j * actualM + bestCol];
+      comp += lanczosQ[j * GRAPH_NODES + a] * zVec[bestZOff + j];
     }
     eigVecBuf[a] = comp;
     const nodeIdx = activeNodeIdx[a];
@@ -2426,6 +3005,763 @@ function renderCalibrationOverlay(W, H) {
   hudCtx.restore();
 }
 
+// ============================================================================
+// CHRONOS-1000 Field Layer Compositor (WebGL2 Instanced + Batched 2D Fallback)
+// ============================================================================
+
+const fieldTexRgba = new Uint8Array(FIELD_CELLS * 4);
+const fieldTexGlPremul = new Uint8Array(FIELD_CELLS * 4);
+const microInstBuf = new Float32Array(MAX_MICRO * 6);
+const bodyMemHead = new Int16Array(MAX_RIGID_BODIES + 1);
+const bodyMemNext = new Int16Array(MAX_MICRO);
+const hullPtsX = new Float32Array(MAX_MICRO);
+const hullPtsY = new Float32Array(MAX_MICRO);
+const hullIdx = new Int32Array(MAX_MICRO);
+const hullPoly = new Int32Array(MAX_MICRO * 2);
+
+let fieldGlCanvas = null;
+let fieldGlCtx = null;
+let fieldGlBroken = false;
+let fieldGlContextLost = false;
+let fieldGlQuadProg = null;
+let fieldGlQuadVao = null;
+let fieldGlTex = null;
+let fieldGlStemProg = null;
+let fieldGlStemVao = null;
+let fieldGlStemUInv = null;
+let fieldGlPipProg = null;
+let fieldGlPipVao = null;
+let fieldGlPipUInv = null;
+let fieldGlPipUHalf = null;
+let fieldGlInstVbo = null;
+
+function resetFieldWebGlResources() {
+  fieldGlCtx = null;
+  fieldGlQuadProg = null;
+  fieldGlQuadVao = null;
+  fieldGlTex = null;
+  fieldGlStemProg = null;
+  fieldGlStemVao = null;
+  fieldGlStemUInv = null;
+  fieldGlPipProg = null;
+  fieldGlPipVao = null;
+  fieldGlPipUInv = null;
+  fieldGlPipUHalf = null;
+  fieldGlInstVbo = null;
+}
+
+let field2dCanvas = null;
+let field2dCtx = null;
+let field2dImgData = null;
+
+function compileFieldShader(gl, type, src) {
+  const sh = gl.createShader(type);
+  gl.shaderSource(sh, src);
+  gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+    const info = gl.getShaderInfoLog(sh) || 'shader compile error';
+    gl.deleteShader(sh);
+    throw new Error(info);
+  }
+  return sh;
+}
+
+function linkFieldProgram(gl, vsSrc, fsSrc) {
+  const vs = compileFieldShader(gl, gl.VERTEX_SHADER, vsSrc);
+  const fs = compileFieldShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+  const prog = gl.createProgram();
+  gl.attachShader(prog, vs);
+  gl.attachShader(prog, fs);
+  gl.linkProgram(prog);
+  gl.deleteShader(vs);
+  gl.deleteShader(fs);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+    const info = gl.getProgramInfoLog(prog) || 'program link error';
+    gl.deleteProgram(prog);
+    throw new Error(info);
+  }
+  return prog;
+}
+
+function ensureFieldWebGl2(W, H) {
+  if (fieldGlBroken || fieldGlContextLost) return false;
+  if (fieldGlCtx) {
+    if (fieldGlCtx.isContextLost()) {
+      fieldGlContextLost = true;
+      resetFieldWebGlResources();
+      return false;
+    }
+    if (fieldGlCanvas.width !== W || fieldGlCanvas.height !== H) {
+      fieldGlCanvas.width = W;
+      fieldGlCanvas.height = H;
+    }
+    return true;
+  }
+  try {
+    if (!fieldGlCanvas) {
+      fieldGlCanvas = new OffscreenCanvas(W, H);
+      fieldGlCanvas.addEventListener('webglcontextlost', (ev) => {
+        ev.preventDefault();
+        fieldGlContextLost = true;
+        resetFieldWebGlResources();
+      });
+      fieldGlCanvas.addEventListener('webglcontextrestored', () => {
+        fieldGlContextLost = false;
+        resetFieldWebGlResources();
+      });
+    } else if (fieldGlCanvas.width !== W || fieldGlCanvas.height !== H) {
+      fieldGlCanvas.width = W;
+      fieldGlCanvas.height = H;
+    }
+    const gl = fieldGlCanvas.getContext('webgl2', {
+      alpha: true,
+      antialias: true,
+      depth: false,
+      stencil: false,
+      premultipliedAlpha: true,
+      preserveDrawingBuffer: false,
+    });
+    if (!gl || gl.isContextLost()) {
+      if (!gl) fieldGlBroken = true;
+      return false;
+    }
+
+    const quadVs = `#version 300 es
+      out vec2 vUv;
+      void main() {
+        vec2 p = vec2(
+          (gl_VertexID == 1 || gl_VertexID == 3 || gl_VertexID == 4) ? 1.0 : -1.0,
+          (gl_VertexID == 2 || gl_VertexID == 4 || gl_VertexID == 5) ? 1.0 : -1.0
+        );
+        vUv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
+        gl_Position = vec4(p, 0.0, 1.0);
+      }`;
+    const quadFs = `#version 300 es
+      precision mediump float;
+      uniform sampler2D uFieldTex;
+      in vec2 vUv;
+      out vec4 fragColor;
+      void main() {
+        fragColor = texture(uFieldTex, vUv);
+      }`;
+
+    const stemVs = `#version 300 es
+      layout(location = 0) in vec2 aPos;
+      layout(location = 1) in vec2 aVel;
+      layout(location = 2) in vec2 aMeta;
+      uniform vec2 uInvFrame;
+      out vec4 vColor;
+      void main() {
+        vec2 p = aPos * uInvFrame;
+        float spd = length(aVel);
+        vec2 stepPx = spd > 1e-3 ? aVel * min(0.16, 22.0 / spd) : vec2(0.0);
+        vec2 uv = p + (gl_VertexID == 1 ? stepPx * uInvFrame : vec2(0.0));
+        gl_Position = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 0.0, 1.0);
+        float code = aMeta.x;
+        float insp = aMeta.y;
+        vec3 col = insp > 0.5 ? vec3(0.99, 0.88, 0.28)
+          : (code > 2.5 ? vec3(1.0, 0.62, 0.18)
+          : (code > 1.5 ? vec3(0.96, 0.62, 0.04) : vec3(0.0, 0.90, 1.0)));
+        float alpha = (code > 1.5 && code < 2.5) ? 0.36 : 0.72;
+        vColor = vec4(col * alpha, alpha);
+      }`;
+    const stemFs = `#version 300 es
+      precision mediump float;
+      in vec4 vColor;
+      out vec4 fragColor;
+      void main() {
+        fragColor = vColor;
+      }`;
+
+    const pipVs = `#version 300 es
+      layout(location = 0) in vec2 aPos;
+      layout(location = 1) in vec2 aVel;
+      layout(location = 2) in vec2 aMeta;
+      uniform vec2 uInvFrame;
+      uniform vec2 uHalfNdc;
+      out vec2 vLocal;
+      out vec2 vMeta;
+      void main() {
+        vec2 uv = aPos * uInvFrame;
+        vec2 q = vec2(
+          (gl_VertexID & 1) == 0 ? -1.0 : 1.0,
+          (gl_VertexID & 2) == 0 ? -1.0 : 1.0
+        );
+        float scale = aMeta.y > 0.5 ? 1.65 : (aMeta.x > 2.5 ? 1.15 : 1.0);
+        vec2 ndc = vec2(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0) + q * uHalfNdc * scale;
+        gl_Position = vec4(ndc, 0.0, 1.0);
+        vLocal = q;
+        vMeta = aMeta;
+      }`;
+    const pipFs = `#version 300 es
+      precision mediump float;
+      in vec2 vLocal;
+      in vec2 vMeta;
+      out vec4 fragColor;
+      void main() {
+        float d = abs(vLocal.x) + abs(vLocal.y);
+        float cov = 1.0 - smoothstep(0.68, 1.02, d);
+        if (cov <= 0.01) discard;
+        float code = vMeta.x;
+        float insp = vMeta.y;
+        vec3 col = insp > 0.5 ? vec3(0.99, 0.88, 0.28)
+          : (code > 2.5 ? vec3(1.0, 0.62, 0.18)
+          : (code > 1.5 ? vec3(0.96, 0.62, 0.04) : vec3(0.0, 0.90, 1.0)));
+        float alpha = ((code > 1.5 && code < 2.5) ? 0.55 : 0.92) * cov;
+        fragColor = vec4(col * alpha, alpha);
+      }`;
+
+    fieldGlQuadProg = linkFieldProgram(gl, quadVs, quadFs);
+    fieldGlStemProg = linkFieldProgram(gl, stemVs, stemFs);
+    fieldGlPipProg = linkFieldProgram(gl, pipVs, pipFs);
+
+    fieldGlStemUInv = gl.getUniformLocation(fieldGlStemProg, 'uInvFrame');
+    fieldGlPipUInv = gl.getUniformLocation(fieldGlPipProg, 'uInvFrame');
+    fieldGlPipUHalf = gl.getUniformLocation(fieldGlPipProg, 'uHalfNdc');
+
+    fieldGlQuadVao = gl.createVertexArray();
+    gl.bindVertexArray(fieldGlQuadVao);
+    gl.useProgram(fieldGlQuadProg);
+    gl.uniform1i(gl.getUniformLocation(fieldGlQuadProg, 'uFieldTex'), 0);
+
+    fieldGlTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, fieldGlTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(
+      gl.TEXTURE_2D, 0, gl.RGBA8, FIELD_GRID_W, FIELD_GRID_H, 0,
+      gl.RGBA, gl.UNSIGNED_BYTE, fieldTexRgba
+    );
+
+    fieldGlInstVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, fieldGlInstVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, microInstBuf.byteLength, gl.DYNAMIC_DRAW);
+
+    const setupInstVao = (vao) => {
+      gl.bindVertexArray(vao);
+      gl.bindBuffer(gl.ARRAY_BUFFER, fieldGlInstVbo);
+      gl.enableVertexAttribArray(0);
+      gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 24, 0);
+      gl.vertexAttribDivisor(0, 1);
+      gl.enableVertexAttribArray(1);
+      gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 8);
+      gl.vertexAttribDivisor(1, 1);
+      gl.enableVertexAttribArray(2);
+      gl.vertexAttribPointer(2, 2, gl.FLOAT, false, 24, 16);
+      gl.vertexAttribDivisor(2, 1);
+    };
+
+    fieldGlStemVao = gl.createVertexArray();
+    setupInstVao(fieldGlStemVao);
+    fieldGlPipVao = gl.createVertexArray();
+    setupInstVao(fieldGlPipVao);
+    gl.bindVertexArray(null);
+
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    fieldGlCtx = gl;
+    return true;
+  } catch (_err) {
+    fieldGlBroken = true;
+    fieldGlCtx = null;
+    return false;
+  }
+}
+
+function packFieldOverlayTexture(dispField, dispModal, validityMask, dispSwarmActive = true) {
+  const mask = validityMask | 0;
+  const active = Boolean(dispSwarmActive);
+  const modeAllowed =
+    !active ? false
+      : fieldOverlayMode === 1 ? true
+      : fieldOverlayMode === 2 ? (mask & 1) !== 0
+      : fieldOverlayMode === 3 ? (mask & 2) !== 0
+      : fieldOverlayMode === 4 ? Boolean(dispModal && (mask & 8) !== 0)
+      : false;
+
+  if (!modeAllowed) {
+    fieldTexRgba.fill(0);
+    fieldTexGlPremul.fill(0);
+    return 1.0;
+  }
+
+  let maxMag = 0.0;
+  for (let c = 0; c < FIELD_CELLS; c++) {
+    const b = c * FIELD_STRIDE;
+    const w = dispField[b + 5];
+    let m = 0.0;
+    if (fieldOverlayMode === 1 || fieldOverlayMode === 2) {
+      if (!Number.isFinite(w) || w <= 0.0) continue;
+      if (fieldOverlayMode === 1) {
+        const u = dispField[b + 0];
+        const v = dispField[b + 1];
+        if (!Number.isFinite(u) || !Number.isFinite(v)) continue;
+        m = Math.hypot(u, v);
+      } else {
+        const vort = dispField[b + 2];
+        if (!Number.isFinite(vort)) continue;
+        m = Math.abs(vort);
+      }
+    } else if (fieldOverlayMode === 3) {
+      const ftle = dispField[b + 4];
+      if (!Number.isFinite(ftle) || ftle <= -900.0) continue;
+      m = Math.max(0.0, ftle);
+    } else {
+      continue;
+    }
+    if (Number.isFinite(m) && m > maxMag) maxMag = m;
+  }
+
+  const normMax = fieldOverlayMode === 1
+    ? Math.max(24.0, maxMag)
+    : (fieldOverlayMode === 2 ? Math.max(0.5, maxMag) : Math.max(0.25, maxMag));
+
+  for (let c = 0; c < FIELD_CELLS; c++) {
+    const b = c * FIELD_STRIDE;
+    const p = c * 4;
+    const w = dispField[b + 5];
+    let r = 0;
+    let g = 0;
+    let bl = 0;
+    let a = 0;
+
+    if (fieldOverlayMode === 4) {
+      const phi = dispModal[c];
+      if (Number.isFinite(phi) && phi >= -3.15 && phi <= 3.15) {
+        r = Math.round(127.5 + 118.0 * Math.cos(phi));
+        g = Math.round(127.5 + 118.0 * Math.cos(phi - 2.0943951));
+        bl = Math.round(127.5 + 118.0 * Math.cos(phi + 2.0943951));
+        a = 145;
+      }
+    } else if (fieldOverlayMode === 3) {
+      const ftle = dispField[b + 4];
+      if (Number.isFinite(ftle) && ftle > -900.0) {
+        const wGain = Number.isFinite(w) && w > 0.0 ? Math.min(1.0, Math.max(0.25, w)) : 0.85;
+        const t = Math.min(1.0, Math.max(0.0, ftle) / normMax);
+        r = Math.round(70 + t * 185);
+        g = Math.round(24 + t * t * 205);
+        bl = Math.round(135 + (t < 0.6 ? t * 160 : (1.0 - t) * 240));
+        a = Math.round((t < 0.08 ? 4 : 26 + t * 154) * wGain);
+      }
+    } else if (Number.isFinite(w) && w > 0.0) {
+      const wGain = Math.min(1.0, Math.max(0.25, w));
+      if (fieldOverlayMode === 1) {
+        const u = dispField[b + 0];
+        const v = dispField[b + 1];
+        if (Number.isFinite(u) && Number.isFinite(v)) {
+          const t = Math.min(1.0, Math.hypot(u, v) / normMax);
+          r = Math.round(t < 0.55 ? 8 + t * 40 : 30 + (t - 0.55) * 490);
+          g = Math.round(35 + t * 205);
+          bl = Math.round(90 + (t < 0.65 ? t * 240 : (1.0 - t) * 420));
+          a = Math.round((32 + t * 138) * wGain);
+        }
+      } else if (fieldOverlayMode === 2) {
+        const vort = dispField[b + 2];
+        if (Number.isFinite(vort)) {
+          const s = Math.max(-1.0, Math.min(1.0, vort / normMax));
+          const mag = Math.abs(s);
+          if (s >= 0.0) {
+            r = Math.round(180 + mag * 75);
+            g = Math.round(70 + mag * 110);
+            bl = 36;
+          } else {
+            r = 44;
+            g = Math.round(115 + mag * 115);
+            bl = 255;
+          }
+          a = Math.round((mag < 0.06 ? 6 : 24 + mag * 150) * wGain);
+        }
+      }
+    }
+
+    fieldTexRgba[p] = r;
+    fieldTexRgba[p + 1] = g;
+    fieldTexRgba[p + 2] = bl;
+    fieldTexRgba[p + 3] = a;
+    if (a <= 0) {
+      fieldTexGlPremul[p] = 0;
+      fieldTexGlPremul[p + 1] = 0;
+      fieldTexGlPremul[p + 2] = 0;
+      fieldTexGlPremul[p + 3] = 0;
+    } else {
+      const aF = a / 255.0;
+      fieldTexGlPremul[p] = Math.round(r * aF);
+      fieldTexGlPremul[p + 1] = Math.round(g * aF);
+      fieldTexGlPremul[p + 2] = Math.round(bl * aF);
+      fieldTexGlPremul[p + 3] = a;
+    }
+  }
+  return normMax;
+}
+
+function computeConvexHullCount(n) {
+  if (n < 3) return 0;
+  for (let i = 0; i < n; i++) hullIdx[i] = i;
+  for (let i = 1; i < n; i++) {
+    const key = hullIdx[i];
+    const kx = hullPtsX[key];
+    const ky = hullPtsY[key];
+    let j = i - 1;
+    while (j >= 0) {
+      const cj = hullIdx[j];
+      const cx = hullPtsX[cj];
+      if (cx < kx || (cx === kx && hullPtsY[cj] <= ky)) break;
+      hullIdx[j + 1] = cj;
+      j--;
+    }
+    hullIdx[j + 1] = key;
+  }
+  let k = 0;
+  for (let i = 0; i < n; i++) {
+    const idx = hullIdx[i];
+    while (k >= 2) {
+      const a = hullPoly[k - 2];
+      const b = hullPoly[k - 1];
+      const cross =
+        (hullPtsX[b] - hullPtsX[a]) * (hullPtsY[idx] - hullPtsY[a]) -
+        (hullPtsY[b] - hullPtsY[a]) * (hullPtsX[idx] - hullPtsX[a]);
+      if (cross > 0.0) break;
+      k--;
+    }
+    hullPoly[k++] = idx;
+  }
+  const lowerK = k + 1;
+  for (let i = n - 2; i >= 0; i--) {
+    const idx = hullIdx[i];
+    while (k >= lowerK) {
+      const a = hullPoly[k - 2];
+      const b = hullPoly[k - 1];
+      const cross =
+        (hullPtsX[b] - hullPtsX[a]) * (hullPtsY[idx] - hullPtsY[a]) -
+        (hullPtsY[b] - hullPtsY[a]) * (hullPtsX[idx] - hullPtsX[a]);
+      if (cross > 0.0) break;
+      k--;
+    }
+    hullPoly[k++] = idx;
+  }
+  return Math.max(0, k - 1);
+}
+
+function renderFieldFallback2D(W, H, visCount, sx, sy) {
+  if (fieldOverlayMode > 0) {
+    if (!field2dCanvas || field2dCanvas.width !== FIELD_GRID_W || field2dCanvas.height !== FIELD_GRID_H) {
+      field2dCanvas = new OffscreenCanvas(FIELD_GRID_W, FIELD_GRID_H);
+      field2dCtx = field2dCanvas.getContext('2d');
+      field2dImgData = new ImageData(FIELD_GRID_W, FIELD_GRID_H);
+    }
+    field2dImgData.data.set(fieldTexRgba);
+    field2dCtx.putImageData(field2dImgData, 0, 0);
+    hudCtx.save();
+    hudCtx.imageSmoothingEnabled = fieldOverlayMode !== 4;
+    if (fieldOverlayMode !== 4) hudCtx.imageSmoothingQuality = 'low';
+    hudCtx.drawImage(field2dCanvas, 0, 0, W, H);
+    hudCtx.restore();
+  }
+
+  if (visCount > 0) {
+    hudCtx.save();
+    hudCtx.lineWidth = 1.0;
+    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.55)';
+    hudCtx.beginPath();
+    for (let i = 0; i < visCount; i++) {
+      const b = i * 6;
+      const px = microInstBuf[b] * sx;
+      const py = microInstBuf[b + 1] * sy;
+      const vx = microInstBuf[b + 2];
+      const vy = microInstBuf[b + 3];
+      const spd = Math.hypot(vx, vy);
+      if (spd > 2.0) {
+        const gain = Math.min(0.16, 22.0 / spd);
+        hudCtx.moveTo(px, py);
+        hudCtx.lineTo(px + vx * gain * sx, py + vy * gain * sy);
+      }
+    }
+    hudCtx.stroke();
+
+    hudCtx.fillStyle = 'rgba(0, 229, 255, 0.90)';
+    for (let i = 0; i < visCount; i++) {
+      const b = i * 6;
+      if (microInstBuf[b + 4] === 1.0) {
+        hudCtx.fillRect(microInstBuf[b] * sx - 1.5, microInstBuf[b + 1] * sy - 1.5, 3, 3);
+      }
+    }
+    hudCtx.fillStyle = 'rgba(255, 158, 44, 0.95)';
+    for (let i = 0; i < visCount; i++) {
+      const b = i * 6;
+      if (microInstBuf[b + 4] === 3.0) {
+        hudCtx.fillRect(microInstBuf[b] * sx - 1.8, microInstBuf[b + 1] * sy - 1.8, 3.6, 3.6);
+      }
+    }
+    hudCtx.fillStyle = 'rgba(245, 158, 11, 0.55)';
+    for (let i = 0; i < visCount; i++) {
+      const b = i * 6;
+      if (microInstBuf[b + 4] === 2.0) {
+        hudCtx.fillRect(microInstBuf[b] * sx - 1.0, microInstBuf[b + 1] * sy - 1.0, 2, 2);
+      }
+    }
+    hudCtx.restore();
+  }
+}
+
+function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
+  const ringOk = dispSlot >= 0 && dispSlot < RING_LEN && swarmRingValid[dispSlot] === 1;
+  let dispMicro = null;
+  let dispField = null;
+  let dispBodies = null;
+  let dispModal = null;
+  let dispSwarm = null;
+
+  if (ringOk) {
+    dispMicro = swarmRingMicro[dispSlot];
+    dispField = swarmRingField[dispSlot];
+    dispBodies = swarmRingBodies[dispSlot];
+    dispModal = swarmRingModal[dispSlot];
+    dispSwarm = swarmRingTelem[dispSlot];
+  } else if (hasChronos1000Exports() && effK === 0 && swarmTelemView && swarmTelemView[1] > 0.5) {
+    dispMicro = microTracksView;
+    dispField = continuumFieldView;
+    dispBodies = rigidBodiesView;
+    dispModal = modalFieldView;
+    dispSwarm = swarmTelemView;
+  } else {
+    lastFieldRenderMs = 0.0;
+    return;
+  }
+
+  if (!dispSwarm || (dispSwarm[1] <= 0.5 && fieldOverlayMode === 0)) {
+    lastFieldRenderMs = 0.0;
+    return;
+  }
+
+  const t0 = performance.now();
+  bodyMemHead.fill(-1);
+  let visCount = 0;
+  let inspFound = false;
+  let inspX = 0.0;
+  let inspY = 0.0;
+  let inspVx = 0.0;
+  let inspVy = 0.0;
+  let inspBody = 0;
+  let inspFtle = 0.0;
+
+  for (let i = 0; i < MAX_MICRO; i++) {
+    const base = i * MICRO_STRIDE;
+    const st = intOrNull(dispMicro[base + 5], 1, 2);
+    if (st === null) continue;
+    const px = dispMicro[base + 1];
+    const py = dispMicro[base + 2];
+    const vx = dispMicro[base + 3];
+    const vy = dispMicro[base + 4];
+    if (!Number.isFinite(px) || !Number.isFinite(py) || !Number.isFinite(vx) || !Number.isFinite(vy)) {
+      continue;
+    }
+    const tid = intOrNull(dispMicro[base + 0], 1, 16777215) ?? 0;
+    const bId = intOrNull(dispMicro[base + 6], 0, MAX_RIGID_BODIES) ?? 0;
+    const isInsp = tid > 0 && tid === inspectedMicroTid;
+    const mOff = visCount * 6;
+    microInstBuf[mOff] = px;
+    microInstBuf[mOff + 1] = py;
+    microInstBuf[mOff + 2] = vx;
+    microInstBuf[mOff + 3] = vy;
+    microInstBuf[mOff + 4] = st === 1 ? (bId > 0 ? 3.0 : 1.0) : 2.0;
+    microInstBuf[mOff + 5] = isInsp ? 1.0 : 0.0;
+    visCount++;
+
+    if (st === 1 && bId >= 1 && bId <= MAX_RIGID_BODIES) {
+      bodyMemNext[i] = bodyMemHead[bId];
+      bodyMemHead[bId] = i;
+    }
+    if (isInsp) {
+      const rawFtle = dispMicro[base + 7];
+      inspFound = true;
+      inspX = px;
+      inspY = py;
+      inspVx = vx;
+      inspVy = vy;
+      inspBody = bId;
+      inspFtle = Number.isFinite(rawFtle) && rawFtle > -900.0 ? rawFtle : null;
+    }
+  }
+
+  const dispSwarmActive = Boolean(dispSwarm && dispSwarm[1] > 0.5);
+  const maskVal = intOrNull(dispSwarm[16], 0, 31) ?? 0;
+  let fieldNormMax = 1.0;
+  if (fieldOverlayMode > 0 && dispField) {
+    fieldNormMax = packFieldOverlayTexture(dispField, dispModal, maskVal, dispSwarmActive);
+  }
+
+  if (ensureFieldWebGl2(W, H)) {
+    const gl = fieldGlCtx;
+    gl.viewport(0, 0, W, H);
+    gl.clearColor(0.0, 0.0, 0.0, 0.0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    if (fieldOverlayMode > 0 && dispField) {
+      gl.useProgram(fieldGlQuadProg);
+      gl.bindVertexArray(fieldGlQuadVao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, fieldGlTex);
+      const texFilter = fieldOverlayMode === 4 ? gl.NEAREST : gl.LINEAR;
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, texFilter);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, texFilter);
+      gl.texSubImage2D(
+        gl.TEXTURE_2D, 0, 0, 0, FIELD_GRID_W, FIELD_GRID_H,
+        gl.RGBA, gl.UNSIGNED_BYTE, fieldTexGlPremul
+      );
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+
+    if (visCount > 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, fieldGlInstVbo);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, microInstBuf, 0, visCount * 6);
+
+      gl.useProgram(fieldGlStemProg);
+      gl.uniform2f(fieldGlStemUInv, 1.0 / frameW, 1.0 / frameH);
+      gl.bindVertexArray(fieldGlStemVao);
+      gl.drawArraysInstanced(gl.LINES, 0, 2, visCount);
+
+      gl.useProgram(fieldGlPipProg);
+      gl.uniform2f(fieldGlPipUInv, 1.0 / frameW, 1.0 / frameH);
+      gl.uniform2f(fieldGlPipUHalf, 4.2 / W, 4.2 / H);
+      gl.bindVertexArray(fieldGlPipVao);
+      gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, visCount);
+    }
+
+    gl.bindVertexArray(null);
+    hudCtx.drawImage(fieldGlCanvas, 0, 0, W, H);
+    lastFieldBackend = 'webgl2';
+  } else {
+    renderFieldFallback2D(W, H, visCount, sx, sy);
+    lastFieldBackend = 'canvas2d';
+  }
+
+  // Rigid-motion SE(2) convex hulls & angular velocity labels (gated strictly by validity bit 2)
+  if (dispBodies && (maskVal & 4) !== 0) {
+    hudCtx.save();
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    for (let b = 0; b < MAX_RIGID_BODIES; b++) {
+      const rb = parseRigidBodyDescriptor(dispBodies, b * BODY_STRIDE);
+      if (!rb) {
+        continue;
+      }
+      const bId = rb.bodyId;
+      const memCount = rb.memberCount;
+      const omega = rb.omegaRadS;
+      const cx = rb.cx * sx;
+      const cy = rb.cy * sy;
+
+      let nPts = 0;
+      let mIdx = bodyMemHead[bId];
+      let minY = cy - 22.0;
+      while (mIdx !== -1 && nPts < MAX_MICRO) {
+        const px = dispMicro[mIdx * MICRO_STRIDE + 1] * sx;
+        const py = dispMicro[mIdx * MICRO_STRIDE + 2] * sy;
+        hullPtsX[nPts] = px;
+        hullPtsY[nPts] = py;
+        if (py < minY) minY = py;
+        nPts++;
+        mIdx = bodyMemNext[mIdx];
+      }
+
+      const hLen = computeConvexHullCount(nPts);
+      if (hLen >= 3) {
+        hudCtx.beginPath();
+        hudCtx.moveTo(hullPtsX[hullPoly[0]], hullPtsY[hullPoly[0]]);
+        for (let k = 1; k < hLen; k++) {
+          hudCtx.lineTo(hullPtsX[hullPoly[k]], hullPtsY[hullPoly[k]]);
+        }
+        hudCtx.closePath();
+        hudCtx.fillStyle = 'rgba(255, 158, 44, 0.10)';
+        hudCtx.fill();
+        hudCtx.strokeStyle = 'rgba(255, 178, 72, 0.88)';
+        hudCtx.lineWidth = 1.6;
+        hudCtx.stroke();
+      }
+
+      // Rotational spin arc at body centroid
+      hudCtx.strokeStyle = '#ff9e2c';
+      hudCtx.lineWidth = 1.6;
+      hudCtx.beginPath();
+      const arcR = 11.0;
+      if (omega >= 0) {
+        hudCtx.arc(cx, cy, arcR, -Math.PI * 0.75, Math.PI * 0.55, false);
+      } else {
+        hudCtx.arc(cx, cy, arcR, Math.PI * 0.75, -Math.PI * 0.55, true);
+      }
+      hudCtx.stroke();
+
+      const lbl = `B${bId} · ω=${omega >= 0 ? '+' : ''}${omega.toFixed(2)} rad/s · N=${memCount}`;
+      const lw = hudCtx.measureText(lbl).width + 10;
+      const lx = Math.max(8, Math.min(W - lw - 8, cx - lw * 0.5));
+      const ly = Math.max(42, Math.min(H - 26, minY - 18));
+      hudCtx.fillStyle = 'rgba(8, 16, 30, 0.88)';
+      hudCtx.fillRect(lx, ly, lw, 16);
+      hudCtx.strokeStyle = 'rgba(255, 158, 44, 0.75)';
+      hudCtx.lineWidth = 1.0;
+      hudCtx.strokeRect(lx, ly, lw, 16);
+      hudCtx.fillStyle = '#ffd18a';
+      hudCtx.fillText(lbl, lx + 5, ly + 11);
+    }
+    hudCtx.restore();
+  }
+
+  // Inspected point/track diamond reticle + callout
+  if (inspFound) {
+    const ix = inspX * sx;
+    const iy = inspY * sy;
+    const spd = Math.hypot(inspVx, inspVy);
+    hudCtx.save();
+    hudCtx.strokeStyle = '#fde047';
+    hudCtx.lineWidth = 1.8;
+    hudCtx.beginPath();
+    hudCtx.moveTo(ix, iy - 10);
+    hudCtx.lineTo(ix + 10, iy);
+    hudCtx.lineTo(ix, iy + 10);
+    hudCtx.lineTo(ix - 10, iy);
+    hudCtx.closePath();
+    hudCtx.stroke();
+    const tag = `μT${inspectedMicroTid}${inspBody > 0 ? ` · B${inspBody}` : ''} · ${spd.toFixed(1)} px/s | FTLE ${inspFtle !== null ? inspFtle.toFixed(2) : '--'}`;
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const tw = hudCtx.measureText(tag).width + 10;
+    const tx = Math.max(8, Math.min(W - tw - 8, ix + 14));
+    const ty = Math.max(44, Math.min(H - 26, iy - 16));
+    hudCtx.fillStyle = 'rgba(10, 18, 32, 0.90)';
+    hudCtx.fillRect(tx, ty, tw, 16);
+    hudCtx.strokeStyle = '#fde047';
+    hudCtx.lineWidth = 1.0;
+    hudCtx.strokeRect(tx, ty, tw, 16);
+    hudCtx.fillStyle = '#fef08a';
+    hudCtx.fillText(tag, tx + 5, ty + 11);
+    hudCtx.restore();
+  }
+
+  // Non-color Field Overlay legend caption (top-left clear of header strip)
+  if (fieldOverlayMode > 0) {
+    let cap = '';
+    if (fieldOverlayMode === 1) cap = `FIELD: VELOCITY |v| (0..${fieldNormMax.toFixed(0)} px/s)`;
+    else if (fieldOverlayMode === 2) cap = `FIELD: VORTICITY CURL v (±${fieldNormMax.toFixed(2)} s⁻¹)`;
+    else if (fieldOverlayMode === 3) cap = `FIELD: FTLE 16F RIDGES (0..${fieldNormMax.toFixed(2)} s⁻¹)`;
+    else cap = 'FIELD: MODAL PHASE ([-π..+π] rad)';
+    if (!dispSwarmActive) cap += ' · STANDBY';
+    hudCtx.save();
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const cw = hudCtx.measureText(cap).width + 12;
+    hudCtx.fillStyle = 'rgba(7, 13, 24, 0.84)';
+    hudCtx.fillRect(10, 44, cw, 17);
+    hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.45)';
+    hudCtx.lineWidth = 1;
+    hudCtx.strokeRect(10, 44, cw, 17);
+    hudCtx.fillStyle = '#bae6fd';
+    hudCtx.fillText(cap, 16, 56);
+    hudCtx.restore();
+  }
+
+  lastFieldRenderMs = performance.now() - t0;
+}
+
 function renderMainHud(dispSlot) {
   if (!hudCtx) return;
   const W = hudCanvas.width;   // 960
@@ -2493,6 +3829,9 @@ function renderMainHud(dispSlot) {
       hudCtx.restore();
     }
   }
+
+  // 3a. CHRONOS-1000 Continuum Heatmap, 1,000+ Micro-Tracks & Rigid-Motion Hulls
+  renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy);
 
   // 3b. Metric Ruler or 4-Point Perspective Homography Floor Grid Overlay
   renderCalibrationOverlay(W, H);
@@ -2706,6 +4045,7 @@ function renderMainHud(dispSlot) {
   updateFrozenApexLocks(uDisp);
 
   // 5. Render Target Trajectories, Hermite Spline Bridges, Frozen Apex Reticles, Protractors & Kalman Baselines
+  if (showHeroTargets) {
   for (let m = 0; m < MAX_TARGETS; m++) {
     const base = 32 + m * 56;
     if (telemView[base] < 0.5) continue;
@@ -3157,6 +4497,7 @@ function renderMainHud(dispSlot) {
       hudCtx.fillText(compactTxt, posSec[0] + 4, posSec[1] + 10);
     }
     hudCtx.restore();
+  }
   }
 
   // 6. Present-Time Phase-Locked Strobe Border Pulse (Mode B Biophysical Entrainment)
@@ -4343,6 +5684,284 @@ function drawCroppedLetterboxedFrame(bmp) {
   simCtx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
 }
 
+function finiteOrNull(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+function intOrNull(v, min = 0, max = 16777215) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || !Number.isInteger(v)) return null;
+  return v >= min && v <= max ? v : null;
+}
+
+function parseRigidBodyDescriptor(buf, bo) {
+  if (!buf) return null;
+  const bodyId = intOrNull(buf[bo], 1, MAX_RIGID_BODIES);
+  const memberCount = intOrNull(buf[bo + 1], 1, MAX_MICRO);
+  const cx = finiteOrNull(buf[bo + 2]);
+  const cy = finiteOrNull(buf[bo + 3]);
+  const vx = finiteOrNull(buf[bo + 4]);
+  const vy = finiteOrNull(buf[bo + 5]);
+  const omegaRadS = finiteOrNull(buf[bo + 6]);
+  if (
+    bodyId === null ||
+    memberCount === null ||
+    cx === null ||
+    cy === null ||
+    vx === null ||
+    vy === null ||
+    omegaRadS === null
+  ) {
+    return null;
+  }
+  return {
+    bodyId,
+    memberCount,
+    cx,
+    cy,
+    vx,
+    vy,
+    omegaRadS,
+    se2RmsePx: finiteOrNull(buf[bo + 7]),
+  };
+}
+
+function computeLookaheadTiming(effK, dispSlot, fIdxNow) {
+  const k = intOrNull(effK, 0, RING_LEN - 1) ?? (Number.isFinite(effK) ? Math.max(0, Math.round(effK)) : 0);
+  if (k === 0) {
+    return {
+      lookaheadWindowMs: 0.0,
+      lookaheadSource: 'zero_lookahead',
+      displayedFrameIdx: fIdxNow,
+      causalFrameIdx: fIdxNow,
+      renderedDelayFrames: 0,
+    };
+  }
+  const targetDispFrame = fIdxNow - k;
+  const ringMatch = dispSlot >= 0 && dispSlot < RING_LEN && ringIngestFrameId[dispSlot] === targetDispFrame;
+  if (
+    ringMatch &&
+    latestCausalPtsMs >= 0.0 &&
+    ringIngestPtsMs[dispSlot] >= 0.0 &&
+    latestCausalPtsMs >= ringIngestPtsMs[dispSlot]
+  ) {
+    return {
+      lookaheadWindowMs: Math.max(0.0, latestCausalPtsMs - ringIngestPtsMs[dispSlot]),
+      lookaheadSource: 'source_pts',
+      displayedFrameIdx: targetDispFrame,
+      causalFrameIdx: fIdxNow,
+      renderedDelayFrames: k,
+    };
+  }
+  if (
+    ringMatch &&
+    ringIngestTimeMs[dispSlot] >= 0.0 &&
+    latestCausalTimeMs >= ringIngestTimeMs[dispSlot]
+  ) {
+    return {
+      lookaheadWindowMs: Math.max(0.0, latestCausalTimeMs - ringIngestTimeMs[dispSlot]),
+      lookaheadSource: 'accumulated_dt',
+      displayedFrameIdx: targetDispFrame,
+      causalFrameIdx: fIdxNow,
+      renderedDelayFrames: k,
+    };
+  }
+  const dtSec = lastDtSecUsed > 0.001 && lastDtSecUsed < 0.25 ? lastDtSecUsed : (1.0 / 30.0);
+  return {
+    lookaheadWindowMs: k * dtSec * 1000.0,
+    lookaheadSource: 'dt_estimate',
+    displayedFrameIdx: Math.max(0, targetDispFrame),
+    causalFrameIdx: fIdxNow,
+    renderedDelayFrames: k,
+  };
+}
+
+function buildChronos1000Snapshot(medianMs, effK, fIdxNow = 0, dispSlot = -1) {
+  const dtSec = lastDtSecUsed > 0.001 && lastDtSecUsed < 0.25 ? lastDtSecUsed : (1.0 / 30.0);
+  const timing = computeLookaheadTiming(effK, dispSlot, fIdxNow);
+  const lookaheadWindowMs = timing.lookaheadWindowMs;
+  const partialPipelineLatencyMs = lookaheadWindowMs + medianMs + lastSwarmCopyMs + lastFieldRenderMs;
+  const st = swarmTelemView;
+  const avail = Boolean(st && hasChronos1000Exports());
+  const stInspTid = avail ? intOrNull(st[11], 0, 16777215) : null;
+  const inspectExplicitClear =
+    lastInspectStatus === 'expired' ||
+    lastInspectStatus === 'miss' ||
+    lastInspectStatus === 'unavailable';
+  const activeInspTid = inspectExplicitClear
+    ? 0
+    : (inspectedMicroTid > 0 ? inspectedMicroTid : (stInspTid !== null && stInspTid > 0 ? stInspTid : 0));
+  let inspectedTrack = null;
+  if (avail && activeInspTid > 0 && microTracksView) {
+    for (let i = 0; i < MAX_MICRO; i++) {
+      const b = i * MICRO_STRIDE;
+      const trackSt = intOrNull(microTracksView[b + 5], 1, 2);
+      const trackTid = intOrNull(microTracksView[b], 1, 16777215);
+      if (trackSt !== null && trackTid === activeInspTid) {
+        const rawTrackFtle = finiteOrNull(microTracksView[b + 7]);
+        inspectedTrack = {
+          tid: activeInspTid,
+          x: finiteOrNull(microTracksView[b + 1]),
+          y: finiteOrNull(microTracksView[b + 2]),
+          vx: finiteOrNull(microTracksView[b + 3]),
+          vy: finiteOrNull(microTracksView[b + 4]),
+          state: trackSt,
+          bodyId: intOrNull(microTracksView[b + 6], 0, MAX_RIGID_BODIES),
+          ftle: rawTrackFtle !== null && rawTrackFtle > -900.0 ? rawTrackFtle : null,
+        };
+        break;
+      }
+    }
+  }
+
+  const swarmActiveFlag = avail ? intOrNull(st[1], 0, 1) : null;
+  const validityMaskVal = avail ? intOrNull(st[16], 0, 31) : null;
+  const rigidBodyCountVal = avail ? intOrNull(st[23], 0, MAX_RIGID_BODIES) : 0;
+  const topRigidMembersVal = avail ? intOrNull(st[25], 0, MAX_MICRO) : 0;
+  const topRigidOmegaVal = avail ? finiteOrNull(st[24]) : 0.0;
+  let validRigidBodyCount = 0;
+  if (avail && rigidBodiesView && validityMaskVal !== null && (validityMaskVal & 4) !== 0) {
+    for (let b = 0; b < MAX_RIGID_BODIES; b++) {
+      if (parseRigidBodyDescriptor(rigidBodiesView, b * BODY_STRIDE)) {
+        validRigidBodyCount++;
+      }
+    }
+  }
+  const topRigidBodyValid = Boolean(
+    avail &&
+    validityMaskVal !== null &&
+    (validityMaskVal & 4) !== 0 &&
+    validRigidBodyCount > 0 &&
+    rigidBodyCountVal !== null &&
+    rigidBodyCountVal > 0 &&
+    topRigidMembersVal !== null &&
+    topRigidMembersVal >= 1 &&
+    topRigidOmegaVal !== null
+  );
+
+  const out = {
+    available: avail,
+    diagnosticsValid: false,
+    delayFrames: 0,
+    causalFrameIdx: timing.causalFrameIdx,
+    displayedFrameIdx: timing.displayedFrameIdx,
+    renderedDelayFrames: timing.renderedDelayFrames,
+    inspectStatus: lastInspectStatus,
+    inspectSeq: lastInspectResSeq,
+    inspectReqSeq: lastInspectReqSeq,
+    inspectResSeq: lastInspectResSeq,
+    inspectReqPxX: lastInspectReqX,
+    inspectReqPxY: lastInspectReqY,
+    inspectReqX: lastInspectReqX,
+    inspectReqY: lastInspectReqY,
+    inspectReqNormX: lastInspectReqNormX,
+    inspectReqNormY: lastInspectReqNormY,
+    swarmMode: avail ? intOrNull(st[0], 0, 2) : swarmMode,
+    userSwarmMode,
+    denseSwarmOverrideActive,
+    swarmActive: avail ? swarmActiveFlag === 1 : false,
+    validRigidBodyCount,
+    topRigidBodyValid,
+    fieldOverlayMode,
+    fieldBackend: lastFieldBackend,
+    fieldRenderMs: lastFieldRenderMs,
+    snapshotCopyMs: lastSwarmCopyMs,
+    peakCount: avail ? intOrNull(st[2], 0, 2048) : 0,
+    activeCount: avail ? intOrNull(st[3], 0, MAX_MICRO) : 0,
+    confirmedCount: avail ? intOrNull(st[4], 0, MAX_MICRO) : 0,
+    peakSimultaneous: avail ? intOrNull(st[5], 0, MAX_MICRO) : 0,
+    uniqueTracks: avail ? intOrNull(st[6], 0, 16777215) : 0,
+    coastingCount: avail ? intOrNull(st[7], 0, MAX_MICRO) : 0,
+    auctionSteps: avail ? intOrNull(st[8], 0, 16777215) : 0,
+    reacqEvents: avail ? intOrNull(st[9], 0, 16777215) : 0,
+    meanIcLkRes: avail ? finiteOrNull(st[10]) : 0.0,
+    inspectedTid: activeInspTid,
+    inspectedBodyId: avail ? intOrNull(st[12], 0, MAX_RIGID_BODIES) : 0,
+    births: avail ? intOrNull(st[13], 0, MAX_MICRO) : 0,
+    tentativeCount: avail ? intOrNull(st[14], 0, MAX_MICRO) : 0,
+    ambiguousCount: avail ? intOrNull(st[15], 0, MAX_MICRO) : 0,
+    validityMask: avail ? intOrNull(st[16], 0, 31) : 0,
+    validCells: avail ? intOrNull(st[17], 0, FIELD_CELLS) : 0,
+    maxVorticityS1: avail ? finiteOrNull(st[18]) : 0.0,
+    rmsVorticityS1: avail ? finiteOrNull(st[19]) : 0.0,
+    rmsDivergenceS1: avail ? finiteOrNull(st[20]) : 0.0,
+    maxFtleS1: avail ? finiteOrNull(st[21]) : 0.0,
+    ftleCells: avail ? intOrNull(st[22], 0, FIELD_CELLS) : 0,
+    rigidBodyCount: avail ? intOrNull(st[23], 0, MAX_RIGID_BODIES) : 0,
+    topRigidOmegaRadS: avail ? finiteOrNull(st[24]) : 0.0,
+    topRigidMembers: avail ? intOrNull(st[25], 0, MAX_MICRO) : 0,
+    topRigidSe2RmsePx: avail ? finiteOrNull(st[26]) : 0.0,
+    modalDomFreqHz: avail ? finiteOrNull(st[27]) : 0.0,
+    modalCoherence: avail ? finiteOrNull(st[28]) : 0.0,
+    modalValidSensors: avail ? intOrNull(st[29], 0, MAX_MICRO) : 0,
+    kuramotoR: avail ? finiteOrNull(st[30]) : 0.0,
+    kuramotoPsi: avail ? finiteOrNull(st[31]) : 0.0,
+    comX: avail ? finiteOrNull(st[32]) : 0.0,
+    comY: avail ? finiteOrNull(st[33]) : 0.0,
+    comVx: avail ? finiteOrNull(st[34]) : 0.0,
+    comVy: avail ? finiteOrNull(st[35]) : 0.0,
+    velDispersion: avail ? finiteOrNull(st[36]) : 0.0,
+    meanStrain: avail ? finiteOrNull(st[37]) : 0.0,
+    knnEdgeCount: avail ? intOrNull(st[38], 0, MAX_MICRO * 6) : 0,
+    ftleMatureTracks: avail ? intOrNull(st[39], 0, MAX_MICRO) : 0,
+    topRigidThetaRad: avail ? finiteOrNull(st[40]) : 0.0,
+    modalR2: avail ? finiteOrNull(st[41]) : 0.0,
+    kernelComputeMedianMs: medianMs,
+    lookaheadWindowMs,
+    lookaheadSource: timing.lookaheadSource,
+    estimatedPartialPipelineLatencyMs: partialPipelineLatencyMs,
+    partialPipelineLatencyMs,
+    dtSec,
+    inspectedTrack,
+  };
+
+  out.diagnosticsValid = Boolean(
+    avail &&
+    out.swarmMode !== null &&
+    swarmActiveFlag !== null &&
+    out.peakCount !== null &&
+    out.activeCount !== null &&
+    out.confirmedCount !== null &&
+    out.peakSimultaneous !== null &&
+    out.uniqueTracks !== null &&
+    out.coastingCount !== null &&
+    out.auctionSteps !== null &&
+    out.reacqEvents !== null &&
+    out.meanIcLkRes !== null &&
+    stInspTid !== null &&
+    out.inspectedBodyId !== null &&
+    out.births !== null &&
+    out.tentativeCount !== null &&
+    out.ambiguousCount !== null &&
+    out.validityMask !== null &&
+    out.validCells !== null &&
+    out.maxVorticityS1 !== null &&
+    out.rmsVorticityS1 !== null &&
+    out.rmsDivergenceS1 !== null &&
+    out.maxFtleS1 !== null &&
+    out.ftleCells !== null &&
+    out.rigidBodyCount !== null &&
+    out.topRigidOmegaRadS !== null &&
+    out.topRigidMembers !== null &&
+    out.topRigidSe2RmsePx !== null &&
+    out.modalDomFreqHz !== null &&
+    out.modalCoherence !== null &&
+    out.modalValidSensors !== null &&
+    out.kuramotoR !== null &&
+    out.kuramotoPsi !== null &&
+    out.comX !== null &&
+    out.comY !== null &&
+    out.comVx !== null &&
+    out.comVy !== null &&
+    out.velDispersion !== null &&
+    out.meanStrain !== null &&
+    out.knnEdgeCount !== null &&
+    out.ftleMatureTracks !== null &&
+    out.topRigidThetaRad !== null &&
+    out.modalR2 !== null
+  );
+  return out;
+}
+
 function emitTelemetrySnapshot() {
   if (!wasmExports || !telemView) return;
   let sumMs = 0.0;
@@ -4523,20 +6142,32 @@ function emitTelemetrySnapshot() {
     }
   }
 
+  const dispSlotNow = Math.round(telemView[2]);
+  const effKNow = Math.round(telemView[1]);
+  const c1kSnap = buildChronos1000Snapshot(medianMs, effKNow, fIdxNow, dispSlotNow);
+  const oracleValid = sourceMode === 'testbench' && !isChronos1000Scenario(benchScenario);
+
   self.postMessage({
     type: 'telemetry',
     frameIdx: fIdxNow,
-    lookaheadK: Math.round(telemView[1]),
+    lookaheadK: effKNow,
     fps: effSampleRate,
     wasmMeanMs: meanMs,
     wasmMedianMs: medianMs,
     wasmMaxMs: maxMs,
+    lookaheadWindowMs: c1kSnap.lookaheadWindowMs,
+    lookaheadSource: c1kSnap.lookaheadSource,
+    partialPipelineLatencyMs: c1kSnap.partialPipelineLatencyMs,
+    estimatedPartialPipelineLatencyMs: c1kSnap.estimatedPartialPipelineLatencyMs,
+    snapshotCopyMs: lastSwarmCopyMs,
+    fieldRenderMs: lastFieldRenderMs,
     activeTargets: Math.round(telemView[3]),
     clutterDb: telemView[4],
     clutterDbValid: telemView[22] > 0.5,
     clutterEvalRatio: telemView[23],
     padicSwaps: Math.round(telemView[5]),
-    oracleSwaps: oraclePadicSwaps,
+    oracleSwaps: oracleValid ? oraclePadicSwaps : null,
+    oracleSwapsAvailable: oracleValid,
     sourceMode,
     benchScenario,
     kalmanSwaps: Math.round(telemView[6]),
@@ -4589,7 +6220,9 @@ function emitTelemetrySnapshot() {
     calProvenance,
     calArmed,
     calibrated: metricOn,
+    showHeroTargets,
     showAllOverlays,
+    swarmMode,
     cropNorm: [cropNorm[0], cropNorm[1], cropNorm[2], cropNorm[3]],
     arenaBytes: Math.round(telemView[20]),
     memoryPages: wasmMemory.buffer.byteLength / 65536,
@@ -4617,6 +6250,7 @@ function emitTelemetrySnapshot() {
     },
     physicsId: buildPhysicsIdSnapshot(pIdx, hasPrimary, pFxPx, pFyPx, speedPhys, speedUnit, pMetricValid, angVelDegS),
     slotRoster,
+    chronos1000: c1kSnap,
   });
 }
 
@@ -4644,12 +6278,50 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
     wasmExports.chronos_set_ingest_pts(mediaTimeSec);
   }
 
-  // Measure full production compute path: Wasm Pre-Tick + Shifted Lanczos Fiedler + Wasm Post-Tick
+  // Measure pure kernel compute path: Wasm Pre-Tick + Shifted Lanczos Fiedler + Wasm Post-Tick
   const t0 = performance.now();
   wasmExports.chronos_pre_tick(rawDt);
   const lambda2 = solveShiftedLanczosFiedler();
   const dispSlot = wasmExports.chronos_post_tick(rawDt);
   const wasmMs = performance.now() - t0;
+
+  lastDtSecUsed = rawDt;
+  ingestElapsedMs += rawDt * 1000.0;
+  latestCausalTimeMs = ingestElapsedMs;
+  const causalFrameNow = Math.round(telemView[0]);
+  const hasPtsNow = Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0.0;
+  if (hasPtsNow) {
+    const ptsMsNow = mediaTimeSec * 1000.0;
+    if (latestCausalPtsMs >= 0.0 && ptsMsNow < latestCausalPtsMs) {
+      ringIngestPtsMs.fill(-1.0);
+    }
+    latestCausalPtsMs = ptsMsNow;
+    if (slotIdx >= 0 && slotIdx < RING_LEN) {
+      ringIngestPtsMs[slotIdx] = ptsMsNow;
+    }
+  } else {
+    latestCausalPtsMs = -1.0;
+    ringIngestPtsMs.fill(-1.0);
+  }
+  if (slotIdx >= 0 && slotIdx < RING_LEN) {
+    ringIngestFrameId[slotIdx] = causalFrameNow;
+    ringIngestTimeMs[slotIdx] = ingestElapsedMs;
+  }
+
+  const tCopy0 = performance.now();
+  if (hasChronos1000Exports() && slotIdx >= 0 && slotIdx < RING_LEN) {
+    if (swarmTelemView && (intOrNull(swarmTelemView[1], 0, 1) === 1 || swarmMode === 2)) {
+      swarmRingMicro[slotIdx].set(microTracksView);
+      swarmRingField[slotIdx].set(continuumFieldView);
+      swarmRingBodies[slotIdx].set(rigidBodiesView);
+      swarmRingModal[slotIdx].set(modalFieldView);
+      swarmRingTelem[slotIdx].set(swarmTelemView);
+      swarmRingValid[slotIdx] = 1;
+    } else {
+      swarmRingValid[slotIdx] = 0;
+    }
+  }
+  lastSwarmCopyMs = performance.now() - tCopy0;
   lastLambda2 = lambda2;
 
   wasmTimeHist[timeHistIdx] = wasmMs;
@@ -4678,7 +6350,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
     camPanStreakWorker = 0;
   }
 
-  if (sourceMode === 'testbench') {
+  if (sourceMode === 'testbench' && !isChronos1000Scenario(benchScenario)) {
     auditOracleSwaps();
   }
 
@@ -4861,8 +6533,9 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
     recSlab[ro + 7] = Math.round(telemView[3]);
     recSlab[ro + 8] = telemView[4];
     recSlab[ro + 9] = telemView[23];
+    const oracleAvailRec = sourceMode === 'testbench' && !isChronos1000Scenario(benchScenario);
     recSlab[ro + 10] = Math.round(telemView[5]);
-    recSlab[ro + 11] = oraclePadicSwaps;
+    recSlab[ro + 11] = oracleAvailRec ? oraclePadicSwaps : Number.NaN;
     recSlab[ro + 12] = Math.round(telemView[6]);
     recSlab[ro + 13] = inPillarCollisions;
     recSlab[ro + 14] = lambda2;
@@ -4951,6 +6624,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
 }
 
 function configureResolutionViews(mode) {
+  refreshChronos1000Views();
   const targetMode = mode ? 1 : 0;
   wasmExports.chronos_set_resolution(targetMode);
   resMode = wasmExports.chronos_get_resolution();
@@ -5012,6 +6686,7 @@ function configureResolutionViews(mode) {
   wasmTimeHist.fill(0.0);
   timeHistIdx = 0;
   tickCounter = 0;
+  clearVisualQueues();
   resetTestbenchState();
 }
 
@@ -5086,8 +6761,186 @@ function commitSurveyedCalibrationFromDraft(targetMode, reason) {
   return false;
 }
 
-function handleHudCanvasClick(normX, normY) {
+function syncSwarmConfigToMain(sc) {
+  self.postMessage({
+    type: 'swarm_config_sync',
+    scenario: sc,
+    resMode,
+    frameW,
+    frameH,
+    pipDim,
+    swarmMode,
+    userSwarmMode,
+    denseSwarmOverrideActive,
+    swarmActive: Boolean(hasChronos1000Exports() && swarmTelemView && swarmTelemView[1] > 0.5),
+    fieldOverlayMode,
+    showHeroTargets,
+  });
+}
+
+function applyScenarioResolutionAndSwarm(sc) {
+  if (sourceMode === 'testbench' && isChronos1000Scenario(sc)) {
+    if (resMode !== 1 && wasmExports) {
+      configureResolutionViews(1);
+      self.postMessage({
+        type: 'resolution_changed',
+        resMode,
+        frameW,
+        frameH,
+        pipDim,
+      });
+      emitCalibrationState();
+    }
+    denseSwarmOverrideActive = true;
+    if (swarmMode !== 2) {
+      swarmMode = 2;
+      if (hasChronos1000Exports()) {
+        wasmExports.chronos_set_swarm_mode(2);
+      }
+    }
+    syncSwarmConfigToMain(sc);
+    return;
+  }
+
+  if (denseSwarmOverrideActive) {
+    denseSwarmOverrideActive = false;
+    if (swarmMode !== userSwarmMode) {
+      swarmMode = userSwarmMode;
+      swarmRingValid.fill(0);
+      clearActiveInspectionSelection();
+      if (hasChronos1000Exports()) {
+        wasmExports.chronos_set_swarm_mode(swarmMode);
+      }
+    }
+    syncSwarmConfigToMain(sc);
+  }
+}
+
+function applyTestbenchScenarioSwitch(sc) {
+  benchScenario = sc || 'pillar_crossing';
+  wasmTimeHist.fill(0.0);
+  timeHistIdx = 0;
+  tickCounter = 0;
+  clearVisualQueues();
+  applyScenarioResolutionAndSwarm(benchScenario);
+  if (wasmExports) wasmExports.chronos_reset_tracks();
+  resetTestbenchState();
+  redrawPausedHudIfReady();
+  emitTelemetrySnapshot();
+}
+
+function findLiveMicroTrackIndexByTid(tid, confirmedOnly = false) {
+  if (!microTracksView || !Number.isInteger(tid) || tid < 1 || tid > 16777215) return -1;
+  const maxState = confirmedOnly ? 1 : 2;
+  for (let i = 0; i < MAX_MICRO; i++) {
+    const b = i * MICRO_STRIDE;
+    const st = intOrNull(microTracksView[b + 5], 1, maxState);
+    const curTid = intOrNull(microTracksView[b], 1, 16777215);
+    if (st !== null && curTid === tid) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function inspectFieldPointAt(rawX, rawY, reqSeq = null, rawNormX = null, rawNormY = null) {
+  const maxX = Math.max(0.0, frameW - 1e-3);
+  const maxY = Math.max(0.0, frameH - 1e-3);
+  const x = Math.max(0.0, Math.min(maxX, Number.isFinite(rawX) ? rawX : frameW * 0.5));
+  const y = Math.max(0.0, Math.min(maxY, Number.isFinite(rawY) ? rawY : frameH * 0.5));
+  const abiOk = hasChronos1000Exports();
+
+  lastInspectResSeq = reqSeq !== null ? Math.max(lastInspectResSeq + 1, reqSeq) : lastInspectResSeq + 1;
+  lastInspectReqSeq = reqSeq !== null ? reqSeq : lastInspectResSeq;
+  lastInspectReqX = x;
+  lastInspectReqY = y;
+  lastInspectReqNormX = frameW > 0 ? x / frameW : (Number.isFinite(rawNormX) ? Math.max(0.0, Math.min(1.0, rawNormX)) : 0.0);
+  lastInspectReqNormY = frameH > 0 ? y / frameH : (Number.isFinite(rawNormY) ? Math.max(0.0, Math.min(1.0, rawNormY)) : 0.0);
+
+  // Map click from displayed ring slot (t-effK) onto exact live confirmed track identity
+  let bestHistTid = 0;
+  const qScale = Math.max(0.25, frameW / 640.0);
+  const dispSlot = telemView ? Math.round(telemView[2]) : -1;
+  if (dispSlot >= 0 && dispSlot < RING_LEN && swarmRingValid[dispSlot] === 1) {
+    const dispMicro = swarmRingMicro[dispSlot];
+    let bestD2 = (16.0 * qScale) * (16.0 * qScale);
+    for (let i = 0; i < MAX_MICRO; i++) {
+      const b = i * MICRO_STRIDE;
+      const st = intOrNull(dispMicro[b + 5], 1, 1);
+      const candTid = intOrNull(dispMicro[b], 1, 16777215);
+      if (st === null || candTid === null) continue;
+      const px = dispMicro[b + 1];
+      const py = dispMicro[b + 2];
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      const dx = px - x;
+      const dy = py - y;
+      const d2 = dx * dx + dy * dy;
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        bestHistTid = candTid;
+      }
+    }
+  }
+
+  if (!abiOk) {
+    inspectedMicroTid = 0;
+    lastInspectStatus = 'unavailable';
+    redrawPausedHudIfReady();
+    emitTelemetrySnapshot();
+    return;
+  }
+
+  if (bestHistTid > 0) {
+    const liveIdx = findLiveMicroTrackIndexByTid(bestHistTid, true);
+    let pinnedOk = false;
+    if (liveIdx >= 0) {
+      let ret = 0;
+      if (typeof wasmExports.chronos_inspect_micro_track === 'function') {
+        ret = wasmExports.chronos_inspect_micro_track(bestHistTid);
+      } else {
+        const lb = liveIdx * MICRO_STRIDE;
+        const lx = Math.max(0.0, Math.min(maxX, microTracksView[lb + 1]));
+        const ly = Math.max(0.0, Math.min(maxY, microTracksView[lb + 2]));
+        ret = wasmExports.chronos_inspect_field_point(lx, ly);
+      }
+      const retTid = intOrNull(ret, 1, 16777215);
+      if (retTid === bestHistTid) {
+        inspectedMicroTid = bestHistTid;
+        lastInspectStatus = 'pinned';
+        wasmExports.chronos_set_focus_target(bestHistTid);
+        pinnedOk = true;
+      }
+    }
+    if (!pinnedOk) {
+      inspectedMicroTid = 0;
+      lastInspectStatus = 'expired';
+      wasmExports.chronos_set_focus_target(0);
+    }
+  } else {
+    const ret = wasmExports.chronos_inspect_field_point(x, y);
+    const retTid = intOrNull(ret, 1, 16777215);
+    const candTid = retTid ?? 0;
+    if (candTid > 0 && findLiveMicroTrackIndexByTid(candTid, true) >= 0) {
+      inspectedMicroTid = candTid;
+      lastInspectStatus = 'live';
+      wasmExports.chronos_set_focus_target(candTid);
+    } else {
+      inspectedMicroTid = 0;
+      lastInspectStatus = 'miss';
+      wasmExports.chronos_set_focus_target(0);
+    }
+  }
+
+  redrawPausedHudIfReady();
+  emitTelemetrySnapshot();
+}
+
+function handleHudCanvasClick(normX, normY, intent = '', expectedCalArmed = '') {
   if (!wasmExports || !telemView) return;
+
+  if (calArmed !== 'none' && expectedCalArmed && expectedCalArmed !== calArmed) {
+    return;
+  }
 
   // Stage interactive 2-Pt Ruler & 4-Pt Plane Homography clicks in draft buffers so Esc/invalid preserves prior state!
   if (calArmed === 'ruler') {
@@ -5113,6 +6966,11 @@ function handleHudCanvasClick(normX, normY) {
       emitCalibrationState();
     }
     redrawPausedHudIfReady();
+    return;
+  }
+
+  // Never let a stale queued calibration click fall through into Hero target focus pinning.
+  if (intent === 'calibration') {
     return;
   }
 
@@ -5266,7 +7124,7 @@ self.onmessage = async (ev) => {
     ecaStageCtx = ecaStageCanvas.getContext('2d');
 
     try {
-      const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261114b');
+      const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261115c1k');
       if (!resp.ok) {
         throw new Error(`Wasm fetch failed (HTTP ${resp.status})`);
       }
@@ -5312,6 +7170,7 @@ self.onmessage = async (ev) => {
         frameW,
         frameH,
         pipDim,
+        showHeroTargets,
       });
       scheduleNextWorkerTick();
     } catch (initErr) {
@@ -5334,12 +7193,7 @@ self.onmessage = async (ev) => {
       emitCalibrationState();
     }
   } else if (msg.type === 'set_scenario') {
-    benchScenario = msg.scenario || 'pillar_crossing';
-    wasmTimeHist.fill(0.0);
-    timeHistIdx = 0;
-    tickCounter = 0;
-    if (wasmExports) wasmExports.chronos_reset_tracks();
-    resetTestbenchState();
+    applyTestbenchScenarioSwitch(msg.scenario);
   } else if (msg.type === 'set_crop') {
     if (Array.isArray(msg.cropNorm) && msg.cropNorm.length === 4) {
       const x = Math.max(0.0, Math.min(0.95, Number(msg.cropNorm[0]) || 0.0));
@@ -5363,6 +7217,9 @@ self.onmessage = async (ev) => {
       }
     }
   } else if (msg.type === 'cal_control') {
+    if (typeof msg.syncSeq === 'number' && Number.isFinite(msg.syncSeq) && msg.syncSeq > lastCalSyncSeq) {
+      lastCalSyncSeq = Math.trunc(msg.syncSeq);
+    }
     const inRulerM = typeof msg.rulerMeters === 'number' && msg.rulerMeters >= 0.01 ? msg.rulerMeters : null;
     const inPlaneW = typeof msg.planeW === 'number' && msg.planeW >= 0.01 ? msg.planeW : null;
     const inPlaneH = typeof msg.planeH === 'number' && msg.planeH >= 0.01 ? msg.planeH : null;
@@ -5392,8 +7249,8 @@ self.onmessage = async (ev) => {
       if (calArmed !== 'none') {
         calArmed = 'none';
         calDraftCount = 0;
-        emitCalibrationState();
       }
+      emitCalibrationState();
     } else if (msg.action === 'stage_dims') {
       if (inRulerM !== null) calDraftRulerMeters = inRulerM;
       if (inPlaneW !== null) calDraftPlaneW = inPlaneW;
@@ -5488,7 +7345,9 @@ self.onmessage = async (ev) => {
     redrawPausedHudIfReady();
   } else if (msg.type === 'canvas_click') {
     if (typeof msg.normX === 'number' && typeof msg.normY === 'number') {
-      handleHudCanvasClick(msg.normX, msg.normY);
+      const intent = typeof msg.intent === 'string' ? msg.intent : '';
+      const expectedCalArmed = typeof msg.expectedCalArmed === 'string' ? msg.expectedCalArmed : '';
+      handleHudCanvasClick(msg.normX, msg.normY, intent, expectedCalArmed);
     }
   } else if (msg.type === 'cycle_focus') {
     cycleFocusTarget();
@@ -5500,16 +7359,33 @@ self.onmessage = async (ev) => {
       redrawPausedHudIfReady();
     }
   } else if (msg.type === 'params') {
+    let visualFlagChanged = false;
     if (typeof msg.lookaheadK === 'number') lookaheadK = msg.lookaheadK;
     if (typeof msg.ecaAdaptRate === 'number') ecaAdaptRate = msg.ecaAdaptRate;
     if (typeof msg.fistaLambda === 'number') fistaLambda = msg.fistaLambda;
     if (typeof msg.eulerianGain === 'number') eulerianGain = msg.eulerianGain;
     if (typeof msg.phaseOffsetRad === 'number') phaseOffsetRad = msg.phaseOffsetRad;
     if (typeof msg.labMode === 'number') labMode = msg.labMode;
-    if (typeof msg.showEcaOverlay === 'boolean') showEcaOverlay = msg.showEcaOverlay;
-    if (typeof msg.showKalmanBaseline === 'boolean') showKalmanBaseline = msg.showKalmanBaseline;
-    if (typeof msg.showAllOverlays === 'boolean') showAllOverlays = msg.showAllOverlays;
-    if (typeof msg.strobeEnabled === 'boolean') strobeEnabled = msg.strobeEnabled;
+    if (typeof msg.showEcaOverlay === 'boolean') {
+      visualFlagChanged = visualFlagChanged || showEcaOverlay !== msg.showEcaOverlay;
+      showEcaOverlay = msg.showEcaOverlay;
+    }
+    if (typeof msg.showKalmanBaseline === 'boolean') {
+      visualFlagChanged = visualFlagChanged || showKalmanBaseline !== msg.showKalmanBaseline;
+      showKalmanBaseline = msg.showKalmanBaseline;
+    }
+    if (typeof msg.showHeroTargets === 'boolean') {
+      visualFlagChanged = visualFlagChanged || showHeroTargets !== msg.showHeroTargets;
+      showHeroTargets = msg.showHeroTargets;
+    }
+    if (typeof msg.showAllOverlays === 'boolean') {
+      visualFlagChanged = visualFlagChanged || showAllOverlays !== msg.showAllOverlays;
+      showAllOverlays = msg.showAllOverlays;
+    }
+    if (typeof msg.strobeEnabled === 'boolean') {
+      visualFlagChanged = visualFlagChanged || strobeEnabled !== msg.strobeEnabled;
+      strobeEnabled = msg.strobeEnabled;
+    }
     if (typeof msg.audioOutLatencySec === 'number') {
       audioOutLatencySec = msg.audioOutLatencySec;
       if (wasmExports) wasmExports.chronos_set_audio_latency(audioOutLatencySec);
@@ -5524,12 +7400,99 @@ self.onmessage = async (ev) => {
         phaseOffsetRad,
         labMode
       );
-      if (sourceMode !== 'testbench') {
+      if (sourceMode !== 'testbench' || visualFlagChanged) {
         redrawPausedHudIfReady();
+        if (visualFlagChanged && (!telemView || Math.round(telemView[0]) <= 0)) {
+          emitTelemetrySnapshot();
+        }
       }
     }
+  } else if (msg.type === 'set_swarm_mode') {
+    const rawM = Number(msg.swarmMode);
+    const nextMode = Number.isFinite(rawM) ? Math.max(0, Math.min(2, Math.round(rawM))) : 0;
+    userSwarmMode = nextMode;
+    denseSwarmOverrideActive = false;
+    swarmMode = nextMode;
+    if (hasChronos1000Exports()) {
+      wasmExports.chronos_set_swarm_mode(nextMode);
+    }
+    if (nextMode === 0) {
+      swarmRingValid.fill(0);
+      clearActiveInspectionSelection();
+    }
+    syncSwarmConfigToMain(benchScenario);
+    redrawPausedHudIfReady();
+    if (!telemView || Math.round(telemView[0]) <= 0) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_field_overlay_mode') {
+    const rawO = Number(msg.fieldOverlayMode);
+    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(4, Math.round(rawO))) : 0;
+    syncSwarmConfigToMain(benchScenario);
+    redrawPausedHudIfReady();
+    if (!telemView || Math.round(telemView[0]) <= 0) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'inspect_point') {
+    if (calArmed === 'none') {
+      const parseNorm = (val, fallback = 0.5) => {
+        if (val === undefined || val === null || val === '') return fallback;
+        const n = Number(val);
+        return Number.isFinite(n) ? Math.max(0.0, Math.min(1.0, n)) : fallback;
+      };
+      const hasAbsX = typeof msg.x === 'number' && Number.isFinite(msg.x);
+      const hasAbsY = typeof msg.y === 'number' && Number.isFinite(msg.y);
+      const reqNormX = hasAbsX ? (frameW > 0 ? Math.max(0.0, Math.min(1.0, msg.x / frameW)) : 0.0) : parseNorm(msg.normX, 0.5);
+      const reqNormY = hasAbsY ? (frameH > 0 ? Math.max(0.0, Math.min(1.0, msg.y / frameH)) : 0.0) : parseNorm(msg.normY, 0.5);
+      const qx = hasAbsX ? msg.x : reqNormX * frameW;
+      const qy = hasAbsY ? msg.y : reqNormY * frameH;
+      const reqSeq = typeof msg.inspectSeq === 'number' && Number.isFinite(msg.inspectSeq)
+        ? Math.max(1, Math.trunc(msg.inspectSeq))
+        : null;
+      inspectFieldPointAt(qx, qy, reqSeq, reqNormX, reqNormY);
+    }
+  } else if (msg.type === 'set_bench_scenario') {
+    applyTestbenchScenarioSwitch(msg.scenario);
   } else if (msg.type === 'set_source') {
+    if (typeof msg.scenario === 'string' && msg.scenario) {
+      benchScenario = msg.scenario;
+    }
     sourceMode = msg.sourceMode;
+    let syncSwarmUi = false;
+    if (typeof msg.swarmMode === 'number' && Number.isFinite(msg.swarmMode)) {
+      const explicitMode = Math.max(0, Math.min(2, Math.round(msg.swarmMode)));
+      userSwarmMode = explicitMode;
+      denseSwarmOverrideActive = false;
+      swarmMode = explicitMode;
+      if (hasChronos1000Exports()) {
+        wasmExports.chronos_set_swarm_mode(swarmMode);
+      }
+      syncSwarmUi = true;
+    } else if (typeof msg.swarmOverride === 'number' && Number.isFinite(msg.swarmOverride)) {
+      const ovMode = Math.max(0, Math.min(2, Math.round(msg.swarmOverride)));
+      denseSwarmOverrideActive = true;
+      swarmMode = ovMode;
+      if (hasChronos1000Exports()) {
+        wasmExports.chronos_set_swarm_mode(swarmMode);
+      }
+      syncSwarmUi = true;
+    } else if (denseSwarmOverrideActive) {
+      denseSwarmOverrideActive = false;
+      swarmMode = userSwarmMode;
+      if (hasChronos1000Exports()) {
+        wasmExports.chronos_set_swarm_mode(swarmMode);
+      }
+      syncSwarmUi = true;
+    }
+
+    if (sourceMode === 'testbench') {
+      applyScenarioResolutionAndSwarm(benchScenario);
+    }
+    if (syncSwarmUi && !(sourceMode === 'testbench' && isChronos1000Scenario(benchScenario))) {
+      syncSwarmConfigToMain(benchScenario);
+    }
+
+    clearVisualQueues();
     if (typeof msg.fpsHint === 'number' && msg.fpsHint >= 8.0) {
       sourceFps = msg.fpsHint;
     } else if (sourceMode !== 'testbench') {
@@ -5713,6 +7676,28 @@ self.onmessage = async (ev) => {
           labMode,
           calibration: getCalibrationSnapshot(),
           calibrationSegments: exportedSegments,
+          chronos1000: (() => {
+            const medCount = Math.min(Math.max(1, tickCounter), TIME_HIST_LEN);
+            const medMs = tickCounter > 0 ? computeMedianTickMs(medCount) : 0.0;
+            const effK = telemView ? intOrNull(telemView[1], 0, RING_LEN - 1) ?? lookaheadK : lookaheadK;
+            const fIdxExp = telemView ? intOrNull(telemView[0], 0) ?? 0 : 0;
+            const dispSlotExp = telemView ? intOrNull(telemView[2], 0, RING_LEN - 1) ?? -1 : -1;
+            const snap = buildChronos1000Snapshot(medMs, effK, fIdxExp, dispSlotExp);
+            const bodies = [];
+            const validMaskExp = Number.isInteger(snap.validityMask) ? snap.validityMask : 0;
+            if (rigidBodiesView && hasChronos1000Exports() && (validMaskExp & 4) !== 0) {
+              for (let b = 0; b < MAX_RIGID_BODIES; b++) {
+                const rb = parseRigidBodyDescriptor(rigidBodiesView, b * BODY_STRIDE);
+                if (rb) {
+                  bodies.push(rb);
+                }
+              }
+            }
+            return {
+              ...snap,
+              rigidBodies: bodies,
+            };
+          })(),
         },
       },
       [ordered.buffer]

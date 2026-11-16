@@ -1,8 +1,14 @@
 [package]
 name = "chronos_spectral"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
-description = "Zero-allocation Non-Causal Spatiotemporal Wavefield & Biophysical Entrainment Tracker (wasm32 SIMD128)"
+authors = ["steph4n-gh"]
+description = "Zero-ML, zero-allocation #![no_std] Wasm32 SIMD128 spatiotemporal wavefield, 1,500-target swarm & continuum physics tracker"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/steph4n-gh/chronos-spectral"
+keywords = ["computer-vision", "tracking", "wasm", "simd128", "no-std"]
+categories = ["computer-vision", "science", "wasm", "no-std", "multimedia::video"]
 
 [lib]
 crate-type = ["cdylib"]

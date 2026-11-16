@@ -347,8 +347,135 @@
 
     #hudCanvas {
       aspect-ratio: 16 / 9;
+      border: 0;
+      padding: 0;
+      outline: 1px solid var(--border-strong);
+      border-radius: 3px;
       cursor: crosshair;
       touch-action: manipulation;
+    }
+
+    /* HUD Instrument Header Quick Actions + Cinema Fullscreen (Zero-CLS) */
+    .hud-dock-slot {
+      min-inline-size: 0;
+    }
+
+    .hud-panel-header {
+      min-block-size: 2.52rem;
+    }
+
+    .hud-header-top {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.45rem;
+      min-block-size: 1.38rem;
+    }
+
+    .hud-header-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.32rem;
+      flex: 0 0 auto;
+    }
+
+    button.hud-header-btn {
+      inline-size: auto;
+      min-block-size: 1.38rem;
+      block-size: 1.38rem;
+      line-height: 1.28rem;
+      padding: 0 0.38rem;
+      font-size: 0.62rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      font-variant-numeric: tabular-nums;
+      text-align: center;
+      flex: 0 0 auto;
+    }
+
+    #btnHudHeroToggle {
+      inline-size: 15.8ch;
+      min-inline-size: 15.8ch;
+    }
+
+    #btnHudHeroToggle[data-hidden-solo="true"] {
+      border-color: var(--status-warn);
+      background-color: #201807;
+      color: var(--status-warn);
+      box-shadow: inset 0 0 0 1px var(--status-warn);
+    }
+
+    #btnHudFullscreen {
+      inline-size: 12.6ch;
+      min-inline-size: 12.6ch;
+    }
+
+    #hudPanel::backdrop {
+      background-color: #040812;
+    }
+
+    #hudPanel:fullscreen,
+    #hudPanel.hud-maximized {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      margin: 0;
+      inline-size: 100vw;
+      block-size: 100dvh;
+      max-block-size: 100dvh;
+      padding: 0.42rem 0.75rem;
+      border: none;
+      border-radius: 0;
+      background-color: #040812;
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      contain: layout style;
+    }
+
+    #hudPanel:fullscreen .hud-panel-header,
+    #hudPanel.hud-maximized .hud-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.65rem;
+      min-block-size: 1.85rem;
+      padding-block-end: 0.25rem;
+    }
+
+    #hudPanel:fullscreen .hud-header-top,
+    #hudPanel.hud-maximized .hud-header-top {
+      display: contents;
+    }
+
+    #hudPanel:fullscreen .hud-panel-header .panel-title,
+    #hudPanel.hud-maximized .hud-panel-header .panel-title {
+      order: 1;
+      flex: 0 0 auto;
+    }
+
+    #hudPanel:fullscreen #hudSourceLabel,
+    #hudPanel.hud-maximized #hudSourceLabel {
+      order: 2;
+      flex: 1 1 auto;
+      text-align: center;
+    }
+
+    #hudPanel:fullscreen .hud-header-actions,
+    #hudPanel.hud-maximized .hud-header-actions {
+      order: 3;
+      flex: 0 0 auto;
+    }
+
+    #hudPanel:fullscreen #hudCanvas,
+    #hudPanel.hud-maximized #hudCanvas {
+      inline-size: min(100%, calc((100dvh - 54px) * 16 / 9));
+      max-inline-size: 100%;
+      block-size: auto;
+      max-block-size: calc(100dvh - 54px);
+      aspect-ratio: 16 / 9;
+      margin: auto;
+      flex: 0 0 auto;
     }
 
     #pipCanvas {
@@ -1623,6 +1750,10 @@
       details.tuning-disclosure {
         border: 1px solid CanvasText;
       }
+      #hudCanvas {
+        border: 0;
+        outline: 1px solid CanvasText;
+      }
       .cal-toolbar-sep {
         border-inline-start: 1px solid CanvasText;
       }
@@ -1630,6 +1761,124 @@
       button.active {
         outline: 2px solid Highlight;
       }
+    }
+    /* CHRONOS-1000 Zero-CLS Continuum Field Panel & Progressive Disclosure Drawer */
+    .continuum-panel {
+      contain: layout style paint;
+    }
+
+    .continuum-controls-row {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.44rem;
+      margin-block-end: 0.52rem;
+    }
+
+    @media (max-width: 640px) {
+      .continuum-controls-row {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    .continuum-kpi-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      margin-block-end: 0.48rem;
+    }
+
+    .continuum-kpi-grid .kpi-card {
+      min-block-size: 3.35rem;
+      padding: 0.42rem 0.5rem;
+    }
+
+    .continuum-kpi-grid .kpi-label {
+      font-size: 0.60rem;
+      letter-spacing: 0.015em;
+    }
+
+    .continuum-kpi-grid .kpi-value {
+      font-size: 0.84rem;
+    }
+
+    .kpi-card.continuum-hero-card {
+      border-color: var(--border-accent);
+      background-color: #061b26;
+    }
+
+    .kpi-card.continuum-hero-card .kpi-value {
+      color: var(--brand-color);
+      font-size: 1.02rem;
+    }
+
+    .swarm-inspect-strip {
+      block-size: 1.78rem;
+      line-height: 1.7rem;
+      padding-inline: 0.52rem;
+      margin-block-end: 0.48rem;
+      border-radius: 4px;
+      border: 1px solid #1e3354;
+      background-color: #060d19;
+      color: #c7e6ff;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.69rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    details.expert-disclosure {
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      background-color: #091221;
+      padding: 0.36rem 0.52rem;
+      contain: layout style;
+    }
+
+    summary.expert-disclosure-summary {
+      cursor: pointer;
+      list-style-position: inside;
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      min-block-size: 1.5rem;
+      line-height: 1.5rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    summary.expert-disclosure-summary:hover {
+      color: var(--brand-color);
+    }
+
+    summary.expert-disclosure-summary:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+      border-radius: 2px;
+    }
+
+    .expert-disclosure-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.38rem;
+      padding-block-start: 0.48rem;
+      contain: layout style paint;
+    }
+
+    .expert-disclosure-grid .kpi-card {
+      min-block-size: 3.05rem;
+      padding: 0.34rem 0.46rem;
+    }
+
+    .expert-disclosure-grid .kpi-label {
+      font-size: 0.58rem;
+    }
+
+    .expert-disclosure-grid .kpi-value {
+      font-size: 0.78rem;
     }
   </style>
 </head>
@@ -1644,7 +1893,7 @@
     </div>
     <div class="header-pills">
       <span class="pill-slot"><span class="pill ok" id="pillKernel">◆ KERNEL BOOTING</span></span>
-      <span class="pill-slot"><span class="pill" id="pillArena">ARENA: 288 PAGES / 18.00 MB</span></span>
+      <span class="pill-slot"><span class="pill" id="pillArena">ARENA: -- PAGES / 0.00 MB</span></span>
       <span class="pill-slot"><span class="pill ok" id="pillPerf">KERNEL: -- ms</span></span>
       <span class="pill-slot"><span class="pill" id="pillFps">FPS: --</span></span>
       <span class="pill-slot"><span class="pill ok" id="pillStreamHealth" hidden>LIVE: CAM LOCKED</span></span>
@@ -1654,12 +1903,20 @@
   <main class="deck-grid">
     <!-- Left Column: Main Delayed Wavefield OffscreenCanvas + Split Raw/Eulerian PiP & Swap Proof -->
     <div class="deck-column">
-      <div class="panel">
-        <div class="panel-header">
-          <h2 class="panel-title">Delayed Wavefield HUD [t − K]</h2>
+      <div id="hudDockSlot" class="hud-dock-slot">
+      <div class="panel" id="hudPanel">
+        <div class="panel-header hud-panel-header">
+          <div class="hud-header-top">
+            <h2 class="panel-title">Delayed Wavefield HUD [t − K]</h2>
+            <div class="hud-header-actions" role="group" aria-label="Wavefield HUD display controls">
+              <button type="button" id="btnHudHeroToggle" class="hud-header-btn active" aria-pressed="true" data-hidden-solo="false" title="Hide 16-slot Hero reticles, trails &amp; Hermite bridges (H)">Hero 16: ON</button>
+              <button type="button" id="btnHudFullscreen" class="hud-header-btn" aria-pressed="false" title="Expand Delayed Wavefield HUD to fullscreen (F)">⛶ Fullscreen</button>
+            </div>
+          </div>
           <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
         </div>
         <canvas id="hudCanvas" width="960" height="540" role="img" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
+      </div>
       </div>
 
       <div class="panel">
@@ -2085,6 +2342,110 @@
         </div>
         <canvas id="physicsPhaseCanvas" width="420" height="210" role="img" aria-label="15 Hz phase-space portrait and mechanical energy and angular momentum conservation scope"></canvas>
       </section>
+
+      <!-- CHRONOS-1000 Zero-ML Continuum & Swarm Field Telemetry (Calm 4 Hz + Progressive Disclosure) -->
+      <section id="continuumFieldPanel" class="panel continuum-panel isolated-region" aria-labelledby="continuumPanelHeading">
+        <div class="panel-header">
+          <h2 class="panel-title" id="continuumPanelHeading">CHRONOS-1000 Continuum &amp; Swarm Field</h2>
+          <span class="panel-meta" id="continuumSummaryMeta" aria-live="off">SWARM: OFF · HERO 16</span>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="swarmModeSelect">Swarm Engine Mode</label>
+            <select id="swarmModeSelect" name="swarmMode">
+              <option value="0" selected>Off (Hero 16 Baseline)</option>
+              <option value="1">Auto-Density (Coarse Gate)</option>
+              <option value="2">Forced Active (1,000+ Targets)</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22)</label>
+            <select id="fieldOverlayModeSelect" name="fieldOverlayMode">
+              <option value="0" selected>Micro-Tracks + Rigid Hulls</option>
+              <option value="1">Velocity |v| Field (40x22)</option>
+              <option value="2">Vorticity Curl v (dv/dx - du/dy)</option>
+              <option value="3">FTLE Coherent Ridges (16f)</option>
+              <option value="4">Modal Vibration Phase ([-pi, pi])</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="kpi-grid continuum-kpi-grid">
+          <div class="kpi-card continuum-hero-card">
+            <span class="kpi-label">CONFIRMED (OBS / COAST)</span>
+            <span class="kpi-value" id="kpiSwarmConfirmed">0 / 0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">PEAK SIMULTANEOUS</span>
+            <span class="kpi-value" id="kpiSwarmPeak">0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">UNIQUE MICRO-TIDS</span>
+            <span class="kpi-value" id="kpiSwarmUnique">0</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">KERNEL P50 / PARTIAL PIPE</span>
+            <span class="kpi-value" id="kpiLatencySplit">-- ms | -- ms</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">RIGID-MOTION BODIES (SE2)</span>
+            <span class="kpi-value" id="kpiRigidBodies">-- | -- rad/s</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">VORTICITY CURL MAX / RMS</span>
+            <span class="kpi-value" id="kpiContinuumVort">-- / -- s⁻¹</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">FTLE MAX RIDGE</span>
+            <span class="kpi-value" id="kpiContinuumFtle">-- s⁻¹</span>
+          </div>
+          <div class="kpi-card">
+            <span class="kpi-label">MODAL FREQ / ORDER R₂</span>
+            <span class="kpi-value" id="kpiModalField">-- Hz | --</span>
+          </div>
+        </div>
+
+        <div class="swarm-inspect-strip" id="swarmInspectReadout">CLICK HUD CANVAS TO INSPECT FIELD OR TRACK</div>
+
+        <details id="expertDiagnosticsDrawer" class="expert-disclosure">
+          <summary id="expertDiagnosticsSummary" class="expert-disclosure-summary">Expert Solver &amp; Raw Continuum Diagnostics (Auction · Bitmask · FTLE · Graph)</summary>
+          <div class="expert-disclosure-grid">
+            <div class="kpi-card">
+              <span class="kpi-label">AUCTION STEPS</span>
+              <span class="kpi-value" id="diagAuctionSteps">0</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">RAW IC-LK / SE2 RMSE</span>
+              <span class="kpi-value" id="diagRawResiduals">-- | -- px</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">VALIDITY BITMASK (G·F·R·M·K)</span>
+              <span class="kpi-value" id="diagValidityMask">0x00 (NONE)</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">FTLE WINDOW STATUS</span>
+              <span class="kpi-value" id="diagFtleWindow">0 trk / 0 cells</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">KNN EDGES / FINE PEAKS</span>
+              <span class="kpi-value" id="diagSparseGraph">0 / 0</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">KURAMOTO R / VEL DISP</span>
+              <span class="kpi-value" id="diagKuramotoCom">-- | -- px/s</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">FIELD COMPOSITOR</span>
+              <span class="kpi-value" id="diagFieldBackend">STANDBY · 0.00 ms</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">MEAN GRAPH STRAIN</span>
+              <span class="kpi-value" id="diagMeanStrain">-- s⁻¹</span>
+            </div>
+          </div>
+        </details>
+      </section>
     </div>
 
     <!-- Right Column: Sensor Input, Live Stream Suite, MP4 Transport, Lab Modes, Synth & Kernel Controls -->
@@ -2103,6 +2464,8 @@
           <button type="button" class="showcase-btn" data-showcase="chaos_pendulum" aria-pressed="false">🧲 Chaos Pendulum (50s)</button>
           <button type="button" class="showcase-btn" data-showcase="coupled_metronomes" aria-pressed="false">🎵 Sync Metronomes (55s)</button>
           <button type="button" class="showcase-btn" data-showcase="newtons_cradle" aria-pressed="false">⚪ Newton's Cradle (45s)</button>
+          <button type="button" class="showcase-btn" data-showcase="starling_1000" aria-pressed="false">🐦 Starling Murmuration (1,000+)</button>
+          <button type="button" class="showcase-btn" data-showcase="vortex_1200" aria-pressed="false">🌀 Lamb-Oseen Vortex (1,200)</button>
         </div>
       </div>
 
@@ -2146,6 +2509,9 @@
               <option value="./samples/harmonic_metronome_phase.mp4" data-fps="30" data-lab="1">Nikko Mechanical Metronome 96 BPM · 0.80 Hz (30 fps · Mode B Phase)</option>
               <option value="./samples/carom_billiards_impulses.mp4" data-fps="30" data-lab="2">3-Cushion Carom Billiards (30 fps · Mode C Impulses)</option>
             </optgroup>
+            <optgroup label="CHRONOS-1000 Continuum Swarms (1,000+ Targets)">
+              <option value="./samples/starling_murmuration_1000.mp4" data-fps="30" data-lab="0" data-swarm="2">Starling Murmuration (13.0s · 30 fps · 1,353 extrema)</option>
+            </optgroup>
           </select>
         </div>
 
@@ -2155,6 +2521,9 @@
             <select id="benchScenarioSelect" name="benchScenario">
               <option value="pillar_crossing">Dual-Pillar Crossing &amp; In-Pillar Bounce (Default)</option>
               <option value="multi_target_swarm">12-Target Dense Swarm (2 Pillars · 16-Slot Capacity Proof)</option>
+              <option value="vortex_swarm_1200">Lamb-Oseen Vortex Dipole (1,200 blobs · 640x360 HD)</option>
+              <option value="murmuration_1200">Murmuration + 3 Rigid SE(2) Hulls (1,208 · 640x360 HD)</option>
+              <option value="modal_beam_1152">Cantilever Modal Beam 3.00 Hz (1,152 speckles · 640x360 HD)</option>
               <option value="short_gap_bridge">Short-Gap Occlusion Bridge (5f ≤ K Hermite Spline)</option>
               <option value="ballistic_cascade">Newtonian Ballistic Cascade (Mode A Apex Proof)</option>
               <option value="model_rocket_flight">Model Rocket Boost, Coast &amp; Apogee (Mode A Proof)</option>
@@ -2314,6 +2683,10 @@
         </div>
 
         <div class="toggle-list">
+          <label class="toggle-item" for="chkHeroTargets">
+            <input type="checkbox" id="chkHeroTargets" checked />
+            <span>Show 16-Slot Hero Reticles &amp; Trails (H)</span>
+          </label>
           <label class="toggle-item" for="chkKalman">
             <input type="checkbox" id="chkKalman" checked />
             <span>Show Kinematic 2×2 Kalman Baseline</span>
@@ -2496,7 +2869,7 @@
     const physicsPhaseOffscreen = physicsPhaseEl ? physicsPhaseEl.transferControlToOffscreen() : null;
     const slotPipOffscreens = rosterCardRefs.map((r) => r.canvas.transferControlToOffscreen());
 
-    const worker = new Worker('./worker.js?v=20261114b');
+    const worker = new Worker('./worker.js?v=20261115c1k');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
       if (dom.pillKernel && dom.pillKernel.textContent.includes('BOOTING')) {
@@ -2512,7 +2885,7 @@
     worker.postMessage(
       {
         type: 'init',
-        wasmUrl: './chronos_spectral.wasm?v=20261114b',
+        wasmUrl: './chronos_spectral.wasm?v=20261115c1k',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
         persistenceCanvas: persistenceOffscreen,
@@ -2809,6 +3182,14 @@
       pillFps: document.getElementById('pillFps'),
       pillStreamHealth: document.getElementById('pillStreamHealth'),
       inputResMeta: document.getElementById('inputResMeta'),
+      hudDockSlot: document.getElementById('hudDockSlot'),
+      hudPanel: document.getElementById('hudPanel'),
+      btnHudHeroToggle: document.getElementById('btnHudHeroToggle'),
+      btnHudFullscreen: document.getElementById('btnHudFullscreen'),
+      chkHeroTargets: document.getElementById('chkHeroTargets'),
+      chkKalman: document.getElementById('chkKalman'),
+      chkAllOverlays: document.getElementById('chkAllOverlays'),
+      chkEcaOverlay: document.getElementById('chkEcaOverlay'),
       hudSourceLabel: document.getElementById('hudSourceLabel'),
       mortonReadout: document.getElementById('mortonReadout'),
       lblPadicSwaps: document.getElementById('lblPadicSwaps'),
@@ -2851,6 +3232,29 @@
       kpiTwoBodyMassE: document.getElementById('kpiTwoBodyMassE'),
       kpiTwoBodyMomRes: document.getElementById('kpiTwoBodyMomRes'),
       kpiPhysicsConserv: document.getElementById('kpiPhysicsConserv'),
+      continuumFieldPanel: document.getElementById('continuumFieldPanel'),
+      continuumSummaryMeta: document.getElementById('continuumSummaryMeta'),
+      swarmModeSelect: document.getElementById('swarmModeSelect'),
+      fieldOverlayModeSelect: document.getElementById('fieldOverlayModeSelect'),
+      kpiSwarmConfirmed: document.getElementById('kpiSwarmConfirmed'),
+      kpiSwarmPeak: document.getElementById('kpiSwarmPeak'),
+      kpiSwarmUnique: document.getElementById('kpiSwarmUnique'),
+      kpiLatencySplit: document.getElementById('kpiLatencySplit'),
+      kpiRigidBodies: document.getElementById('kpiRigidBodies'),
+      kpiContinuumVort: document.getElementById('kpiContinuumVort'),
+      kpiContinuumFtle: document.getElementById('kpiContinuumFtle'),
+      kpiModalField: document.getElementById('kpiModalField'),
+      swarmInspectReadout: document.getElementById('swarmInspectReadout'),
+      expertDiagnosticsDrawer: document.getElementById('expertDiagnosticsDrawer'),
+      expertDiagnosticsSummary: document.getElementById('expertDiagnosticsSummary'),
+      diagAuctionSteps: document.getElementById('diagAuctionSteps'),
+      diagRawResiduals: document.getElementById('diagRawResiduals'),
+      diagValidityMask: document.getElementById('diagValidityMask'),
+      diagFtleWindow: document.getElementById('diagFtleWindow'),
+      diagSparseGraph: document.getElementById('diagSparseGraph'),
+      diagKuramotoCom: document.getElementById('diagKuramotoCom'),
+      diagFieldBackend: document.getElementById('diagFieldBackend'),
+      diagMeanStrain: document.getElementById('diagMeanStrain'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -2915,12 +3319,308 @@
     videoEl.addEventListener('timeupdate', updateVideoTimeLabel);
     videoEl.addEventListener('loadedmetadata', updateVideoTimeLabel);
 
+    function mapSourceModeToFsm(mode) {
+      if (mode === 'webcam') return 'WEBCAM';
+      if (mode === 'video' || mode === 'live') return 'VIDEO';
+      if (mode === 'testbench') return 'TESTBENCH';
+      return 'IDLE';
+    }
+
+    const VALID_DECK_SOURCES = new Set(['IDLE', 'TESTBENCH', 'VIDEO', 'WEBCAM']);
+    const VALID_DECK_ENGINES = new Set(['SWARM_OFF', 'AUTO_STANDBY', 'SWARM_ACTIVE']);
+    const VALID_POINTER_TOOLS = new Set([
+      'INSPECT_TARGET',
+      'CAL_RULER_P1',
+      'CAL_RULER_P2',
+      'CAL_QUAD_PT1',
+      'CAL_QUAD_PT2',
+      'CAL_QUAD_PT3',
+      'CAL_QUAD_PT4',
+      'CROP_ROI',
+    ]);
+    const VALID_VIEWPORTS = new Set(['DOCKED', 'FULLSCREEN']);
+
+    function deriveCalPointerTool(calArmed, calDraftCount) {
+      if (calArmed === 'ruler') {
+        return Number(calDraftCount) >= 1 ? 'CAL_RULER_P2' : 'CAL_RULER_P1';
+      }
+      if (calArmed === 'homography') {
+        const pt = Math.min(4, Math.max(1, (Math.trunc(Number(calDraftCount) || 0)) + 1));
+        return `CAL_QUAD_PT${pt}`;
+      }
+      return 'INSPECT_TARGET';
+    }
+
+    function normalizeInspectAck(raw) {
+      const r = raw && typeof raw === 'object' ? raw : {};
+      const seqNum = Number.isInteger(r.inspectSeq) ? r.inspectSeq : 0;
+      const optNum = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+      const pxX = optNum(r.inspectReqPxX ?? r.inspectReqX);
+      const pxY = optNum(r.inspectReqPxY ?? r.inspectReqY);
+      return Object.freeze({
+        inspectSeq: Math.max(0, seqNum),
+        inspectReqNormX: optNum(r.inspectReqNormX),
+        inspectReqNormY: optNum(r.inspectReqNormY),
+        inspectReqPxX: pxX,
+        inspectReqPxY: pxY,
+        inspectStatus: typeof r.inspectStatus === 'string' ? r.inspectStatus : 'idle',
+        inspectedTid: Number.isInteger(r.inspectedTid) ? Math.max(0, r.inspectedTid) : 0,
+      });
+    }
+
+    function inspectAckEquals(a, b) {
+      if (a === b) return true;
+      if (!a || !b) return false;
+      return (
+        a.inspectSeq === b.inspectSeq &&
+        a.inspectReqNormX === b.inspectReqNormX &&
+        a.inspectReqNormY === b.inspectReqNormY &&
+        a.inspectReqPxX === b.inspectReqPxX &&
+        a.inspectReqPxY === b.inspectReqPxY &&
+        a.inspectStatus === b.inspectStatus &&
+        a.inspectedTid === b.inspectedTid
+      );
+    }
+
+    function freezeDeckStateSnapshot(st) {
+      return Object.freeze({
+        seq: st.seq,
+        source: st.source,
+        engine: st.engine,
+        overlays: Object.freeze({
+          showHeroTargets: Boolean(st.overlays.showHeroTargets),
+          showAllOverlays: Boolean(st.overlays.showAllOverlays),
+          showEcaOverlay: Boolean(st.overlays.showEcaOverlay),
+          showKalman: Boolean(st.overlays.showKalman),
+          fieldOverlayMode: Math.max(0, Math.min(4, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
+        }),
+        pointerTool: st.pointerTool,
+        viewport: st.viewport,
+        lastInspectAck: normalizeInspectAck(st.lastInspectAck),
+      });
+    }
+
+    function transitionDeckState(state, event) {
+      if (!event || typeof event.type !== 'string') return state;
+      let nextSource = state.source;
+      let nextEngine = state.engine;
+      let nextOverlays = state.overlays;
+      let nextPointerTool = state.pointerTool;
+      let nextViewport = state.viewport;
+      let nextInspectAck = state.lastInspectAck;
+
+      if (event.type === 'SOURCE_CHANGED') {
+        if (VALID_DECK_SOURCES.has(event.source)) {
+          nextSource = event.source;
+        }
+      } else if (event.type === 'ENGINE_SYNC') {
+        const computed = event.swarmActive
+          ? 'SWARM_ACTIVE'
+          : Number(event.swarmMode) === 1
+          ? 'AUTO_STANDBY'
+          : 'SWARM_OFF';
+        if (VALID_DECK_ENGINES.has(computed)) {
+          nextEngine = computed;
+        }
+      } else if (event.type === 'OVERLAY_SET') {
+        const ov = {
+          showHeroTargets: typeof event.showHeroTargets === 'boolean' ? event.showHeroTargets : state.overlays.showHeroTargets,
+          showAllOverlays: typeof event.showAllOverlays === 'boolean' ? event.showAllOverlays : state.overlays.showAllOverlays,
+          showEcaOverlay: typeof event.showEcaOverlay === 'boolean' ? event.showEcaOverlay : state.overlays.showEcaOverlay,
+          showKalman: typeof event.showKalman === 'boolean' ? event.showKalman : state.overlays.showKalman,
+          fieldOverlayMode:
+            typeof event.fieldOverlayMode === 'number' && Number.isFinite(event.fieldOverlayMode)
+              ? Math.max(0, Math.min(4, Math.round(event.fieldOverlayMode)))
+              : state.overlays.fieldOverlayMode,
+        };
+        if (
+          ov.showHeroTargets !== state.overlays.showHeroTargets ||
+          ov.showAllOverlays !== state.overlays.showAllOverlays ||
+          ov.showEcaOverlay !== state.overlays.showEcaOverlay ||
+          ov.showKalman !== state.overlays.showKalman ||
+          ov.fieldOverlayMode !== state.overlays.fieldOverlayMode
+        ) {
+          nextOverlays = ov;
+        }
+      } else if (event.type === 'CAL_TOOL_SYNC') {
+        const derived = deriveCalPointerTool(event.calArmed, event.calDraftCount);
+        if (derived !== 'INSPECT_TARGET' || state.pointerTool !== 'CROP_ROI') {
+          nextPointerTool = derived;
+        }
+      } else if (event.type === 'POINTER_TOOL_SET') {
+        if (VALID_POINTER_TOOLS.has(event.pointerTool)) {
+          nextPointerTool = event.pointerTool;
+        }
+      } else if (event.type === 'FULLSCREEN_SYNC') {
+        const vp = event.active ? 'FULLSCREEN' : 'DOCKED';
+        if (VALID_VIEWPORTS.has(vp)) {
+          nextViewport = vp;
+        }
+      } else if (event.type === 'INSPECT_ACK') {
+        const candAck = normalizeInspectAck(event.ack);
+        if (!inspectAckEquals(state.lastInspectAck, candAck)) {
+          nextInspectAck = candAck;
+        }
+      } else {
+        return state;
+      }
+
+      if (
+        nextSource === state.source &&
+        nextEngine === state.engine &&
+        nextOverlays === state.overlays &&
+        nextPointerTool === state.pointerTool &&
+        nextViewport === state.viewport &&
+        nextInspectAck === state.lastInspectAck
+      ) {
+        return state;
+      }
+
+      return freezeDeckStateSnapshot({
+        seq: state.seq + 1,
+        source: nextSource,
+        engine: nextEngine,
+        overlays: nextOverlays,
+        pointerTool: nextPointerTool,
+        viewport: nextViewport,
+        lastInspectAck: nextInspectAck,
+      });
+    }
+
+    let hudMaximizedFallback = false;
+    let calSyncSeq = 0;
+    let uiCalMinDraftCount = 0;
+    let inspectReqSeq = 0;
+    let deckUiState = freezeDeckStateSnapshot({
+      seq: 0,
+      source: 'IDLE',
+      engine: 'SWARM_OFF',
+      overlays: {
+        showHeroTargets: true,
+        showAllOverlays: false,
+        showEcaOverlay: false,
+        showKalman: true,
+        fieldOverlayMode: 0,
+      },
+      pointerTool: 'INSPECT_TARGET',
+      viewport: 'DOCKED',
+    });
+
+    function renderDeckState(state) {
+      const ov = state.overlays;
+      if (dom.chkHeroTargets && dom.chkHeroTargets.checked !== ov.showHeroTargets) {
+        dom.chkHeroTargets.checked = ov.showHeroTargets;
+      }
+      if (dom.chkAllOverlays && dom.chkAllOverlays.checked !== ov.showAllOverlays) {
+        dom.chkAllOverlays.checked = ov.showAllOverlays;
+      }
+      if (dom.chkEcaOverlay && dom.chkEcaOverlay.checked !== ov.showEcaOverlay) {
+        dom.chkEcaOverlay.checked = ov.showEcaOverlay;
+      }
+      if (dom.chkKalman && dom.chkKalman.checked !== ov.showKalman) {
+        dom.chkKalman.checked = ov.showKalman;
+      }
+      if (dom.fieldOverlayModeSelect && dom.fieldOverlayModeSelect.value !== String(ov.fieldOverlayMode)) {
+        dom.fieldOverlayModeSelect.value = String(ov.fieldOverlayMode);
+      }
+      if (dom.btnHudHeroToggle) {
+        const on = ov.showHeroTargets;
+        const soloHidden = !on && state.engine !== 'SWARM_ACTIVE';
+        dom.btnHudHeroToggle.classList.toggle('active', on);
+        dom.btnHudHeroToggle.setAttribute('aria-pressed', String(on));
+        dom.btnHudHeroToggle.dataset.hiddenSolo = String(soloHidden);
+        setTextIfChanged(dom.btnHudHeroToggle, on ? 'Hero 16: ON' : 'HERO 16: HIDDEN');
+        dom.btnHudHeroToggle.title = on
+          ? 'Hide 16-slot Hero reticles, trails & Hermite bridges (H)'
+          : soloHidden
+          ? 'Hero 16 overlays hidden while Swarm is inactive -- click or press H to restore'
+          : 'Show 16-slot Hero reticles & trails (H)';
+      }
+
+      const isFs = state.viewport === 'FULLSCREEN';
+      const useFallbackMax = hudMaximizedFallback && isFs;
+      if (dom.hudPanel) {
+        if (dom.hudDockSlot && useFallbackMax && !dom.hudPanel.classList.contains('hud-maximized')) {
+          const dockRect = dom.hudPanel.getBoundingClientRect();
+          if (dockRect.height > 0) {
+            dom.hudDockSlot.style.blockSize = `${dockRect.height}px`;
+          }
+        }
+        dom.hudPanel.classList.toggle('hud-maximized', useFallbackMax);
+        if (dom.hudDockSlot && !useFallbackMax) {
+          dom.hudDockSlot.style.blockSize = '';
+        }
+        dom.hudPanel.dataset.source = state.source;
+        dom.hudPanel.dataset.engine = state.engine;
+        dom.hudPanel.dataset.pointerTool = state.pointerTool;
+        dom.hudPanel.dataset.viewport = state.viewport;
+      }
+      if (dom.btnHudFullscreen) {
+        dom.btnHudFullscreen.classList.toggle('active', isFs);
+        dom.btnHudFullscreen.setAttribute('aria-pressed', String(isFs));
+        setTextIfChanged(dom.btnHudFullscreen, isFs ? '✕ Exit Full' : '⛶ Fullscreen');
+        dom.btnHudFullscreen.title = isFs
+          ? 'Exit HUD fullscreen (F or Esc)'
+          : 'Expand Delayed Wavefield HUD to fullscreen (F)';
+      }
+      if (hudEl) {
+        hudEl.dataset.pointerTool = state.pointerTool;
+      }
+    }
+
+    function dispatchDeckEvent(event) {
+      const next = transitionDeckState(deckUiState, event);
+      if (next !== deckUiState) {
+        deckUiState = next;
+        window.__chronosUiState = deckUiState;
+        renderDeckState(deckUiState);
+      }
+      return deckUiState;
+    }
+
+    function beginOptimisticCalArm(nextArm) {
+      calSyncSeq += 1;
+      uiCalMinDraftCount = 0;
+      dispatchDeckEvent({
+        type: 'CAL_TOOL_SYNC',
+        calArmed: nextArm,
+        calDraftCount: 0,
+      });
+      return calSyncSeq;
+    }
+
+    function advanceOptimisticCalClick() {
+      const pt = deckUiState.pointerTool;
+      if (pt === 'CAL_RULER_P1') {
+        uiCalMinDraftCount = Math.max(uiCalMinDraftCount, 1);
+        dispatchDeckEvent({ type: 'CAL_TOOL_SYNC', calArmed: 'ruler', calDraftCount: 1 });
+        return 'ruler';
+      }
+      if (pt === 'CAL_RULER_P2') {
+        return 'ruler';
+      }
+      if (pt.startsWith('CAL_QUAD_PT')) {
+        const curPt = Math.max(1, Math.min(4, Number(pt.slice(11)) || 1));
+        if (curPt < 4) {
+          uiCalMinDraftCount = Math.max(uiCalMinDraftCount, curPt);
+          dispatchDeckEvent({ type: 'CAL_TOOL_SYNC', calArmed: 'homography', calDraftCount: curPt });
+        }
+        return 'homography';
+      }
+      return 'none';
+    }
+
+    renderDeckState(deckUiState);
+    window.__chronosUiState = deckUiState;
+    window.__chronosInspectState = deckUiState.lastInspectAck;
+
     function syncContextualSourceUi(mode) {
       activeSourceMode = mode;
       dom.benchScenarioField.hidden = mode !== 'testbench';
       dom.videoTransportBar.hidden = mode !== 'video';
       dom.liveStreamBar.hidden = mode !== 'live';
       dom.pillStreamHealth.hidden = mode === 'testbench';
+      dispatchDeckEvent({ type: 'SOURCE_CHANGED', source: mapSourceModeToFsm(mode) });
       syncStimulusButtonAvailability();
       updateVideoTimeLabel();
     }
@@ -3043,8 +3743,8 @@
         return;
       }
 
-      // Detect <video loop> wrap-around or backward seek so tracks reset cleanly instead of teleporting
-      if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 0.15 < lastMediaTime) {
+      // Detect <video loop> wrap-around or any backward seek (> 1 ms reversal) so tracks and PTS clocks reset cleanly
+      if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 1e-3 < lastMediaTime) {
         worker.postMessage({ type: 'lab_action', action: 'reset' });
         lastMediaTime = -1;
         lastPumpPerfMs = 0;
@@ -3105,7 +3805,27 @@
     let uiCalArmed = 'none';
 
     function applyCalibrationUiState(m) {
-      uiCalArmed = m.calArmed || 'none';
+      if (
+        m &&
+        typeof m.calSyncSeq === 'number' &&
+        typeof calSyncSeq === 'number' &&
+        m.calSyncSeq < calSyncSeq
+      ) {
+        return;
+      }
+      const nextArmed = m && m.calArmed ? m.calArmed : 'none';
+      if (nextArmed === 'none' || nextArmed !== uiCalArmed) {
+        uiCalMinDraftCount = 0;
+      }
+      uiCalArmed = nextArmed;
+      lastCalArmedUi = uiCalArmed;
+      const rawDraft = m && typeof m.calDraftCount === 'number' ? m.calDraftCount : 0;
+      const effDraft = uiCalArmed === 'none' ? 0 : Math.max(rawDraft, uiCalMinDraftCount);
+      dispatchDeckEvent({
+        type: 'CAL_TOOL_SYNC',
+        calArmed: uiCalArmed,
+        calDraftCount: effDraft,
+      });
       const rulerOn = uiCalArmed === 'ruler' || (uiCalArmed === 'none' && m.calMode === 'ruler');
       const quadOn = uiCalArmed === 'homography' || (uiCalArmed === 'none' && m.calMode === 'homography');
       dom.btnCalRuler.setAttribute('aria-pressed', String(rulerOn));
@@ -3369,6 +4089,167 @@
       setTextIfChanged(dom.kpiPhysicsConserv, has ? `${fmtPhysicsCompact(eVal)} | ${fmtPhysicsCompact(lzVal)}` : '--');
     }
 
+    let lastSwarmActive = false;
+    let lastSwarmFrameW = 320;
+    let lastSwarmFrameH = 180;
+    let lastCalArmedUi = 'none';
+
+    function formatValidityMaskLabel(mask) {
+      const m = Number(mask) | 0;
+      const flags = [];
+      if (m & 1) flags.push('G');
+      if (m & 2) flags.push('F');
+      if (m & 4) flags.push('R');
+      if (m & 8) flags.push('M');
+      if (m & 16) flags.push('K');
+      const hex = '0x' + (m & 0xFF).toString(16).toUpperCase().padStart(2, '0');
+      return `${hex} (${flags.length ? flags.join(' ') : 'NONE'})`;
+    }
+
+    function fmtFixedOrDash(v, digits) {
+      return typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '--';
+    }
+
+    function fmtIntOrDash(v) {
+      return typeof v === 'number' && Number.isFinite(v) ? Math.round(v).toLocaleString('en-US') : '--';
+    }
+
+    function publishInspectTelemetryState(c1k) {
+      const ackSrc = c1k && typeof c1k === 'object' ? {
+        inspectSeq: Number.isInteger(c1k.inspectSeq) ? c1k.inspectSeq : (Number.isInteger(c1k.inspectResSeq) ? c1k.inspectResSeq : 0),
+        inspectReqNormX: c1k.inspectReqNormX,
+        inspectReqNormY: c1k.inspectReqNormY,
+        inspectReqPxX: c1k.inspectReqPxX ?? c1k.inspectReqX,
+        inspectReqPxY: c1k.inspectReqPxY ?? c1k.inspectReqY,
+        inspectStatus: c1k.inspectStatus,
+        inspectedTid: c1k.inspectedTid,
+      } : null;
+      const inspReqSeq = c1k && Number.isInteger(c1k.inspectReqSeq) ? c1k.inspectReqSeq : (ackSrc ? ackSrc.inspectSeq : 0);
+      if (typeof dispatchDeckEvent === 'function') {
+        dispatchDeckEvent({ type: 'INSPECT_ACK', ack: ackSrc });
+      }
+      const ack = deckUiState && deckUiState.lastInspectAck
+        ? deckUiState.lastInspectAck
+        : normalizeInspectAck(ackSrc);
+      if (dom.swarmInspectReadout) {
+        const ds = dom.swarmInspectReadout.dataset || (dom.swarmInspectReadout.dataset = {});
+        ds.inspectSeq = String(ack.inspectSeq);
+        ds.inspectReqSeq = String(inspReqSeq);
+        ds.inspectResSeq = String(ack.inspectSeq);
+        ds.inspectStatus = ack.inspectStatus;
+        ds.inspectTid = String(ack.inspectedTid);
+        ds.inspectReqPxX = ack.inspectReqPxX !== null ? ack.inspectReqPxX.toFixed(3) : '';
+        ds.inspectReqPxY = ack.inspectReqPxY !== null ? ack.inspectReqPxY.toFixed(3) : '';
+        ds.inspectReqNormX = ack.inspectReqNormX !== null ? ack.inspectReqNormX.toFixed(6) : '';
+        ds.inspectReqNormY = ack.inspectReqNormY !== null ? ack.inspectReqNormY.toFixed(6) : '';
+      }
+      if (typeof window !== 'undefined') {
+        window.__chronosInspectState = ack;
+      }
+    }
+
+    function updateContinuumDomUi(c1k, m) {
+      if (!dom.continuumSummaryMeta) return;
+      publishInspectTelemetryState(c1k);
+      const kernelMs = Number(c1k && Number.isFinite(c1k.kernelComputeMedianMs) ? c1k.kernelComputeMedianMs : m.wasmMedianMs) || 0.0;
+      const pipeMs = Number(c1k && Number.isFinite(c1k.partialPipelineLatencyMs) ? c1k.partialPipelineLatencyMs : m.partialPipelineLatencyMs) || kernelMs;
+      setTextIfChanged(dom.kpiLatencySplit, `${kernelMs.toFixed(2)} ms | ${pipeMs.toFixed(1)} ms`);
+
+      if (!c1k || !c1k.available) {
+        setTextIfChanged(dom.continuumSummaryMeta, 'SWARM: STANDBY · LEGACY WASM');
+        return;
+      }
+
+      const diagTag = c1k.diagnosticsValid === false ? ' · DIAG INVALID' : '';
+      const modeTag = c1k.swarmActive
+        ? `SWARM: ACTIVE · ${(c1k.fieldBackend || 'webgl2').toUpperCase()}${diagTag}`
+        : (c1k.swarmMode === 2 ? `SWARM: FORCED WAIT${diagTag}` : (c1k.swarmMode === 1 ? `SWARM: AUTO STANDBY${diagTag}` : `SWARM: OFF · HERO 16${diagTag}`));
+      setTextIfChanged(dom.continuumSummaryMeta, modeTag);
+      setTextIfChanged(
+        dom.kpiSwarmConfirmed,
+        `${fmtIntOrDash(c1k.confirmedCount)} / ${fmtIntOrDash(c1k.coastingCount)}`
+      );
+      setTextIfChanged(dom.kpiSwarmPeak, fmtIntOrDash(c1k.peakSimultaneous));
+      setTextIfChanged(dom.kpiSwarmUnique, fmtIntOrDash(c1k.uniqueTracks));
+
+      const mask = Number.isInteger(c1k.validityMask) ? c1k.validityMask : 0;
+      const hasValidatedTopBody = Boolean(
+        (mask & 4) &&
+        c1k.topRigidBodyValid &&
+        Number.isInteger(c1k.rigidBodyCount) &&
+        c1k.rigidBodyCount > 0 &&
+        Number.isInteger(c1k.topRigidMembers) &&
+        c1k.topRigidMembers >= 1 &&
+        Number.isFinite(c1k.topRigidOmegaRadS)
+      );
+      if (hasValidatedTopBody) {
+        const wSign = c1k.topRigidOmegaRadS >= 0 ? '+' : '';
+        setTextIfChanged(dom.kpiRigidBodies, `${c1k.rigidBodyCount} | ${wSign}${c1k.topRigidOmegaRadS.toFixed(2)} rad/s`);
+      } else if ((mask & 4) && Number.isInteger(c1k.rigidBodyCount) && c1k.rigidBodyCount === 0 && (c1k.validRigidBodyCount ?? 0) === 0) {
+        setTextIfChanged(dom.kpiRigidBodies, '0 | -- rad/s');
+      } else {
+        setTextIfChanged(dom.kpiRigidBodies, '-- | -- rad/s');
+      }
+
+      const vortValid = Number.isFinite(c1k.maxVorticityS1) && Number.isFinite(c1k.rmsVorticityS1);
+      if ((mask & 1) && vortValid) {
+        setTextIfChanged(dom.kpiContinuumVort, `${c1k.maxVorticityS1.toFixed(2)} / ${c1k.rmsVorticityS1.toFixed(2)} s⁻¹`);
+      } else if (c1k.swarmActive && vortValid) {
+        setTextIfChanged(dom.kpiContinuumVort, `RAW ${c1k.maxVorticityS1.toFixed(2)} / ${c1k.rmsVorticityS1.toFixed(2)} s⁻¹`);
+      } else {
+        setTextIfChanged(dom.kpiContinuumVort, '-- / -- s⁻¹');
+      }
+
+      if ((mask & 2) && Number.isFinite(c1k.maxFtleS1) && c1k.maxFtleS1 > -900.0) {
+        setTextIfChanged(dom.kpiContinuumFtle, `${c1k.maxFtleS1.toFixed(3)} s⁻¹ (${fmtIntOrDash(c1k.ftleCells)}c)`);
+      } else if (c1k.swarmActive) {
+        setTextIfChanged(dom.kpiContinuumFtle, `WARM ${fmtIntOrDash(c1k.ftleMatureTracks)}t`);
+      } else {
+        setTextIfChanged(dom.kpiContinuumFtle, '-- s⁻¹');
+      }
+
+      const modalValidNums = Number.isFinite(c1k.modalDomFreqHz) && Number.isFinite(c1k.modalR2);
+      if ((mask & 8) && modalValidNums && c1k.modalDomFreqHz > 0.05) {
+        setTextIfChanged(dom.kpiModalField, `${c1k.modalDomFreqHz.toFixed(2)} Hz | R₂ ${c1k.modalR2.toFixed(2)}`);
+      } else if (c1k.swarmActive && modalValidNums && c1k.modalDomFreqHz > 0.05) {
+        setTextIfChanged(dom.kpiModalField, `RAW ${c1k.modalDomFreqHz.toFixed(2)} Hz | R₂ ${c1k.modalR2.toFixed(2)}`);
+      } else if (c1k.swarmActive) {
+        setTextIfChanged(dom.kpiModalField, `WARM ${fmtIntOrDash(c1k.modalValidSensors)}s | R₂ ${fmtFixedOrDash(c1k.modalR2, 2)}`);
+      } else {
+        setTextIfChanged(dom.kpiModalField, '-- Hz | --');
+      }
+
+      if (c1k.inspectStatus === 'expired') {
+        setTextIfChanged(dom.swarmInspectReadout, 'TRACK EXPIRED BEFORE CAUSAL FRAME · CLICK LIVE TRACK');
+      } else if (c1k.inspectStatus === 'miss') {
+        setTextIfChanged(dom.swarmInspectReadout, 'NO ACTIVE TRACK AT POINT · CLICK LIVE TRACK');
+      } else if (c1k.inspectStatus === 'unavailable') {
+        setTextIfChanged(dom.swarmInspectReadout, 'FIELD INSPECTION UNAVAILABLE (LEGACY WASM)');
+      } else if (c1k.inspectedTrack && Number.isFinite(c1k.inspectedTrack.x) && Number.isFinite(c1k.inspectedTrack.y)) {
+        const it = c1k.inspectedTrack;
+        const bTxt = it.bodyId > 0 ? ` · B${it.bodyId}` : '';
+        const spd = Number.isFinite(it.vx) && Number.isFinite(it.vy) ? fmtFixedOrDash(Math.hypot(it.vx, it.vy), 1) : '--';
+        setTextIfChanged(
+          dom.swarmInspectReadout,
+          `INSP μT${it.tid}${bTxt} · (${it.x.toFixed(1)}, ${it.y.toFixed(1)}) · ${spd} px/s · FTLE ${fmtFixedOrDash(it.ftle, 2)}`
+        );
+      } else if (c1k.inspectedTid > 0) {
+        const bTxt = c1k.inspectedBodyId > 0 ? ` · BODY #${c1k.inspectedBodyId}` : '';
+        setTextIfChanged(dom.swarmInspectReadout, `INSP μT${c1k.inspectedTid}${bTxt}`);
+      } else {
+        setTextIfChanged(dom.swarmInspectReadout, 'CLICK HUD CANVAS TO INSPECT FIELD OR TRACK');
+      }
+
+      setTextIfChanged(dom.diagAuctionSteps, `${fmtIntOrDash(c1k.auctionSteps)} (↻${fmtIntOrDash(c1k.reacqEvents)})`);
+      setTextIfChanged(dom.diagRawResiduals, `${fmtFixedOrDash(c1k.meanIcLkRes, 3)} | ${fmtFixedOrDash(c1k.topRigidSe2RmsePx, 2)} px`);
+      setTextIfChanged(dom.diagValidityMask, formatValidityMaskLabel(mask));
+      setTextIfChanged(dom.diagFtleWindow, `${fmtIntOrDash(c1k.ftleMatureTracks)} trk / ${fmtIntOrDash(c1k.ftleCells)} cells`);
+      setTextIfChanged(dom.diagSparseGraph, `${fmtIntOrDash(c1k.knnEdgeCount)} / ${fmtIntOrDash(c1k.peakCount)}`);
+      setTextIfChanged(dom.diagKuramotoCom, `${fmtFixedOrDash(c1k.kuramotoR, 2)} | ${fmtFixedOrDash(c1k.velDispersion, 1)} px/s`);
+      setTextIfChanged(dom.diagFieldBackend, `${(c1k.fieldBackend || 'none').toUpperCase()} · ${fmtFixedOrDash(c1k.fieldRenderMs, 2)} ms`);
+      setTextIfChanged(dom.diagMeanStrain, `${fmtFixedOrDash(c1k.meanStrain, 4)} s⁻¹`);
+    }
+
     function applyResolutionUi(mode, w, h, pDim) {
       activeResMode = mode ? 1 : 0;
       activeFrameW = w || (activeResMode ? 640 : 320);
@@ -3400,10 +4281,34 @@
         dom.pillKernel.textContent = '◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
         dom.pillArena.textContent = `ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
+        dispatchDeckEvent({ type: 'SOURCE_CHANGED', source: mapSourceModeToFsm(activeSourceMode) });
+        if (typeof m.showHeroTargets === 'boolean') {
+          dispatchDeckEvent({ type: 'OVERLAY_SET', showHeroTargets: m.showHeroTargets });
+        }
+        if (typeof publishInspectTelemetryState === 'function') {
+          publishInspectTelemetryState(m.chronos1000 || null);
+        }
       } else if (m.type === 'init_error') {
         dom.pillKernel.textContent = '⚠ KERNEL INIT FAILED';
         dom.pillKernel.title = m.message || 'Failed to initialize Wasm kernel';
         dom.hudSourceLabel.textContent = `KERNEL ERROR: ${m.message || 'Wasm load failed'}`;
+      } else if (m.type === 'swarm_config_sync') {
+        if (typeof m.swarmMode === 'number' && dom.swarmModeSelect) {
+          dom.swarmModeSelect.value = String(m.swarmMode);
+        }
+        if (typeof m.fieldOverlayMode === 'number' && dom.fieldOverlayModeSelect) {
+          dom.fieldOverlayModeSelect.value = String(m.fieldOverlayMode);
+        }
+        dispatchDeckEvent({
+          type: 'ENGINE_SYNC',
+          swarmMode: typeof m.swarmMode === 'number' ? m.swarmMode : 0,
+          swarmActive: Boolean(m.swarmActive),
+        });
+        dispatchDeckEvent({
+          type: 'OVERLAY_SET',
+          showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
+          fieldOverlayMode: typeof m.fieldOverlayMode === 'number' ? m.fieldOverlayMode : undefined,
+        });
       } else if (m.type === 'resolution_changed') {
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
       } else if (m.type === 'audio_strobe') {
@@ -3411,6 +4316,27 @@
       } else if (m.type === 'audio_percussion') {
         playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentEpochMs);
       } else if (m.type === 'telemetry') {
+        lastSwarmActive = Boolean(m.chronos1000 && m.chronos1000.swarmActive);
+        lastSwarmFrameW = m.frameW || lastSwarmFrameW;
+        lastSwarmFrameH = m.frameH || lastSwarmFrameH;
+        dispatchDeckEvent({ type: 'SOURCE_CHANGED', source: mapSourceModeToFsm(m.sourceMode) });
+        dispatchDeckEvent({
+          type: 'ENGINE_SYNC',
+          swarmMode: m.chronos1000 && typeof m.chronos1000.swarmMode === 'number'
+            ? m.chronos1000.swarmMode
+            : typeof m.swarmMode === 'number'
+            ? m.swarmMode
+            : 0,
+          swarmActive: lastSwarmActive,
+        });
+        dispatchDeckEvent({
+          type: 'OVERLAY_SET',
+          showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
+          showAllOverlays: typeof m.showAllOverlays === 'boolean' ? m.showAllOverlays : undefined,
+          fieldOverlayMode: m.chronos1000 && typeof m.chronos1000.fieldOverlayMode === 'number'
+            ? m.chronos1000.fieldOverlayMode
+            : undefined,
+        });
         const medMs = typeof m.wasmMedianMs === 'number' ? m.wasmMedianMs : m.wasmMeanMs;
         const budgetMs = m.resMode === 1
           ? (m.sourceMode === 'testbench' ? 1.0 : 2.2)
@@ -3440,9 +4366,9 @@
 
         if (m.sourceMode === 'testbench') {
           dom.lblPadicSwaps.textContent = 'Oracle ID Swaps';
-          dom.kpiPadicSwaps.textContent = `◆ ${m.oracleSwaps}`;
+          dom.kpiPadicSwaps.textContent = m.oracleSwaps != null ? `◆ ${m.oracleSwaps}` : '◆ N/A';
           dom.lblCollisions.textContent = 'Pillar Collisions';
-          dom.kpiCollisions.textContent = `${m.inPillarCollisions}`;
+          dom.kpiCollisions.textContent = m.oracleSwaps != null ? `${m.inPillarCollisions}` : 'N/A';
         } else {
           dom.lblPadicSwaps.textContent = '2-Adic Fiedler';
           dom.kpiPadicSwaps.textContent = `◆ ${m.padicSwaps}`;
@@ -3469,6 +4395,7 @@
         dom.kpiTargets.textContent = `${m.activeTargets} / 16`;
         updatePersistenceDomUi(m.sessionPersistence, m.activeTargets);
         updatePhysicsIdDomUi(m.physicsId, m);
+        updateContinuumDomUi(m.chronos1000, m);
 
         if (m.focusTrackId > 0) {
           dom.btnFocusCycle.textContent = `◎ Focus: PIN T${m.focusTrackId}`;
@@ -3621,7 +4548,7 @@
             const base = r * cols;
             for (let c = 0; c < cols; c++) {
               const v = data[base + c];
-              obj[columns[c]] = Number.isInteger(v) ? v : Number(v.toFixed(6));
+              obj[columns[c]] = !Number.isFinite(v) ? null : (Number.isInteger(v) ? v : Number(v.toFixed(6)));
             }
             records[r] = obj;
           }
@@ -3646,7 +4573,7 @@
             const rowStr = new Array(cols);
             for (let c = 0; c < cols; c++) {
               const v = data[base + c];
-              rowStr[c] = Number.isInteger(v) ? String(v) : v.toFixed(6);
+              rowStr[c] = !Number.isFinite(v) ? '' : (Number.isInteger(v) ? String(v) : v.toFixed(6));
             }
             lines[r + 1] = rowStr.join(',');
           }
@@ -3657,11 +4584,78 @@
     };
 
     // Click-to-pin target on HUD Canvas + Accessible Keyboard Focus Cycle Button
+    if (dom.swarmModeSelect) {
+      dom.swarmModeSelect.addEventListener('change', () => {
+        const mode = Math.max(0, Math.min(2, parseInt(dom.swarmModeSelect.value || '0', 10) || 0));
+        dispatchDeckEvent({
+          type: 'ENGINE_SYNC',
+          swarmMode: mode,
+          swarmActive: mode === 2 ? true : (mode === 0 ? false : lastSwarmActive),
+        });
+        worker.postMessage({ type: 'set_swarm_mode', swarmMode: mode });
+      });
+    }
+
+    if (dom.fieldOverlayModeSelect) {
+      dom.fieldOverlayModeSelect.addEventListener('change', () => {
+        const om = Math.max(0, Math.min(4, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
+        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om });
+      });
+    }
+
+    function syncSwarmControlsForConfig(resTarget, swarmTarget, overlayTarget, postSwarmMode = false) {
+      if (typeof resTarget === 'number' && resTarget === 1 && activeResMode === 0) {
+        document.getElementById('btnResHd')?.click();
+      }
+      if (typeof swarmTarget === 'number' && dom.swarmModeSelect) {
+        dom.swarmModeSelect.value = String(swarmTarget);
+        dispatchDeckEvent({
+          type: 'ENGINE_SYNC',
+          swarmMode: swarmTarget,
+          swarmActive: swarmTarget === 2 ? true : (swarmTarget === 0 ? false : lastSwarmActive),
+        });
+        if (postSwarmMode) {
+          worker.postMessage({ type: 'set_swarm_mode', swarmMode: swarmTarget });
+        }
+      }
+      if (typeof overlayTarget === 'number' && dom.fieldOverlayModeSelect) {
+        dom.fieldOverlayModeSelect.value = String(overlayTarget);
+        dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: overlayTarget });
+        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: overlayTarget });
+      }
+    }
+
     hudEl.addEventListener('click', (ev) => {
       const rect = hudEl.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
       const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
       const normY = Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height));
+      const ptTool = deckUiState.pointerTool;
+      if (ptTool === 'CAL_RULER_P1' || ptTool === 'CAL_RULER_P2' || ptTool.startsWith('CAL_QUAD_PT')) {
+        const expectedCalArmed = advanceOptimisticCalClick();
+        worker.postMessage({
+          type: 'canvas_click',
+          normX,
+          normY,
+          intent: 'calibration',
+          expectedCalArmed,
+        });
+        return;
+      }
+      if (ptTool === 'CROP_ROI') {
+        return;
+      }
+      if (deckUiState.engine === 'SWARM_ACTIVE' || lastSwarmActive || ev.shiftKey) {
+        const nextInspectSeq = typeof inspectReqSeq === 'number' ? (inspectReqSeq += 1) : 1;
+        worker.postMessage({
+          type: 'inspect_point',
+          inspectSeq: nextInspectSeq,
+          normX,
+          normY,
+        });
+        return;
+      }
       worker.postMessage({ type: 'canvas_click', normX, normY });
     });
 
@@ -3684,6 +4678,10 @@
     // Testbench Scenario Selector
     dom.benchScenarioSelect.addEventListener('change', () => {
       const sc = dom.benchScenarioSelect.value;
+      const isC1k = sc === 'vortex_swarm_1200' || sc === 'murmuration_1200' || sc === 'modal_beam_1152';
+      if (isC1k) {
+        syncSwarmControlsForConfig(1, 2, undefined, false);
+      }
       worker.postMessage({ type: 'set_scenario', scenario: sc });
       if (sc === 'ballistic_cascade' && currentLabMode !== 0) {
         document.querySelector('.lab-btn[data-lab="0"]')?.click();
@@ -4359,6 +5357,8 @@
       chaos_pendulum: { url: './samples/chaotic_magnetic_pendulum.mp4', cal: 'preset' },
       coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
       newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
+      starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1 },
+      vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2 },
       juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
       gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
       galileo: { url: './samples/galileo_pendulum_peg.mp4', cal: 'preset' },
@@ -4370,6 +5370,11 @@
 
     sampleVideoSelect.addEventListener('change', async () => {
       const url = sampleVideoSelect.value;
+      const selOpt = sampleVideoSelect.selectedOptions[0];
+      const reqSwarm = selOpt && selOpt.dataset.swarm ? parseInt(selOpt.dataset.swarm, 10) : NaN;
+      if (url && Number.isFinite(reqSwarm)) {
+        syncSwarmControlsForConfig(1, reqSwarm, undefined, false);
+      }
       const queuedCal = pendingShowcaseCal;
       pendingShowcaseCal = '';
       if (!url) return;
@@ -4399,7 +5404,11 @@
       }
       syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: SAMPLE MP4 (${opt.textContent.split(' (')[0].toUpperCase()})`;
-      worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint });
+      const sourceMsg = { type: 'set_source', sourceMode: 'video', fpsHint };
+      if (Number.isFinite(reqSwarm)) {
+        sourceMsg.swarmOverride = reqSwarm;
+      }
+      worker.postMessage(sourceMsg);
       if (queuedCal === 'preset') {
         document.getElementById('btnCalPreset')?.click();
       } else if (queuedCal === 'auto_g') {
@@ -4452,6 +5461,21 @@
           return;
         }
         const cfg = showcaseClipMap[key];
+        if (!cfg) return;
+        if (cfg.benchScenario) {
+          stopMediaCapture();
+          sampleVideoSelect.value = '';
+          dom.benchScenarioSelect.value = cfg.benchScenario;
+          btnTestbench.click();
+          dom.benchScenarioSelect.value = cfg.benchScenario;
+          syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
+          worker.postMessage({ type: 'set_scenario', scenario: cfg.benchScenario });
+          setActiveShowcaseChip(key);
+          return;
+        }
+        if (typeof cfg.resMode === 'number' || typeof cfg.swarmMode === 'number' || typeof cfg.overlayMode === 'number') {
+          syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
+        }
         if (!cfg) return;
         pendingShowcaseCal = cfg.cal;
         sampleVideoSelect.value = cfg.url;
@@ -4643,13 +5667,100 @@
       worker.postMessage({ type: 'params', eulerianGain: v });
     });
 
+    function setHeroTargetsVisible(nextVal) {
+      const visible = Boolean(nextVal);
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showHeroTargets: visible });
+      worker.postMessage({ type: 'params', showHeroTargets: visible });
+    }
+
+    if (dom.chkHeroTargets) {
+      dom.chkHeroTargets.addEventListener('change', (e) => {
+        setHeroTargetsVisible(e.target.checked);
+      });
+    }
+
+    if (dom.btnHudHeroToggle) {
+      dom.btnHudHeroToggle.addEventListener('click', () => {
+        setHeroTargetsVisible(!deckUiState.overlays.showHeroTargets);
+      });
+    }
+
+    async function toggleHudFullscreen(forceActive) {
+      const wantActive = typeof forceActive === 'boolean'
+        ? forceActive
+        : deckUiState.viewport !== 'FULLSCREEN';
+      const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+      if (wantActive) {
+        if (fsElem === dom.hudPanel) {
+          hudMaximizedFallback = false;
+          dispatchDeckEvent({ type: 'FULLSCREEN_SYNC', active: true });
+          return;
+        }
+        if (dom.hudPanel && typeof dom.hudPanel.requestFullscreen === 'function') {
+          try {
+            await dom.hudPanel.requestFullscreen();
+            return;
+          } catch (_err) {
+            // Fall back to fixed viewport CSS .hud-maximized when browser blocks Fullscreen API
+          }
+        } else if (dom.hudPanel && typeof dom.hudPanel.webkitRequestFullscreen === 'function') {
+          try {
+            dom.hudPanel.webkitRequestFullscreen();
+            return;
+          } catch (_err) {
+            // Fall back to .hud-maximized
+          }
+        }
+        hudMaximizedFallback = true;
+        dispatchDeckEvent({ type: 'FULLSCREEN_SYNC', active: true });
+      } else {
+        hudMaximizedFallback = false;
+        if (fsElem) {
+          try {
+            if (typeof document.exitFullscreen === 'function') {
+              await document.exitFullscreen();
+              return;
+            }
+            if (typeof document.webkitExitFullscreen === 'function') {
+              document.webkitExitFullscreen();
+              return;
+            }
+          } catch (_err) {
+            // Clear fallback below
+          }
+        }
+        dispatchDeckEvent({ type: 'FULLSCREEN_SYNC', active: false });
+      }
+    }
+
+    function handleFullscreenChange() {
+      const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+      const nativeActive = Boolean(dom.hudPanel && fsElem === dom.hudPanel);
+      if (nativeActive) {
+        hudMaximizedFallback = false;
+      }
+      dispatchDeckEvent({ type: 'FULLSCREEN_SYNC', active: nativeActive || hudMaximizedFallback });
+    }
+
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+
+    if (dom.btnHudFullscreen) {
+      dom.btnHudFullscreen.addEventListener('click', () => {
+        toggleHudFullscreen();
+      });
+    }
+
     document.getElementById('chkKalman').addEventListener('change', (e) => {
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showKalman: e.target.checked });
       worker.postMessage({ type: 'params', showKalmanBaseline: e.target.checked });
     });
     document.getElementById('chkAllOverlays').addEventListener('change', (e) => {
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showAllOverlays: e.target.checked });
       worker.postMessage({ type: 'params', showAllOverlays: e.target.checked });
     });
     document.getElementById('chkEcaOverlay').addEventListener('change', (e) => {
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showEcaOverlay: e.target.checked });
       worker.postMessage({ type: 'params', showEcaOverlay: e.target.checked });
     });
     document.getElementById('chkStrobe').addEventListener('change', (e) => {
@@ -4887,30 +5998,92 @@
     dom.btnCalRuler.addEventListener('click', () => {
       const dims = readValidatedCalibrationDims(true);
       if (!dims) return;
-      worker.postMessage({ type: 'cal_control', action: 'arm_ruler', ...dims });
+      const disarm = uiCalArmed === 'ruler' || deckUiState.pointerTool.startsWith('CAL_RULER_');
+      const nextArm = disarm ? 'none' : 'ruler';
+      uiCalArmed = nextArm;
+      lastCalArmedUi = nextArm;
+      const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm(nextArm) : 0;
+      dom.btnCalRuler.setAttribute('aria-pressed', String(nextArm === 'ruler'));
+      if (nextArm === 'ruler') dom.btnCalQuad.setAttribute('aria-pressed', 'false');
+      worker.postMessage({
+        type: 'cal_control',
+        action: disarm ? 'cancel_arm' : 'arm_ruler',
+        syncSeq,
+        ...dims,
+      });
     });
 
     dom.btnCalQuad.addEventListener('click', () => {
       const dims = readValidatedCalibrationDims(true);
       if (!dims) return;
-      worker.postMessage({ type: 'cal_control', action: 'arm_homography', ...dims });
+      const disarm = uiCalArmed === 'homography' || deckUiState.pointerTool.startsWith('CAL_QUAD_');
+      const nextArm = disarm ? 'none' : 'homography';
+      uiCalArmed = nextArm;
+      lastCalArmedUi = nextArm;
+      const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm(nextArm) : 0;
+      dom.btnCalQuad.setAttribute('aria-pressed', String(nextArm === 'homography'));
+      if (nextArm === 'homography') dom.btnCalRuler.setAttribute('aria-pressed', 'false');
+      worker.postMessage({
+        type: 'cal_control',
+        action: disarm ? 'cancel_arm' : 'arm_homography',
+        syncSeq,
+        ...dims,
+      });
     });
 
     dom.btnCalAutoG.addEventListener('click', () => {
-      worker.postMessage({ type: 'cal_control', action: 'set_auto_g' });
+      uiCalArmed = 'none';
+      lastCalArmedUi = 'none';
+      const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm('none') : 0;
+      worker.postMessage({ type: 'cal_control', action: 'set_auto_g', syncSeq });
     });
 
     dom.btnCalPreset.addEventListener('click', () => {
-      worker.postMessage({ type: 'cal_control', action: 'apply_preset', preset: getActivePresetKey() });
+      uiCalArmed = 'none';
+      lastCalArmedUi = 'none';
+      const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm('none') : 0;
+      worker.postMessage({ type: 'cal_control', action: 'apply_preset', preset: getActivePresetKey(), syncSeq });
     });
 
     dom.btnCalClear.addEventListener('click', () => {
-      worker.postMessage({ type: 'cal_control', action: 'clear' });
+      uiCalArmed = 'none';
+      lastCalArmedUi = 'none';
+      const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm('none') : 0;
+      dom.btnCalRuler.setAttribute('aria-pressed', 'false');
+      dom.btnCalQuad.setAttribute('aria-pressed', 'false');
+      worker.postMessage({ type: 'cal_control', action: 'clear', syncSeq });
     });
 
     document.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Escape' && !liveDialog.open && uiCalArmed !== 'none') {
-        worker.postMessage({ type: 'cal_control', action: 'cancel_arm' });
+      if (liveDialog.open) return;
+      if (ev.key === 'Escape') {
+        if (hudMaximizedFallback) {
+          ev.preventDefault();
+          toggleHudFullscreen(false);
+        }
+        if (uiCalArmed !== 'none' || deckUiState.pointerTool.startsWith('CAL_')) {
+          ev.preventDefault();
+          uiCalArmed = 'none';
+          lastCalArmedUi = 'none';
+          const syncSeq = typeof beginOptimisticCalArm === 'function' ? beginOptimisticCalArm('none') : 0;
+          dom.btnCalRuler.setAttribute('aria-pressed', 'false');
+          dom.btnCalQuad.setAttribute('aria-pressed', 'false');
+          worker.postMessage({ type: 'cal_control', action: 'cancel_arm', syncSeq });
+        }
+        return;
+      }
+      if (ev.ctrlKey || ev.metaKey || ev.altKey || ev.repeat) return;
+      const t = ev.target;
+      const tag = t && t.tagName ? t.tagName.toUpperCase() : '';
+      if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA' || (t && t.isContentEditable)) {
+        return;
+      }
+      if (ev.key === 'h' || ev.key === 'H') {
+        ev.preventDefault();
+        setHeroTargetsVisible(!deckUiState.overlays.showHeroTargets);
+      } else if (ev.key === 'f' || ev.key === 'F') {
+        ev.preventDefault();
+        toggleHudFullscreen();
       }
     });
 

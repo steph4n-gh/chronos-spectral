@@ -249,7 +249,7 @@ async function main() {
       downloadPath: downloadDir,
     });
 
-    // 1. Verify Boot + 288-Page Arena + 320x180 SD Blind Pillar Testbench (0 Oracle swaps)
+    // 1. Verify Boot + 320-Page Arena + 320x180 SD Blind Pillar Testbench (0 Oracle swaps)
     const sdState = await waitForCondition(
       cdp,
       sessionId,
@@ -263,7 +263,7 @@ async function main() {
         const collisions = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10);
         return {
           ok: kernel.includes('0 HEAP ALLOC / 0 IMPORTS') &&
-              arena.includes('288 PAGES / 18.00 MB') &&
+              arena.includes('320 PAGES / 20.00 MB') &&
               resMeta === '320×180 SD RGBA' &&
               targets === '4 / 16' &&
               collisions >= 2 &&
@@ -925,8 +925,8 @@ async function main() {
         };
       })()`
     );
-    if (selectMeta.optgroups !== 2 || selectMeta.options !== 14) {
-      throw new Error(`Expected 2 <optgroup> and 14 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (selectMeta.optgroups !== 3 || selectMeta.options !== 15) {
+      throw new Error(`Expected 3 <optgroup> and 15 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);
@@ -1495,6 +1495,1081 @@ async function main() {
       })()`
     );
     console.log(`  [PASS] Step 6 (Lab Modes B/C & SD Round-Trip): saccade=${modeBState.val}, modeC_strikes=${modeCStrikeCheck.strikes}, returned=${backSd.resMeta}`);
+
+    // 6c. CHRONOS-1000 Live Dense Continuum Gate (vortex_1200 Synthetic + starling_1000 Real MP4)
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        document.querySelector('.lab-btn[data-lab="0"]')?.click();
+        document.getElementById('btnCalClear')?.click();
+        window.__e2eC1kCls = 0;
+        if (window.__e2eC1kClsPo) {
+          try { window.__e2eC1kClsPo.disconnect(); } catch (_e) {}
+        }
+        window.__e2eC1kClsPo = new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) window.__e2eC1kCls += e.value;
+        });
+        window.__e2eC1kClsPo.observe({ type: 'layout-shift', buffered: false });
+        return true;
+      })()`
+    );
+
+    const captureClipBytes = async (elementId) => {
+      await cdp.evalJs(
+        sessionId,
+        `document.getElementById(${JSON.stringify(elementId)})?.scrollIntoView({ block: 'center', inline: 'center' }); true;`
+      );
+      await new Promise((r) => setTimeout(r, 120));
+      const rect = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const el = document.getElementById(${JSON.stringify(elementId)});
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return {
+            x: Math.max(0, Math.floor(r.left)),
+            y: Math.max(0, Math.floor(r.top)),
+            width: Math.ceil(r.width),
+            height: Math.ceil(r.height),
+          };
+        })()`
+      );
+      if (!rect || rect.width < 10 || rect.height < 10) {
+        throw new Error(`Step 6c: Missing or zero-sized canvas #${elementId}: ${JSON.stringify(rect)}`);
+      }
+      const shot = await cdp.send(
+        'Page.captureScreenshot',
+        {
+          format: 'png',
+          captureBeyondViewport: true,
+          clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
+        },
+        sessionId
+      );
+      return shot?.data ? Buffer.from(shot.data, 'base64').byteLength : 0;
+    };
+
+    const verifyDenseC1kShowcase = async (cfg) => {
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const btn = document.querySelector(${JSON.stringify(cfg.selector)});
+          if (!btn) throw new Error('Missing showcase button ' + ${JSON.stringify(cfg.selector)});
+          btn.click();
+          return true;
+        })()`
+      );
+
+      const denseState = await waitForCondition(
+        cdp,
+        sessionId,
+        `Step 6c ${cfg.id}: >= 1000 confirmed, active continuum metrics, collapsed drawer, valid latency split`,
+        `(() => {
+          const btn = document.querySelector(${JSON.stringify(cfg.selector)});
+          const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
+          const confTxt = document.getElementById('kpiSwarmConfirmed')?.textContent || '';
+          const peakTxt = document.getElementById('kpiSwarmPeak')?.textContent || '';
+          const uniqTxt = document.getElementById('kpiSwarmUnique')?.textContent || '';
+          const vortTxt = document.getElementById('kpiContinuumVort')?.textContent || '';
+          const ftleTxt = document.getElementById('kpiContinuumFtle')?.textContent || '';
+          const latTxt = document.getElementById('kpiLatencySplit')?.textContent || '';
+          const drawer = document.getElementById('expertDiagnosticsDrawer');
+          const panel = document.getElementById('continuumFieldPanel');
+
+          const parseCommaInt = (s) => parseInt(String(s || '0').replace(/,/g, '').trim(), 10);
+          const confParts = confTxt.split('/');
+          const confirmed = parseCommaInt(confParts[0] || '0');
+          const coast = parseCommaInt(confParts[1] || '-1');
+          const peak = parseCommaInt(peakTxt || '0');
+          const uniq = parseCommaInt(uniqTxt || '0');
+
+          const latMatch = latTxt.trim().match(/^(\\d+(?:\\.\\d+)?)\\s*ms\\s*\\|\\s*(\\d+(?:\\.\\d+)?)\\s*ms$/);
+          const kernelMs = latMatch ? parseFloat(latMatch[1]) : NaN;
+          const pipeMs = latMatch ? parseFloat(latMatch[2]) : NaN;
+
+          const scanEls = [panel, ...Array.from(document.querySelectorAll('.kpi-grid .kpi-value, [id^="kpi"]'))].filter(Boolean);
+          const badTexts = [];
+          for (const el of scanEls) {
+            const t = el.textContent || '';
+            if (/\\b(?:NaN|Infinity|undefined)\\b/i.test(t)) {
+              badTexts.push((el.id || el.className) + '=' + t.slice(0, 60));
+            }
+          }
+
+          const vortActive = !vortTxt.includes('--') && !vortTxt.startsWith('RAW') && vortTxt.includes('s⁻¹');
+          const ftleActive = ${cfg.requireFtleNumeric ? "(!ftleTxt.includes('--') && !ftleTxt.startsWith('WARM') && ftleTxt.includes('s⁻¹'))" : "(!ftleTxt.includes('--'))"};
+
+          return {
+            ok: btn?.getAttribute('aria-pressed') === 'true' &&
+                meta.startsWith('SWARM: ACTIVE') &&
+                !meta.includes('DIAG INVALID') &&
+                Number.isInteger(confirmed) && confirmed >= 1000 &&
+                Number.isInteger(coast) && coast >= 0 &&
+                Number.isInteger(peak) && peak >= 1000 &&
+                Number.isInteger(uniq) && uniq >= 1000 &&
+                vortActive &&
+                ftleActive &&
+                Boolean(latMatch) && Number.isFinite(kernelMs) && Number.isFinite(pipeMs) && kernelMs >= 0 && pipeMs >= 0 &&
+                Boolean(drawer) && drawer.open === false &&
+                badTexts.length === 0,
+            meta, confTxt, peakTxt, uniqTxt, vortTxt, ftleTxt, latTxt,
+            drawerOpen: drawer ? drawer.open : null,
+            badTexts,
+          };
+        })()`,
+        26000
+      );
+
+      const hudPngBytes = await captureClipBytes('hudCanvas');
+      if (hudPngBytes < 2500) {
+        throw new Error(`Step 6c (${cfg.id}): Expected non-blank #hudCanvas screenshot >= 2500 B, got ${hudPngBytes} B`);
+      }
+
+      // Click a populated noncentral region on #hudCanvas and verify a fresh field inspection update + normalized coordinate mapping
+      let inspectState = null;
+      const probeCoords = [
+        [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
+        [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
+        [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
+      ];
+      const beforeProbe = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+          const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+          const mt = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)/i);
+          const resTxt = (document.getElementById('inputResMeta')?.textContent || '').trim();
+          const rm = resTxt.match(/(\\d+)\\s*[×x]\\s*(\\d+)/i);
+          const fw = rm ? parseInt(rm[1], 10) : 640;
+          const fh = rm ? parseInt(rm[2], 10) : 360;
+          return {
+            readout,
+            tid: mc ? parseInt(mc[1], 10) : (mt ? parseInt(mt[1], 10) : 0),
+            nx: mc ? parseFloat(mc[2]) / fw : null,
+            ny: mc ? parseFloat(mc[3]) / fh : null,
+            fw,
+            fh,
+          };
+        })()`
+      );
+      const filteredProbeCoords = probeCoords.filter(([nx, ny]) => {
+        if (Math.hypot(nx - 0.5, ny - 0.5) < 0.12) return false;
+        if (beforeProbe && beforeProbe.nx !== null && beforeProbe.ny !== null) {
+          return Math.hypot(nx - beforeProbe.nx, ny - beforeProbe.ny) >= 0.15;
+        }
+        return true;
+      });
+      for (const [nx, ny] of (filteredProbeCoords.length ? filteredProbeCoords : probeCoords)) {
+        const attemptBefore = await cdp.evalJs(
+          sessionId,
+          `(() => {
+            const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+            const prevInspectSeq = window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0;
+            const hud = document.getElementById('hudCanvas');
+            if (!hud) return null;
+            const r = hud.getBoundingClientRect();
+            const cx = r.left + r.width * ${nx};
+            const cy = r.top + r.height * ${ny};
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
+            return { readout, prevInspectSeq };
+          })()`
+        );
+        if (!attemptBefore) continue;
+        try {
+          inspectState = await waitForCondition(
+            cdp,
+            sessionId,
+            `Step 6c ${cfg.id}: fresh #swarmInspectReadout + inspectSeq + coord (${nx},${ny})`,
+            `(() => {
+              const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+              const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+              const ack = window.__chronosUiState?.lastInspectAck;
+              if (!ack || !Number.isInteger(ack.inspectSeq) || ack.inspectSeq <= ${attemptBefore.prevInspectSeq}) {
+                return { ok: false, readout, tid: 0, inspectSeq: ack?.inspectSeq ?? 0 };
+              }
+              if (!mc) {
+                return { ok: true, matched: false, readout, tid: 0, inspectSeq: ack.inspectSeq };
+              }
+              const tid = parseInt(mc[1], 10);
+              const ackMatchesReq =
+                Number.isFinite(ack.inspectReqNormX) &&
+                Number.isFinite(ack.inspectReqNormY) &&
+                Number.isFinite(ack.inspectReqPxX) &&
+                Number.isFinite(ack.inspectReqPxY) &&
+                Math.abs(ack.inspectReqNormX - ${nx}) <= 0.005 &&
+                Math.abs(ack.inspectReqNormY - ${ny}) <= 0.005 &&
+                Math.abs(ack.inspectReqPxX - ${nx} * ${beforeProbe.fw}) <= 0.5 &&
+                Math.abs(ack.inspectReqPxY - ${ny} * ${beforeProbe.fh}) <= 0.5 &&
+                ack.inspectedTid === tid &&
+                ['live', 'pinned'].includes(ack.inspectStatus);
+              if (!ackMatchesReq) {
+                return { ok: true, matched: false, readout, tid: 0, inspectSeq: ack.inspectSeq };
+              }
+              const ix = parseFloat(mc[2]);
+              const iy = parseFloat(mc[3]);
+              const ixNorm = ix / ${beforeProbe.fw};
+              const iyNorm = iy / ${beforeProbe.fh};
+              const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
+              const coordMatch = pxDist < 24.0 * (${beforeProbe.fw} / 640.0) + 0.5;
+              const freshReadout = readout !== ${JSON.stringify(attemptBefore.readout)} && readout !== ${JSON.stringify(beforeProbe.readout)};
+              const shiftedTarget = ${beforeProbe.tid} === 0 || tid !== ${beforeProbe.tid} ||
+                (${beforeProbe.nx !== null ? `Math.hypot(ixNorm - ${beforeProbe.nx}, iyNorm - ${beforeProbe.ny}) >= 0.12` : 'false'});
+              return { ok: true, matched: tid > 0 && coordMatch && freshReadout && shiftedTarget, readout, tid, ixNorm, iyNorm, inspectSeq: ack.inspectSeq, pxDist };
+            })()`,
+            2000
+          );
+          if (inspectState && inspectState.matched) break;
+        } catch (_probeErr) {
+          // Try next noncentral dense probe point if this coordinate fell outside active track radius
+        }
+      }
+      if (!inspectState || !inspectState.matched) {
+        throw new Error(`Step 6c (${cfg.id}): #swarmInspectReadout did not produce fresh INSP μT<tid> matching noncentral #hudCanvas coordinates`);
+      }
+
+      const pipPngBytes = await captureClipBytes('pipCanvas');
+      if (pipPngBytes < 600) {
+        throw new Error(`Step 6c (${cfg.id}): Expected non-blank Hero PiP #pipCanvas screenshot >= 600 B, got ${pipPngBytes} B`);
+      }
+
+      return { ...denseState, hudPngBytes, pipPngBytes, readout: inspectState.readout, inspectedTid: inspectState.tid };
+    };
+
+    const vortex1200Res = await verifyDenseC1kShowcase({
+      id: 'vortex_1200',
+      selector: '.showcase-btn[data-showcase="vortex_1200"]',
+      requireFtleNumeric: true,
+    });
+    const starling1000Res = await verifyDenseC1kShowcase({
+      id: 'starling_1000',
+      selector: '.showcase-btn[data-showcase="starling_1000"]',
+      requireFtleNumeric: false,
+    });
+
+    const c1kCls = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        if (window.__e2eC1kClsPo) window.__e2eC1kClsPo.disconnect();
+        return window.__e2eC1kCls || 0;
+      })()`
+    );
+    if (c1kCls >= 0.0001) {
+      throw new Error(`Step 6c: Expected 0.000000 CLS during dense CHRONOS-1000 showcase checks, got ${c1kCls}`);
+    }
+
+    console.log(
+      `  [PASS] Step 6c (CHRONOS-1000 Live Dense Continuum Gate): vortex_1200=[${vortex1200Res.confTxt}, ${vortex1200Res.latTxt}, ${vortex1200Res.readout}, hud=${vortex1200Res.hudPngBytes}B, pip=${vortex1200Res.pipPngBytes}B], starling_1000=[${starling1000Res.confTxt}, ${starling1000Res.latTxt}, ${starling1000Res.readout}, hud=${starling1000Res.hudPngBytes}B, pip=${starling1000Res.pipPngBytes}B], CLS=${c1kCls.toFixed(6)}`
+    );
+
+    // 6d. Wave-2 Deck UI FSM, Hero-16 Toggle, 16:9 Fullscreen Viewport, Shortcut Guards & Calibration Exclusion
+    const sendCdpKey = async (key, code, keyCode, modifiers = 0, extra = {}) => {
+      const text = key.length === 1 && modifiers === 0 && !extra.autoRepeat ? key : undefined;
+      await cdp.send(
+        'Input.dispatchKeyEvent',
+        {
+          type: 'keyDown',
+          key,
+          code,
+          windowsVirtualKeyCode: keyCode,
+          nativeVirtualKeyCode: keyCode,
+          modifiers,
+          ...(extra.autoRepeat ? { autoRepeat: true } : {}),
+          ...(text ? { text, unmodifiedText: text } : {}),
+        },
+        sessionId
+      );
+      await cdp.send(
+        'Input.dispatchKeyEvent',
+        {
+          type: 'keyUp',
+          key,
+          code,
+          windowsVirtualKeyCode: keyCode,
+          nativeVirtualKeyCode: keyCode,
+          modifiers,
+        },
+        sessionId
+      );
+    };
+
+    const clickDomCenter = async (selector) => {
+      const pt = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const el = document.querySelector(${JSON.stringify(selector)});
+          if (!el) return null;
+          el.scrollIntoView({ block: 'center', inline: 'center' });
+          const r = el.getBoundingClientRect();
+          return { x: r.left + r.width * 0.5, y: r.top + r.height * 0.5, w: r.width, h: r.height };
+        })()`
+      );
+      if (!pt || pt.w < 1 || pt.h < 1) {
+        throw new Error(`Step 6d: Cannot click missing/collapsed selector ${selector}`);
+      }
+      await cdp.send(
+        'Input.dispatchMouseEvent',
+        { type: 'mouseMoved', x: pt.x, y: pt.y, button: 'none' },
+        sessionId
+      );
+      await cdp.send(
+        'Input.dispatchMouseEvent',
+        { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 },
+        sessionId
+      );
+      await cdp.send(
+        'Input.dispatchMouseEvent',
+        { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 },
+        sessionId
+      );
+      return pt;
+    };
+
+    const probeSwarmInspectOnHud = async (label, useCdpClick = false) => {
+      const coords = [
+        [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
+        [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
+        [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
+      ];
+      const before = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+          const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+          const mt = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)/i);
+          const resTxt = (document.getElementById('inputResMeta')?.textContent || '').trim();
+          const rm = resTxt.match(/(\\d+)\\s*[×x]\\s*(\\d+)/i);
+          const fw = rm ? parseInt(rm[1], 10) : 640;
+          const fh = rm ? parseInt(rm[2], 10) : 360;
+          return {
+            readout,
+            tid: mc ? parseInt(mc[1], 10) : (mt ? parseInt(mt[1], 10) : 0),
+            nx: mc ? parseFloat(mc[2]) / fw : null,
+            ny: mc ? parseFloat(mc[3]) / fh : null,
+            fw,
+            fh,
+          };
+        })()`
+      );
+      const filteredCoords = coords.filter(([nx, ny]) => {
+        if (Math.hypot(nx - 0.5, ny - 0.5) < 0.12) return false;
+        if (before && before.nx !== null && before.ny !== null) {
+          return Math.hypot(nx - before.nx, ny - before.ny) >= 0.15;
+        }
+        return true;
+      });
+      for (const [nx, ny] of (filteredCoords.length ? filteredCoords : coords)) {
+        const pt = await cdp.evalJs(
+          sessionId,
+          `(() => {
+            const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+            const prevInspectSeq = window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0;
+            const hud = document.getElementById('hudCanvas');
+            if (!hud) return null;
+            const r = hud.getBoundingClientRect();
+            const x = r.left + r.width * ${nx};
+            const y = r.top + r.height * ${ny};
+            if (!${Boolean(useCdpClick)}) {
+              hud.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+              }));
+            }
+            return { x, y, attemptBeforeReadout: readout, prevInspectSeq };
+          })()`
+        );
+        if (!pt) continue;
+        if (useCdpClick) {
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
+          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
+        }
+        try {
+          const res = await waitForCondition(
+            cdp,
+            sessionId,
+            `${label} (${nx},${ny})`,
+            `(() => {
+              const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+              const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+              const ack = window.__chronosUiState?.lastInspectAck;
+              if (!ack || !Number.isInteger(ack.inspectSeq) || ack.inspectSeq <= ${pt.prevInspectSeq}) {
+                return { ok: false, readout, inspectSeq: ack?.inspectSeq ?? 0 };
+              }
+              if (!mc) {
+                return { ok: true, matched: false, readout, inspectSeq: ack.inspectSeq };
+              }
+              const tid = parseInt(mc[1], 10);
+              const ackMatchesReq =
+                Number.isFinite(ack.inspectReqNormX) &&
+                Number.isFinite(ack.inspectReqNormY) &&
+                Number.isFinite(ack.inspectReqPxX) &&
+                Number.isFinite(ack.inspectReqPxY) &&
+                Math.abs(ack.inspectReqNormX - ${nx}) <= 0.005 &&
+                Math.abs(ack.inspectReqNormY - ${ny}) <= 0.005 &&
+                Math.abs(ack.inspectReqPxX - ${nx} * ${before.fw}) <= 0.5 &&
+                Math.abs(ack.inspectReqPxY - ${ny} * ${before.fh}) <= 0.5 &&
+                ack.inspectedTid === tid &&
+                ['live', 'pinned'].includes(ack.inspectStatus);
+              if (!ackMatchesReq) {
+                return { ok: true, matched: false, readout, inspectSeq: ack.inspectSeq };
+              }
+              const ix = parseFloat(mc[2]);
+              const iy = parseFloat(mc[3]);
+              const ixNorm = ix / ${before.fw};
+              const iyNorm = iy / ${before.fh};
+              const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
+              const coordMatch = pxDist < 24.0 * (${before.fw} / 640.0) + 0.5;
+              const freshReadout = readout !== ${JSON.stringify(pt.attemptBeforeReadout)} && readout !== ${JSON.stringify(before.readout)};
+              const shiftedTarget = ${before.tid} === 0 || tid !== ${before.tid} ||
+                (${before.nx !== null ? `Math.hypot(ixNorm - ${before.nx}, iyNorm - ${before.ny}) >= 0.12` : 'false'});
+              return { ok: true, matched: tid > 0 && coordMatch && freshReadout && shiftedTarget, readout, tid, ixNorm, iyNorm, inspectSeq: ack.inspectSeq, pxDist };
+            })()`,
+            1800
+          );
+          if (res && res.matched) return res;
+        } catch (_probeErr) {
+          // Try next noncentral dense region if current coordinate sits over empty sky between starlings
+        }
+      }
+      throw new Error(`${label}: #swarmInspectReadout did not lock onto a fresh track with matching noncentral coordinates`);
+    };
+
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        window.__e2eHeroRawCls = 0;
+        window.__e2eUiFsmCls = 0;
+        window.__e2eUiFsmClsEntries = [];
+        window.__e2eUiFsmPhase = 'hero';
+        window.__e2eUiFsmClsPo = new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) {
+            if (window.__e2eUiFsmPhase === 'hero') {
+              window.__e2eHeroRawCls += e.value;
+            }
+            if (!e.hadRecentInput) {
+              window.__e2eUiFsmCls += e.value;
+              window.__e2eUiFsmClsEntries.push({
+                phase: window.__e2eUiFsmPhase,
+                val: +e.value.toFixed(6),
+                nodes: (e.sources || []).map(s => s.node?.id || s.node?.className || s.node?.tagName || '?'),
+              });
+            }
+          }
+        });
+        window.__e2eUiFsmClsPo.observe({ type: 'layout-shift', buffered: false });
+        return true;
+      })()`
+    );
+
+    const fsmBoot = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const st = window.__chronosUiState;
+        const dock = document.getElementById('hudDockSlot');
+        const panel = document.getElementById('hudPanel');
+        const hud = document.getElementById('hudCanvas');
+        const btnHero = document.getElementById('btnHudHeroToggle');
+        const chkHero = document.getElementById('chkHeroTargets');
+        const btnFs = document.getElementById('btnHudFullscreen');
+        const rHero = btnHero?.getBoundingClientRect();
+        const rFs = btnFs?.getBoundingClientRect();
+        const rHud = hud?.getBoundingClientRect();
+        const csHud = hud ? getComputedStyle(hud) : null;
+        const dockAspectErr = rHud && rHud.height > 0 ? Math.abs(rHud.width / rHud.height - 16 / 9) : 1;
+        const borderFreeHud = Boolean(
+          csHud &&
+            csHud.borderLeftWidth === '0px' &&
+            csHud.borderTopWidth === '0px' &&
+            csHud.borderRightWidth === '0px' &&
+            csHud.borderBottomWidth === '0px' &&
+            csHud.paddingLeft === '0px' &&
+            csHud.paddingTop === '0px' &&
+            csHud.paddingRight === '0px' &&
+            csHud.paddingBottom === '0px'
+        );
+        return {
+          ok: Boolean(st && dock && panel && hud && btnHero && chkHero && btnFs) &&
+              dock.contains(panel) &&
+              Object.isFrozen(st) &&
+              Object.isFrozen(st.overlays) &&
+              Number.isInteger(st.seq) &&
+              st.engine === 'SWARM_ACTIVE' &&
+              st.overlays.showHeroTargets === true &&
+              st.viewport === 'DOCKED' &&
+              st.pointerTool === 'INSPECT_TARGET' &&
+              panel.dataset.engine === 'SWARM_ACTIVE' &&
+              panel.dataset.viewport === 'DOCKED' &&
+              panel.dataset.pointerTool === 'INSPECT_TARGET' &&
+              btnHero.getAttribute('aria-pressed') === 'true' &&
+              chkHero.checked === true &&
+              borderFreeHud &&
+              dockAspectErr <= 0.005,
+          borderFreeHud,
+          dockAspectErr,
+          heroW: rHero ? rHero.width : 0,
+          fsLeft: rFs ? rFs.left : 0,
+          seq: st ? st.seq : -1,
+        };
+      })()`
+    );
+    if (!fsmBoot.ok) {
+      throw new Error(`Step 6d: Invalid Wave-2 DeckUiFsm initial state: ${JSON.stringify(fsmBoot)}`);
+    }
+
+    // 6d.1 Toggle Hero-16 OFF via #btnHudHeroToggle, assert 1:1 checkbox sync, fixed button geometry & live inspection
+    await clickDomCenter('#btnHudHeroToggle');
+    const heroHiddenState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Hero-16 toggle OFF updates FSM, #btnHudHeroToggle, #chkHeroTargets & keeps zero button shift',
+      `(() => {
+        const st = window.__chronosUiState;
+        const btnHero = document.getElementById('btnHudHeroToggle');
+        const chkHero = document.getElementById('chkHeroTargets');
+        const btnFs = document.getElementById('btnHudFullscreen');
+        const rHero = btnHero?.getBoundingClientRect();
+        const rFs = btnFs?.getBoundingClientRect();
+        return {
+          ok: Boolean(st && btnHero && chkHero && btnFs && rHero && rFs) &&
+              st.overlays.showHeroTargets === false &&
+              chkHero.checked === false &&
+              btnHero.textContent.trim() === 'HERO 16: HIDDEN' &&
+              btnHero.getAttribute('aria-pressed') === 'false' &&
+              btnHero.dataset.hiddenSolo === 'false' &&
+              Math.abs(rHero.width - ${fsmBoot.heroW}) < 0.1 &&
+              Math.abs(rFs.left - ${fsmBoot.fsLeft}) < 0.1,
+          text: btnHero?.textContent?.trim(),
+          checked: chkHero?.checked,
+          hiddenSolo: btnHero?.dataset?.hiddenSolo,
+        };
+      })()`,
+      6000
+    );
+
+    const hiddenHeroInspect = await probeSwarmInspectOnHud(
+      'Step 6d: Swarm inspect readout stays live while Hero-16 overlay is hidden',
+      false
+    );
+    const hiddenHeroPipBytes = await captureClipBytes('pipCanvas');
+    if (hiddenHeroPipBytes < 600) {
+      throw new Error(`Step 6d: Hero #pipCanvas unexpectedly blank while Hero-16 overlay hidden (${hiddenHeroPipBytes} B)`);
+    }
+
+    // Toggle back ON via #chkHeroTargets click, then verify H keyboard shortcut OFF -> ON
+    await clickDomCenter('#chkHeroTargets');
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Clicking #chkHeroTargets syncs Hero-16 back ON',
+      `(() => {
+        const st = window.__chronosUiState;
+        const btnHero = document.getElementById('btnHudHeroToggle');
+        const chkHero = document.getElementById('chkHeroTargets');
+        return {
+          ok: Boolean(st && st.overlays.showHeroTargets === true && chkHero?.checked === true && btnHero?.textContent?.trim() === 'Hero 16: ON' && btnHero?.getAttribute('aria-pressed') === 'true'),
+        };
+      })()`,
+      5000
+    );
+
+    await cdp.evalJs(sessionId, `document.activeElement?.blur?.(); true;`);
+    await sendCdpKey('h', 'KeyH', 72, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: H shortcut toggles Hero-16 OFF',
+      `(() => ({ ok: window.__chronosUiState?.overlays?.showHeroTargets === false }))()`,
+      4000
+    );
+    await sendCdpKey('h', 'KeyH', 72, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: H shortcut toggles Hero-16 back ON',
+      `(() => ({ ok: window.__chronosUiState?.overlays?.showHeroTargets === true }))()`,
+      4000
+    );
+
+    // 6d.2 Verify H & F shortcuts are ignored independently inside <input>/<select>/<textarea>/contentEditable, with Ctrl/Alt/Meta/Repeat, and when #liveStreamDialog is open
+    const assertGuardedKey = async (guardLabel, key, code, keyCode, modifiers = 0, extra = {}) => {
+      const snapUiGuard = `(() => {
+        const st = window.__chronosUiState;
+        const panel = document.getElementById('hudPanel');
+        const chk = document.getElementById('chkHeroTargets');
+        const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+        return st ? {
+          showHeroTargets: st.overlays.showHeroTargets,
+          viewport: st.viewport,
+          chkHero: Boolean(chk && chk.checked),
+          nativeFs: fsElem === panel,
+          fallbackMax: Boolean(panel && panel.classList.contains('hud-maximized')),
+        } : null;
+      })()`;
+      const before = await cdp.evalJs(sessionId, snapUiGuard);
+      if (!before) {
+        throw new Error(`Step 6d: Missing window.__chronosUiState before guard ${guardLabel}`);
+      }
+      await sendCdpKey(key, code, keyCode, modifiers, extra);
+      await new Promise((r) => setTimeout(r, 40));
+      const after = await cdp.evalJs(sessionId, snapUiGuard);
+      if (
+        !after ||
+        after.showHeroTargets !== before.showHeroTargets ||
+        after.viewport !== before.viewport ||
+        after.chkHero !== before.chkHero ||
+        after.nativeFs !== before.nativeFs ||
+        after.fallbackMax !== before.fallbackMax
+      ) {
+        throw new Error(
+          `Step 6d: Shortcut guard failed independently for ${guardLabel} (${key}): before=${JSON.stringify(before)}, after=${JSON.stringify(after)}`
+        );
+      }
+    };
+
+    const focusInputOk = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const el = document.getElementById('calRulerM');
+        if (!el) return false;
+        el.focus();
+        return document.activeElement === el && document.activeElement.tagName === 'INPUT';
+      })()`
+    );
+    if (!focusInputOk) throw new Error('Step 6d: Failed to focus INPUT #calRulerM for shortcut guard test');
+    await assertGuardedKey('INPUT', 'h', 'KeyH', 72, 0);
+    await assertGuardedKey('INPUT', 'f', 'KeyF', 70, 0);
+
+    const focusSelectOk = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const el = document.getElementById('swarmModeSelect');
+        if (!el) return false;
+        el.focus();
+        return document.activeElement === el && document.activeElement.tagName === 'SELECT';
+      })()`
+    );
+    if (!focusSelectOk) throw new Error('Step 6d: Failed to focus SELECT #swarmModeSelect for shortcut guard test');
+    await assertGuardedKey('SELECT', 'h', 'KeyH', 72, 0);
+    await assertGuardedKey('SELECT', 'f', 'KeyF', 70, 0);
+
+    const focusTextareaOk = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        let ta = document.getElementById('__e2eTmpTextarea');
+        if (!ta) {
+          ta = document.createElement('textarea');
+          ta.id = '__e2eTmpTextarea';
+          ta.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:40px;height:20px;opacity:0;';
+          document.body.appendChild(ta);
+        }
+        ta.focus();
+        return document.activeElement === ta && document.activeElement.tagName === 'TEXTAREA';
+      })()`
+    );
+    if (!focusTextareaOk) throw new Error('Step 6d: Failed to focus TEXTAREA for shortcut guard test');
+    await assertGuardedKey('TEXTAREA', 'h', 'KeyH', 72, 0);
+    await assertGuardedKey('TEXTAREA', 'f', 'KeyF', 70, 0);
+    await cdp.evalJs(sessionId, `document.getElementById('__e2eTmpTextarea')?.remove(); true;`);
+
+    const focusCeOk = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        let ce = document.getElementById('__e2eTmpCe');
+        if (!ce) {
+          ce = document.createElement('div');
+          ce.id = '__e2eTmpCe';
+          ce.contentEditable = 'true';
+          ce.tabIndex = 0;
+          ce.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:40px;height:20px;opacity:0;';
+          document.body.appendChild(ce);
+        }
+        ce.focus();
+        return document.activeElement === ce && Boolean(document.activeElement.isContentEditable);
+      })()`
+    );
+    if (!focusCeOk) throw new Error('Step 6d: Failed to focus contentEditable element for shortcut guard test');
+    await assertGuardedKey('CONTENTEDITABLE', 'h', 'KeyH', 72, 0);
+    await assertGuardedKey('CONTENTEDITABLE', 'f', 'KeyF', 70, 0);
+    await cdp.evalJs(sessionId, `document.getElementById('__e2eTmpCe')?.remove(); document.activeElement?.blur?.(); true;`);
+
+    await assertGuardedKey('CTRL', 'h', 'KeyH', 72, 2);
+    await assertGuardedKey('CTRL', 'f', 'KeyF', 70, 2);
+    await assertGuardedKey('ALT', 'h', 'KeyH', 72, 1);
+    await assertGuardedKey('ALT', 'f', 'KeyF', 70, 1);
+    await assertGuardedKey('META', 'h', 'KeyH', 72, 4);
+    await assertGuardedKey('META', 'f', 'KeyF', 70, 4);
+    await assertGuardedKey('REPEAT', 'h', 'KeyH', 72, 0, { autoRepeat: true });
+    await assertGuardedKey('REPEAT', 'f', 'KeyF', 70, 0, { autoRepeat: true });
+
+    const dialogOpenOk = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const d = document.getElementById('liveStreamDialog');
+        if (d && !d.open && typeof d.showModal === 'function') d.showModal();
+        return Boolean(d && d.open);
+      })()`
+    );
+    if (!dialogOpenOk) throw new Error('Step 6d: Failed to open #liveStreamDialog for shortcut guard test');
+    await assertGuardedKey('DIALOG', 'h', 'KeyH', 72, 0);
+    await assertGuardedKey('DIALOG', 'f', 'KeyF', 70, 0);
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const d = document.getElementById('liveStreamDialog');
+        if (d && d.open) d.close();
+        return Boolean(!d || !d.open);
+      })()`
+    );
+
+    const heroRawCls = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const v = window.__e2eHeroRawCls || 0;
+        window.__e2eUiFsmPhase = 'fullscreen';
+        return v;
+      })()`
+    );
+    if (heroRawCls >= 0.0001) {
+      throw new Error(`Step 6d: Expected 0.000000 raw layout-shift across Hero-16 toggles & key guards, got ${heroRawCls}`);
+    }
+
+    // Snapshot docked geometry before fullscreen transitions so we verify 0.00px drift on DOCKED restore
+    const dockSnapBefore = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const snap = (id) => {
+          const el = document.getElementById(id);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height };
+        };
+        return {
+          dock: snap('hudDockSlot'),
+          panel: snap('hudPanel'),
+          canvas: snap('hudCanvas'),
+          continuum: snap('continuumFieldPanel'),
+        };
+      })()`
+    );
+
+    // 6d.3 Wavefield Fullscreen enter (#btnHudFullscreen click) -> 16:9 aspect check -> inspect click -> Esc exit -> F toggle
+    await clickDomCenter('#btnHudFullscreen');
+    const fsEntered = await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Fullscreen enters FULLSCREEN with strict 16:9 #hudCanvas geometry',
+      `(() => {
+        const st = window.__chronosUiState;
+        const panel = document.getElementById('hudPanel');
+        const btnFs = document.getElementById('btnHudFullscreen');
+        const hud = document.getElementById('hudCanvas');
+        const r = hud ? hud.getBoundingClientRect() : null;
+        const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+        const isNativeOrFallback = Boolean(panel && (fsElem === panel || panel.classList.contains('hud-maximized')));
+        const aspect = r && r.height > 0 ? r.width / r.height : 0;
+        const aspectErr = Math.abs(aspect - 16 / 9);
+        const csHud = hud ? getComputedStyle(hud) : null;
+        const borderFreeHud = Boolean(
+          csHud &&
+            csHud.borderLeftWidth === '0px' &&
+            csHud.borderTopWidth === '0px' &&
+            csHud.borderRightWidth === '0px' &&
+            csHud.borderBottomWidth === '0px' &&
+            csHud.paddingLeft === '0px' &&
+            csHud.paddingTop === '0px' &&
+            csHud.paddingRight === '0px' &&
+            csHud.paddingBottom === '0px'
+        );
+        const coversViewport = Boolean(r && (r.width >= window.innerWidth * 0.65 || r.height >= window.innerHeight * 0.65));
+        const inBounds = Boolean(r && r.left >= -1 && r.top >= -1 && r.right <= window.innerWidth + 1 && r.bottom <= window.innerHeight + 1);
+        return {
+          ok: Boolean(st && st.viewport === 'FULLSCREEN' && panel?.dataset.viewport === 'FULLSCREEN' &&
+              btnFs?.getAttribute('aria-pressed') === 'true' && btnFs?.textContent?.trim() === '✕ Exit Full' &&
+              isNativeOrFallback && coversViewport && inBounds && borderFreeHud && aspectErr <= 0.005),
+          nativeFs: fsElem === panel,
+          fallbackMax: Boolean(panel?.classList.contains('hud-maximized')),
+          w: r ? Math.round(r.width) : 0,
+          h: r ? Math.round(r.height) : 0,
+          aspectErr,
+        };
+      })()`,
+      6000
+    );
+
+    await probeSwarmInspectOnHud(
+      'Step 6d: Clicking fullscreen #hudCanvas sustains valid Swarm inspection readout',
+      true
+    );
+
+    await sendCdpKey('Escape', 'Escape', 27, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Escape exits Wavefield Fullscreen cleanly back to DOCKED',
+      `(() => {
+        const st = window.__chronosUiState;
+        const panel = document.getElementById('hudPanel');
+        const dock = document.getElementById('hudDockSlot');
+        const btnFs = document.getElementById('btnHudFullscreen');
+        const fsElem = document.fullscreenElement || document.webkitFullscreenElement;
+        return {
+          ok: Boolean(st && st.viewport === 'DOCKED' && !fsElem && panel &&
+              !panel.classList.contains('hud-maximized') &&
+              panel.dataset.viewport === 'DOCKED' &&
+              (!dock || dock.style.blockSize === '') &&
+              btnFs?.getAttribute('aria-pressed') === 'false' &&
+              btnFs?.textContent?.trim() === '⛶ Fullscreen'),
+        };
+      })()`,
+      5000
+    );
+
+    await cdp.evalJs(sessionId, `document.activeElement?.blur?.(); true;`);
+    await sendCdpKey('f', 'KeyF', 70, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: F key enters Wavefield Fullscreen',
+      `(() => ({ ok: window.__chronosUiState?.viewport === 'FULLSCREEN' }))()`,
+      5000
+    );
+    await sendCdpKey('f', 'KeyF', 70, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Second F key exits Wavefield Fullscreen back to DOCKED',
+      `(() => ({ ok: window.__chronosUiState?.viewport === 'DOCKED' && !document.fullscreenElement && !document.getElementById('hudPanel')?.classList.contains('hud-maximized') }))()`,
+      5000
+    );
+
+    const uiFsmGeomAndCls = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        if (window.__e2eUiFsmClsPo) window.__e2eUiFsmClsPo.disconnect();
+        const snap = (id) => {
+          const el = document.getElementById(id);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { x: r.left + window.scrollX, y: r.top + window.scrollY, w: r.width, h: r.height };
+        };
+        const after = {
+          dock: snap('hudDockSlot'),
+          panel: snap('hudPanel'),
+          canvas: snap('hudCanvas'),
+          continuum: snap('continuumFieldPanel'),
+        };
+        const before = ${JSON.stringify(null)} || null;
+        return {
+          cls: window.__e2eUiFsmCls || 0,
+          entries: window.__e2eUiFsmClsEntries || [],
+          after,
+        };
+      })()`
+    );
+    const uiFsmCls = uiFsmGeomAndCls.cls;
+    const dockDrift = ['dock', 'panel', 'canvas', 'continuum']
+      .map((k) => {
+        const b = dockSnapBefore[k];
+        const a = uiFsmGeomAndCls.after[k];
+        if (!b || !a) return `${k}:missing`;
+        const dx = Math.abs(a.x - b.x);
+        const dy = Math.abs(a.y - b.y);
+        const dw = Math.abs(a.w - b.w);
+        const dh = Math.abs(a.h - b.h);
+        const maxD = Math.max(dx, dy, dw, dh);
+        return maxD > 0.5 ? `${k}:d=${maxD.toFixed(2)}` : null;
+      })
+      .filter(Boolean);
+    if (uiFsmCls >= 0.0001 || dockDrift.length > 0) {
+      throw new Error(
+        `Step 6d: Expected 0.000000 Web Vitals CLS & 0.00px dock drift across Hero-16 & Fullscreen transitions, got cls=${uiFsmCls}, drift=${JSON.stringify(dockDrift)}, entries=${JSON.stringify(uiFsmGeomAndCls.entries)}`
+      );
+    }
+
+    // Restore cleanly to legacy SD pillar_crossing before Step 7 (and verify SWARM_OFF data-hidden-solo & calibration tool mutual exclusion)
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        document.querySelector('.lab-btn[data-lab="0"]')?.click();
+        const swarmSel = document.getElementById('swarmModeSelect');
+        if (swarmSel) {
+          swarmSel.value = '0';
+          swarmSel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        const ovSel = document.getElementById('fieldOverlayModeSelect');
+        if (ovSel) {
+          ovSel.value = '0';
+          ovSel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        document.getElementById('btnSrcTestbench')?.click();
+        const scSel = document.getElementById('benchScenarioSelect');
+        if (scSel) {
+          scSel.value = 'pillar_crossing';
+          scSel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        document.getElementById('btnResSd')?.click();
+        return true;
+      })()`
+    );
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Restore legacy 320x180 SD pillar_crossing after Step 6c/6d',
+      `(() => {
+        const resMeta = document.getElementById('inputResMeta')?.textContent || '';
+        const targets = document.getElementById('kpiTargets')?.textContent || '';
+        const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
+        const st = window.__chronosUiState;
+        const v = document.getElementById('hiddenVideoSource');
+        return {
+          ok: resMeta === '320×180 SD RGBA' &&
+              targets === '4 / 16' &&
+              meta.startsWith('SWARM: OFF') &&
+              !meta.includes('DIAG INVALID') &&
+              Boolean(st && st.source === 'TESTBENCH' && st.engine === 'SWARM_OFF' && st.viewport === 'DOCKED' && st.overlays.showHeroTargets === true) &&
+              (!v || v.paused),
+          resMeta, targets, meta,
+        };
+      })()`,
+      12000
+    );
+
+    // 6d.4 Verify SWARM_OFF solo-hidden warning flag (data-hidden-solo="true") + pointerTool ruler exclusion
+    await sendCdpKey('h', 'KeyH', 72, 0);
+    const soloWarnState = await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Hiding Hero-16 while SWARM_OFF activates data-hidden-solo="true"',
+      `(() => {
+        const btnHero = document.getElementById('btnHudHeroToggle');
+        const st = window.__chronosUiState;
+        return {
+          ok: Boolean(st && st.overlays.showHeroTargets === false && btnHero?.dataset?.hiddenSolo === 'true'),
+          hiddenSolo: btnHero?.dataset?.hiddenSolo,
+        };
+      })()`,
+      4000
+    );
+    await sendCdpKey('h', 'KeyH', 72, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Restoring Hero-16 ON clears data-hidden-solo back to false',
+      `(() => {
+        const btnHero = document.getElementById('btnHudHeroToggle');
+        const st = window.__chronosUiState;
+        return { ok: Boolean(st && st.overlays.showHeroTargets === true && btnHero?.dataset?.hiddenSolo === 'false') };
+      })()`,
+      4000
+    );
+
+    await clickDomCenter('#btnCalRuler');
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Arming ruler transitions pointerTool to CAL_RULER_P1',
+      `(() => ({ ok: window.__chronosUiState?.pointerTool === 'CAL_RULER_P1' }))()`,
+      4000
+    );
+    await clickDomCenter('#hudCanvas');
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Clicking #hudCanvas during calibration transitions CAL_RULER_P1 -> CAL_RULER_P2 cleanly',
+      `(() => ({ ok: window.__chronosUiState?.pointerTool === 'CAL_RULER_P2' }))()`,
+      4000
+    );
+    await sendCdpKey('Escape', 'Escape', 27, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Escape disarms calibration pointerTool back to INSPECT_TARGET',
+      `(() => ({ ok: window.__chronosUiState?.pointerTool === 'INSPECT_TARGET' }))()`,
+      4000
+    );
+    await cdp.evalJs(sessionId, `document.getElementById('btnCalClear')?.click(); true;`);
+
+    // 6d.5 Verify single Escape exits .hud-maximized fallback AND cancels armed Ruler synchronously
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const panel = document.getElementById('hudPanel');
+        if (!panel) return false;
+        window.__e2eHasOwnReqFs = Object.prototype.hasOwnProperty.call(panel, 'requestFullscreen');
+        window.__e2eOrigRequestFullscreen = panel.requestFullscreen;
+        panel.requestFullscreen = () => Promise.reject(new Error('e2e-fallback-test'));
+        return true;
+      })()`
+    );
+    await clickDomCenter('#btnCalRuler');
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Arming ruler transitions pointerTool to CAL_RULER_P1 before fallback fullscreen',
+      `(() => ({ ok: window.__chronosUiState?.pointerTool === 'CAL_RULER_P1' }))()`,
+      4000
+    );
+    await clickDomCenter('#btnHudFullscreen');
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Fallback .hud-maximized enters FULLSCREEN while Ruler remains armed',
+      `(() => {
+        const st = window.__chronosUiState;
+        const panel = document.getElementById('hudPanel');
+        return {
+          ok: Boolean(
+            st &&
+              st.viewport === 'FULLSCREEN' &&
+              st.pointerTool === 'CAL_RULER_P1' &&
+              panel?.classList.contains('hud-maximized') &&
+              !document.fullscreenElement
+          ),
+        };
+      })()`,
+      4000
+    );
+    await sendCdpKey('Escape', 'Escape', 27, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Step 6d: Single Escape exits .hud-maximized AND disarms Ruler synchronously',
+      `(() => {
+        const st = window.__chronosUiState;
+        const panel = document.getElementById('hudPanel');
+        return {
+          ok: Boolean(
+            st &&
+              st.viewport === 'DOCKED' &&
+              st.pointerTool === 'INSPECT_TARGET' &&
+              panel &&
+              !panel.classList.contains('hud-maximized') &&
+              panel.dataset.viewport === 'DOCKED' &&
+              panel.dataset.pointerTool === 'INSPECT_TARGET'
+          ),
+        };
+      })()`,
+      4000
+    );
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const panel = document.getElementById('hudPanel');
+        if (panel && '__e2eOrigRequestFullscreen' in window) {
+          if (window.__e2eHasOwnReqFs) panel.requestFullscreen = window.__e2eOrigRequestFullscreen;
+          else delete panel.requestFullscreen;
+          delete window.__e2eHasOwnReqFs;
+          delete window.__e2eOrigRequestFullscreen;
+        }
+        document.getElementById('btnCalClear')?.click();
+        return true;
+      })()`
+    );
+
+    console.log(
+      `  [PASS] Step 6d (Wave-2 DeckUiFsm & Viewport Gate): heroToggle=${heroHiddenState.text}->ON (readout=${hiddenHeroInspect.readout}, pip=${hiddenHeroPipBytes}B), soloWarn=${soloWarnState.hiddenSolo}, fs=${fsEntered.nativeFs ? 'native' : 'maximized'}(${fsEntered.w}x${fsEntered.h}, aspectErr=${fsEntered.aspectErr.toFixed(4)}), keyGuards=OK, calExclusion=OK, CLS=${uiFsmCls.toFixed(6)}`
+    );
 
     // 7. Server & Browser Hardening Regression Gates (Range FD/Suffix, Multi-Hop HLS SSRF, 429 Cap, Esc-After-Blur, Horizon Homography, MSE Finite Retry)
     {
