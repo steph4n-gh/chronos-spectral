@@ -1908,7 +1908,7 @@
       inline-size: 100%;
       margin-inline: auto;
       grid-template-columns: minmax(0, 1fr);
-      padding-block: 0.75rem 2rem;
+      padding-block: 0.75rem 1rem;
       padding-inline: clamp(0.75rem, 2dvw, 1.5rem);
       gap: 0.75rem;
     }
@@ -2344,6 +2344,52 @@
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    footer.deck-footer {
+      padding-block: 0.55rem 0.95rem;
+      padding-inline: 1rem;
+      border-block-start: 1px solid #162338;
+      background-color: var(--bg-app);
+      color: var(--text-secondary);
+      font-family: var(--font-mono);
+      font-size: 0.68rem;
+      line-height: 1.4;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem 0.7rem;
+      contain: layout style paint;
+    }
+
+    footer.deck-footer a {
+      display: inline-flex;
+      align-items: center;
+      min-inline-size: 24px;
+      min-block-size: 24px;
+      padding-inline: 0.2rem;
+      color: #9ec5e6;
+      text-decoration: underline;
+      text-underline-offset: 2px;
+    }
+
+    @media (pointer: coarse) {
+      footer.deck-footer a {
+        min-block-size: 2.75rem;
+      }
+    }
+
+    @media (hover: hover) {
+      footer.deck-footer a:hover {
+        color: var(--brand-color);
+      }
+    }
+
+    footer.deck-footer a:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+      border-radius: 3px;
     }
   </style>
 </head>
@@ -3287,6 +3333,14 @@
       </div>
     </aside>
   </main>
+
+  <footer class="deck-footer">
+    <span>CHRONOS-SPECTRAL · Code &amp; Wasm: <a href="https://github.com/steph4n-gh/chronos-spectral/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache-2.0 License</a></span>
+    <span aria-hidden="true">·</span>
+    <a id="lnkSampleAttribution" href="./samples/credits.html" target="_blank" rel="noopener noreferrer">Sample Video Credits (CC BY / CC BY-SA / Public Domain)</a>
+    <span aria-hidden="true">·</span>
+    <a href="https://github.com/steph4n-gh/chronos-spectral/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security Policy</a>
+  </footer>
 
   <dialog id="liveStreamDialog" closedby="any" aria-labelledby="liveDialogTitle">
     <div class="dialog-header">
@@ -6180,10 +6234,18 @@
       }
     }
 
+    function syncSurfaceDocumentTitle(surface) {
+      document.title =
+        surface === 'deck'
+          ? '15-Panel Command Deck | CHRONOS-SPECTRAL'
+          : 'Interactive Showcase | CHRONOS-SPECTRAL';
+    }
+
     function setSurfaceMode(nextSurface) {
       const target = nextSurface === 'deck' ? 'deck' : 'showcase';
       activeSurface = target;
       document.body.dataset.surface = target;
+      syncSurfaceDocumentTitle(target);
       if (target === 'deck') {
         worker.postMessage({ type: 'params', showcaseMinimalScopes: false, rawWipeRatio: 0.0 });
         if (!isStaticHostMode) {
@@ -6201,6 +6263,8 @@
         } catch (_e) {}
       }
     }
+
+    syncSurfaceDocumentTitle(activeSurface);
 
     setShowcaseWipePercent(28, false);
     if (dom.showcaseWipeSlider) {

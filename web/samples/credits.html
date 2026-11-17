@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sample Video Credits | CHRONOS-SPECTRAL</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg-app: #05080f;
+      --bg-panel: #0c1220;
+      --bg-card: #121c30;
+      --border: #22324d;
+      --accent: #00e5ff;
+      --text: #ecf4ff;
+      --muted: #a6bbd8;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --sans: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background-color: var(--bg-app);
+      color: var(--text);
+      font-family: var(--sans);
+      font-size: 0.94rem;
+      line-height: 1.5;
+    }
+
+    header.credits-header,
+    main.credits-main,
+    footer.credits-footer {
+      max-inline-size: 62rem;
+      margin-inline: auto;
+      padding-inline: clamp(0.85rem, 2.5dvw, 1.5rem);
+    }
+
+    header.credits-header {
+      padding-block: 1.4rem 1rem;
+      border-block-end: 1px solid var(--border);
+    }
+
+    .credits-nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-block-end: 0.9rem;
+    }
+
+    a {
+      color: var(--accent);
+      text-underline-offset: 2px;
+    }
+
+    a:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+      border-radius: 3px;
+    }
+
+    .nav-pill {
+      display: inline-flex;
+      align-items: center;
+      min-inline-size: 24px;
+      min-block-size: 2.25rem;
+      padding: 0.35rem 0.72rem;
+      border-radius: 5px;
+      border: 1px solid var(--border);
+      background-color: var(--bg-panel);
+      color: var(--text);
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    @media (pointer: coarse) {
+      .nav-pill,
+      footer.credits-footer a {
+        min-block-size: 2.75rem;
+      }
+    }
+
+    @media (hover: hover) {
+      .nav-pill:hover {
+        border-color: var(--accent);
+      }
+    }
+
+    h1 {
+      margin: 0 0 0.45rem;
+      font-size: clamp(1.25rem, 1rem + 1.1vw, 1.75rem);
+      line-height: 1.2;
+    }
+
+    h2 {
+      margin: 1.6rem 0 0.7rem;
+      font-family: var(--mono);
+      font-size: 0.84rem;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      color: #9ec5e6;
+      border-inline-start: 2px solid var(--accent);
+      padding-inline-start: 0.55rem;
+    }
+
+    p {
+      margin: 0 0 0.65rem;
+      color: var(--muted);
+    }
+
+    ul.credit-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 0.65rem;
+    }
+
+    ul.credit-list li {
+      background-color: var(--bg-panel);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem 0.9rem;
+    }
+
+    .clip-title {
+      font-family: var(--mono);
+      font-size: 0.84rem;
+      font-weight: 700;
+      color: var(--text);
+      margin-block-end: 0.25rem;
+    }
+
+    .clip-meta {
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    footer.credits-footer {
+      margin-block-start: 2rem;
+      padding-block: 1rem 1.8rem;
+      border-block-start: 1px solid var(--border);
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.45rem 0.9rem;
+      align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <header class="credits-header">
+    <nav class="credits-nav" aria-label="Application navigation">
+      <a class="nav-pill" href="../">Interactive Showcase</a>
+      <a class="nav-pill" href="../?view=deck">15-Panel Command Deck</a>
+      <a class="nav-pill" href="./ATTRIBUTION.md">Raw Markdown Attribution</a>
+    </nav>
+    <h1>Sample Video Attribution &amp; Open Media Licenses</h1>
+    <p>Software source code, WebAssembly artifacts (<code>chronos_spectral.wasm</code>), build scripts, and text documentation are licensed under the <a href="https://github.com/steph4n-gh/chronos-spectral/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">Apache License 2.0</a>. All 14 real-camera demonstration and calibration MP4 clips (and derived demonstration captures) retain their respective upstream Creative Commons and U.S. Government Public Domain licenses below.</p>
+  </header>
+
+  <main class="credits-main">
+    <h2>High-Density Continuum Swarm Clips (1,000+ Targets)</h2>
+    <ul class="credit-list">
+      <li>
+        <div class="clip-title">starling_murmuration_1000.mp4 (13.0 s, 30 fps)</div>
+        <div class="clip-meta">Cropped (<code>1440x810</code> at <code>(240, 0)</code>) and scaled to <code>640x360</code> from <code>82.0 s</code> to <code>95.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:Flock_of_starlings_(Sturnus_vulgaris).webm" target="_blank" rel="noopener noreferrer">File:Flock of starlings (Sturnus vulgaris).webm</a> (original Flickr source: <a href="https://www.flickr.com/photos/karen_roe/38609728842/" target="_blank" rel="noopener noreferrer">38609728842</a>) by <a href="https://www.flickr.com/photos/karen_roe/" target="_blank" rel="noopener noreferrer">Karen Roe</a>, licensed under <a href="https://creativecommons.org/licenses/by/2.0/" target="_blank" rel="noopener noreferrer">CC BY 2.0</a>.</div>
+      </li>
+    </ul>
+
+    <h2>Extended HD Showcase Clips (29 s to 80 s)</h2>
+    <ul class="credit-list">
+      <li>
+        <div class="clip-title">model_rocket_full_flights.mp4 (30.9 s, 25 fps)</div>
+        <div class="clip-meta">Normalized to <code>640x360</code> and trimmed to three cutaway-free launch-to-parachute sequences from <a href="https://commons.wikimedia.org/wiki/File:Miniatuur-raketten_de_lucht_in-138846.ogv" target="_blank" rel="noopener noreferrer">File:Miniatuur-raketten de lucht in-138846.ogv</a> by Nederlands Instituut voor Beeld en Geluid / Open Beelden, licensed under <a href="https://creativecommons.org/licenses/by-sa/3.0/nl/deed.en" target="_blank" rel="noopener noreferrer">CC BY-SA 3.0 nl</a> (ShareAlike: adaptation remains CC BY-SA 3.0 nl).</div>
+      </li>
+      <li>
+        <div class="clip-title">rocket_vtvl_full_flight.mp4 (79.9 s, 30 fps)</div>
+        <div class="clip-meta">Transcoded from <a href="https://commons.wikimedia.org/wiki/File:SDSU_Tethered_and_Free-flight_Tests_(sdsu-tether4-4-25-cama-creditastrobotic).webm" target="_blank" rel="noopener noreferrer">File:SDSU Tethered and Free-flight Tests (sdsu-tether4-4-25-cama-creditastrobotic).webm</a> by NASA / Flight Opportunities / SDSU / Astrobotic, in the U.S. Government Public Domain.</div>
+      </li>
+      <li>
+        <div class="clip-title">water_rocket_parachute_flights.mp4 (30.2 s, 25 fps)</div>
+        <div class="clip-meta">Transcoded and concatenated from <a href="https://commons.wikimedia.org/wiki/File:Cocavicmlesvrez1.webm" target="_blank" rel="noopener noreferrer">File:Cocavicmlesvrez1.webm</a> and <a href="https://commons.wikimedia.org/wiki/File:Cocavicmlesvrez2.webm" target="_blank" rel="noopener noreferrer">File:Cocavicmlesvrez2.webm</a> by <a href="https://commons.wikimedia.org/wiki/User:Bernard_de_Go_Mars" target="_blank" rel="noopener noreferrer">Bernard de Go Mars</a>, licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a> (ShareAlike: adaptation remains CC BY-SA 4.0).</div>
+      </li>
+      <li>
+        <div class="clip-title">cologne_motorway_occlusion.mp4 (45.0 s, 30 fps)</div>
+        <div class="clip-meta">Scaled from <code>44.0 s</code> to <code>89.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:A4_Auffahrt_K%C3%B6ln_Luxemburgerstra%C3%9Fe_aus_der_Luft_%E2%80%93_Dezember_2021.webm" target="_blank" rel="noopener noreferrer">A4 Auffahrt Köln Luxemburgerstraße aus der Luft - Dezember 2021</a> by Maximilian Schönherr, licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a> (ShareAlike: adaptation remains CC BY-SA 4.0).</div>
+      </li>
+      <li>
+        <div class="clip-title">rally_ego_pan_tracking.mp4 (29.0 s, 30 fps)</div>
+        <div class="clip-meta">Scaled from <code>1.0 s</code> to <code>30.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:Rali_Ceredigion_2024_Nant_Y_Moch_4.webm" target="_blank" rel="noopener noreferrer">File:Rali Ceredigion 2024 Nant Y Moch 4.webm</a> by WillFR130, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>.</div>
+      </li>
+      <li>
+        <div class="clip-title">chaotic_magnetic_pendulum.mp4 (50.0 s, 25 fps)</div>
+        <div class="clip-meta">Scaled from <code>2.0 s</code> to <code>52.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:Chaospendel_(Lernwerkstatt).webm" target="_blank" rel="noopener noreferrer">File:Chaospendel (Lernwerkstatt).webm</a> by Rhetos / Mathe-AC Lernwerkstatt Aachen, licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a> (ShareAlike: adaptation remains CC BY-SA 4.0).</div>
+      </li>
+      <li>
+        <div class="clip-title">coupled_metronomes_sync.mp4 (55.0 s, 30 fps)</div>
+        <div class="clip-meta">Scaled from <code>35.0 s</code> to <code>90.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:Wesphysdemo_-_Synchronized_Metronomes.webm" target="_blank" rel="noopener noreferrer">File:Wesphysdemo - Synchronized Metronomes.webm</a> by wesphysdemo, licensed under <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noopener noreferrer">CC BY 3.0</a>.</div>
+      </li>
+      <li>
+        <div class="clip-title">newtons_cradle_impulses.mp4 (45.0 s, 30 fps)</div>
+        <div class="clip-meta">Scaled from <code>3.0 s</code> to <code>48.0 s</code> of <a href="https://commons.wikimedia.org/wiki/File:Newton%E2%80%99s_cradle_slo_mo.webm" target="_blank" rel="noopener noreferrer">File:Newton’s cradle slo mo.webm</a> by Nigos, licensed under <a href="https://creativecommons.org/licenses/by-sa/3.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 3.0</a> (ShareAlike: adaptation remains CC BY-SA 3.0).</div>
+      </li>
+    </ul>
+
+    <h2>Calibration Benchmark Clips (5.4 s to 6.7 s)</h2>
+    <ul class="credit-list">
+      <li>
+        <div class="clip-title">juggling_ballistic.mp4 (5.4 s, 25 fps)</div>
+        <div class="clip-meta">Cropped from <a href="https://commons.wikimedia.org/wiki/File:Zeitsymmetrie_(jonglieren).webm" target="_blank" rel="noopener noreferrer">File:Zeitsymmetrie (jonglieren).webm</a> by Rhetos / Mathe-AC Lernwerkstatt Aachen, licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a> (ShareAlike: adaptation remains CC BY-SA 4.0).</div>
+      </li>
+      <li>
+        <div class="clip-title">roundabout_occlusion.mp4 (6.6 s, 24 fps)</div>
+        <div class="clip-meta">Cropped from <a href="https://commons.wikimedia.org/wiki/File:Roundabout_14_61.webm" target="_blank" rel="noopener noreferrer">File:Roundabout 14 61.webm</a> by Wikideas1, dedicated to the public domain under <a href="https://creativecommons.org/publicdomain/zero/1.0/" target="_blank" rel="noopener noreferrer">CC0 1.0</a>.</div>
+      </li>
+      <li>
+        <div class="clip-title">galileo_pendulum_peg.mp4 (6.7 s, 30 fps)</div>
+        <div class="clip-meta">Cropped from <a href="https://commons.wikimedia.org/wiki/File:Blocked-pendulum-slow-motion.webm" target="_blank" rel="noopener noreferrer">File:Blocked-pendulum-slow-motion.webm</a> by MikeRun, licensed under <a href="https://creativecommons.org/licenses/by-sa/4.0/" target="_blank" rel="noopener noreferrer">CC BY-SA 4.0</a> (ShareAlike: adaptation remains CC BY-SA 4.0).</div>
+      </li>
+      <li>
+        <div class="clip-title">harmonic_metronome_phase.mp4 (6.5 s, 30 fps)</div>
+        <div class="clip-meta">Cropped and scaled from <a href="https://commons.wikimedia.org/wiki/File:Metronome.webm" target="_blank" rel="noopener noreferrer">File:Metronome.webm</a> by Daniel Eriksson / Belteshassar, licensed under <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a>.</div>
+      </li>
+      <li>
+        <div class="clip-title">carom_billiards_impulses.mp4 (5.8 s, 30 fps)</div>
+        <div class="clip-meta">Cropped rail-to-rail from <a href="https://commons.wikimedia.org/wiki/File:Carom_billiards.webm" target="_blank" rel="noopener noreferrer">File:Carom billiards.webm</a> by billclub, licensed under <a href="https://creativecommons.org/licenses/by/3.0/" target="_blank" rel="noopener noreferrer">CC BY 3.0</a>.</div>
+      </li>
+    </ul>
+  </main>
+
+  <footer class="credits-footer">
+    <span>CHRONOS-SPECTRAL</span>
+    <a href="https://github.com/steph4n-gh/chronos-spectral" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+    <a href="https://github.com/steph4n-gh/chronos-spectral/blob/main/NOTICE" target="_blank" rel="noopener noreferrer">NOTICE</a>
+    <a href="https://github.com/steph4n-gh/chronos-spectral/blob/main/SECURITY.md" target="_blank" rel="noopener noreferrer">Security Policy</a>
+  </footer>
+</body>
+</html>

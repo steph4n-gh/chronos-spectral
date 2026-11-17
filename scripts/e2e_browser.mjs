@@ -2761,6 +2761,28 @@ async function main() {
           res.end();
           return;
         }
+        if (req.url === '/evil.mpd') {
+          res.writeHead(200, { 'Content-Type': 'application/dash+xml' });
+          res.end(
+            `<MPD><Period><AdaptationSet><Representation><BaseURL>http://127.0.0.1:${internalPort}/dash_secret.mp4</BaseURL></Representation></AdaptationSet></Period></MPD>`.padEnd(1200, ' ')
+          );
+          return;
+        }
+        if (req.url === '/oversized.m3u8') {
+          res.writeHead(200, { 'Content-Type': 'application/vnd.apple.mpegurl' });
+          res.end(`#EXTM3U\n${'# comment\n'.repeat(60000)}`);
+          return;
+        }
+        if (req.url === '/slow_preflight.mp4') {
+          const timer = setTimeout(() => {
+            if (!res.destroyed && !res.writableEnded) {
+              res.writeHead(200, { 'Content-Type': 'video/mp4' });
+              fs.createReadStream(path.join(WEB_DIR, 'samples', 'roundabout_occlusion.mp4')).pipe(res);
+            }
+          }, 220);
+          res.once('close', () => clearTimeout(timer));
+          return;
+        }
         res.writeHead(404);
         res.end();
       });
@@ -2784,6 +2806,42 @@ async function main() {
           throw new Error(`Step 7b: Direct parser-differential HLS preflight failed (status=${directDiffRes.status}, internalHits=${internalHits})`);
         }
 
+        const nat64Res = await fetch(
+          `${capBase}/api/live-stream?url=${encodeURIComponent('http://[64:ff9b::7f00:1]/a.mp4')}`
+        );
+        await nat64Res.arrayBuffer().catch(() => {});
+        if (nat64Res.status !== 400 && nat64Res.status !== 403) {
+          throw new Error(`Step 7b: NAT64 IPv6 SSRF target not blocked (status=${nat64Res.status})`);
+        }
+
+        const dashRes = await fetch(
+          `${capBase}/api/live-stream?url=${encodeURIComponent(`http://127.0.0.1:${publicMockPort}/evil.mpd`)}`
+        );
+        await dashRes.arrayBuffer().catch(() => {});
+        if (dashRes.status === 200 || internalHits !== 0) {
+          throw new Error(`Step 7b: DASH manifest SSRF not blocked (status=${dashRes.status}, internalHits=${internalHits})`);
+        }
+
+        const bigRes = await fetch(
+          `${capBase}/api/live-stream?url=${encodeURIComponent(`http://127.0.0.1:${publicMockPort}/oversized.m3u8`)}`,
+          { signal: AbortSignal.timeout(4000) }
+        );
+        await bigRes.arrayBuffer().catch(() => {});
+        if (bigRes.status === 200) {
+          throw new Error(`Step 7b: Oversized >512 KB HLS playlist unexpectedly succeeded (${bigRes.status})`);
+        }
+
+        // Disconnect client mid-preflight and prove no orphan FFmpeg process consumes the maxLiveProcs=1 slot
+        const slowCtrl = new AbortController();
+        const slowPromise = fetch(
+          `${capBase}/api/live-stream?url=${encodeURIComponent(`http://127.0.0.1:${publicMockPort}/slow_preflight.mp4`)}`,
+          { signal: slowCtrl.signal }
+        ).catch(() => null);
+        await new Promise((r) => setTimeout(r, 40));
+        slowCtrl.abort();
+        await slowPromise;
+        await new Promise((r) => setTimeout(r, 300));
+
         const ssrfHlsRes = await fetch(
           `${capBase}/api/live-stream?url=${encodeURIComponent(`http://127.0.0.1:${publicMockPort}/master.m3u8`)}`
         );
@@ -2792,10 +2850,13 @@ async function main() {
           throw new Error(`Step 7b: Multi-hop HLS segment/parser-differential SSRF leaked ${internalHits} request(s) to internal server!`);
         }
 
-        // Verify maxLiveProcs=1 -> 429 Too Many Requests on concurrent relay
+        // Verify maxLiveProcs=1 -> 200 on first live relay (slot uncorrupted) then 429 Too Many Requests on concurrent relay
         const holdAbort = new AbortController();
         const holdPromise = fetch(`${capBase}/api/live-stream?preset=sim_live_traffic`, { signal: holdAbort.signal });
         const holdRes = await holdPromise;
+        if (holdRes.status !== 200) {
+          throw new Error(`Step 7b: Expected 200 for first live relay (no preflight orphan leak), got ${holdRes.status}`);
+        }
         const holdReader = holdRes.body.getReader();
         await holdReader.read();
         const secondRes = await fetch(`${capBase}/api/live-stream?preset=sim_live_traffic`);
@@ -2971,11 +3032,25 @@ async function main() {
           scSession,
           'Step 8a: Showcase DOM booted cleanly',
           `(() => ({
-            ok: document.body?.dataset?.surface === 'showcase' && Boolean(document.getElementById('showcaseWipeSlider'))
+            ok: document.body?.dataset?.surface === 'showcase' &&
+                Boolean(document.getElementById('showcaseWipeSlider')) &&
+                Boolean(document.getElementById('lnkSampleAttribution')?.getAttribute('href')?.endsWith('samples/credits.html')) &&
+                document.title.startsWith('Interactive Showcase')
           }))()`,
           8000,
           true
         );
+        const creditsOk = await cdp.evalJs(
+          scSession,
+          `(async () => {
+            const r = await fetch('./samples/credits.html');
+            const html = await r.text();
+            return r.status === 200 && html.includes('Bernard de Go Mars') && html.includes('Karen Roe');
+          })()`
+        );
+        if (!creditsOk) {
+          throw new Error('Step 8a: ./samples/credits.html failed status 200 or missing verified attribution credits');
+        }
         await cdp.evalJs(
           scSession,
           `(() => {
@@ -3205,6 +3280,7 @@ async function main() {
             return {
               ok: surface === 'deck' &&
                   location.search.includes('view=deck') &&
+                  document.title.startsWith('15-Panel Command Deck') &&
                   Boolean(roster && roster.offsetParent !== null) &&
                   seq >= ${seqBeforeSwitch},
               surface,
@@ -3221,7 +3297,9 @@ async function main() {
           scSession,
           'Step 8e: Return transition back to Split-Wipe Showcase',
           `(() => ({
-            ok: document.body?.dataset?.surface === 'showcase' && !location.search.includes('view=deck'),
+            ok: document.body?.dataset?.surface === 'showcase' &&
+                !location.search.includes('view=deck') &&
+                document.title.startsWith('Interactive Showcase'),
           }))()`,
           6000
         );

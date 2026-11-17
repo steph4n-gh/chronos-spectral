@@ -176,6 +176,6 @@ In paired sparse-mode parity testing across all 13 non-swarm sample clips (`52/5
 
 ## License and attribution
 
-All software source code, build and verification scripts, documentation, and compiled WebAssembly artifacts (`web/chronos_spectral.wasm`) are licensed under the **[Apache License, Version 2.0](./LICENSE)** (see [NOTICE](./NOTICE)).
+All software source code, build and verification scripts, text documentation, and compiled WebAssembly artifacts (`web/chronos_spectral.wasm`) are licensed under the **[Apache License, Version 2.0](./LICENSE)** (see [NOTICE](./NOTICE)).
 
-Standalone demonstration and benchmark MP4 clips under [web/samples/](./web/samples/) remain under their respective Creative Commons (`CC0 1.0`, `CC BY 2.0/3.0/4.0`, `CC BY-SA 3.0/4.0`) and U.S. Government Public Domain licenses as documented in [web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md).
+Standalone demonstration and benchmark MP4 clips under [web/samples/](./web/samples/), together with derived demonstration GIFs and video-frame screenshots under `docs/assets/demos/` and `docs/assets/panels/`, retain their respective Creative Commons (`CC0 1.0`, `CC BY 2.0/3.0/4.0`, `CC BY-SA 3.0 nl / 3.0 / 4.0`) and U.S. Government Public Domain terms and attributions documented in [web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md).

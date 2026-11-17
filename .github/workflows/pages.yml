@@ -1,7 +1,9 @@
 name: Deploy CHRONOS-SPECTRAL to GitHub Pages
 
 on:
-  push:
+  workflow_run:
+    workflows: ["CHRONOS-SPECTRAL CI"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
 
@@ -20,14 +22,23 @@ env:
 jobs:
   deploy-pages:
     name: Deploy web/ static bundle
-    if: github.event.repository.private == false || github.event_name == 'workflow_dispatch'
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event.workflow_run.event == 'push' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.head_branch == 'main' &&
+        github.event.repository.private == false
+      )
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Check out verified commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5

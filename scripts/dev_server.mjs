@@ -85,29 +85,71 @@ const PUBLIC_HLS_CANDIDATES = [
   },
 ];
 
+function parseIpv6Hextets(ip) {
+  if (typeof ip !== 'string' || !ip || ip.includes('%')) return null;
+  const dbl = ip.indexOf('::');
+  if (dbl >= 0 && ip.indexOf('::', dbl + 2) >= 0) return null;
+  const rawLeft = dbl >= 0 ? ip.slice(0, dbl) : ip;
+  const rawRight = dbl >= 0 ? ip.slice(dbl + 2) : '';
+  const parsePart = (partStr) => {
+    if (!partStr) return [];
+    const segs = partStr.split(':');
+    const out = [];
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      if (!s) return null;
+      if (s.includes('.')) {
+        if (i !== segs.length - 1) return null;
+        const octs = s.split('.');
+        if (octs.length !== 4) return null;
+        const nums = octs.map((o) => (/^\d{1,3}$/.test(o) ? Number(o) : -1));
+        if (nums.some((n) => n < 0 || n > 255)) return null;
+        out.push((nums[0] << 8) | nums[1], (nums[2] << 8) | nums[3]);
+      } else {
+        if (!/^[0-9a-f]{1,4}$/i.test(s)) return null;
+        out.push(parseInt(s, 16));
+      }
+    }
+    return out;
+  };
+  const left = parsePart(rawLeft);
+  const right = parsePart(rawRight);
+  if (!left || !right) return null;
+  const total = left.length + right.length;
+  if (dbl < 0 ? total !== 8 : total >= 8) return null;
+  const zeroFill = dbl < 0 ? 0 : 8 - total;
+  const out = new Uint16Array(8);
+  let idx = 0;
+  for (const v of left) out[idx++] = v;
+  idx += zeroFill;
+  for (const v of right) out[idx++] = v;
+  return out;
+}
+
 function isPrivateOrLoopbackIp(ip) {
   const ver = net.isIP(ip);
   if (ver === 4) {
     const parts = ip.split('.').map((n) => parseInt(n, 10));
-    const [a, b] = parts;
+    const [a, b, c] = parts;
     if (a === 0 || a === 10 || a === 127) return true;
     if (a === 169 && b === 254) return true;
     if (a === 172 && b >= 16 && b <= 31) return true;
     if (a === 192 && b === 168) return true;
+    if (a === 192 && b === 0 && (c === 0 || c === 2)) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    if (a === 198 && b === 51 && c === 100) return true;
+    if (a === 203 && b === 0 && c === 113) return true;
     if (a === 100 && b >= 64 && b <= 127) return true;
     if (a >= 224) return true;
     return false;
   }
   if (ver === 6) {
-    const norm = ip.toLowerCase();
-    if (norm === '::' || norm === '::1') return true;
-    if (norm.startsWith('::ffff:')) {
-      return isPrivateOrLoopbackIp(norm.slice(7));
-    }
-    if (norm.startsWith('fc') || norm.startsWith('fd')) return true;
-    if (norm.startsWith('fe8') || norm.startsWith('fe9') || norm.startsWith('fea') || norm.startsWith('feb')) {
-      return true;
-    }
+    const h = parseIpv6Hextets(ip);
+    if (!h) return true;
+    if ((h[0] & 0xe000) !== 0x2000) return true;
+    if (h[0] === 0x2001 && (h[1] === 0x0db8 || h[1] === 0x0000)) return true;
+    if (h[0] === 0x2001 && h[1] === 0x0002 && h[2] === 0x0000) return true;
+    if (h[0] === 0x2002) return true;
     return false;
   }
   return true;
@@ -165,9 +207,7 @@ async function resolveAndPinPublicUrl(rawUrl, allowHostPorts = null) {
   } catch {
     throw new Error('Malformed stream URL');
   }
-  const allowRtsp = process.env.CHRONOS_ALLOW_RTSP === '1';
-  const allowedProtos = allowRtsp ? ['https:', 'http:', 'rtsp:'] : ['https:', 'http:'];
-  if (!allowedProtos.includes(parsed.protocol)) {
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
     throw new Error(`Unsupported protocol ${parsed.protocol}`);
   }
   if (parsed.username || parsed.password) {
@@ -336,6 +376,28 @@ function bufferStartsWithExtM3u(buf) {
   return head.startsWith('#EXTM3U');
 }
 
+function isBlockedManifestPayload(ctype, firstChunk) {
+  const lcType = String(ctype || '').toLowerCase();
+  if (
+    lcType.includes('dash') ||
+    lcType.includes('sdp') ||
+    lcType.includes('smil') ||
+    lcType.includes('smoothstream')
+  ) {
+    return true;
+  }
+  if (!firstChunk || firstChunk.length === 0) return false;
+  const head = firstChunk
+    .subarray(0, Math.min(firstChunk.length, 1024))
+    .toString('utf8')
+    .replace(/^\uFEFF/, '');
+  return (
+    /<(?:[\w-]+:)?(?:MPD|SmoothStreamingMedia|smil|asx)\b/i.test(head) ||
+    /^\s*ffconcat\s+version\b/im.test(head) ||
+    /^\s*v=0\r?\n/m.test(head)
+  );
+}
+
 async function readBoundedStreamBuffer(stream, firstChunk, maxBytes = 524288) {
   const chunks = firstChunk.length > 0 ? [firstChunk] : [];
   let total = firstChunk.length;
@@ -345,50 +407,87 @@ async function readBoundedStreamBuffer(stream, firstChunk, maxBytes = 524288) {
   }
   return new Promise((resolve, reject) => {
     let done = false;
-    const finish = () => {
+    function cleanup() {
+      stream.off('data', onData);
+      stream.off('end', onEnd);
+      stream.off('close', onClose);
+      stream.off('error', onErr);
+    }
+    function onData(chunk) {
       if (done) return;
-      done = true;
-      resolve(Buffer.concat(chunks, total));
-    };
-    stream.on('data', (chunk) => {
       total += chunk.length;
       if (total > maxBytes) {
         done = true;
-        stream.destroy(new Error('HLS playlist exceeded 512 KB cap'));
+        cleanup();
+        const capErr = new Error('HLS playlist exceeded 512 KB cap');
+        stream.destroy(capErr);
+        reject(capErr);
         return;
       }
       chunks.push(Buffer.from(chunk));
-    });
-    stream.once('end', finish);
-    stream.once('close', finish);
-    stream.once('error', (err) => {
-      if (!done) {
-        done = true;
-        reject(err);
+    }
+    function onEnd() {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(Buffer.concat(chunks, total));
+    }
+    function onClose() {
+      if (done) return;
+      done = true;
+      cleanup();
+      if (stream.readableEnded) {
+        resolve(Buffer.concat(chunks, total));
+      } else {
+        reject(new Error('Upstream HLS playlist closed prematurely'));
       }
-    });
+    }
+    function onErr(err) {
+      if (done) return;
+      done = true;
+      cleanup();
+      reject(err);
+    }
+    stream.on('data', onData);
+    stream.once('end', onEnd);
+    stream.once('close', onClose);
+    stream.once('error', onErr);
     stream.resume();
-    if (stream.readableEnded) finish();
+    if (stream.readableEnded) onEnd();
   });
 }
 
-async function validatePublicStreamUrl(rawUrl, allowHostPorts = null) {
-  const initial = await resolveAndPinPublicUrl(rawUrl, allowHostPorts);
-  if (initial.parsed.protocol !== 'http:' && initial.parsed.protocol !== 'https:') {
-    return { url: initial.parsed.toString(), isPlaylist: false };
+async function validatePublicStreamUrl(rawUrl, allowHostPorts = null, signal = null) {
+  await resolveAndPinPublicUrl(rawUrl, allowHostPorts);
+  if (signal?.aborted) {
+    throw new Error('Client disconnected during stream preflight');
   }
   const { parsed, upReq, upRes } = await openPinnedHttpStream(rawUrl, 0, allowHostPorts);
+  const onAbort = () => {
+    try { upRes.destroy(); } catch {}
+    try { upReq.destroy(); } catch {}
+  };
+  if (signal) {
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+  }
   try {
     const status = upRes.statusCode || 502;
     if (status < 200 || status >= 300) {
       throw new Error(`Upstream returned HTTP ${status}`);
     }
     const { firstChunk, ended } = await peekHeaderBytes(upRes);
+    if (signal?.aborted) {
+      throw new Error('Client disconnected during stream preflight');
+    }
     const ctype = String(upRes.headers['content-type'] || '').toLowerCase();
     const isPlaylist =
       parsed.pathname.toLowerCase().endsWith('.m3u8') ||
       ctype.includes('mpegurl') ||
       bufferStartsWithExtM3u(firstChunk);
+    if (!isPlaylist && isBlockedManifestPayload(ctype, firstChunk)) {
+      throw new Error('Unsupported manifest format (only HLS .m3u8 and direct media containers are permitted)');
+    }
     if (isPlaylist) {
       const fullBuf = ended ? firstChunk : await readBoundedStreamBuffer(upRes, firstChunk);
       if (fullBuf.includes(0)) {
@@ -432,6 +531,7 @@ async function validatePublicStreamUrl(rawUrl, allowHostPorts = null) {
     }
     return { url: parsed.toString(), isPlaylist };
   } finally {
+    if (signal) signal.removeEventListener('abort', onAbort);
     upRes.resume();
     upReq.destroy();
   }
@@ -683,17 +783,18 @@ export function startChronosServer({
     }
 
     const isHls = customIsPlaylist || remoteUrl.includes('.m3u8');
-    const isHttp = /^https?:/i.test(remoteUrl);
-    const ffmpegInputUrl = isHttp
-      ? buildLocalProxyUrl(remoteUrl, isHls ? '.m3u8' : '.mp4')
-      : remoteUrl;
+    const ffmpegInputUrl = buildLocalProxyUrl(remoteUrl, isHls ? '.m3u8' : '.mp4');
     return [
       '-v', 'error',
       '-nostdin',
       ...(isHls ? [] : ['-fflags', 'nobuffer']),
       '-probesize', '500000',
       '-analyzeduration', '1000000',
-      '-protocol_whitelist', isHttp ? 'http,tcp' : 'rtsp,rtp,udp,tcp',
+      '-protocol_whitelist', 'http,tcp',
+      '-format_whitelist',
+      isHls
+        ? 'hls,mpegts,mov,mp4,m4a,3gp,3g2,mj2,aac,mp3'
+        : 'mov,mp4,m4a,3gp,3g2,mj2,matroska,webm,mpegts,flv,avi',
       '-max_redirects', '0',
       '-rw_timeout', '15000000',
       ...(isHls ? ['-live_start_index', '-2'] : []),
@@ -766,6 +867,10 @@ export function startChronosServer({
             return;
           }
 
+          if (isBlockedManifestPayload(ctype, firstChunk)) {
+            throw new Error('Unsupported manifest format on upstream hop');
+          }
+
           res.writeHead(200, {
             'Content-Type': activeUpRes.headers['content-type'] || 'application/octet-stream',
             'Cache-Control': 'no-store',
@@ -818,14 +923,38 @@ export function startChronosServer({
           res.end(JSON.stringify({ ok: false, error: 'Maximum concurrent live FFmpeg relays reached' }));
           return;
         }
+        let clientGone = Boolean(req.aborted || req.destroyed || res.destroyed || res.writableEnded);
+        let proc = null;
+        let cleaned = false;
+        const abortCtrl = new AbortController();
+        const cleanup = () => {
+          clientGone = true;
+          abortCtrl.abort();
+          if (cleaned) return;
+          cleaned = true;
+          if (proc) {
+            activeProcs.delete(proc);
+            try {
+              proc.kill('SIGKILL');
+            } catch {}
+          }
+        };
+        req.once('close', cleanup);
+        res.once('close', cleanup);
+        res.once('error', cleanup);
+
         const presetId = (reqUrl.searchParams.get('preset') || '').trim();
         const rawCustomUrl = (reqUrl.searchParams.get('url') || '').trim();
         let validatedUrl = '';
         let validatedIsPlaylist = false;
         if (!presetId && rawCustomUrl) {
-          const validated = await validatePublicStreamUrl(rawCustomUrl, allowHostSet);
+          const validated = await validatePublicStreamUrl(rawCustomUrl, allowHostSet, abortCtrl.signal);
           validatedUrl = validated.url;
           validatedIsPlaylist = validated.isPlaylist;
+        }
+        if (clientGone || req.aborted || req.destroyed || res.destroyed || res.writableEnded) {
+          cleanup();
+          return;
         }
         if (activeProcs.size >= maxLiveProcs) {
           res.writeHead(429, { 'Content-Type': 'application/json; charset=utf-8' });
@@ -833,24 +962,15 @@ export function startChronosServer({
           return;
         }
         const ffArgs = buildFfmpegArgsForRequest(presetId, validatedUrl, validatedIsPlaylist);
-        const proc = spawn(FFMPEG_BIN, ffArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
+        proc = spawn(FFMPEG_BIN, ffArgs, { stdio: ['ignore', 'pipe', 'pipe'] });
         activeProcs.add(proc);
+        if (clientGone || req.aborted || req.destroyed || res.destroyed || res.writableEnded) {
+          cleanup();
+          return;
+        }
 
         let headersSent = false;
         let errTail = '';
-        let cleaned = false;
-        const cleanup = () => {
-          if (cleaned) return;
-          cleaned = true;
-          activeProcs.delete(proc);
-          try {
-            proc.kill('SIGKILL');
-          } catch {}
-        };
-
-        req.on('close', cleanup);
-        res.on('close', cleanup);
-        res.on('error', cleanup);
 
         proc.stderr.on('data', (chunk) => {
           if (errTail.length < 512) errTail += chunk.toString('utf8');
