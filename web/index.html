@@ -3489,6 +3489,7 @@
 
     let hudMaximizedFallback = false;
     let calSyncSeq = 0;
+    let overlaySyncSeq = 0;
     let uiCalMinDraftCount = 0;
     let inspectReqSeq = 0;
     let deckUiState = freezeDeckStateSnapshot({
@@ -3587,6 +3588,11 @@
         calDraftCount: 0,
       });
       return calSyncSeq;
+    }
+
+    function nextOverlaySyncSeq() {
+      overlaySyncSeq += 1;
+      return overlaySyncSeq;
     }
 
     function advanceOptimisticCalClick() {
@@ -4282,7 +4288,8 @@
         dom.pillArena.textContent = `ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
         dispatchDeckEvent({ type: 'SOURCE_CHANGED', source: mapSourceModeToFsm(activeSourceMode) });
-        if (typeof m.showHeroTargets === 'boolean') {
+        const overlayConverged = overlaySyncSeq === 0 || (typeof m.overlaySyncSeq === 'number' && m.overlaySyncSeq >= overlaySyncSeq);
+        if (overlayConverged && typeof m.showHeroTargets === 'boolean') {
           dispatchDeckEvent({ type: 'OVERLAY_SET', showHeroTargets: m.showHeroTargets });
         }
         if (typeof publishInspectTelemetryState === 'function') {
@@ -4293,10 +4300,11 @@
         dom.pillKernel.title = m.message || 'Failed to initialize Wasm kernel';
         dom.hudSourceLabel.textContent = `KERNEL ERROR: ${m.message || 'Wasm load failed'}`;
       } else if (m.type === 'swarm_config_sync') {
+        const overlayConverged = overlaySyncSeq === 0 || (typeof m.overlaySyncSeq === 'number' && m.overlaySyncSeq >= overlaySyncSeq);
         if (typeof m.swarmMode === 'number' && dom.swarmModeSelect) {
           dom.swarmModeSelect.value = String(m.swarmMode);
         }
-        if (typeof m.fieldOverlayMode === 'number' && dom.fieldOverlayModeSelect) {
+        if (overlayConverged && typeof m.fieldOverlayMode === 'number' && dom.fieldOverlayModeSelect) {
           dom.fieldOverlayModeSelect.value = String(m.fieldOverlayMode);
         }
         dispatchDeckEvent({
@@ -4304,11 +4312,13 @@
           swarmMode: typeof m.swarmMode === 'number' ? m.swarmMode : 0,
           swarmActive: Boolean(m.swarmActive),
         });
-        dispatchDeckEvent({
-          type: 'OVERLAY_SET',
-          showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
-          fieldOverlayMode: typeof m.fieldOverlayMode === 'number' ? m.fieldOverlayMode : undefined,
-        });
+        if (overlayConverged) {
+          dispatchDeckEvent({
+            type: 'OVERLAY_SET',
+            showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
+            fieldOverlayMode: typeof m.fieldOverlayMode === 'number' ? m.fieldOverlayMode : undefined,
+          });
+        }
       } else if (m.type === 'resolution_changed') {
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
       } else if (m.type === 'audio_strobe') {
@@ -4316,6 +4326,7 @@
       } else if (m.type === 'audio_percussion') {
         playDelayedSyncPercussion(m.zone, m.leadSec, m.velocity, m.sentEpochMs);
       } else if (m.type === 'telemetry') {
+        const overlayConverged = overlaySyncSeq === 0 || (typeof m.overlaySyncSeq === 'number' && m.overlaySyncSeq >= overlaySyncSeq);
         lastSwarmActive = Boolean(m.chronos1000 && m.chronos1000.swarmActive);
         lastSwarmFrameW = m.frameW || lastSwarmFrameW;
         lastSwarmFrameH = m.frameH || lastSwarmFrameH;
@@ -4329,14 +4340,16 @@
             : 0,
           swarmActive: lastSwarmActive,
         });
-        dispatchDeckEvent({
-          type: 'OVERLAY_SET',
-          showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
-          showAllOverlays: typeof m.showAllOverlays === 'boolean' ? m.showAllOverlays : undefined,
-          fieldOverlayMode: m.chronos1000 && typeof m.chronos1000.fieldOverlayMode === 'number'
-            ? m.chronos1000.fieldOverlayMode
-            : undefined,
-        });
+        if (overlayConverged) {
+          dispatchDeckEvent({
+            type: 'OVERLAY_SET',
+            showHeroTargets: typeof m.showHeroTargets === 'boolean' ? m.showHeroTargets : undefined,
+            showAllOverlays: typeof m.showAllOverlays === 'boolean' ? m.showAllOverlays : undefined,
+            fieldOverlayMode: m.chronos1000 && typeof m.chronos1000.fieldOverlayMode === 'number'
+              ? m.chronos1000.fieldOverlayMode
+              : undefined,
+          });
+        }
         const medMs = typeof m.wasmMedianMs === 'number' ? m.wasmMedianMs : m.wasmMeanMs;
         const budgetMs = m.resMode === 1
           ? (m.sourceMode === 'testbench' ? 1.0 : 2.2)
@@ -4600,7 +4613,7 @@
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
         const om = Math.max(0, Math.min(4, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
-        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om });
+        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
     }
 
@@ -4622,7 +4635,7 @@
       if (typeof overlayTarget === 'number' && dom.fieldOverlayModeSelect) {
         dom.fieldOverlayModeSelect.value = String(overlayTarget);
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: overlayTarget });
-        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: overlayTarget });
+        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: overlayTarget, overlaySyncSeq: nextOverlaySyncSeq() });
       }
     }
 
@@ -5670,7 +5683,7 @@
     function setHeroTargetsVisible(nextVal) {
       const visible = Boolean(nextVal);
       dispatchDeckEvent({ type: 'OVERLAY_SET', showHeroTargets: visible });
-      worker.postMessage({ type: 'params', showHeroTargets: visible });
+      worker.postMessage({ type: 'params', showHeroTargets: visible, overlaySyncSeq: nextOverlaySyncSeq() });
     }
 
     if (dom.chkHeroTargets) {
@@ -5753,15 +5766,15 @@
 
     document.getElementById('chkKalman').addEventListener('change', (e) => {
       dispatchDeckEvent({ type: 'OVERLAY_SET', showKalman: e.target.checked });
-      worker.postMessage({ type: 'params', showKalmanBaseline: e.target.checked });
+      worker.postMessage({ type: 'params', showKalmanBaseline: e.target.checked, overlaySyncSeq: nextOverlaySyncSeq() });
     });
     document.getElementById('chkAllOverlays').addEventListener('change', (e) => {
       dispatchDeckEvent({ type: 'OVERLAY_SET', showAllOverlays: e.target.checked });
-      worker.postMessage({ type: 'params', showAllOverlays: e.target.checked });
+      worker.postMessage({ type: 'params', showAllOverlays: e.target.checked, overlaySyncSeq: nextOverlaySyncSeq() });
     });
     document.getElementById('chkEcaOverlay').addEventListener('change', (e) => {
       dispatchDeckEvent({ type: 'OVERLAY_SET', showEcaOverlay: e.target.checked });
-      worker.postMessage({ type: 'params', showEcaOverlay: e.target.checked });
+      worker.postMessage({ type: 'params', showEcaOverlay: e.target.checked, overlaySyncSeq: nextOverlaySyncSeq() });
     });
     document.getElementById('chkStrobe').addEventListener('change', (e) => {
       worker.postMessage({ type: 'params', strobeEnabled: e.target.checked });

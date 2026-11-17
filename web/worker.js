@@ -245,6 +245,7 @@ let showEcaOverlay = false;
 let showKalmanBaseline = true;
 let showHeroTargets = true;
 let showAllOverlays = false;
+let lastOverlaySyncSeq = 0;
 let strobeEnabled = true;
 const cropNorm = new Float64Array([0.0, 0.0, 1.0, 1.0]); // [x, y, w, h] in [0..1]
 
@@ -6222,6 +6223,7 @@ function emitTelemetrySnapshot() {
     calibrated: metricOn,
     showHeroTargets,
     showAllOverlays,
+    overlaySyncSeq: lastOverlaySyncSeq,
     swarmMode,
     cropNorm: [cropNorm[0], cropNorm[1], cropNorm[2], cropNorm[3]],
     arenaBytes: Math.round(telemView[20]),
@@ -6775,6 +6777,7 @@ function syncSwarmConfigToMain(sc) {
     swarmActive: Boolean(hasChronos1000Exports() && swarmTelemView && swarmTelemView[1] > 0.5),
     fieldOverlayMode,
     showHeroTargets,
+    overlaySyncSeq: lastOverlaySyncSeq,
   });
 }
 
@@ -7171,6 +7174,7 @@ self.onmessage = async (ev) => {
         frameH,
         pipDim,
         showHeroTargets,
+        overlaySyncSeq: lastOverlaySyncSeq,
       });
       scheduleNextWorkerTick();
     } catch (initErr) {
@@ -7359,6 +7363,9 @@ self.onmessage = async (ev) => {
       redrawPausedHudIfReady();
     }
   } else if (msg.type === 'params') {
+    if (typeof msg.overlaySyncSeq === 'number' && msg.overlaySyncSeq > lastOverlaySyncSeq) {
+      lastOverlaySyncSeq = msg.overlaySyncSeq;
+    }
     let visualFlagChanged = false;
     if (typeof msg.lookaheadK === 'number') lookaheadK = msg.lookaheadK;
     if (typeof msg.ecaAdaptRate === 'number') ecaAdaptRate = msg.ecaAdaptRate;
@@ -7426,6 +7433,9 @@ self.onmessage = async (ev) => {
       emitTelemetrySnapshot();
     }
   } else if (msg.type === 'set_field_overlay_mode') {
+    if (typeof msg.overlaySyncSeq === 'number' && msg.overlaySyncSeq > lastOverlaySyncSeq) {
+      lastOverlaySyncSeq = msg.overlaySyncSeq;
+    }
     const rawO = Number(msg.fieldOverlayMode);
     fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(4, Math.round(rawO))) : 0;
     syncSwarmConfigToMain(benchScenario);

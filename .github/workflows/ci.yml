@@ -53,14 +53,15 @@ jobs:
 
       - name: Ensure Google Chrome Stable (branded build with H.264 MP4 codec)
         run: |
-          if ! command -v google-chrome-stable >/dev/null 2>&1; then
+          if [ ! -x /opt/google/chrome/chrome ]; then
             curl -fsSL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/google-chrome.deb
             sudo apt-get install -y --no-install-recommends /tmp/google-chrome.deb
             rm -f /tmp/google-chrome.deb
           fi
-          google-chrome-stable --version
+          /opt/google/chrome/chrome --version
 
       - name: Run full build, static Wasm audit, math gates, MP4 calibration, and Chrome CDP E2E
         env:
-          CHROME_BIN: /usr/bin/google-chrome-stable
+          CHROME_BIN: /opt/google/chrome/chrome
+          CI: "1"
         run: ./build.sh --e2e

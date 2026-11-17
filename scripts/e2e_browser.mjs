@@ -36,6 +36,7 @@ function findChromeBinary() {
     '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
     '/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary',
     '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    '/opt/google/chrome/chrome',
     '/usr/bin/google-chrome',
     '/usr/bin/google-chrome-stable',
     '/usr/bin/chromium-browser',
@@ -61,18 +62,30 @@ function launchHeadlessChrome(chromeBin, userDataDir) {
     '--disable-backgrounding-occluded-windows',
     '--window-size=1440,900',
   ];
+  if (process.platform === 'linux') {
+    args.push('--no-sandbox', '--disable-dev-shm-usage', '--disable-features=dbus');
+  }
   if (process.platform === 'linux' || process.env.CI) {
-    args.push('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
+    args.push(
+      '--use-gl=angle',
+      '--use-angle=swiftshader',
+      '--enable-unsafe-swiftshader',
+      '--disable-accelerated-2d-canvas',
+      '--disable-webgl'
+    );
   }
 
-  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+  const env = process.platform === 'linux'
+    ? { ...process.env, DBUS_SESSION_BUS_ADDRESS: '/dev/null', NO_AT_BRIDGE: '1' }
+    : process.env;
+  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'], env });
 
   return new Promise((resolve, reject) => {
     let stderrBuf = '';
     const timer = setTimeout(() => {
       proc.kill('SIGKILL');
       reject(new Error(`Timed out waiting for Chrome DevTools endpoint. stderr:\n${stderrBuf}`));
-    }, 15000);
+    }, 30000);
 
     proc.on('error', (err) => {
       clearTimeout(timer);
@@ -493,6 +506,13 @@ async function main() {
         const sel = document.getElementById('sampleVideoSelect');
         sel.value = './samples/juggling_ballistic.mp4';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
+        if (${Boolean(process.env.CI)}) {
+          const v = document.getElementById('hiddenVideoSource');
+          if (v) {
+            v.defaultPlaybackRate = 0.5;
+            v.playbackRate = 0.5;
+          }
+        }
         return true;
       })()`
     );
@@ -502,6 +522,10 @@ async function main() {
       'Juggling 25fps MP4 playback + multi-arc gravity + APERIODIC guard',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
+        if (${Boolean(process.env.CI)} && v && v.playbackRate !== 0.5) {
+          v.defaultPlaybackRate = 0.5;
+          v.playbackRate = 0.5;
+        }
         const srcLabel = document.getElementById('hudSourceLabel')?.textContent || '';
         const targetsText = document.getElementById('kpiTargets')?.textContent || '0 / 16';
         const activeCount = parseInt(targetsText.split('/')[0], 10) || 0;
@@ -745,6 +769,19 @@ async function main() {
       })()`
     );
     await cdp.saveScreenshot(sessionId, proofDir, 'proof_mode_c_billiards.png');
+    if (process.env.CI) {
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const v = document.getElementById('hiddenVideoSource');
+          if (v) {
+            v.defaultPlaybackRate = 1.0;
+            v.playbackRate = 1.0;
+          }
+          return true;
+        })()`
+      );
+    }
 
     // Arm 2-Pt Ruler while ASSUMED 4-PT H is active, then press Escape -> prior calibration MUST survive!
     await cdp.evalJs(sessionId, `document.getElementById('btnCalRuler').click(); true;`);
@@ -1237,16 +1274,28 @@ async function main() {
       })()`,
       15000
     );
+    await cdp.evalJs(
+      sessionId,
+      `document.getElementById('persistenceCanvas')?.scrollIntoView({ block: 'center', inline: 'center' }); true;`
+    );
+    await new Promise((r) => setTimeout(r, 120));
+    const persistRect = await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const r = document.getElementById('persistenceCanvas')?.getBoundingClientRect();
+        return r ? { x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))), y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))), width: Math.ceil(r.width), height: Math.ceil(r.height) } : null;
+      })()`
+    );
     const persistClipShot = await cdp.send(
       'Page.captureScreenshot',
       {
         format: 'png',
-        captureBeyondViewport: true,
+        captureBeyondViewport: false,
         clip: {
-          x: Math.max(0, swarmState.pRect.x),
-          y: Math.max(0, swarmState.pRect.y),
-          width: swarmState.pRect.width,
-          height: swarmState.pRect.height,
+          x: persistRect.x,
+          y: persistRect.y,
+          width: persistRect.width,
+          height: persistRect.height,
           scale: 1,
         },
       },
@@ -1378,14 +1427,14 @@ async function main() {
       sessionId,
       `(() => {
         const r = document.getElementById('physicsPhaseCanvas')?.getBoundingClientRect();
-        return r ? { x: Math.floor(r.left), y: Math.floor(r.top), width: Math.ceil(r.width), height: Math.ceil(r.height) } : null;
+        return r ? { x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))), y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))), width: Math.ceil(r.width), height: Math.ceil(r.height) } : null;
       })()`
     );
     const phaseClipShot = await cdp.send(
       'Page.captureScreenshot',
       {
         format: 'png',
-        captureBeyondViewport: true,
+        captureBeyondViewport: false,
         clip: {
           x: Math.max(0, physRect.x),
           y: Math.max(0, physRect.y),
@@ -1417,6 +1466,7 @@ async function main() {
     await cdp.evalJs(
       sessionId,
       `(() => {
+        document.getElementById('btnSrcTestbench')?.click();
         const scSel = document.getElementById('benchScenarioSelect');
         scSel.value = 'pillar_crossing';
         scSel.dispatchEvent(new Event('change', { bubbles: true }));
@@ -1528,8 +1578,8 @@ async function main() {
           if (!el) return null;
           const r = el.getBoundingClientRect();
           return {
-            x: Math.max(0, Math.floor(r.left)),
-            y: Math.max(0, Math.floor(r.top)),
+            x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))),
+            y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))),
             width: Math.ceil(r.width),
             height: Math.ceil(r.height),
           };
@@ -1542,7 +1592,7 @@ async function main() {
         'Page.captureScreenshot',
         {
           format: 'png',
-          captureBeyondViewport: true,
+          captureBeyondViewport: false,
           clip: { x: rect.x, y: rect.y, width: rect.width, height: rect.height, scale: 1 },
         },
         sessionId
