@@ -4659,17 +4659,6 @@ function renderMainHud(dispSlot) {
         hudCtx.moveTo(wipeX + 0.5, 0);
         hudCtx.lineTo(wipeX + 0.5, H);
         hudCtx.stroke();
-
-        const pillY = Math.round(H * 0.5) - 12;
-        const pillX = Math.max(6, Math.min(W - 58, wipeX - 27));
-        hudCtx.fillStyle = 'rgba(5, 10, 18, 0.92)';
-        hudCtx.fillRect(pillX, pillY, 54, 24);
-        hudCtx.strokeStyle = '#00e5ff';
-        hudCtx.lineWidth = 1.4;
-        hudCtx.strokeRect(pillX, pillY, 54, 24);
-        hudCtx.fillStyle = '#00e5ff';
-        hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
-        hudCtx.fillText('◀ │ ▶', pillX + 9, pillY + 15);
         hudCtx.restore();
       }
     }

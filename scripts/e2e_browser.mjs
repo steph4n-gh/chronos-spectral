@@ -3144,6 +3144,96 @@ async function main() {
           throw new Error(`Step 8b: Split-wipe sync mismatch: ${JSON.stringify(wipeState)}`);
         }
 
+        const dragGeom = await cdp.evalJs(
+          scSession,
+          `(() => {
+            const hud = document.getElementById('hudCanvas');
+            const stage = document.getElementById('hudCanvasStage');
+            const track = document.getElementById('hudWipeTrack');
+            const handle = document.getElementById('hudWipeHandle');
+            if (!hud || !stage || !track || track.hidden || !handle) return null;
+            hud.scrollIntoView({ block: 'center', inline: 'center' });
+            const hr = hud.getBoundingClientRect();
+            const dr = handle.getBoundingClientRect();
+            return {
+              wipeCssVar: stage.style.getPropertyValue('--wipe-pct').trim(),
+              handleX: dr.left + dr.width * 0.5,
+              handleY: dr.top + dr.height * 0.5,
+              targetX: hr.left + hr.width * 0.38,
+              drW: dr.width,
+              drH: dr.height,
+            };
+          })()`
+        );
+        if (!dragGeom || dragGeom.wipeCssVar !== '55' || dragGeom.drW < 20 || dragGeom.drH < 40) {
+          throw new Error(`Step 8b: On-canvas #hudWipeHandle geometry/sync invalid: ${JSON.stringify(dragGeom)}`);
+        }
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: dragGeom.handleX, y: dragGeom.handleY, button: 'none' },
+          scSession
+        );
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          { type: 'mousePressed', x: dragGeom.handleX, y: dragGeom.handleY, button: 'left', buttons: 1, clickCount: 1 },
+          scSession
+        );
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: dragGeom.handleX - 12, y: dragGeom.handleY, button: 'left', buttons: 1 },
+          scSession
+        );
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseMoved', x: dragGeom.targetX, y: dragGeom.handleY, button: 'left', buttons: 1 },
+          scSession
+        );
+        await cdp.send(
+          'Input.dispatchMouseEvent',
+          { type: 'mouseReleased', x: dragGeom.targetX, y: dragGeom.handleY, button: 'left', buttons: 0, clickCount: 1 },
+          scSession
+        );
+
+        const dragAfter = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8b: On-canvas pointer drag updates split-wipe + slider + status cleanly',
+          `(() => {
+            const s = document.getElementById('showcaseWipeSlider');
+            const handle = document.getElementById('hudWipeHandle');
+            const readout = document.getElementById('showcaseWipeReadout')?.textContent || '';
+            const status = document.getElementById('showcaseToolbarStatus')?.textContent || '';
+            const val = Number(s?.value || 0);
+            const draggingLeft = Boolean(handle && handle.classList.contains('dragging'));
+            return {
+              ok: val >= 37 &&
+                  val <= 39 &&
+                  !draggingLeft &&
+                  readout.includes(val + '% RAW') &&
+                  status.includes('Split-wipe divider moved to ' + val + '%'),
+              val,
+              draggingLeft,
+              readout,
+              status,
+            };
+          })()`,
+          4000
+        );
+
+        const kbdAfter = await cdp.evalJs(
+          scSession,
+          `(() => {
+            const handle = document.getElementById('hudWipeHandle');
+            handle.focus();
+            handle.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true, cancelable: true }));
+            const val = Number(document.getElementById('showcaseWipeSlider')?.value || 0);
+            return { val, cssVar: document.getElementById('hudCanvasStage')?.style.getPropertyValue('--wipe-pct').trim() || '' };
+          })()`
+        );
+        if (kbdAfter.val !== dragAfter.val + 2 || kbdAfter.cssVar !== String(kbdAfter.val)) {
+          throw new Error(`Step 8b: ArrowRight on #hudWipeHandle expected ${dragAfter.val + 2}, got ${JSON.stringify(kbdAfter)}`);
+        }
+
         let scInspectText = '';
         for (const [nx, ny] of [[0.67, 0.46], [0.65, 0.58], [0.62, 0.40], [0.76, 0.68], [0.78, 0.30], [0.70, 0.50], [0.74, 0.55]]) {
           await cdp.evalJs(
@@ -3183,7 +3273,38 @@ async function main() {
           throw new Error('Step 8b: Clicking right-side Spectral Wavefield did not inspect an active track (#scValInspect)');
         }
 
-        // 8c. 1-Click Counter-Proof: Model Rockets
+        // 8c. 1-Click Counter-Proofs: Carom Billiards + Model Rockets (preserving non-zero split-wipe)
+        await cdp.evalJs(scSession, `document.getElementById('btnHeroBilliards')?.click(); true;`);
+        const billiardsHero = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8c: Showcase 1-click Carom Billiards (Mode C)',
+          `(() => {
+            const btnB = document.getElementById('btnHeroBilliards');
+            const selVal = document.getElementById('sampleVideoSelect')?.value || '';
+            const cal = document.getElementById('calBadge')?.textContent || '';
+            const modeC = document.querySelector('.lab-btn[data-lab="2"]')?.getAttribute('aria-pressed') === 'true';
+            const wipe = Number(document.getElementById('showcaseWipeSlider')?.value || 0);
+            const st = window.__chronosUiState;
+            const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+            return {
+              ok: btnB?.getAttribute('aria-pressed') === 'true' &&
+                  selVal.endsWith('carom_billiards_impulses.mp4') &&
+                  st?.overlays?.showHeroTargets === true &&
+                  cal === 'ASSUMED 4-PT H' &&
+                  modeC &&
+                  wipe > 0 &&
+                  tgts >= 1,
+              selVal,
+              cal,
+              modeC,
+              wipe,
+              tgts,
+            };
+          })()`,
+          15000
+        );
+
         await cdp.evalJs(scSession, `document.getElementById('btnHeroRockets')?.click(); true;`);
         const rocketHero = await waitForCondition(
           cdp,
@@ -3198,7 +3319,7 @@ async function main() {
             const calValid =
               cal === 'ASSUMED RULER' ||
               (cal === 'PX UNITS' && calStatus.includes('CAMERA PTZ PAN'));
-            const wipe = document.getElementById('showcaseWipeSlider')?.value || '';
+            const wipe = Number(document.getElementById('showcaseWipeSlider')?.value || 0);
             const st = window.__chronosUiState;
             const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
             return {
@@ -3207,7 +3328,7 @@ async function main() {
                   selVal.endsWith('model_rocket_full_flights.mp4') &&
                   st?.overlays?.showHeroTargets === true &&
                   calValid &&
-                  wipe === '0' &&
+                  wipe > 0 &&
                   tgts >= 1,
               selVal,
               cal,
@@ -3354,7 +3475,7 @@ async function main() {
         );
 
         console.log(
-          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipe55%="${wipeState.readout}", inspect="${scInspectText}", rockets=${rocketHero.cal}(${rocketHero.tgts} tgts), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${totalCls.toFixed(6)}`
+          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipeDrag=${dragAfter.val}%+ArrowRight=${kbdAfter.val}%, inspect="${scInspectText}", billiards=${billiardsHero.cal}(${billiardsHero.tgts} tgts), rockets=${rocketHero.cal}(${rocketHero.tgts} tgts, wipe=${rocketHero.wipe}%), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${totalCls.toFixed(6)}`
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: scTargetId }).catch(() => {});

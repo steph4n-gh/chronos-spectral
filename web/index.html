@@ -1903,6 +1903,112 @@
       display: none !important;
     }
 
+    .hud-canvas-stage {
+      position: relative;
+      inline-size: 100%;
+    }
+
+    body[data-surface="deck"] .hud-canvas-stage,
+    #hudPanel:fullscreen .hud-canvas-stage,
+    #hudPanel.hud-maximized .hud-canvas-stage {
+      display: contents;
+    }
+
+    body[data-surface="deck"] #hudWipeTrack,
+    #hudPanel:fullscreen #hudWipeTrack,
+    #hudPanel.hud-maximized #hudWipeTrack,
+    .hud-wipe-track[hidden] {
+      display: none !important;
+    }
+
+    .hud-wipe-track {
+      position: absolute;
+      inset: 0;
+      overflow: clip;
+      pointer-events: none;
+      z-index: 4;
+    }
+
+    .hud-wipe-rail {
+      position: relative;
+      inline-size: 100%;
+      block-size: 100%;
+      pointer-events: none;
+      will-change: transform;
+      transform: translate3d(clamp(1.85rem, calc(var(--wipe-pct, 28) * 1%), calc(100% - 1.85rem)), 0, 0);
+    }
+
+    /* Interactive On-Canvas Split-Wipe Drag Handle (modern-web-guidance: drag) */
+    .hud-wipe-handle {
+      position: absolute;
+      inset-block: 0;
+      inset-inline-start: 0;
+      transform: translateX(-50%);
+      inline-size: 2.25rem;
+      min-inline-size: 24px;
+      block-size: 100%;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      pointer-events: auto;
+      cursor: grab;
+      touch-action: none;
+      -webkit-user-select: none;
+      user-select: none;
+    }
+
+    @media (pointer: coarse) {
+      .hud-wipe-handle {
+        inline-size: 2.75rem;
+      }
+    }
+
+    .hud-wipe-handle.dragging {
+      cursor: grabbing;
+    }
+
+    .hud-wipe-grip {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      inline-size: 3.375rem;
+      block-size: 1.5rem;
+      border-radius: 3px;
+      border: 1.4px solid var(--brand-color);
+      background-color: rgba(5, 10, 18, 0.92);
+      color: var(--brand-color);
+      font-family: var(--font-mono);
+      font-size: 0.625rem;
+      font-weight: 700;
+      line-height: 1;
+      letter-spacing: 0.02em;
+      white-space: nowrap;
+      pointer-events: none;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.55);
+    }
+
+    .hud-wipe-handle:hover .hud-wipe-grip,
+    .hud-wipe-handle.dragging .hud-wipe-grip,
+    .hud-wipe-handle:focus-visible .hud-wipe-grip {
+      background-color: #082738;
+      color: #ffffff;
+      border-color: #7ef4ff;
+    }
+
+    .hud-wipe-handle:focus-visible {
+      outline: none;
+    }
+
+    .hud-wipe-handle:focus-visible .hud-wipe-grip {
+      outline: 2px solid #ffffff;
+      outline-offset: 2px;
+    }
+
     body[data-surface="showcase"] main.deck-grid {
       max-inline-size: 74rem;
       inline-size: 100%;
@@ -2023,6 +2129,7 @@
       align-items: center;
       gap: 0.55rem 0.75rem;
       padding-block-start: 0.35rem;
+      padding-inline: 0.15rem;
       border-block-start: 1px solid #1b2a44;
     }
 
@@ -2072,8 +2179,8 @@
       font-weight: 700;
       font-variant-numeric: tabular-nums;
       color: var(--brand-color);
-      inline-size: 23.5ch;
-      min-inline-size: 23.5ch;
+      inline-size: 28.5ch;
+      min-inline-size: 28.5ch;
       text-align: right;
       white-space: nowrap;
     }
@@ -2447,7 +2554,20 @@
           </div>
           <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
         </div>
-        <canvas id="hudCanvas" width="960" height="540" role="img" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
+        <div class="hud-canvas-stage" id="hudCanvasStage" style="--wipe-pct: 28;">
+          <canvas id="hudCanvas" width="960" height="540" role="img" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
+          <div class="hud-wipe-track" id="hudWipeTrack" hidden>
+            <div class="hud-wipe-rail">
+              <button
+                type="button"
+                id="hudWipeHandle"
+                class="hud-wipe-handle"
+                aria-label="Split-wipe divider handle. Drag left or right, or use Left and Right arrow keys to adjust raw vs spectral view."
+                title="Drag left or right to compare raw camera pixels vs delayed spectral wavefield"
+              ><span class="hud-wipe-grip" aria-hidden="true">◀ │ ▶</span></button>
+            </div>
+          </div>
+        </div>
         <div id="showcaseWipeBar" class="showcase-wipe-bar">
           <button type="button" id="btnShowcasePlayPause" class="wipe-step-btn" title="Pause or resume video playback">⏸ Pause</button>
           <button type="button" id="btnShowcaseStepFwd" class="wipe-step-btn" title="Step forward 1 exact stream frame">+1f</button>
@@ -3905,6 +4025,9 @@
       btnReturnShowcase: document.getElementById('btnReturnShowcase'),
       btnShowcasePlayPause: document.getElementById('btnShowcasePlayPause'),
       btnShowcaseStepFwd: document.getElementById('btnShowcaseStepFwd'),
+      hudCanvasStage: document.getElementById('hudCanvasStage'),
+      hudWipeTrack: document.getElementById('hudWipeTrack'),
+      hudWipeHandle: document.getElementById('hudWipeHandle'),
       showcaseWipeSlider: document.getElementById('showcaseWipeSlider'),
       showcaseWipeReadout: document.getElementById('showcaseWipeReadout'),
       showcaseToolbar: document.getElementById('showcaseToolbar'),
@@ -6048,6 +6171,9 @@
 
     function setShowcaseWipePercent(pct, notifyWorker = true) {
       const clamped = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+      if (dom.hudCanvasStage) {
+        dom.hudCanvasStage.style.setProperty('--wipe-pct', String(clamped));
+      }
       if (dom.showcaseWipeSlider) {
         dom.showcaseWipeSlider.value = String(clamped);
         dom.showcaseWipeSlider.style.setProperty('--attr-min', dom.showcaseWipeSlider.min || '0');
@@ -6214,20 +6340,78 @@
       });
     }
 
+    function activateShowcaseEntry(key) {
+      pendingShowcaseCal = '';
+      setActiveShowcaseChip(key);
+      if (activeResMode === 0) {
+        document.getElementById('btnResHd')?.click();
+      }
+      if (key === 'live_i80') {
+        if (isStaticHostMode) {
+          openLiveStreamModal();
+          return;
+        }
+        dom.tier3CustomHlsUrl.value = '';
+        const i80Opt = dom.tier3PresetSelect.querySelector('option[value="caltrans_d4_i80_ashby"]');
+        const i80Offline = i80Opt && i80Opt.textContent.includes('[OFFLINE]');
+        let chosenId = 'caltrans_d4_i80_ashby';
+        let chosenLabel = 'Caltrans D4: I-80 @ Ashby Ave (Berkeley Overpass · 1080p)';
+        if (i80Offline) {
+          const altOpt = Array.from(dom.tier3PresetSelect.options).find((o) => o.textContent.includes('[LIVE ONLINE]'));
+          if (altOpt) {
+            chosenId = altOpt.value;
+            chosenLabel = altOpt.textContent.replace(/^\[[^\]]+\]\s*/, '');
+          }
+        }
+        if (dom.tier3PresetSelect.querySelector(`option[value="${chosenId}"]`)) {
+          dom.tier3PresetSelect.value = chosenId;
+        }
+        startTier3MseStream({
+          presetId: chosenId,
+          customUrl: '',
+          label: chosenLabel,
+          fpsHint: 30,
+          targetLab: 0,
+          showcaseId: 'live_i80',
+        });
+        return;
+      }
+      const cfg = showcaseClipMap[key];
+      if (!cfg) return;
+      if (cfg.benchScenario) {
+        stopMediaCapture();
+        sampleVideoSelect.value = '';
+        dom.benchScenarioSelect.value = cfg.benchScenario;
+        btnTestbench.click();
+        dom.benchScenarioSelect.value = cfg.benchScenario;
+        syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
+        worker.postMessage({ type: 'set_scenario', scenario: cfg.benchScenario });
+        setActiveShowcaseChip(key);
+        return;
+      }
+      if (typeof cfg.resMode === 'number' || typeof cfg.swarmMode === 'number' || typeof cfg.overlayMode === 'number') {
+        syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
+      }
+      pendingShowcaseCal = cfg.cal;
+      sampleVideoSelect.value = cfg.url;
+      sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
     function activateHeroScene(sceneKey) {
-      const targetBtn = document.querySelector(`.showcase-btn[data-showcase="${sceneKey}"]`);
-      if (!targetBtn) return;
+      if (sceneKey !== 'live_i80' && !showcaseClipMap[sceneKey]) return;
       showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
       setHeroScenePressed(sceneKey);
+      const curWipe = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 0;
+      const keepWipe = curWipe > 0 && curWipe < 100;
       if (sceneKey === 'starling_1000') {
-        setShowcaseWipePercent(28);
+        setShowcaseWipePercent(keepWipe ? curWipe : 28);
         setHeroTargetsVisible(false);
       } else {
-        setShowcaseWipePercent(0);
+        setShowcaseWipePercent(keepWipe ? curWipe : 24);
         syncSwarmControlsForConfig(1, 0, 0, true);
         setHeroTargetsVisible(true);
       }
-      targetBtn.click();
+      activateShowcaseEntry(sceneKey);
       if (dom.showcaseToolbarStatus) {
         const heroBtn = document.querySelector(`.hero-scene-btn[data-hero-scene="${sceneKey}"]`);
         dom.showcaseToolbarStatus.textContent = heroBtn ? `Active showcase: ${heroBtn.textContent.trim()}` : '';
@@ -6270,6 +6454,73 @@
     if (dom.showcaseWipeSlider) {
       dom.showcaseWipeSlider.addEventListener('input', () => {
         setShowcaseWipePercent(dom.showcaseWipeSlider.value, true);
+      });
+    }
+    if (dom.hudWipeHandle) {
+      if (dom.hudWipeTrack) dom.hudWipeTrack.hidden = false;
+      let wipeGrabOffsetPx = 0;
+      let wipeStartClientX = 0;
+      let wipeDragged = false;
+
+      const announceWipePosition = () => {
+        if (!dom.showcaseToolbarStatus || !dom.showcaseWipeSlider) return;
+        const pct = Math.max(0, Math.min(100, Math.round(Number(dom.showcaseWipeSlider.value) || 0)));
+        dom.showcaseToolbarStatus.textContent =
+          pct === 0
+            ? 'Split-wipe divider docked left (full spectral view)'
+            : pct === 100
+            ? 'Split-wipe divider docked right (full raw video)'
+            : `Split-wipe divider moved to ${pct}% raw video, ${100 - pct}% spectral wavefield`;
+      };
+
+      dom.hudWipeHandle.addEventListener('pointerdown', (ev) => {
+        if (ev.button !== 0 || activeSurface !== 'showcase') return;
+        const rect = hudEl.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const curPct = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 28;
+        wipeGrabOffsetPx = ev.clientX - (rect.left + (curPct / 100) * rect.width);
+        wipeStartClientX = ev.clientX;
+        wipeDragged = false;
+        dom.hudWipeHandle.setPointerCapture(ev.pointerId);
+      });
+
+      dom.hudWipeHandle.addEventListener('pointermove', (ev) => {
+        if (!dom.hudWipeHandle.hasPointerCapture(ev.pointerId)) return;
+        if (!wipeDragged && Math.abs(ev.clientX - wipeStartClientX) < 4) return;
+        wipeDragged = true;
+        dom.hudWipeHandle.classList.add('dragging');
+        const rect = hudEl.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const nextPct = Math.max(
+          0,
+          Math.min(100, Math.round(((ev.clientX - wipeGrabOffsetPx - rect.left) / rect.width) * 100))
+        );
+        setShowcaseWipePercent(nextPct, true);
+      });
+
+      dom.hudWipeHandle.addEventListener('lostpointercapture', () => {
+        const didDrag = wipeDragged;
+        wipeDragged = false;
+        dom.hudWipeHandle.classList.remove('dragging');
+        if (didDrag) announceWipePosition();
+      });
+
+      dom.hudWipeHandle.addEventListener('keydown', (ev) => {
+        if (activeSurface !== 'showcase') return;
+        if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(ev.key)) return;
+        ev.preventDefault();
+        const curPct = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 28;
+        const step = ev.shiftKey ? 10 : 2;
+        const nextPct =
+          ev.key === 'Home'
+            ? 0
+            : ev.key === 'End'
+            ? 100
+            : ev.key === 'ArrowLeft'
+            ? Math.max(0, curPct - step)
+            : Math.min(100, curPct + step);
+        setShowcaseWipePercent(nextPct, true);
+        announceWipePosition();
       });
     }
     if (dom.btnShowcasePlayPause) {
@@ -6380,62 +6631,7 @@
 
     document.querySelectorAll('.showcase-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
-        pendingShowcaseCal = '';
-        const key = btn.dataset.showcase;
-        setActiveShowcaseChip(key);
-        if (activeResMode === 0) {
-          document.getElementById('btnResHd')?.click();
-        }
-        if (key === 'live_i80') {
-          if (isStaticHostMode) {
-            openLiveStreamModal();
-            return;
-          }
-          dom.tier3CustomHlsUrl.value = '';
-          const i80Opt = dom.tier3PresetSelect.querySelector('option[value="caltrans_d4_i80_ashby"]');
-          const i80Offline = i80Opt && i80Opt.textContent.includes('[OFFLINE]');
-          let chosenId = 'caltrans_d4_i80_ashby';
-          let chosenLabel = 'Caltrans D4: I-80 @ Ashby Ave (Berkeley Overpass · 1080p)';
-          if (i80Offline) {
-            const altOpt = Array.from(dom.tier3PresetSelect.options).find((o) => o.textContent.includes('[LIVE ONLINE]'));
-            if (altOpt) {
-              chosenId = altOpt.value;
-              chosenLabel = altOpt.textContent.replace(/^\[[^\]]+\]\s*/, '');
-            }
-          }
-          if (dom.tier3PresetSelect.querySelector(`option[value="${chosenId}"]`)) {
-            dom.tier3PresetSelect.value = chosenId;
-          }
-          startTier3MseStream({
-            presetId: chosenId,
-            customUrl: '',
-            label: chosenLabel,
-            fpsHint: 30,
-            targetLab: 0,
-            showcaseId: 'live_i80',
-          });
-          return;
-        }
-        const cfg = showcaseClipMap[key];
-        if (!cfg) return;
-        if (cfg.benchScenario) {
-          stopMediaCapture();
-          sampleVideoSelect.value = '';
-          dom.benchScenarioSelect.value = cfg.benchScenario;
-          btnTestbench.click();
-          dom.benchScenarioSelect.value = cfg.benchScenario;
-          syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
-          worker.postMessage({ type: 'set_scenario', scenario: cfg.benchScenario });
-          setActiveShowcaseChip(key);
-          return;
-        }
-        if (typeof cfg.resMode === 'number' || typeof cfg.swarmMode === 'number' || typeof cfg.overlayMode === 'number') {
-          syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
-        }
-        if (!cfg) return;
-        pendingShowcaseCal = cfg.cal;
-        sampleVideoSelect.value = cfg.url;
-        sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        activateShowcaseEntry(btn.dataset.showcase);
       });
     });
 
