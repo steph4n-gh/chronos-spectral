@@ -1886,6 +1886,8 @@
     /* ===================================================================== */
     .visually-hidden {
       position: absolute;
+      top: 0;
+      left: 0;
       inline-size: 1px;
       block-size: 1px;
       overflow: hidden;
@@ -2070,7 +2072,8 @@
       font-weight: 700;
       font-variant-numeric: tabular-nums;
       color: var(--brand-color);
-      min-inline-size: 23ch;
+      inline-size: 23.5ch;
+      min-inline-size: 23.5ch;
       text-align: right;
       white-space: nowrap;
     }
@@ -2307,6 +2310,8 @@
       font-family: var(--font-mono);
       font-size: 0.63rem;
       font-weight: 700;
+      line-height: 1.2;
+      block-size: 0.8rem;
       letter-spacing: 0.04em;
       text-transform: uppercase;
       color: var(--text-secondary);
@@ -2322,6 +2327,7 @@
       font-variant-numeric: tabular-nums;
       color: var(--text-primary);
       line-height: 1.25;
+      block-size: 1.05rem;
       min-block-size: 1.05rem;
       white-space: nowrap;
       overflow: hidden;
@@ -2333,6 +2339,7 @@
       font-size: 0.65rem;
       color: #88a4c8;
       line-height: 1.25;
+      block-size: 0.85rem;
       min-block-size: 0.85rem;
       white-space: nowrap;
       overflow: hidden;

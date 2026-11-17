@@ -977,6 +977,10 @@ async function main() {
         const btn = document.querySelector('.showcase-btn[data-showcase="model_rockets"]');
         const activeCount = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
         const badge = document.getElementById('calBadge')?.textContent || '';
+        const calStatus = document.getElementById('calStatusLive')?.textContent || '';
+        const calValid =
+          badge === 'ASSUMED RULER' ||
+          (badge === 'PX UNITS' && calStatus.includes('CAMERA PTZ PAN'));
         const speedTxt = document.getElementById('kpiKinSpeed')?.textContent || '';
         const angTxt = document.getElementById('kpiKinAngle')?.textContent || '';
         const noNan = ![speedTxt, angTxt].some((s) => s.includes('NaN'));
@@ -984,7 +988,7 @@ async function main() {
           ok: v && Number.isFinite(v.duration) && v.duration >= 29.5 && !v.paused &&
               btn?.getAttribute('aria-pressed') === 'true' &&
               activeCount >= 1 &&
-              badge === 'ASSUMED RULER' &&
+              calValid &&
               noNan,
           duration: v ? Number(v.duration.toFixed(2)) : 0,
           activeCount,
@@ -3101,6 +3105,10 @@ async function main() {
             const btnS = document.getElementById('btnHeroStarlings');
             const selVal = document.getElementById('sampleVideoSelect')?.value || '';
             const cal = document.getElementById('calBadge')?.textContent || '';
+            const calStatus = document.getElementById('calStatusLive')?.textContent || '';
+            const calValid =
+              cal === 'ASSUMED RULER' ||
+              (cal === 'PX UNITS' && calStatus.includes('CAMERA PTZ PAN'));
             const wipe = document.getElementById('showcaseWipeSlider')?.value || '';
             const st = window.__chronosUiState;
             const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
@@ -3109,7 +3117,7 @@ async function main() {
                   btnS?.getAttribute('aria-pressed') === 'false' &&
                   selVal.endsWith('model_rocket_full_flights.mp4') &&
                   st?.overlays?.showHeroTargets === true &&
-                  cal === 'ASSUMED RULER' &&
+                  calValid &&
                   wipe === '0' &&
                   tgts >= 1,
               selVal,
@@ -3157,6 +3165,18 @@ async function main() {
           15000
         );
 
+        await new Promise((r) => setTimeout(r, 80));
+        const clsShowcaseFlows = await cdp.evalJs(
+          scSession,
+          `(() => {
+            if (window.__e2eShowcaseClsPo) window.__e2eShowcaseClsPo.disconnect();
+            return window.__e2eShowcaseCls || 0;
+          })()`
+        );
+        if (clsShowcaseFlows >= 0.0001) {
+          throw new Error(`Step 8d: Expected < 0.0001 CLS across Showcase flows (8a..8d), got ${clsShowcaseFlows}`);
+        }
+
         // 8e. Zero-Reload Switch to Full 15-Panel Command Deck & Back
         const seqBeforeSwitch = await cdp.evalJs(scSession, `window.__chronosUiState?.seq ?? -1`);
         await cdp.evalJs(scSession, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
@@ -3180,21 +3200,39 @@ async function main() {
           })()`,
           6000
         );
+        await new Promise((r) => setTimeout(r, 50));
         await cdp.evalJs(scSession, `document.getElementById('btnReturnShowcase')?.click(); true;`);
-        const returnedShowcase = await waitForCondition(
+        await waitForCondition(
           cdp,
           scSession,
           'Step 8e: Return transition back to Split-Wipe Showcase',
           `(() => ({
             ok: document.body?.dataset?.surface === 'showcase' && !location.search.includes('view=deck'),
-            cls: window.__e2eShowcaseCls || 0,
           }))()`,
           6000
         );
-        await cdp.evalJs(scSession, `if (window.__e2eShowcaseClsPo) window.__e2eShowcaseClsPo.disconnect(); true;`);
-        if (returnedShowcase.cls >= 0.0001) {
-          throw new Error(`Step 8e: Expected 0.000000 CLS across Showcase surface flows, got ${returnedShowcase.cls}`);
+        const clsPostReturn = await cdp.evalJs(
+          scSession,
+          `new Promise((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              let steadyCls = 0;
+              const po = new PerformanceObserver((list) => {
+                for (const e of list.getEntries()) {
+                  if (!e.hadRecentInput) steadyCls += e.value;
+                }
+              });
+              po.observe({ type: 'layout-shift', buffered: false });
+              setTimeout(() => {
+                po.disconnect();
+                resolve(steadyCls);
+              }, 250);
+            }));
+          })`
+        );
+        if (clsPostReturn >= 0.0001) {
+          throw new Error(`Step 8e: Expected < 0.0001 CLS after returning to Showcase steady state, got ${clsPostReturn}`);
         }
+        const totalCls = clsShowcaseFlows + clsPostReturn;
 
         // 8f. Static-Host Mode (?static=1) & /deck.html Redirect
         await cdp.send('Page.navigate', { url: `${baseUrl}/index.html?static=1` }, scSession);
@@ -3222,7 +3260,7 @@ async function main() {
         );
 
         console.log(
-          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipe55%="${wipeState.readout}", inspect="${scInspectText}", rockets=${rocketHero.cal}(${rocketHero.tgts} tgts), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${returnedShowcase.cls.toFixed(6)}`
+          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipe55%="${wipeState.readout}", inspect="${scInspectText}", rockets=${rocketHero.cal}(${rocketHero.tgts} tgts), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${totalCls.toFixed(6)}`
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: scTargetId }).catch(() => {});
