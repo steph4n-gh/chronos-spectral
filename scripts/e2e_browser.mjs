@@ -62,7 +62,13 @@ function launchHeadlessChrome(chromeBin, userDataDir) {
     '--window-size=1440,900',
   ];
   if (process.platform === 'linux' || process.env.CI) {
-    args.push('--no-sandbox', '--disable-dev-shm-usage');
+    args.push(
+      '--no-sandbox',
+      '--disable-dev-shm-usage',
+      '--use-gl=angle',
+      '--use-angle=swiftshader',
+      '--enable-unsafe-swiftshader'
+    );
   }
 
   const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -172,7 +178,8 @@ class CdpClient {
 }
 
 async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs = 14000) {
-  const deadline = Date.now() + timeoutMs;
+  const ciTimeoutScale = Math.max(1.0, Math.min(2.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0') * 0.6));
+  const deadline = Date.now() + Math.round(timeoutMs * ciTimeoutScale);
   let lastVal = null;
   while (Date.now() < deadline) {
     lastVal = await cdp.evalJs(sessionId, jsExpr);
@@ -2590,6 +2597,13 @@ async function main() {
       const baseUrl = `http://127.0.0.1:${srv.port}`;
       const countFds = () => {
         if (process.platform === 'win32') return 0;
+        if (process.platform === 'linux') {
+          try {
+            return fs.readdirSync('/proc/self/fd').length;
+          } catch {
+            return 0;
+          }
+        }
         try {
           return parseInt(execSync(`lsof -p ${process.pid} 2>/dev/null | wc -l`, { encoding: 'utf8' }).trim(), 10) || 0;
         } catch {

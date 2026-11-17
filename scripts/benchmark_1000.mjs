@@ -9085,6 +9085,39 @@ function printAblationTable(rows) {
 // Main Runner
 // ============================================================================
 
+/** Untimed Wasm Liftoff->TurboFan & Lanczos JS JIT warmup before timed gates. */
+async function warmupWasmAndLanczosJit(wasm) {
+  const numFrames = 48;
+  const nx = 48;
+  const ny = 25;
+  const cx = HD_W * 0.5;
+  const cy = HD_H * 0.5;
+  await runSyntheticWasmSequence(wasm, {
+    numFrames,
+    fps: 30,
+    dtSec: 1.0 / 30.0,
+    swarmMode: 2,
+    resMode: 1,
+    checkInspector: true,
+    renderFrame: (rgba, f) => {
+      const ang = f * 0.025;
+      const ca = Math.cos(ang);
+      const sa = Math.sin(ang);
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const idx = j * nx + i;
+          const ox = (i + 0.5) * (HD_W / nx) - cx;
+          const oy = (j + 0.5) * (HD_H / ny) - cy;
+          const x = Math.max(16, Math.min(HD_W - 16, cx + ox * ca - oy * sa));
+          const y = Math.max(16, Math.min(HD_H - 16, cy + ox * sa + oy * ca));
+          stampParticleBlob(rgba, HD_W, HD_H, x, y, idx + 1, idx < 3);
+        }
+      }
+    },
+  });
+  wasm.exp.chronos_init();
+}
+
 async function main() {
   const cpuModel = os.cpus()[0]?.model || 'unknown';
   console.log('========================================================================');
@@ -9140,6 +9173,7 @@ async function main() {
   }
 
   if (hasWave2Wasm) {
+    await warmupWasmAndLanczosJit(wasm);
     if (shouldRun('Q1')) results.push(await runQ1Vortex(wasm));
     if (shouldRun('Q2')) {
       const q2Res = await runQ2Murmuration(wasm, q2Scene);
