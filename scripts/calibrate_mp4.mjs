@@ -657,7 +657,7 @@ function streamMp4Frames(mp4Path, w, h, onFrame, maxFrames = null) {
   return new Promise((resolve, reject) => {
     const proc = spawn(
       'ffmpeg',
-      ['-v', 'error', '-threads', '1', '-i', mp4Path, '-filter_threads', '1', '-threads', '1', '-vf', `scale=${w}:${h}`, '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
+      ['-v', 'error', '-threads', '1', '-i', mp4Path, '-filter_threads', '1', '-threads', '1', '-vf', `scale=${w}:${h}:flags=area+accurate_rnd+full_chroma_int+bitexact,format=rgba`, '-pix_fmt', 'rgba', '-f', 'rawvideo', 'pipe:1'],
       { stdio: ['ignore', 'pipe', 'pipe'] }
     );
     let stderrText = '';

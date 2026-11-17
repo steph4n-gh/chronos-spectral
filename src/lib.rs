@@ -11217,6 +11217,7 @@ fn update_physics_and_telemetry(
     }
 
     if a.lab_mode == 1 && eff_k >= 7 && (f_idx as usize) >= eff_k {
+        let mut ode_freq_arr = [0.0f32; MAX_TARGETS];
         let mut best_pend_m: i32 = -1;
         let mut best_pend_score = -1.0f32;
         for m in 0..MAX_TARGETS {
@@ -11228,12 +11229,8 @@ fn update_physics_and_telemetry(
                 && ode_r2_arr[m] >= 0.50
             {
                 let f_ode = (1.0 / period_arr[m]).clamp(0.15, 15.0);
-                if a.targets[m].freq_valid == 0 || a.targets[m].osc_regime != 2 {
-                    a.targets[m].freq_valid = 1;
-                    a.targets[m].osc_regime = 2;
-                    a.targets[m].tremor_freq_hz = f_ode;
-                    a.targets[m].tremor_omega_ema = TWO_PI * f_ode;
-                    a.targets[m].phase_valid = 1;
+                ode_freq_arr[m] = f_ode;
+                if a.slot_meta[m * 8 + 4] <= 0.0 {
                     a.slot_meta[m * 8 + 4] = f_ode;
                 }
                 let sc_m = span_arr[m] * ode_r2_arr[m];
@@ -11250,11 +11247,15 @@ fn update_physics_and_telemetry(
                 a.telemetry[13] = a.targets[pm].tremor_freq_hz;
                 a.telemetry[26] = a.targets[pm].phase_valid as f32;
                 a.telemetry[TELEM_GLOBAL_START + 12] = 1.0;
+            } else if ode_freq_arr[pm] > 0.0 {
+                a.telemetry[13] = ode_freq_arr[pm];
+                a.telemetry[26] = 1.0;
+                a.telemetry[TELEM_GLOBAL_START + 12] = 1.0;
             } else if a.focus_target_id == 0 && best_pend_m >= 0 {
                 let bm = best_pend_m as usize;
                 a.telemetry[8] = best_pend_m as f32;
-                a.telemetry[13] = a.targets[bm].tremor_freq_hz;
-                a.telemetry[26] = a.targets[bm].phase_valid as f32;
+                a.telemetry[13] = ode_freq_arr[bm];
+                a.telemetry[26] = 1.0;
                 a.telemetry[TELEM_GLOBAL_START + 12] = 1.0;
             }
         }
