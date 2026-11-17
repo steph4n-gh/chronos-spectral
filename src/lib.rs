@@ -4824,15 +4824,28 @@ fn solve_noncausal_fista_target(
                         )
                     };
                     let dt_nom_c = dt_tot_s / (span as f32);
-                    if (vx2_s - vx1_s).abs() * dt_nom_c < 3.5 * scale_f && (yy[u0] - yy[11]) >= min_rise {
+                    // Circular pendulum arcs transfer velocity between vx and vy continuously near turnarounds.
+                    let dvx_lim = if t.pivot_valid > 0 {
+                        (7.5 * scale_f).max(4.2)
+                    } else {
+                        3.5 * scale_f
+                    };
+                    let min_rise_eff = if t.pivot_valid > 0 && span >= 4 {
+                        (4.2 * scale_f).max(2.0)
+                    } else {
+                        min_rise
+                    };
+                    if (vx2_s - vx1_s).abs() * dt_nom_c < dvx_lim && (yy[u0] - yy[11]) >= min_rise_eff {
                         let ay_phys_b = (vy2_s - vy1_s) / dt_mid_s;
                         let vy_phys_b = vy2_s + dt_last_s * ay_phys_b;
                         let vx_phys_b = (yx[11] - yx[u0]) / dt_tot_s;
                         let shallow_road_cruise = t.pivot_valid == 0
                             && ay_phys_b < 360.0 * scale_f
                             && vx_phys_b.abs() > 1.75 * vy_phys_b.abs();
-                        if vy_phys_b < -18.0 * scale_f
-                            && ay_phys_b > 110.0 * scale_f
+                        let vy_lim = if t.pivot_valid > 0 { -10.0 * scale_f } else { -18.0 * scale_f };
+                        let ay_min = if t.pivot_valid > 0 { 28.0 * scale_f } else { 110.0 * scale_f };
+                        if vy_phys_b < vy_lim
+                            && ay_phys_b > ay_min
                             && ay_phys_b < 16500.0 * scale_f
                             && !shallow_road_cruise
                         {
@@ -4849,7 +4862,17 @@ fn solve_noncausal_fista_target(
                                     if ex > max_rx { max_rx = ex; }
                                 }
                             }
-                            if obs_in_arc >= 4 && max_ry <= 3.6 * scale_f && max_rx <= 3.8 * scale_f {
+                            let max_ry_lim = if t.pivot_valid > 0 {
+                                (4.4 * scale_f).max(2.8)
+                            } else {
+                                (3.6 * scale_f).max(2.3)
+                            };
+                            let max_rx_lim = if t.pivot_valid > 0 {
+                                (7.0 * scale_f).max(4.4)
+                            } else {
+                                (3.8 * scale_f).max(2.7)
+                            };
+                            if obs_in_arc >= 4 && max_ry <= max_ry_lim && max_rx <= max_rx_lim {
                                 let t_apex_sec = (-vy_phys_b / ay_phys_b).min(0.75);
                                 t.apex_frames = t_apex_sec / dt_nom_c.max(1e-3);
                                 t.apex_x = (xk[11] + vx_phys_b * t_apex_sec).clamp(8.0 * scale_f, (frame_w as f32) - 8.0 * scale_f);
@@ -11193,6 +11216,50 @@ fn update_physics_and_telemetry(
         a.telemetry[b + 15] = jump_code as f32;
     }
 
+    if a.lab_mode == 1 && eff_k >= 7 && (f_idx as usize) >= eff_k {
+        let mut best_pend_m: i32 = -1;
+        let mut best_pend_score = -1.0f32;
+        for m in 0..MAX_TARGETS {
+            if conf_arr[m] != 0
+                && a.telemetry[32 + m * 56] > 0.5
+                && phys_reg_arr[m] == physics_id::PHYS_REGIME_PENDULUM
+                && period_arr[m] >= 0.30
+                && period_arr[m] <= 6.0
+                && ode_r2_arr[m] >= 0.50
+            {
+                let f_ode = (1.0 / period_arr[m]).clamp(0.15, 15.0);
+                if a.targets[m].freq_valid == 0 || a.targets[m].osc_regime != 2 {
+                    a.targets[m].freq_valid = 1;
+                    a.targets[m].osc_regime = 2;
+                    a.targets[m].tremor_freq_hz = f_ode;
+                    a.targets[m].tremor_omega_ema = TWO_PI * f_ode;
+                    a.targets[m].phase_valid = 1;
+                    a.slot_meta[m * 8 + 4] = f_ode;
+                }
+                let sc_m = span_arr[m] * ode_r2_arr[m];
+                if sc_m > best_pend_score {
+                    best_pend_score = sc_m;
+                    best_pend_m = m as i32;
+                }
+            }
+        }
+        let cur_pm = a.telemetry[8] as i32;
+        if cur_pm >= 0 && (cur_pm as usize) < MAX_TARGETS {
+            let pm = cur_pm as usize;
+            if a.targets[pm].freq_valid != 0 && a.targets[pm].osc_regime == 2 {
+                a.telemetry[13] = a.targets[pm].tremor_freq_hz;
+                a.telemetry[26] = a.targets[pm].phase_valid as f32;
+                a.telemetry[TELEM_GLOBAL_START + 12] = 1.0;
+            } else if a.focus_target_id == 0 && best_pend_m >= 0 {
+                let bm = best_pend_m as usize;
+                a.telemetry[8] = best_pend_m as f32;
+                a.telemetry[13] = a.targets[bm].tremor_freq_hz;
+                a.telemetry[26] = a.targets[bm].phase_valid as f32;
+                a.telemetry[TELEM_GLOBAL_START + 12] = 1.0;
+            }
+        }
+    }
+
     a.telemetry[TELEM_ENSEMBLE_START] = kuramoto_r;
     a.telemetry[TELEM_ENSEMBLE_START + 1] = kuramoto_psi;
     a.telemetry[TELEM_ENSEMBLE_START + 2] = kuramoto_cnt;
@@ -15475,12 +15542,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             && fx <= a.targets[m].osc_ext_max_x + 18.0 * s;
         let macro_osc = a.targets[m].pivot_valid > 0 || bounded_bi_turn;
 
-        if macro_osc && eff_k >= 7 && vis_d != 0 && (f_idx as usize) >= eff_k {
+        let disp_obs_or_bridged = vis_d != 0 || a.targets[m].bridged_at_disp != 0;
+        if macro_osc && eff_k >= 7 && disp_obs_or_bridged && (f_idx as usize) >= eff_k {
             // Regime 2: Verified Macro-Excursion Harmonic Oscillator (Kasa plumb or bi-directional turnaround midpoint + >=3 exact f64 zero-crossings)
-            let center_x = if a.targets[m].pivot_valid > 0 {
-                a.targets[m].pivot_x
-            } else {
+            let center_x = if bounded_bi_turn {
                 0.5 * (a.targets[m].osc_ext_min_x + a.targets[m].osc_ext_max_x)
+            } else {
+                a.targets[m].pivot_x
             };
 
             // Backfill recent zero-crossing history from `arc_raw_x` + `hist_t_sec` (bounded strictly to un-overwritten 32-slot ring!)
@@ -15529,7 +15597,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                                         || a.targets[m].osc_half_period_ema <= 0.01
                                     {
                                         a.targets[m].osc_half_period_ema = dt_hb;
-                                        a.targets[m].osc_period_jit_ema = 1.0;
+                                        a.targets[m].osc_period_jit_ema = 0.20;
                                     } else {
                                         let rj = (dt_hb - a.targets[m].osc_half_period_ema).abs()
                                             / a.targets[m].osc_half_period_ema.max(0.05);
@@ -15564,7 +15632,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
 
             let q_disp = fx - center_x;
-            if vis_d != 0 {
+            if disp_obs_or_bridged {
                 if q_disp.abs() > a.targets[m].pend_max_q {
                     a.targets[m].pend_max_q = q_disp.abs();
                 }
@@ -15595,22 +15663,33 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         let mut bounce_skip = false;
                         if a.targets[m].osc_cross_count >= 1 {
                             let dt_half = (t_cross - a.targets[m].osc_last_cross_t) as f32;
-                            if a.lab_mode == 1
+                            let hp_prev = a.targets[m].osc_half_period_ema;
+                            let eff_half = if a.lab_mode == 1
                                 && a.targets[m].osc_cross_count >= 3
-                                && a.targets[m].osc_period_jit_ema <= 0.28
-                                && a.targets[m].osc_half_period_ema >= 0.20
-                                && dt_half < 0.55 * a.targets[m].osc_half_period_ema
+                                && a.targets[m].osc_period_jit_ema <= 0.34
+                                && hp_prev >= 0.20
+                                && dt_half < 0.55 * hp_prev
                             {
                                 bounce_skip = true;
+                                None
                             } else if dt_half >= 0.08 && dt_half <= 1.25 {
-                                if a.targets[m].osc_cross_count == 1
-                                    || a.targets[m].osc_half_period_ema <= 0.01
-                                {
-                                    a.targets[m].osc_half_period_ema = dt_half;
-                                    a.targets[m].osc_period_jit_ema = 1.0;
+                                Some(dt_half)
+                            } else if a.targets[m].osc_cross_count >= 3
+                                && a.targets[m].osc_period_jit_ema <= 0.34
+                                && hp_prev >= 0.20
+                                && dt_half >= 1.65 * hp_prev
+                                && dt_half <= 2.35 * hp_prev
+                            {
+                                Some(0.5 * dt_half)
+                            } else {
+                                None
+                            };
+                            if let Some(half_sec) = eff_half {
+                                if a.targets[m].osc_cross_count == 1 || hp_prev <= 0.01 {
+                                    a.targets[m].osc_half_period_ema = half_sec;
+                                    a.targets[m].osc_period_jit_ema = 0.20;
                                 } else {
-                                    let rj = (dt_half - a.targets[m].osc_half_period_ema).abs()
-                                        / a.targets[m].osc_half_period_ema.max(0.05);
+                                    let rj = (half_sec - hp_prev).abs() / hp_prev.max(0.05);
                                     a.targets[m].osc_period_jit_ema =
                                         if a.targets[m].osc_cross_count == 2 {
                                             rj
@@ -15618,11 +15697,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                                             0.65 * a.targets[m].osc_period_jit_ema + 0.35 * rj
                                         };
                                     a.targets[m].osc_half_period_ema =
-                                        0.60 * a.targets[m].osc_half_period_ema + 0.40 * dt_half;
+                                        0.60 * hp_prev + 0.40 * half_sec;
                                 }
                                 a.targets[m].osc_cross_count =
                                     a.targets[m].osc_cross_count.saturating_add(1).min(64);
-                            } else {
+                            } else if !bounce_skip {
                                 a.targets[m].osc_cross_count = 1;
                                 a.targets[m].osc_half_period_ema = 0.0;
                                 a.targets[m].osc_period_jit_ema = 1.0;
@@ -15642,7 +15721,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
             let period_locked = a.targets[m].osc_cross_count >= 3
                 && a.targets[m].osc_half_period_ema >= 0.08
-                && a.targets[m].osc_period_jit_ema <= 0.28;
+                && a.targets[m].osc_period_jit_ema <= 0.34;
             if period_locked {
                 let f_teth = (1.0 / (2.0 * a.targets[m].osc_half_period_ema)).clamp(0.15, 15.0);
                 let omega_teth = TWO_PI * f_teth;
@@ -15875,6 +15954,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     && !(a.lab_mode != 1
                         && a.targets[m].retrace_dirs != 3
                         && a.targets[m].max_excursion2 >= (30.0 * s) * (30.0 * s))
+                    && !(a.lab_mode == 2
+                        && a.targets[m].max_excursion2 >= (30.0 * s) * (30.0 * s))
                 {
                     1
                 } else {
@@ -15962,6 +16043,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                         } else {
                             60.0
                         }
+                    } else if a.targets[m].osc_regime == 2 && exc_px >= 12.0 * s {
+                        95.0
                     } else {
                         0.0
                     };

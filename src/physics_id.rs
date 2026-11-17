@@ -3796,13 +3796,16 @@ pub fn update_galileo_peg_detector(
     }
 
     let mut fired_peg_jump = false;
+    // Discrete pixel/chroma 4:2:0 floor keeps SD (s=0.5) robust across decoder filters without altering HD (s=1.0).
+    let init_rmse_lim = (1.2 * sc).max(0.85);
+    let jump_rmse_lim = (1.15 * sc).max(0.82);
     if best_fit.valid_circle != 0 && plumb_ok {
         let r_new = best_fit.radius;
         if st.has_stable_piv == 0 {
             if st.jump_cand_r > 1.0 && (r_new - st.jump_cand_r).abs() <= 0.08 * st.jump_cand_r {
                 st.jump_cand_streak = st.jump_cand_streak.saturating_add(1);
                 st.jump_cand_r = 0.65 * st.jump_cand_r + 0.35 * r_new;
-                if st.jump_cand_streak >= 3 && best_fit.rmse_px <= 1.2 * sc {
+                if st.jump_cand_streak >= 3 && best_fit.rmse_px <= init_rmse_lim {
                     st.stable_piv_x = best_fit.xc;
                     st.stable_piv_y = best_fit.yc;
                     st.stable_piv_r = r_new;
@@ -3811,7 +3814,7 @@ pub fn update_galileo_peg_detector(
                     st.jump_cand_r = 0.0;
                     st.seg_peak_cos = 1.0;
                 }
-            } else if best_fit.rmse_px <= 1.2 * sc {
+            } else if best_fit.rmse_px <= init_rmse_lim {
                 st.jump_cand_r = r_new;
                 st.jump_cand_streak = 1;
             }
@@ -3836,7 +3839,7 @@ pub fn update_galileo_peg_detector(
                 st.jump_cand_r = 0.0;
             } else if ratio >= 1.38
                 && diff_r >= 24.0 * sc
-                && best_fit.rmse_px <= 1.15 * sc
+                && best_fit.rmse_px <= jump_rmse_lim
                 && cos_align >= 0.70
             {
                 if st.jump_cand_r > 1.0 && (r_new - st.jump_cand_r).abs() <= 0.06 * r_new {
