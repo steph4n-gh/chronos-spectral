@@ -62,13 +62,7 @@ function launchHeadlessChrome(chromeBin, userDataDir) {
     '--window-size=1440,900',
   ];
   if (process.platform === 'linux' || process.env.CI) {
-    args.push(
-      '--no-sandbox',
-      '--disable-dev-shm-usage',
-      '--use-gl=angle',
-      '--use-angle=swiftshader',
-      '--enable-unsafe-swiftshader'
-    );
+    args.push('--no-sandbox', '--disable-dev-shm-usage', '--disable-gpu');
   }
 
   const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'] });
@@ -248,7 +242,7 @@ async function main() {
     await cdp.send('Runtime.enable', {}, sessionId);
     await cdp.send(
       'Emulation.setDeviceMetricsOverride',
-      { width: 1440, height: 900, deviceScaleFactor: 2, mobile: false },
+      { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
       sessionId
     );
     await cdp.send('Browser.setDownloadBehavior', {
