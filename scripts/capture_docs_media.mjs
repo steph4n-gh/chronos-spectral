@@ -407,7 +407,7 @@ async function main() {
   fs.mkdirSync(chromeUserDir, { recursive: true });
 
   const srv = await startChronosServer({ rootDir: WEB_DIR, port: 0, host: '127.0.0.1' });
-  const appUrl = `http://127.0.0.1:${srv.port}/index.html`;
+  const appUrl = `http://127.0.0.1:${srv.port}/index.html?view=deck`;
   let chromeProc = null;
   let cdp = null;
 

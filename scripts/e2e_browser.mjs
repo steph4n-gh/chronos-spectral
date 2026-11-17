@@ -211,7 +211,7 @@ async function main() {
   fs.mkdirSync(downloadDir, { recursive: true });
 
   const srv = await startChronosServer({ rootDir: WEB_DIR, port: 0, host: '127.0.0.1' });
-  const appUrl = `http://127.0.0.1:${srv.port}/index.html`;
+  const appUrl = `http://127.0.0.1:${srv.port}/index.html?view=deck`;
   let chromeProc = null;
   let cdp = null;
 
@@ -2931,6 +2931,302 @@ async function main() {
       allowNegativeNetworkLogs = false;
 
       console.log(`  [PASS] Step 7 (Security & Hardening Gates): FD_delta=${fdDelta}, multiHopSSRF_hits=${internalHits}, 429=ok, EscBlur="${escBlurState.live}", (0,0)-H=${zeroHorizonState.badge}, MSE_BoundedRetries=${mseTruncHits} (${mseBoundedState.txt})`);
+    }
+
+    // 8. Option A Showcase Landing Surface, Split-Wipe, Local MP4 Drop, Zero-Reload Deck Switch & Static-Host Gate
+    {
+      const baseUrl = `http://127.0.0.1:${srv.port}`;
+      const { targetId: scTargetId } = await cdp.send('Target.createTarget', { url: `${baseUrl}/index.html` });
+      const { sessionId: scSession } = await cdp.send('Target.attachToTarget', { targetId: scTargetId, flatten: true });
+      try {
+        await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, scSession);
+        await cdp.send('Page.enable', {}, scSession);
+        await cdp.send('Log.enable', {}, scSession);
+        await cdp.send('Runtime.enable', {}, scSession);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
+          scSession
+        );
+
+        await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8a: Showcase DOM booted cleanly',
+          `(() => ({
+            ok: document.body?.dataset?.surface === 'showcase' && Boolean(document.getElementById('showcaseWipeSlider'))
+          }))()`,
+          8000
+        );
+        await cdp.evalJs(
+          scSession,
+          `(() => {
+            window.__e2eShowcaseCls = 0;
+            window.__e2eShowcaseClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eShowcaseCls += e.value;
+              }
+            });
+            window.__e2eShowcaseClsPo.observe({ type: 'layout-shift', buffered: false });
+            return true;
+          })()`
+        );
+
+        const starlingBoot = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8a: Showcase frame-0 Starling Murmuration (>= 1,000 confirmed, HERO 16 hidden, 28% wipe)',
+          `(() => {
+            const surface = document.body?.dataset?.surface || '';
+            const btnStar = document.getElementById('btnHeroStarlings');
+            const wipeSlider = document.getElementById('showcaseWipeSlider');
+            const kernelTxt = (document.getElementById('scValKernel')?.textContent || '').trim();
+            const tracksTxt = (document.getElementById('scValTracks')?.textContent || '').trim();
+            const confRaw = tracksTxt.split(' ')[0] || '0';
+            const confirmed = parseInt(confRaw.replace(/,/g, ''), 10) || 0;
+            const st = window.__chronosUiState;
+            return {
+              ok: surface === 'showcase' &&
+                  btnStar?.getAttribute('aria-pressed') === 'true' &&
+                  confirmed >= 1000 &&
+                  st?.overlays?.showHeroTargets === false &&
+                  wipeSlider?.value === '28' &&
+                  kernelTxt.endsWith('ms / frame') &&
+                  !kernelTxt.startsWith('--'),
+              surface,
+              confirmed,
+              kernelTxt,
+              tracksTxt,
+              wipe: wipeSlider?.value,
+            };
+          })()`,
+          26000
+        );
+
+        const scHudRect = await cdp.evalJs(
+          scSession,
+          `(() => {
+            const el = document.getElementById('hudCanvas');
+            if (!el) return null;
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+            const r = el.getBoundingClientRect();
+            return {
+              x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))),
+              y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))),
+              width: Math.ceil(r.width),
+              height: Math.ceil(r.height),
+            };
+          })()`
+        );
+        const scHudShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...scHudRect, scale: 1 } },
+          scSession
+        );
+        const scHudBytes = scHudShot?.data ? Buffer.from(scHudShot.data, 'base64').byteLength : 0;
+        if (scHudBytes < 2500) {
+          throw new Error(`Step 8a: Expected Showcase #hudCanvas screenshot >= 2500 B, got ${scHudBytes} B`);
+        }
+        await cdp.saveScreenshot(scSession, proofDir, 'proof_showcase_starlings.png');
+
+        // 8b. Interactive Split-Wipe (55%) + Right-Side Click-to-Inspect
+        const wipeState = await cdp.evalJs(
+          scSession,
+          `(() => {
+            const s = document.getElementById('showcaseWipeSlider');
+            s.value = '55';
+            s.dispatchEvent(new Event('input', { bubbles: true }));
+            return {
+              val: s.value,
+              aria: s.getAttribute('aria-valuetext') || '',
+              readout: document.getElementById('showcaseWipeReadout')?.textContent || '',
+            };
+          })()`
+        );
+        if (
+          wipeState.val !== '55' ||
+          wipeState.aria !== '55% raw video, 45% spectral wavefield' ||
+          !wipeState.readout.includes('55% RAW')
+        ) {
+          throw new Error(`Step 8b: Split-wipe sync mismatch: ${JSON.stringify(wipeState)}`);
+        }
+
+        let scInspectText = '';
+        for (const [nx, ny] of [[0.67, 0.46], [0.65, 0.58], [0.62, 0.40], [0.76, 0.68], [0.78, 0.30], [0.70, 0.50], [0.74, 0.55]]) {
+          await cdp.evalJs(
+            scSession,
+            `(() => {
+              const hud = document.getElementById('hudCanvas');
+              const r = hud.getBoundingClientRect();
+              hud.dispatchEvent(new MouseEvent('click', {
+                bubbles: true,
+                cancelable: true,
+                clientX: r.left + r.width * ${nx},
+                clientY: r.top + r.height * ${ny},
+              }));
+              return true;
+            })()`
+          );
+          try {
+            const hit = await waitForCondition(
+              cdp,
+              scSession,
+              `Step 8b: Right-side inspect (${nx},${ny})`,
+              `(() => {
+                const txt = (document.getElementById('scValInspect')?.textContent || '').trim();
+                return { ok: /^INSP\\s+(?:μ|u)T\\d+/i.test(txt), txt };
+              })()`,
+              1600
+            );
+            if (hit && hit.ok) {
+              scInspectText = hit.txt;
+              break;
+            }
+          } catch (_e) {
+            // Try next coordinate on right half
+          }
+        }
+        if (!scInspectText) {
+          throw new Error('Step 8b: Clicking right-side Spectral Wavefield did not inspect an active track (#scValInspect)');
+        }
+
+        // 8c. 1-Click Counter-Proof: Model Rockets
+        await cdp.evalJs(scSession, `document.getElementById('btnHeroRockets')?.click(); true;`);
+        const rocketHero = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8c: Showcase 1-click Model Rockets counter-proof',
+          `(() => {
+            const btnR = document.getElementById('btnHeroRockets');
+            const btnS = document.getElementById('btnHeroStarlings');
+            const selVal = document.getElementById('sampleVideoSelect')?.value || '';
+            const cal = document.getElementById('calBadge')?.textContent || '';
+            const wipe = document.getElementById('showcaseWipeSlider')?.value || '';
+            const st = window.__chronosUiState;
+            const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+            return {
+              ok: btnR?.getAttribute('aria-pressed') === 'true' &&
+                  btnS?.getAttribute('aria-pressed') === 'false' &&
+                  selVal.endsWith('model_rocket_full_flights.mp4') &&
+                  st?.overlays?.showHeroTargets === true &&
+                  cal === 'ASSUMED RULER' &&
+                  wipe === '0' &&
+                  tgts >= 1,
+              selVal,
+              cal,
+              wipe,
+              tgts,
+            };
+          })()`,
+          15000
+        );
+        await cdp.saveScreenshot(scSession, proofDir, 'proof_showcase_rockets.png');
+
+        // 8d. Zero-Upload Drag-and-Drop Local MP4 onto #hudPanel
+        await cdp.evalJs(
+          scSession,
+          `(async () => {
+            const resp = await fetch('./samples/juggling_ballistic.mp4');
+            const blob = await resp.blob();
+            const file = new File([blob], 'user_clip.mp4', { type: 'video/mp4' });
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            document.getElementById('hudPanel').dispatchEvent(
+              new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt })
+            );
+            return true;
+          })()`
+        );
+        const dropState = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8d: Drag-and-drop user_clip.mp4 tracks locally with scene pills cleared',
+          `(() => {
+            const srcLbl = document.getElementById('hudSourceLabel')?.textContent || '';
+            const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+            const anyPressed = Array.from(document.querySelectorAll('.hero-scene-btn')).some(
+              (b) => b.getAttribute('aria-pressed') === 'true'
+            );
+            return {
+              ok: srcLbl.includes('user_clip.mp4') && !anyPressed && tgts >= 1,
+              srcLbl,
+              tgts,
+              anyPressed,
+            };
+          })()`,
+          15000
+        );
+
+        // 8e. Zero-Reload Switch to Full 15-Panel Command Deck & Back
+        const seqBeforeSwitch = await cdp.evalJs(scSession, `window.__chronosUiState?.seq ?? -1`);
+        await cdp.evalJs(scSession, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
+        const deckSwitched = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8e: Seamless zero-reload transition to Full Command Deck',
+          `(() => {
+            const surface = document.body?.dataset?.surface || '';
+            const roster = document.querySelector('.roster-panel');
+            const seq = window.__chronosUiState?.seq ?? -1;
+            return {
+              ok: surface === 'deck' &&
+                  location.search.includes('view=deck') &&
+                  Boolean(roster && roster.offsetParent !== null) &&
+                  seq >= ${seqBeforeSwitch},
+              surface,
+              search: location.search,
+              seq,
+            };
+          })()`,
+          6000
+        );
+        await cdp.evalJs(scSession, `document.getElementById('btnReturnShowcase')?.click(); true;`);
+        const returnedShowcase = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8e: Return transition back to Split-Wipe Showcase',
+          `(() => ({
+            ok: document.body?.dataset?.surface === 'showcase' && !location.search.includes('view=deck'),
+            cls: window.__e2eShowcaseCls || 0,
+          }))()`,
+          6000
+        );
+        await cdp.evalJs(scSession, `if (window.__e2eShowcaseClsPo) window.__e2eShowcaseClsPo.disconnect(); true;`);
+        if (returnedShowcase.cls >= 0.0001) {
+          throw new Error(`Step 8e: Expected 0.000000 CLS across Showcase surface flows, got ${returnedShowcase.cls}`);
+        }
+
+        // 8f. Static-Host Mode (?static=1) & /deck.html Redirect
+        await cdp.send('Page.navigate', { url: `${baseUrl}/index.html?static=1` }, scSession);
+        const staticState = await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8f: Static-host mode active (?static=1) without API 404s',
+          `(() => ({
+            ok: document.body?.dataset?.staticHost === 'true' && document.body?.dataset?.surface === 'showcase',
+            staticHost: document.body?.dataset?.staticHost,
+          }))()`,
+          8000
+        );
+        await new Promise((r) => setTimeout(r, 250));
+
+        await cdp.send('Page.navigate', { url: `${baseUrl}/deck.html` }, scSession);
+        await waitForCondition(
+          cdp,
+          scSession,
+          'Step 8f: /deck.html redirects cleanly to ?view=deck Command Deck',
+          `(() => ({
+            ok: location.search.includes('view=deck') && document.body?.dataset?.surface === 'deck',
+          }))()`,
+          8000
+        );
+
+        console.log(
+          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipe55%="${wipeState.readout}", inspect="${scInspectText}", rockets=${rocketHero.cal}(${rocketHero.tgts} tgts), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${returnedShowcase.cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: scTargetId }).catch(() => {});
+      }
     }
 
     if (pageErrors.length > 0) {

@@ -394,8 +394,8 @@
     }
 
     #btnHudHeroToggle {
-      inline-size: 15.8ch;
-      min-inline-size: 15.8ch;
+      inline-size: 18.4ch;
+      min-inline-size: 18.4ch;
     }
 
     #btnHudHeroToggle[data-hidden-solo="true"] {
@@ -406,8 +406,8 @@
     }
 
     #btnHudFullscreen {
-      inline-size: 12.6ch;
-      min-inline-size: 12.6ch;
+      inline-size: 16.8ch;
+      min-inline-size: 16.8ch;
     }
 
     #hudPanel::backdrop {
@@ -1880,9 +1880,476 @@
     .expert-disclosure-grid .kpi-value {
       font-size: 0.78rem;
     }
+
+    /* ===================================================================== */
+    /* Option A: Dual-Surface Interactive Split-Wipe Showcase & Static Guard */
+    /* ===================================================================== */
+    .visually-hidden {
+      position: absolute;
+      inline-size: 1px;
+      block-size: 1px;
+      overflow: hidden;
+      clip-path: inset(50%);
+      white-space: nowrap;
+    }
+
+    body[data-surface="deck"] #showcaseIntroSection,
+    body[data-surface="deck"] #showcaseWipeBar,
+    body[data-surface="deck"] #showcaseActionDock,
+    #hudPanel:fullscreen #showcaseWipeBar,
+    #hudPanel.hud-maximized #showcaseWipeBar {
+      display: none !important;
+    }
+
+    body[data-surface="showcase"] main.deck-grid {
+      max-inline-size: 74rem;
+      inline-size: 100%;
+      margin-inline: auto;
+      grid-template-columns: minmax(0, 1fr);
+      padding-block: 0.75rem 2rem;
+      padding-inline: clamp(0.75rem, 2dvw, 1.5rem);
+      gap: 0.75rem;
+    }
+
+    body[data-surface="showcase"] #btnShowcasePlayPause {
+      inline-size: 11.6ch;
+      min-inline-size: 11.6ch;
+    }
+
+    body[data-surface="showcase"] .brand-lockup {
+      max-inline-size: 25.5rem;
+    }
+
+    body[data-surface="showcase"] .deck-column:not(:first-child),
+    body[data-surface="showcase"] .deck-column:first-child > :not(#showcaseIntroSection):not(#hudDockSlot):not(#showcaseActionDock) {
+      display: none !important;
+    }
+
+    body[data-static-host="true"] [data-local-server-only="true"] {
+      border-style: dashed;
+    }
+
+    #hudPanel[data-drop-active="true"] {
+      border-color: var(--brand-color);
+      box-shadow: 0 0 0 2px rgba(0, 229, 255, 0.34);
+    }
+
+    .showcase-intro-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 0.75rem 1.25rem;
+      padding: 0.85rem 1.05rem;
+      contain: layout style paint;
+    }
+
+    @media (max-width: 780px) {
+      .showcase-intro-panel {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    .showcase-eyebrow {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--brand-color);
+      margin-block-end: 0.25rem;
+    }
+
+    .showcase-headline {
+      font-size: clamp(1.12rem, 0.9rem + 1.05vw, 1.68rem);
+      font-weight: 750;
+      line-height: 1.2;
+      color: var(--text-primary);
+      text-wrap: balance;
+    }
+
+    .showcase-subline {
+      margin-block-start: 0.28rem;
+      font-size: 0.84rem;
+      line-height: 1.42;
+      color: var(--text-secondary);
+      max-inline-size: 68ch;
+    }
+
+    .showcase-cta-group {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .cta-primary-btn {
+      inline-size: auto;
+      min-inline-size: 24px;
+      min-block-size: 2.35rem;
+      padding: 0.45rem 0.9rem;
+      border-radius: 5px;
+      border: 1px solid var(--border-accent);
+      background-color: #083042;
+      color: #ffffff;
+      font-family: var(--font-mono);
+      font-size: 0.76rem;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .cta-secondary-link {
+      display: inline-flex;
+      align-items: center;
+      min-inline-size: 24px;
+      min-block-size: 2.35rem;
+      padding: 0.45rem 0.8rem;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.74rem;
+      font-weight: 600;
+      text-decoration: none;
+      white-space: nowrap;
+    }
+
+    .showcase-wipe-bar {
+      display: grid;
+      grid-template-columns: auto auto auto minmax(140px, 1fr) auto;
+      align-items: center;
+      gap: 0.55rem 0.75rem;
+      padding-block-start: 0.35rem;
+      border-block-start: 1px solid #1b2a44;
+    }
+
+    @media (max-width: 720px) {
+      .showcase-wipe-bar {
+        grid-template-columns: auto auto minmax(0, 1fr);
+      }
+      .showcase-wipe-bar label[for="showcaseWipeSlider"] {
+        grid-column: 1 / 2;
+      }
+      #showcaseWipeSlider {
+        grid-column: 2 / -1;
+      }
+      #showcaseWipeReadout {
+        grid-column: 1 / -1;
+      }
+    }
+
+    .wipe-step-btn {
+      inline-size: auto;
+      min-inline-size: 24px;
+      min-block-size: 2rem;
+      padding: 0.25rem 0.62rem;
+      border-radius: 4px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .wipe-bar-label {
+      font-family: var(--font-mono);
+      font-size: 0.69rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      color: var(--text-secondary);
+      white-space: nowrap;
+    }
+
+    .wipe-bar-readout {
+      font-family: var(--font-mono);
+      font-size: 0.71rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--brand-color);
+      min-inline-size: 23ch;
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    /* Split-Wipe Range Slider (modern-web-guidance: slider) */
+    #showcaseWipeSlider {
+      --slider-track-size: 0.45rem;
+      --slider-thumb-size: 1.15rem;
+      --slider-track-radius: 999px;
+      --slider-thumb-radius: 50%;
+      --slider-track-color: #2f466d;
+      --slider-fill-color: #00e5ff;
+      --slider-thumb-color: #ecf4ff;
+      --slider-direction: to right;
+      --attr-min: attr(min type(<number>), 0);
+      --attr-max: attr(max type(<number>), 100);
+      --control-value: attr(value type(<number>), 28);
+      --slider-progress: calc(progress(var(--control-value), var(--attr-min), var(--attr-max)) * 100%);
+      -webkit-appearance: none;
+      appearance: none;
+      inline-size: 100%;
+      block-size: 2.25rem;
+      margin: 0;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    #showcaseWipeSlider:dir(rtl) {
+      --slider-direction: to left;
+    }
+
+    @supports not (opacity: progress(1, 0, 100)) {
+      #showcaseWipeSlider {
+        --slider-progress: calc(
+          (var(--control-value) - var(--attr-min)) /
+          (var(--attr-max) - var(--attr-min)) * 100%
+        );
+      }
+    }
+
+    #showcaseWipeSlider::-webkit-slider-runnable-track {
+      block-size: var(--slider-track-size);
+      border: 0;
+      border-radius: var(--slider-track-radius);
+      background: linear-gradient(
+        var(--slider-direction),
+        var(--slider-fill-color) var(--slider-progress),
+        var(--slider-track-color) var(--slider-progress)
+      );
+    }
+
+    #showcaseWipeSlider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      inline-size: var(--slider-thumb-size);
+      block-size: var(--slider-thumb-size);
+      margin-block-start: calc((var(--slider-track-size) - var(--slider-thumb-size)) / 2);
+      border: 2px solid #05080f;
+      border-radius: var(--slider-thumb-radius);
+      background: var(--slider-thumb-color);
+    }
+
+    #showcaseWipeSlider::-moz-range-track {
+      block-size: var(--slider-track-size);
+      border: 0;
+      border-radius: var(--slider-track-radius);
+      background: var(--slider-track-color);
+    }
+
+    #showcaseWipeSlider::-moz-range-progress {
+      block-size: var(--slider-track-size);
+      border-radius: var(--slider-track-radius);
+      background: var(--slider-fill-color);
+    }
+
+    #showcaseWipeSlider::-moz-range-thumb {
+      inline-size: var(--slider-thumb-size);
+      block-size: var(--slider-thumb-size);
+      border: 2px solid #05080f;
+      border-radius: var(--slider-thumb-radius);
+      background: var(--slider-thumb-color);
+    }
+
+    #showcaseWipeSlider:focus-visible {
+      outline: 2px solid var(--slider-fill-color);
+      outline-offset: 4px;
+    }
+
+    /* 3-Beat Hero Toolbar (modern-web-guidance: toolbar) */
+    .showcase-action-dock {
+      display: flex;
+      flex-direction: column;
+      gap: 0.72rem;
+    }
+
+    .showcase-toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .showcase-toolbar-group {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 0.42rem;
+    }
+
+    .toolbar-sep {
+      align-self: stretch;
+      inline-size: 0;
+      min-block-size: 1.8rem;
+      border-inline-start: 1px solid var(--border-strong);
+      margin-inline: 0.15rem;
+    }
+
+    @media (max-width: 720px) {
+      .toolbar-sep {
+        display: none;
+      }
+    }
+
+    .hero-scene-btn,
+    .hero-action-btn {
+      inline-size: auto;
+      min-inline-size: 24px;
+      min-block-size: 2.25rem;
+      padding: 0.38rem 0.72rem;
+      border-radius: 5px;
+      border: 1px solid var(--border-strong);
+      background-color: var(--bg-card);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 0.72rem;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    .hero-scene-btn[aria-pressed="true"] {
+      background-color: #083042;
+      border-color: var(--brand-color);
+      color: #ffffff;
+      box-shadow: inset 0 0 0 1px var(--brand-color);
+    }
+
+    @media (pointer: coarse) {
+      .hero-scene-btn,
+      .hero-action-btn,
+      .wipe-step-btn,
+      .cta-primary-btn,
+      .cta-secondary-link {
+        min-block-size: 2.75rem;
+      }
+    }
+
+    @media (hover: hover) {
+      .hero-scene-btn:hover,
+      .hero-action-btn:hover,
+      .wipe-step-btn:hover,
+      .cta-primary-btn:hover,
+      .cta-secondary-link:hover {
+        border-color: var(--brand-color);
+      }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .hero-scene-btn,
+      .hero-action-btn,
+      .wipe-step-btn,
+      .cta-primary-btn,
+      .cta-secondary-link {
+        transition: border-color 120ms ease, background-color 120ms ease;
+      }
+    }
+
+    .hero-scene-btn:focus-visible,
+    .hero-action-btn:focus-visible,
+    .wipe-step-btn:focus-visible,
+    .cta-primary-btn:focus-visible,
+    .cta-secondary-link:focus-visible {
+      outline: 2px solid var(--brand-color);
+      outline-offset: 2px;
+    }
+
+    @media (forced-colors: active) {
+      .hero-scene-btn[aria-pressed="true"] {
+        border: 2px solid Highlight;
+        color: HighlightText;
+        background-color: Highlight;
+      }
+      .toolbar-sep {
+        border-inline-start-color: ButtonText;
+      }
+    }
+
+    .showcase-proof-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.5rem;
+    }
+
+    @media (max-width: 960px) {
+      .showcase-proof-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 540px) {
+      .showcase-proof-grid {
+        grid-template-columns: minmax(0, 1fr);
+      }
+    }
+
+    .showcase-proof-card {
+      background-color: var(--bg-card);
+      border: 1px solid #203352;
+      border-radius: 5px;
+      padding: 0.46rem 0.62rem;
+      min-block-size: 4.1rem;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      gap: 0.14rem;
+      contain: layout style paint;
+      min-inline-size: 0;
+    }
+
+    .showcase-proof-label {
+      font-family: var(--font-mono);
+      font-size: 0.63rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .showcase-proof-val {
+      font-family: var(--font-mono);
+      font-size: 0.82rem;
+      font-weight: 700;
+      font-variant-numeric: tabular-nums;
+      color: var(--text-primary);
+      line-height: 1.25;
+      min-block-size: 1.05rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .showcase-proof-sub {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: #88a4c8;
+      line-height: 1.25;
+      min-block-size: 0.85rem;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
   </style>
 </head>
 <body>
+  <script>
+    (() => {
+      const q = new URLSearchParams(location.search);
+      document.body.dataset.surface = q.get('view') === 'deck' ? 'deck' : 'showcase';
+      if (location.hostname.endsWith('.github.io') || location.protocol === 'file:' || q.get('static') === '1') {
+        document.body.dataset.staticHost = 'true';
+      }
+    })();
+  </script>
   <header class="deck-header">
     <div class="brand-lockup">
       <span class="brand-badge">WASM32 + SIMD128</span>
@@ -1903,6 +2370,18 @@
   <main class="deck-grid">
     <!-- Left Column: Main Delayed Wavefield OffscreenCanvas + Split Raw/Eulerian PiP & Swap Proof -->
     <div class="deck-column">
+      <section id="showcaseIntroSection" class="panel showcase-intro-panel" aria-labelledby="showcaseHeadline">
+        <div>
+          <p class="showcase-eyebrow">Live Client-Side WebAssembly · 0 Neural Weights · 0 Server Compute</p>
+          <h2 id="showcaseHeadline" class="showcase-headline">Zero-ML trajectories, symbolic ODEs, and 1,400-target flow fields in &lt; 2 ms on CPU.</h2>
+          <p class="showcase-subline">Running live on raw pixels inside a 2.13 MiB <code>#![no_std]</code> Rust WebAssembly (<code>+simd128</code>) static arena. Drag the split-wipe or drop any MP4 onto the canvas below.</p>
+        </div>
+        <div class="showcase-cta-group">
+          <button type="button" id="btnOpenFullDeck" class="cta-primary-btn">Open Full 15-Panel Command Deck →</button>
+          <a id="lnkGithubRepo" class="cta-secondary-link" href="https://github.com/steph4n-gh/chronos-spectral" target="_blank" rel="noopener noreferrer">GitHub Repo &amp; Docs</a>
+        </div>
+      </section>
+
       <div id="hudDockSlot" class="hud-dock-slot">
       <div class="panel" id="hudPanel">
         <div class="panel-header hud-panel-header">
@@ -1916,8 +2395,54 @@
           <span class="panel-meta" id="hudSourceLabel">SOURCE: BLIND PIXEL PILLAR TESTBENCH (getImageData ONLY)</span>
         </div>
         <canvas id="hudCanvas" width="960" height="540" role="img" aria-label="Delayed non-causal wavefield tracking viewport. Click a tracked patch to pin focus."></canvas>
+        <div id="showcaseWipeBar" class="showcase-wipe-bar">
+          <button type="button" id="btnShowcasePlayPause" class="wipe-step-btn" title="Pause or resume video playback">⏸ Pause</button>
+          <button type="button" id="btnShowcaseStepFwd" class="wipe-step-btn" title="Step forward 1 exact stream frame">+1f</button>
+          <label for="showcaseWipeSlider" class="wipe-bar-label">RAW / SPECTRAL WIPE</label>
+          <input type="range" id="showcaseWipeSlider" min="0" max="100" step="1" value="28" aria-valuetext="28% raw video, 72% spectral wavefield" />
+          <span id="showcaseWipeReadout" class="wipe-bar-readout">28% RAW · 72% SPECTRAL</span>
+        </div>
       </div>
       </div>
+
+      <section id="showcaseActionDock" class="panel showcase-action-dock" aria-label="Interactive showcase scenes and live proof telemetry">
+        <div id="showcaseToolbar" class="showcase-toolbar" role="toolbar" focusgroup="toolbar wrap" aria-label="Hero showcase scenes and local optical inputs" aria-controls="hudCanvas">
+          <div class="showcase-toolbar-group" role="group" aria-label="Featured real-camera physics scenes">
+            <button type="button" id="btnHeroStarlings" class="hero-scene-btn" data-hero-scene="starling_1000" aria-pressed="true">🐦 Starling Swarm (1,400+ Birds)</button>
+            <button type="button" id="btnHeroRockets" class="hero-scene-btn" data-hero-scene="model_rockets" aria-pressed="false">🚀 Model Rockets (Smoke Bridge &amp; Chutes)</button>
+            <button type="button" id="btnHeroPendulum" class="hero-scene-btn" data-hero-scene="chaos_pendulum" aria-pressed="false">🧲 Chaotic Pendulum (ODE Discovery)</button>
+            <button type="button" id="btnHeroBilliards" class="hero-scene-btn" data-hero-scene="billiards" aria-pressed="false">🎱 Carom Billiards (L1 Impacts)</button>
+          </div>
+          <span class="toolbar-sep" role="separator" aria-orientation="vertical"></span>
+          <div class="showcase-toolbar-group" role="group" aria-label="Zero-upload local optical inputs">
+            <button type="button" id="btnHeroDropMp4" class="hero-action-btn" title="Test your own MP4/WebM video locally in WebAssembly (zero bytes uploaded)">📂 Drop / Choose Any MP4</button>
+            <button type="button" id="btnHeroWebcam" class="hero-action-btn" title="Stream live webcam pixels directly into the local Wasm arena">◉ Use Webcam</button>
+          </div>
+        </div>
+        <p id="showcaseToolbarStatus" role="status" class="visually-hidden"></p>
+        <div id="showcaseProofGrid" class="showcase-proof-grid">
+          <div class="showcase-proof-card">
+            <span class="showcase-proof-label">Wasm SIMD128 Latency</span>
+            <span class="showcase-proof-val" id="scValKernel">-- ms / frame</span>
+            <span class="showcase-proof-sub" id="scSubKernel">2.13 MiB · 0 heap allocs · 320 pages</span>
+          </div>
+          <div class="showcase-proof-card">
+            <span class="showcase-proof-label">Live Tracked State</span>
+            <span class="showcase-proof-val" id="scValTracks">--</span>
+            <span class="showcase-proof-sub" id="scSubTracks">Awaiting live stream</span>
+          </div>
+          <div class="showcase-proof-card">
+            <span class="showcase-proof-label">Physics / Continuum Output</span>
+            <span class="showcase-proof-val" id="scValPhysics">--</span>
+            <span class="showcase-proof-sub" id="scSubPhysics">0 neural weights · Weak-form + Eulerian</span>
+          </div>
+          <div class="showcase-proof-card">
+            <span class="showcase-proof-label">Click-to-Inspect State</span>
+            <span class="showcase-proof-val" id="scValInspect">Click any bird or rocket on canvas</span>
+            <span class="showcase-proof-sub" id="scSubInspect">Zero upload · Drag any MP4 onto canvas</span>
+          </div>
+        </div>
+      </section>
 
       <div class="panel">
         <div class="panel-header">
@@ -2452,13 +2977,16 @@
     <aside class="deck-column isolated-region scrollable-controls control-column" aria-label="Tracker controls and session telemetry">
       <div class="panel showcase-strip">
         <div class="panel-header">
-          <h2 class="panel-title">★ Featured Showcases (1-Click HD)</h2>
+          <div class="hud-header-top">
+            <h2 class="panel-title">★ Featured Showcases (1-Click HD)</h2>
+            <button type="button" id="btnReturnShowcase" class="hud-header-btn" title="Switch to Interactive Split-Wipe Showcase View">✦ Split-Wipe Showcase</button>
+          </div>
           <span class="panel-meta">AUTO-SETUP</span>
         </div>
         <div class="showcase-grid" role="group" aria-label="One-click HD live and physics demonstrations">
           <button type="button" class="showcase-btn" data-showcase="model_rockets" aria-pressed="false">🚀 Model Rockets · Chutes (31s)</button>
           <button type="button" class="showcase-btn" data-showcase="rocket_vtvl" aria-pressed="false">🚀 Rocket Pad-to-Pad (80s)</button>
-          <button type="button" class="showcase-btn" data-showcase="live_i80" aria-pressed="false">🌉 Live I-80 Cam</button>
+          <button type="button" class="showcase-btn" data-showcase="live_i80" data-local-server-only="true" aria-pressed="false">🌉 Live I-80 Cam</button>
           <button type="button" class="showcase-btn" data-showcase="cologne_motorway" aria-pressed="false">🛣️ A4 Motorway (45s)</button>
           <button type="button" class="showcase-btn" data-showcase="rally_pan" aria-pressed="false">🏎️ Rally Ego-Pan (29s)</button>
           <button type="button" class="showcase-btn" data-showcase="chaos_pendulum" aria-pressed="false">🧲 Chaos Pendulum (50s)</button>
@@ -2481,7 +3009,7 @@
         <div class="btn-row">
           <button type="button" id="btnSrcTestbench" aria-pressed="true" class="active">■ Pillar Bench</button>
           <button type="button" id="btnSrcWebcam" aria-pressed="false">◉ Live Webcam</button>
-          <button type="button" id="btnSrcLiveStream" aria-pressed="false">📡 Live Stream</button>
+          <button type="button" id="btnSrcLiveStream" data-local-server-only="true" aria-pressed="false">📡 Live Stream</button>
           <div class="file-upload-wrap">
             <input type="file" id="mp4Input" name="mp4File" accept="video/*" />
             <label for="mp4Input" class="file-upload-label">▶ Upload MP4</label>
@@ -2869,6 +3397,11 @@
     const physicsPhaseOffscreen = physicsPhaseEl ? physicsPhaseEl.transferControlToOffscreen() : null;
     const slotPipOffscreens = rosterCardRefs.map((r) => r.canvas.transferControlToOffscreen());
 
+    const isInitialDeckSurface = document.body.dataset.surface === 'deck';
+    let activeSurface = isInitialDeckSurface ? 'deck' : 'showcase';
+    let isStaticHostMode = document.body.dataset.staticHost === 'true';
+    let initialShowcaseBooted = false;
+
     const worker = new Worker('./worker.js?v=20261115c1k');
     worker.addEventListener('error', (err) => {
       console.error('Worker uncaught error:', err.message || err);
@@ -2886,6 +3419,10 @@
       {
         type: 'init',
         wasmUrl: './chronos_spectral.wasm?v=20261115c1k',
+        resMode: activeSurface === 'showcase' ? 1 : 0,
+        showcaseMinimalScopes: activeSurface === 'showcase',
+        rawWipeRatio: activeSurface === 'showcase' ? 0.28 : 0.0,
+        showHeroTargets: activeSurface !== 'showcase',
         hudCanvas: hudOffscreen,
         pipCanvas: pipOffscreen,
         persistenceCanvas: persistenceOffscreen,
@@ -3303,10 +3840,39 @@
       vidTimeLabel: document.getElementById('vidTimeLabel'),
       btnVidPlayPause: document.getElementById('btnVidPlayPause'),
       btnFocusCycle: document.getElementById('btnFocusCycle'),
+      btnOpenFullDeck: document.getElementById('btnOpenFullDeck'),
+      btnReturnShowcase: document.getElementById('btnReturnShowcase'),
+      btnShowcasePlayPause: document.getElementById('btnShowcasePlayPause'),
+      btnShowcaseStepFwd: document.getElementById('btnShowcaseStepFwd'),
+      showcaseWipeSlider: document.getElementById('showcaseWipeSlider'),
+      showcaseWipeReadout: document.getElementById('showcaseWipeReadout'),
+      showcaseToolbar: document.getElementById('showcaseToolbar'),
+      showcaseToolbarStatus: document.getElementById('showcaseToolbarStatus'),
+      scValKernel: document.getElementById('scValKernel'),
+      scSubKernel: document.getElementById('scSubKernel'),
+      scValTracks: document.getElementById('scValTracks'),
+      scSubTracks: document.getElementById('scSubTracks'),
+      scValPhysics: document.getElementById('scValPhysics'),
+      scSubPhysics: document.getElementById('scSubPhysics'),
+      scValInspect: document.getElementById('scValInspect'),
+      scSubInspect: document.getElementById('scSubInspect'),
     };
 
     function updateVideoTimeLabel() {
-      if (activeSourceMode !== 'video') return;
+      const isVid = activeSourceMode === 'video';
+      if (dom.btnShowcasePlayPause) {
+        dom.btnShowcasePlayPause.setAttribute('aria-disabled', String(!isVid));
+      }
+      if (dom.btnShowcaseStepFwd) {
+        dom.btnShowcaseStepFwd.setAttribute('aria-disabled', String(!isVid));
+      }
+      if (!isVid) {
+        if (dom.btnShowcasePlayPause) {
+          dom.btnShowcasePlayPause.textContent = '⏸ Live';
+          dom.btnShowcasePlayPause.removeAttribute('aria-pressed');
+        }
+        return;
+      }
       const cur = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime.toFixed(2) : '0.00';
       const dur = Number.isFinite(videoEl.duration) ? videoEl.duration.toFixed(2) : '--';
       dom.vidTimeLabel.textContent = `${cur}s / ${dur}s`;
@@ -3314,6 +3880,9 @@
       dom.btnVidPlayPause.classList.toggle('active', playing);
       dom.btnVidPlayPause.setAttribute('aria-pressed', String(playing));
       dom.btnVidPlayPause.textContent = playing ? '⏸ Pause' : '▶ Play';
+      if (dom.btnShowcasePlayPause) {
+        dom.btnShowcasePlayPause.textContent = playing ? '⏸ Pause' : '▶ Play';
+      }
     }
 
     videoEl.addEventListener('timeupdate', updateVideoTimeLabel);
@@ -3497,7 +4066,7 @@
       source: 'IDLE',
       engine: 'SWARM_OFF',
       overlays: {
-        showHeroTargets: true,
+        showHeroTargets: activeSurface !== 'showcase',
         showAllOverlays: false,
         showEcaOverlay: false,
         showKalman: true,
@@ -4295,6 +4864,10 @@
         if (typeof publishInspectTelemetryState === 'function') {
           publishInspectTelemetryState(m.chronos1000 || null);
         }
+        if (activeSurface === 'showcase' && !initialShowcaseBooted) {
+          initialShowcaseBooted = true;
+          activateHeroScene('starling_1000');
+        }
       } else if (m.type === 'init_error') {
         dom.pillKernel.textContent = '⚠ KERNEL INIT FAILED';
         dom.pillKernel.title = m.message || 'Failed to initialize Wasm kernel';
@@ -4542,6 +5115,9 @@
 
         updateSlotRosterUi(m.slotRoster);
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+        if (activeSurface === 'showcase' && typeof updateShowcaseProofCards === 'function') {
+          updateShowcaseProofCards(m, medMs);
+        }
       } else if (m.type === 'cal_state') {
         applyCalibrationUiState(m);
       } else if (m.type === 'rec_state') {
@@ -4751,11 +5327,33 @@
       userPickedTier3Preset = true;
     });
 
+    function enableStaticHostMode() {
+      if (isStaticHostMode) return;
+      isStaticHostMode = true;
+      document.body.dataset.staticHost = 'true';
+      if (btnLiveStream) {
+        btnLiveStream.title = 'Live HLS FFmpeg relay requires local scripts/dev_server.mjs (Tab Capture & Tier-2 CORS remain available)';
+      }
+      document.querySelectorAll('.showcase-btn[data-showcase="live_i80"]').forEach((btn) => {
+        btn.title = 'Requires local node scripts/dev_server.mjs (FFmpeg HLS relay)';
+      });
+    }
+
+    if (isStaticHostMode) {
+      isStaticHostMode = false;
+      enableStaticHostMode();
+    }
+
     async function refreshTier3LivePresets(forceRefresh = false) {
+      if (isStaticHostMode && !forceRefresh) return;
+      if (activeSurface === 'showcase' && !forceRefresh && !liveDialog.open) return;
       try {
         const url = forceRefresh ? '/api/live-presets?refresh=1' : '/api/live-presets';
         const resp = await fetch(url, { cache: 'no-store' });
-        if (!resp.ok) return;
+        if (!resp.ok) {
+          if (resp.status === 404 || resp.status === 405) enableStaticHostMode();
+          return;
+        }
         const payload = await resp.json();
         if (!payload || !Array.isArray(payload.presets) || payload.presets.length === 0) return;
         const prevVal = dom.tier3PresetSelect.value;
@@ -4798,22 +5396,32 @@
           dom.tier3PresetSelect.value = firstOnlineCam.id;
         }
       } catch (_err) {
-        // Keep built-in options if served from a plain static server
+        enableStaticHostMode();
       }
     }
 
-    // Warm camera probe in the background so live Caltrans status is ready immediately
-    setTimeout(() => { refreshTier3LivePresets(false); }, 150);
+    // Warm camera probe in the background only on deck surface with a non-static host
+    if (!isStaticHostMode && activeSurface === 'deck') {
+      setTimeout(() => { refreshTier3LivePresets(false); }, 150);
+    }
 
     function openLiveStreamModal() {
       dom.btnFallbackTier2ToTier3.hidden = true;
-      refreshTier3LivePresets(false);
+      if (isStaticHostMode) {
+        setLiveDialogBanner('Static CDN host detected: Tier-3 FFmpeg HLS relay requires running local `node scripts/dev_server.mjs`. Bundled MP4s, swarms, webcam, local MP4 drop, and Tier-2 CORS streams run 100% in your browser.');
+      } else {
+        refreshTier3LivePresets(false);
+      }
       if (!liveDialog.open) liveDialog.showModal();
     }
 
     btnLiveStream.addEventListener('click', openLiveStreamModal);
     document.getElementById('btnReopenLiveModal').addEventListener('click', openLiveStreamModal);
     document.getElementById('btnRefreshTier3Presets').addEventListener('click', () => {
+      if (isStaticHostMode) {
+        setLiveDialogBanner('Static CDN host: Tier-3 FFmpeg relay requires local `node scripts/dev_server.mjs`. Use Tier-1 Tab Capture, Tier-2 Direct CORS URL, Webcam, or bundled MP4s.');
+        return;
+      }
       setLiveDialogBanner('Probing Caltrans HLS camera endpoints...');
       refreshTier3LivePresets(true).then(() => {
         setLiveDialogBanner('Camera health probe updated. Select any [LIVE ONLINE] highway camera and click Connect.');
@@ -5172,6 +5780,10 @@
     }
 
     document.getElementById('btnStartTier3Mse').addEventListener('click', () => {
+      if (isStaticHostMode) {
+        setLiveDialogBanner('Static CDN host: Tier-3 FFmpeg HLS relay requires running local `node scripts/dev_server.mjs`.', true);
+        return;
+      }
       const customRaw = dom.tier3CustomHlsUrl.value.trim();
       if (customRaw) {
         if (!/^https?:\/\/.+/i.test(customRaw)) {
@@ -5329,18 +5941,88 @@
       }
     });
 
+    let showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
+
+    function updateShowcaseProofCards(m, medMs) {
+      if (!dom.scValKernel) return;
+      const msTxt = typeof medMs === 'number' && Number.isFinite(medMs) ? `${medMs.toFixed(2)} ms / frame` : '-- ms / frame';
+      setTextIfChanged(dom.scValKernel, msTxt);
+      setTextIfChanged(dom.scSubKernel, `2.13 MiB · 0 heap allocs · ${m.resMode ? '640×360 HD' : '320×180 SD'}`);
+
+      const c1k = m.chronos1000;
+      const shownSwaps = m.sourceMode === 'testbench' ? (m.oracleSwaps ?? 0) : (m.padicSwaps ?? 0);
+      if (c1k && c1k.swarmActive) {
+        setTextIfChanged(dom.scValTracks, `${fmtIntOrDash(c1k.confirmedCount)} active (peak ${fmtIntOrDash(c1k.peakSimultaneous)})`);
+        setTextIfChanged(dom.scSubTracks, `unique ${fmtIntOrDash(c1k.uniqueTracks)} · coast ${fmtIntOrDash(c1k.coastingCount)} · IDSW ${shownSwaps}`);
+        const hasFtle = Number.isFinite(c1k.maxFtleS1) && c1k.maxFtleS1 > -900.0;
+        const vortVal = Number.isFinite(c1k.maxVorticityS1) ? c1k.maxVorticityS1.toFixed(1) : '0.0';
+        setTextIfChanged(dom.scValPhysics, `curl ${vortVal} s⁻¹${hasFtle ? ` · FTLE ${c1k.maxFtleS1.toFixed(2)}` : ''}`);
+        setTextIfChanged(dom.scSubPhysics, `40×22 Eulerian flow · ${(c1k.fieldBackend || 'webgl2').toUpperCase()}`);
+        const insp = dom.swarmInspectReadout ? dom.swarmInspectReadout.textContent : '';
+        if (insp && !insp.startsWith('CLICK HUD')) {
+          setTextIfChanged(dom.scValInspect, insp);
+        } else {
+          setTextIfChanged(dom.scValInspect, 'Click any bird on canvas to inspect');
+        }
+      } else {
+        setTextIfChanged(dom.scValTracks, `${m.activeTargets} / 16 locks · ${m.bridgedFrames || 0}f bridges`);
+        const calLbl = dom.calBadge ? dom.calBadge.textContent : 'PX UNITS';
+        setTextIfChanged(dom.scSubTracks, `${calLbl} · 2-adic swaps ◆ ${shownSwaps}`);
+        const regTxt = dom.physRegimeBadge ? dom.physRegimeBadge.textContent : 'STANDBY';
+        const r2Txt = dom.kpiPhysicsR2 ? dom.kpiPhysicsR2.textContent : '--%';
+        setTextIfChanged(dom.scValPhysics, `${regTxt}${r2Txt && r2Txt !== '--%' ? ` · R² ${r2Txt}` : ''}`);
+        const odeTxt = dom.physicsOdeEq && dom.physicsOdeEq.textContent ? dom.physicsOdeEq.textContent : 'Weak-form STRidge/AICc + K=8 FISTA';
+        setTextIfChanged(dom.scSubPhysics, odeTxt);
+        const spdTxt = dom.kpiKinSpeed ? dom.kpiKinSpeed.textContent : '';
+        if (m.focusTrackId > 0) {
+          setTextIfChanged(dom.scValInspect, `Pinned Track T${m.focusTrackId} · ${spdTxt}`);
+        } else if (m.primaryTrackId > 0) {
+          setTextIfChanged(dom.scValInspect, `Auto Focus T${m.primaryTrackId} · ${spdTxt}`);
+        } else {
+          setTextIfChanged(dom.scValInspect, 'Click any moving target on canvas');
+        }
+      }
+      setTextIfChanged(dom.scSubInspect, showcaseInspectSubNote);
+    }
+
+    function setShowcaseWipePercent(pct, notifyWorker = true) {
+      const clamped = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+      if (dom.showcaseWipeSlider) {
+        dom.showcaseWipeSlider.value = String(clamped);
+        dom.showcaseWipeSlider.style.setProperty('--attr-min', dom.showcaseWipeSlider.min || '0');
+        dom.showcaseWipeSlider.style.setProperty('--attr-max', dom.showcaseWipeSlider.max || '100');
+        dom.showcaseWipeSlider.style.setProperty('--control-value', String(clamped));
+        dom.showcaseWipeSlider.setAttribute('aria-valuetext', `${clamped}% raw video, ${100 - clamped}% spectral wavefield`);
+      }
+      if (dom.showcaseWipeReadout) {
+        dom.showcaseWipeReadout.textContent = clamped === 0
+          ? '0% RAW · FULL SPECTRAL VIEW'
+          : clamped === 100
+          ? '100% RAW VIDEO · 0% SPECTRAL'
+          : `${clamped}% RAW · ${100 - clamped}% SPECTRAL`;
+      }
+      if (activeSurface === 'showcase' && notifyWorker) {
+        worker.postMessage({ type: 'params', rawWipeRatio: clamped / 100.0 });
+      }
+    }
+
+    function setHeroScenePressed(activeSceneKey) {
+      document.querySelectorAll('.hero-scene-btn').forEach((b) => {
+        b.setAttribute('aria-pressed', String(Boolean(activeSceneKey) && b.dataset.heroScene === activeSceneKey));
+      });
+    }
+
     async function safePlayVideo() {
       try {
         await videoEl.play();
         return true;
       } catch (err) {
-        if (err && err.name === 'AbortError') return false;
+        if (err && (err.name === 'AbortError' || err.name === 'NotAllowedError')) return false;
         throw err;
       }
     }
 
-    mp4Input.addEventListener('change', async (ev) => {
-      const file = ev.target.files && ev.target.files[0];
+    async function loadLocalVideoFile(file, fromShowcaseDrop = false) {
       if (!file) return;
       stopMediaCapture();
       const myEpoch = sourceEpoch;
@@ -5350,6 +6032,16 @@
       if (activeResMode === 0) {
         document.getElementById('btnResHd')?.click();
       }
+      if (fromShowcaseDrop || activeSurface === 'showcase') {
+        syncSwarmControlsForConfig(1, 1, 0, false);
+        setHeroTargetsVisible(true);
+        setShowcaseWipePercent(20);
+        setHeroScenePressed('');
+        showcaseInspectSubNote = 'Loaded local file in WebAssembly (0 bytes uploaded)';
+        if (dom.showcaseToolbarStatus) {
+          dom.showcaseToolbarStatus.textContent = `Loaded local video ${file.name}`;
+        }
+      }
       activeVideoFps = 30.0;
       currentObjectUrl = URL.createObjectURL(file);
       videoEl.src = currentObjectUrl;
@@ -5357,8 +6049,17 @@
       if (!(await safePlayVideo()) || myEpoch !== sourceEpoch) return;
       syncContextualSourceUi('video');
       dom.hudSourceLabel.textContent = `SOURCE: MP4 FILE (${file.name})`;
-      worker.postMessage({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+      const srcPayload = { type: 'set_source', sourceMode: 'video', fpsHint: 30 };
+      if (fromShowcaseDrop || activeSurface === 'showcase') {
+        srcPayload.swarmMode = 1;
+      }
+      worker.postMessage(srcPayload);
       startVideoPump();
+    }
+
+    mp4Input.addEventListener('change', async (ev) => {
+      const file = ev.target.files && ev.target.files[0];
+      await loadLocalVideoFile(file, activeSurface === 'showcase');
     });
 
     const showcaseClipMap = {
@@ -5409,7 +6110,20 @@
       activeVideoFps = fpsHint;
       videoEl.src = url;
       videoEl.loop = true;
-      if (!(await safePlayVideo()) || myEpoch !== sourceEpoch) return;
+      const playOk = await safePlayVideo();
+      if (!playOk) {
+        if (myEpoch === sourceEpoch && activeSurface === 'showcase' && url.includes('starling_murmuration_1000')) {
+          showcaseInspectSubNote = 'Autoplay blocked by power mode · live 1,208-target flock running';
+          syncSwarmControlsForConfig(1, 2, 1, false);
+          btnTestbench.click();
+          dom.benchScenarioSelect.value = 'murmuration_1200';
+          worker.postMessage({ type: 'set_scenario', scenario: 'murmuration_1200' });
+          setShowcaseWipePercent(28);
+          setHeroTargetsVisible(false);
+        }
+        return;
+      }
+      if (myEpoch !== sourceEpoch) return;
 
       const targetBtn = document.querySelector(`.lab-btn[data-lab="${targetLab}"]`);
       if (targetBtn && currentLabMode !== targetLab) {
@@ -5439,6 +6153,160 @@
       });
     }
 
+    function activateHeroScene(sceneKey) {
+      const targetBtn = document.querySelector(`.showcase-btn[data-showcase="${sceneKey}"]`);
+      if (!targetBtn) return;
+      showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
+      setHeroScenePressed(sceneKey);
+      if (sceneKey === 'starling_1000') {
+        setShowcaseWipePercent(28);
+        setHeroTargetsVisible(false);
+      } else {
+        setShowcaseWipePercent(0);
+        syncSwarmControlsForConfig(1, 0, 0, true);
+        setHeroTargetsVisible(true);
+      }
+      targetBtn.click();
+      if (dom.showcaseToolbarStatus) {
+        const heroBtn = document.querySelector(`.hero-scene-btn[data-hero-scene="${sceneKey}"]`);
+        dom.showcaseToolbarStatus.textContent = heroBtn ? `Active showcase: ${heroBtn.textContent.trim()}` : '';
+      }
+    }
+
+    function setSurfaceMode(nextSurface) {
+      const target = nextSurface === 'deck' ? 'deck' : 'showcase';
+      activeSurface = target;
+      document.body.dataset.surface = target;
+      if (target === 'deck') {
+        worker.postMessage({ type: 'params', showcaseMinimalScopes: false, rawWipeRatio: 0.0 });
+        if (!isStaticHostMode) {
+          refreshTier3LivePresets(false);
+        }
+        try {
+          history.replaceState(null, '', `?view=deck${location.hash}`);
+        } catch (_e) {}
+      } else {
+        const pct = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 28;
+        worker.postMessage({ type: 'params', showcaseMinimalScopes: true, rawWipeRatio: pct / 100.0 });
+        window.scrollTo(0, 0);
+        try {
+          history.replaceState(null, '', `${location.pathname}${location.hash}`);
+        } catch (_e) {}
+      }
+    }
+
+    setShowcaseWipePercent(28, false);
+    if (dom.showcaseWipeSlider) {
+      dom.showcaseWipeSlider.addEventListener('input', () => {
+        setShowcaseWipePercent(dom.showcaseWipeSlider.value, true);
+      });
+    }
+    if (dom.btnShowcasePlayPause) {
+      dom.btnShowcasePlayPause.addEventListener('click', () => {
+        if (dom.btnShowcasePlayPause.getAttribute('aria-disabled') === 'true') return;
+        dom.btnVidPlayPause.click();
+      });
+    }
+    if (dom.btnShowcaseStepFwd) {
+      dom.btnShowcaseStepFwd.addEventListener('click', () => {
+        if (dom.btnShowcaseStepFwd.getAttribute('aria-disabled') === 'true') return;
+        stepVideoByFrames(1);
+      });
+    }
+    document.querySelectorAll('.hero-scene-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        activateHeroScene(btn.dataset.heroScene);
+      });
+    });
+    const btnHeroDropMp4 = document.getElementById('btnHeroDropMp4');
+    if (btnHeroDropMp4) {
+      btnHeroDropMp4.addEventListener('click', () => {
+        mp4Input.click();
+      });
+    }
+    const btnHeroWebcam = document.getElementById('btnHeroWebcam');
+    if (btnHeroWebcam) {
+      btnHeroWebcam.addEventListener('click', () => {
+        setHeroScenePressed('');
+        syncSwarmControlsForConfig(1, 1, 0, true);
+        setHeroTargetsVisible(true);
+        setShowcaseWipePercent(20);
+        showcaseInspectSubNote = 'Live webcam pixels streaming into local Wasm';
+        if (dom.showcaseToolbarStatus) {
+          dom.showcaseToolbarStatus.textContent = 'Requesting live webcam feed';
+        }
+        btnWebcam.click();
+      });
+    }
+    if (dom.btnOpenFullDeck) {
+      dom.btnOpenFullDeck.addEventListener('click', () => setSurfaceMode('deck'));
+    }
+    if (dom.btnReturnShowcase) {
+      dom.btnReturnShowcase.addEventListener('click', () => setSurfaceMode('showcase'));
+    }
+
+    // Drag-and-drop MP4/WebM directly onto Showcase canvas or dock (zero bytes uploaded)
+    const dropTargets = [dom.hudPanel, document.getElementById('showcaseActionDock')].filter(Boolean);
+    let dropDepth = 0;
+    dropTargets.forEach((el) => {
+      el.addEventListener('dragenter', (ev) => {
+        ev.preventDefault();
+        dropDepth++;
+        if (dom.hudPanel) dom.hudPanel.dataset.dropActive = 'true';
+      });
+      el.addEventListener('dragover', (ev) => {
+        ev.preventDefault();
+        if (ev.dataTransfer) ev.dataTransfer.dropEffect = 'copy';
+      });
+      el.addEventListener('dragleave', () => {
+        dropDepth = Math.max(0, dropDepth - 1);
+        if (dropDepth === 0 && dom.hudPanel) delete dom.hudPanel.dataset.dropActive;
+      });
+      el.addEventListener('drop', async (ev) => {
+        ev.preventDefault();
+        dropDepth = 0;
+        if (dom.hudPanel) delete dom.hudPanel.dataset.dropActive;
+        const file = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+        if (file) {
+          await loadLocalVideoFile(file, true);
+        }
+      });
+    });
+
+    // Showcase Toolbar roving-tabindex fallback when native focusgroup is unavailable (modern-web-guidance: toolbar)
+    if (dom.showcaseToolbar && !('focusGroup' in HTMLElement.prototype)) {
+      const bar = dom.showcaseToolbar;
+      const barItems = Array.from(bar.querySelectorAll('button'));
+      barItems.forEach((b, i) => {
+        b.tabIndex = i ? -1 : 0;
+      });
+      bar.addEventListener('focusin', ({ target }) => {
+        if (barItems.includes(target)) {
+          barItems.forEach((b) => {
+            b.tabIndex = b === target ? 0 : -1;
+          });
+        }
+      });
+      bar.addEventListener('keydown', (ev) => {
+        const idx = barItems.indexOf(document.activeElement);
+        if (idx < 0) return;
+        const rtl = getComputedStyle(bar).direction === 'rtl';
+        const steps = { ArrowRight: rtl ? -1 : 1, ArrowLeft: rtl ? 1 : -1 };
+        let nextIdx = -1;
+        if (Object.hasOwn(steps, ev.key)) {
+          nextIdx = (idx + steps[ev.key] + barItems.length) % barItems.length;
+        } else if (ev.key === 'Home') {
+          nextIdx = 0;
+        } else if (ev.key === 'End') {
+          nextIdx = barItems.length - 1;
+        }
+        if (nextIdx >= 0) {
+          ev.preventDefault();
+          barItems[nextIdx].focus();
+        }
+      });
+    }
+
     document.querySelectorAll('.showcase-btn').forEach((btn) => {
       btn.addEventListener('click', () => {
         pendingShowcaseCal = '';
@@ -5448,6 +6316,10 @@
           document.getElementById('btnResHd')?.click();
         }
         if (key === 'live_i80') {
+          if (isStaticHostMode) {
+            openLiveStreamModal();
+            return;
+          }
           dom.tier3CustomHlsUrl.value = '';
           const i80Opt = dom.tier3PresetSelect.querySelector('option[value="caltrans_d4_i80_ashby"]');
           const i80Offline = i80Opt && i80Opt.textContent.includes('[OFFLINE]');

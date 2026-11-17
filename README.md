@@ -63,7 +63,7 @@ Each subsystem is cleanly factored with narrow dependencies under the [Apache Li
 
 Prerequisites: Rust toolchain with `wasm32-unknown-unknown`, `node` (`v22+`), and `python3`. Install `wabt` (`wasm-objdump`), `ffmpeg`, and Google Chrome to run the full MP4 calibration and headless Chrome E2E verification suites.
 
-Compile `web/chronos_spectral.wasm`, run all static/mathematical/swarm gates (`--check`), and start the local Command Deck at `http://127.0.0.1:8080`:
+Compile `web/chronos_spectral.wasm`, run all static/mathematical/swarm gates (`--check`), and start the local server at `http://127.0.0.1:8080` (serving the interactive Split-Wipe Showcase at `/`, with the full 15-panel Command Deck at `/?view=deck` or `/deck.html`):
 
 ```bash
 ./build.sh
@@ -75,7 +75,7 @@ Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical
 ./build.sh --check
 ```
 
-Run the complete verification pipeline (`--check`, SD/HD MP4 CLEAR-MOT & physics calibration gates, and headless Chrome CDP Steps `1-7` including live fMP4 `MediaSource` camera-cut recovery):
+Run the complete verification pipeline (`--check`, SD/HD MP4 CLEAR-MOT & physics calibration gates, and headless Chrome CDP Steps `1-8` covering the full Command Deck, Showcase Split-Wipe surface, and live fMP4 `MediaSource` camera-cut recovery):
 
 ```bash
 ./build.sh --e2e
@@ -163,9 +163,9 @@ In paired sparse-mode parity testing across all 13 non-swarm sample clips (`52/5
 - [src/continuum_physics.rs](./src/continuum_physics.rs): Zero-`unsafe` `k`-NN strain, `SE(2)` rigid-body clustering, `40x22` Eulerian velocity gradients, 2-bank Cauchy-Green FTLE, modal accelerometers (`R_2`), and validity masking.
 - [src/physics_id.rs](./src/physics_id.rs): Weak-form STRidge/AICc symbolic ODE discovery, `f64` Jacobi Taubin circle fitting, AGM elliptic pendulum period, Rosenstein `4D` Lyapunov divergence, Kuramoto synchronization, and two-body collision conservation.
 - [src/simd_ops.rs](./src/simd_ops.rs): `v128` SIMD kernels (`0` `MaybeUninit`) for RGBA unpacking, Rank-2 ECA projection, sub-pixel Catmull-Rom pan advection, Shi-Tomasi cornerness, `i32.clz` Haar-Morton wavelets, zero-mean gain-invariant patch SAD, and IC-LK refinement.
-- [web/](./web/): Command Deck UI ([web/index.html](./web/index.html)), Worker + WebGL2 field compositor ([web/worker.js](./web/worker.js)), prebuilt `web/chronos_spectral.wasm`, and 14 open-licensed `640x360` MP4 clips ([web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md)).
+- [web/](./web/): Interactive Split-Wipe Showcase and Command Deck UI ([web/index.html](./web/index.html), [web/deck.html](./web/deck.html)), Worker + WebGL2 field compositor ([web/worker.js](./web/worker.js)), prebuilt `web/chronos_spectral.wasm`, and 14 open-licensed `640x360` MP4 clips ([web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md)).
 - [scripts/](./scripts/): Static/math/E2E gates ([build.sh](./build.sh), [scripts/e2e_browser.mjs](./scripts/e2e_browser.mjs), [scripts/calibrate_mp4.mjs](./scripts/calibrate_mp4.mjs), [scripts/benchmark_1000.mjs](./scripts/benchmark_1000.mjs)), HTTP 206 / fMP4 live relay server ([scripts/dev_server.mjs](./scripts/dev_server.mjs)), and documentation media generator ([scripts/capture_docs_media.mjs](./scripts/capture_docs_media.mjs)).
-- [.github/workflows/ci.yml](./.github/workflows/ci.yml): Runs `./build.sh --e2e` on every push and pull request against `main`.
+- [.github/workflows/ci.yml](./.github/workflows/ci.yml) and [.github/workflows/pages.yml](./.github/workflows/pages.yml): Full `./build.sh --e2e` verification CI pipeline plus automatic GitHub Pages static deployment of [web/](./web/) for public builds.
 
 ## Scope limits
 

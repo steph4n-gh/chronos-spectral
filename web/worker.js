@@ -246,6 +246,8 @@ let showKalmanBaseline = true;
 let showHeroTargets = true;
 let showAllOverlays = false;
 let lastOverlaySyncSeq = 0;
+let rawWipeRatio = 0.0;
+let showcaseMinimalScopes = false;
 let strobeEnabled = true;
 const cropNorm = new Float64Array([0.0, 0.0, 1.0, 1.0]); // [x, y, w, h] in [0..1]
 
@@ -4529,15 +4531,17 @@ function renderMainHud(dispSlot) {
   const ecaTag = showEcaOverlay ? ' | ECA@t' : '';
   const shownSwaps = sourceMode === 'testbench' ? oraclePadicSwaps : Math.round(telemView[5]);
 
-  hudCtx.fillStyle = 'rgba(6, 10, 18, 0.82)';
-  hudCtx.fillRect(10, 10, 598, 24);
-  hudCtx.fillStyle = '#8ef9f3';
-  hudCtx.font = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
-  hudCtx.fillText(
-    `VIEW [t-${effK}] ${frameW}x${frameH} | ECA ${clutterStr} | IDSW:${shownSwaps} | KAL:${Math.round(telemView[6])}${ecaTag}`,
-    16,
-    26
-  );
+  if (rawWipeRatio <= 0.002) {
+    hudCtx.fillStyle = 'rgba(6, 10, 18, 0.82)';
+    hudCtx.fillRect(10, 10, 598, 24);
+    hudCtx.fillStyle = '#8ef9f3';
+    hudCtx.font = '600 10.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(
+      `VIEW [t-${effK}] ${frameW}x${frameH} | ECA ${clutterStr} | IDSW:${shownSwaps} | KAL:${Math.round(telemView[6])}${ecaTag}`,
+      16,
+      26
+    );
+  }
 
   const camState = Math.round(telemView[TELEM_GLOBAL + 9]);
   if (camState > 0 && sourceMode !== 'testbench') {
@@ -4606,6 +4610,69 @@ function renderMainHud(dispSlot) {
     hudCtx.fillStyle = calProvenance === 'assumed' ? '#ffd166' : '#00e5ff';
     hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
     hudCtx.fillText(calShort, W - cw - 2, H - 17);
+  }
+
+  if (rawWipeRatio > 0.002) {
+    const wipeX = Math.round(Math.max(0, Math.min(W, rawWipeRatio * W)));
+    if (wipeX > 0) {
+      hudCtx.save();
+      hudCtx.beginPath();
+      hudCtx.rect(0, 0, wipeX, H);
+      hudCtx.clip();
+      hudCtx.imageSmoothingEnabled = false;
+      hudCtx.drawImage(dispStageCanvas, 0, 0, W, H);
+      if (wipeX >= 124) {
+        const badgeW = Math.min(168, wipeX - 16);
+        hudCtx.fillStyle = 'rgba(5, 8, 15, 0.86)';
+        hudCtx.fillRect(10, 10, badgeW, 24);
+        hudCtx.strokeStyle = 'rgba(236, 244, 255, 0.38)';
+        hudCtx.lineWidth = 1;
+        hudCtx.strokeRect(10, 10, badgeW, 24);
+        hudCtx.fillStyle = '#ecf4ff';
+        hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText(`RAW PIXELS [t-${effK}]`, 18, 26);
+      }
+      hudCtx.restore();
+
+      if (wipeX < W) {
+        const rightGap = W - 276 - (wipeX + 10);
+        if (rightGap >= 156) {
+          const specTxt = rightGap >= 336
+            ? `SPECTRAL [t-${effK}] | ECA ${clutterStr} | IDSW:${shownSwaps}`
+            : `SPECTRAL [t-${effK}] | IDSW:${shownSwaps}`;
+          const sw = Math.min(rightGap, Math.max(156, specTxt.length * 6.4 + 16));
+          hudCtx.save();
+          hudCtx.fillStyle = 'rgba(6, 10, 18, 0.86)';
+          hudCtx.fillRect(wipeX + 10, 10, sw, 24);
+          hudCtx.strokeStyle = 'rgba(0, 229, 255, 0.42)';
+          hudCtx.lineWidth = 1;
+          hudCtx.strokeRect(wipeX + 10, 10, sw, 24);
+          hudCtx.fillStyle = '#8ef9f3';
+          hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          hudCtx.fillText(specTxt, wipeX + 18, 26);
+          hudCtx.restore();
+        }
+        hudCtx.save();
+        hudCtx.strokeStyle = '#00e5ff';
+        hudCtx.lineWidth = 2;
+        hudCtx.beginPath();
+        hudCtx.moveTo(wipeX + 0.5, 0);
+        hudCtx.lineTo(wipeX + 0.5, H);
+        hudCtx.stroke();
+
+        const pillY = Math.round(H * 0.5) - 12;
+        const pillX = Math.max(6, Math.min(W - 58, wipeX - 27));
+        hudCtx.fillStyle = 'rgba(5, 10, 18, 0.92)';
+        hudCtx.fillRect(pillX, pillY, 54, 24);
+        hudCtx.strokeStyle = '#00e5ff';
+        hudCtx.lineWidth = 1.4;
+        hudCtx.strokeRect(pillX, pillY, 54, 24);
+        hudCtx.fillStyle = '#00e5ff';
+        hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+        hudCtx.fillText('◀ │ ▶', pillX + 9, pillY + 15);
+        hudCtx.restore();
+      }
+    }
   }
 }
 
@@ -6224,6 +6291,8 @@ function emitTelemetrySnapshot() {
     showHeroTargets,
     showAllOverlays,
     overlaySyncSeq: lastOverlaySyncSeq,
+    rawWipeRatio,
+    showcaseMinimalScopes,
     swarmMode,
     cropNorm: [cropNorm[0], cropNorm[1], cropNorm[2], cropNorm[3]],
     arenaBytes: Math.round(telemView[20]),
@@ -6511,12 +6580,9 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
 
   // Render all OffscreenCanvases inside Worker isolate
   renderMainHud(dispSlot);
-  renderEulerianPip();
-  renderAllSlotPips(true);
-  renderHilbertScope();
-  renderSpectralAndRingScope();
-  renderPersistenceTimeline(false);
-  renderPhysicsPhaseCanvas(false);
+  if (!showcaseMinimalScopes) {
+    renderSecondaryScopes(true, false);
+  }
 
   // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 56 columns)
   if (recActive) {
@@ -6692,16 +6758,22 @@ function configureResolutionViews(mode) {
   resetTestbenchState();
 }
 
+function renderSecondaryScopes(slotFast, fullHist) {
+  renderEulerianPip();
+  renderAllSlotPips(slotFast);
+  renderHilbertScope();
+  renderSpectralAndRingScope();
+  renderPersistenceTimeline(fullHist);
+  renderPhysicsPhaseCanvas(fullHist);
+}
+
 function redrawPausedHudIfReady() {
   if (wasmExports && telemView && Math.round(telemView[0]) > 0) {
     const dispSlot = Math.round(telemView[2]);
     renderMainHud(dispSlot);
-    renderEulerianPip();
-    renderAllSlotPips(false);
-    renderHilbertScope();
-    renderSpectralAndRingScope();
-    renderPersistenceTimeline(true);
-    renderPhysicsPhaseCanvas(true);
+    if (!showcaseMinimalScopes) {
+      renderSecondaryScopes(false, true);
+    }
     emitTelemetrySnapshot();
   }
 }
@@ -7162,6 +7234,15 @@ self.onmessage = async (ev) => {
         TELEMETRY_LEN
       );
 
+      if (typeof msg.showcaseMinimalScopes === 'boolean') {
+        showcaseMinimalScopes = msg.showcaseMinimalScopes;
+      }
+      if (typeof msg.rawWipeRatio === 'number' && Number.isFinite(msg.rawWipeRatio)) {
+        rawWipeRatio = Math.max(0.0, Math.min(1.0, msg.rawWipeRatio));
+      }
+      if (typeof msg.showHeroTargets === 'boolean') {
+        showHeroTargets = msg.showHeroTargets;
+      }
       configureResolutionViews(msg.resMode || 0);
       applySceneCalibrationPreset('testbench');
       running = true;
@@ -7392,6 +7473,16 @@ self.onmessage = async (ev) => {
     if (typeof msg.strobeEnabled === 'boolean') {
       visualFlagChanged = visualFlagChanged || strobeEnabled !== msg.strobeEnabled;
       strobeEnabled = msg.strobeEnabled;
+    }
+    if (typeof msg.rawWipeRatio === 'number' && Number.isFinite(msg.rawWipeRatio)) {
+      const clamped = Math.max(0.0, Math.min(1.0, msg.rawWipeRatio));
+      visualFlagChanged = visualFlagChanged || Math.abs(rawWipeRatio - clamped) > 1e-4;
+      rawWipeRatio = clamped;
+    }
+    if (typeof msg.showcaseMinimalScopes === 'boolean') {
+      const wakingScopes = showcaseMinimalScopes && !msg.showcaseMinimalScopes;
+      showcaseMinimalScopes = msg.showcaseMinimalScopes;
+      if (wakingScopes) visualFlagChanged = true;
     }
     if (typeof msg.audioOutLatencySec === 'number') {
       audioOutLatencySec = msg.audioOutLatencySec;
