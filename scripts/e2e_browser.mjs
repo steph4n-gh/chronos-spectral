@@ -184,13 +184,25 @@ class CdpClient {
   }
 }
 
-async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs = 14000) {
+async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs = 14000, allowNavigation = false) {
   const ciTimeoutScale = Math.max(1.0, Math.min(2.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0') * 0.6));
   const deadline = Date.now() + Math.round(timeoutMs * ciTimeoutScale);
   let lastVal = null;
   while (Date.now() < deadline) {
-    lastVal = await cdp.evalJs(sessionId, jsExpr);
-    if (lastVal && lastVal.ok) return lastVal;
+    try {
+      lastVal = await cdp.evalJs(sessionId, jsExpr);
+      if (lastVal && lastVal.ok) return lastVal;
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      if (
+        allowNavigation &&
+        /Inspected target navigated or closed|Execution context was destroyed|Cannot find context/i.test(msg)
+      ) {
+        lastVal = { navInFlight: msg };
+      } else {
+        throw err;
+      }
+    }
     await new Promise((r) => setTimeout(r, 90));
   }
   throw new Error(`Timeout waiting for [${description}]. Last state: ${JSON.stringify(lastVal)}`);
@@ -2947,6 +2959,7 @@ async function main() {
         await cdp.send('Page.enable', {}, scSession);
         await cdp.send('Log.enable', {}, scSession);
         await cdp.send('Runtime.enable', {}, scSession);
+        await cdp.send('Target.closeTarget', { targetId }).catch(() => {});
         await cdp.send(
           'Emulation.setDeviceMetricsOverride',
           { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
@@ -2960,7 +2973,8 @@ async function main() {
           `(() => ({
             ok: document.body?.dataset?.surface === 'showcase' && Boolean(document.getElementById('showcaseWipeSlider'))
           }))()`,
-          8000
+          8000,
+          true
         );
         await cdp.evalJs(
           scSession,
@@ -3244,7 +3258,8 @@ async function main() {
             ok: document.body?.dataset?.staticHost === 'true' && document.body?.dataset?.surface === 'showcase',
             staticHost: document.body?.dataset?.staticHost,
           }))()`,
-          8000
+          8000,
+          true
         );
         await new Promise((r) => setTimeout(r, 250));
 
@@ -3256,7 +3271,8 @@ async function main() {
           `(() => ({
             ok: location.search.includes('view=deck') && document.body?.dataset?.surface === 'deck',
           }))()`,
-          8000
+          8000,
+          true
         );
 
         console.log(
