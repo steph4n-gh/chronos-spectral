@@ -1,12 +1,18 @@
 # CHRONOS-SPECTRAL
 
+[![Live Showcase](https://img.shields.io/badge/Live_Demo-Split--Wipe_Showcase-00b8d4)](https://steph4n-gh.github.io/chronos-spectral/)
+[![CI](https://github.com/steph4n-gh/chronos-spectral/actions/workflows/ci.yml/badge.svg)](https://github.com/steph4n-gh/chronos-spectral/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](./LICENSE)
+
+**[Launch Interactive Split-Wipe Showcase ->](https://steph4n-gh.github.io/chronos-spectral/)** · **[Open Full 15-Panel Command Deck ->](https://steph4n-gh.github.io/chronos-spectral/?view=deck)** · **[Architecture & Math](./docs/ARCHITECTURE_AND_MATH.md)** · **[UI & Telemetry Guide](./docs/UI_TELEMETRY_GUIDE.md)** · **[Benchmarks](./docs/VERIFICATION_AND_BENCHMARKS.md)**
 
 CHRONOS-SPECTRAL turns raw video pixels directly into occlusion-bridged trajectories, symbolic differential equations, and continuum flow fields in under 2 milliseconds per CPU frame. It solves tracking, phase measurement, and system identification from classical signal processing and variational mechanics rather than trained neural networks.
 
 Everything runs inside one `2.13 MiB` (`2,234,437 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `20.00 MB` (`320`-page) static arena. The kernel has zero host imports, zero runtime heap allocations, zero GPU compute dependencies, zero `MaybeUninit` blocks, and zero `unsafe` code inside the continuum physics module.
 
 ## Live demonstrations
+
+> **Try it live in your browser (zero install, zero upload):** Open the **[Interactive Split-Wipe Showcase](https://steph4n-gh.github.io/chronos-spectral/)** to drag the `t - K` raw-vs-spectral split-wipe across `1,400+` starlings and full-flight model rockets, drop any local MP4 onto the canvas (`0` bytes leave your device), or switch into the **[Full 15-Panel Command Deck](https://steph4n-gh.github.io/chronos-spectral/?view=deck)**.
 
 <table>
   <tr>
