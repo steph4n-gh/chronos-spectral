@@ -12,7 +12,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_WASM = path.join(ROOT, 'web', 'chronos_spectral.wasm');
 const wasmArg = process.argv.slice(2).find((a) => a.startsWith('--wasm='));
 const WASM_PATH = wasmArg ? path.resolve(wasmArg.slice('--wasm='.length)) : DEFAULT_WASM;
@@ -256,8 +256,8 @@ for (const bad of [
 // ----------------------------------------------------------------------------
 const case1Point = stageEval(
   makeInput({
-    p1: [100, 90, 150, 0, 1.0, 6.0],
-    p2: [160, 90, -150, 0, 1.0, 6.0],
+    p1: [100, 90, 150, 0, 1.0, 0.0],
+    p2: [160, 90, -150, 0, 1.0, 0.0],
     a: [100, 90, -150, 0],
     b: [160, 90, 150, 0],
     dt: 0.40,
@@ -284,6 +284,50 @@ assertNear(case1Point.angMomResid, 0.0, 1e-4, 'Case 1 angMomResid');
 assertNear(case1Point.deltaKeRatio, 0.0, 1e-4, 'Case 1 deltaKeRatio');
 assertNear(case1Point.e, 1.0, 1e-3, 'Case 1 restitution');
 assertNear(case1Point.tau, 0.20, 1e-3, 'Case 1 tau');
+
+// H1 rejections: severe interpenetration at fitted tau and closing post-impact (e = -0.01) must fail H1
+{
+  const interpen = stageEval(
+    makeInput({
+      p1: [-10, 0, 10, 0, 1.0, 6.0],
+      p2: [10, 0, -10, 0, 1.0, 6.0],
+      a: [-5, 0, -5, 0],
+      b: [5, 0, 5, 0],
+      dt: 2.0,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(interpen.status, OCCL_STATUS_VIOLATED, 'Deep interpenetration with r=6 must be VIOLATED');
+  assert.equal(interpen.mask & (HYP_COLLISION_KEEP | HYP_COLLISION_SWAP), 0, 'Deep interpenetration must reject H1');
+
+  const stillClosing = stageEval(
+    makeInput({
+      p1: [-30, 0, 30, 0, 1.0, 0.0],
+      p2: [10, 0, -10, 0, 3.0, 0.0],
+      a: [0.3, 0, 0.3, 0],
+      b: [-0.1, 0, -0.1, 0],
+      dt: 2.0,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(stillClosing.status, OCCL_STATUS_VIOLATED, 'Negative restitution e=-0.01 must be VIOLATED');
+  assert.equal(stillClosing.mask & (HYP_COLLISION_KEEP | HYP_COLLISION_SWAP), 0, 'Still-closing exit must reject H1');
+
+  const extremeMass = stageEval(
+    makeInput({
+      p1: [10, 10, 0, 0, 1e-37, 0.0],
+      p2: [50, 10, 0, 0, 1e37, 0.0],
+      a: [10, 10, 0, 0],
+      b: [50, 10, 0, 0],
+      dt: 1.0,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(extremeMass.status, OCCL_STATUS_NONE, 'Unrepresentable 1e37/1e-37 mass ratio must fail closed to NONE');
+  for (let k = 0; k < 32; k++) {
+    assert.equal(consTelem[k], 0.0, `Expected zeroed telemetry[${k}] on extreme mass overflow`);
+  }
+}
 
 // Hard-sphere surface-contact bounce within position uncertainty also keeps both branches admissible
 const case1Disc = stageEval(
@@ -509,13 +553,13 @@ let case4;
 // ----------------------------------------------------------------------------
 // Case 5: Live Wasm Frame-Loop Co-Occlusion Test (lab_mode = 2)
 // ----------------------------------------------------------------------------
-function buildBgWithCentralBar() {
+function buildBgWithCentralBar(barY0 = 14, barY1 = 166) {
   const out = new Uint8Array(BYTES);
   const gStep = 24;
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       const idx = (y * W + x) * 4;
-      const inBar = x >= 136 && x < 184 && y >= 14 && y < 166;
+      const inBar = x >= 136 && x < 184 && y >= barY0 && y < barY1;
       if (inBar) {
         const v = (x === 136 || x === 183) ? 58 : 34 + ((y >> 3) & 3);
         out[idx] = v;
@@ -535,8 +579,8 @@ function buildBgWithCentralBar() {
   return out;
 }
 
-function paintBarOverlay(bufRgba) {
-  for (let y = 14; y < 166; y++) {
+function paintBarOverlay(bufRgba, barY0 = 14, barY1 = 166) {
+  for (let y = barY0; y < barY1; y++) {
     for (let x = 136; x < 184; x++) {
       const idx = (y * W + x) * 4;
       const v = (x === 136 || x === 183) ? 58 : 34 + ((y >> 3) & 3);
@@ -581,8 +625,18 @@ function pushLiveFrame(frameBuf, seq, ptsUs) {
   exp.chronos_tick(1 / 60);
 }
 
-function runLiveCoOcclusionScene({ boostA = 1.0, boostB = 1.0 }) {
-  const bg = buildBgWithCentralBar();
+function runLiveCoOcclusionScene({
+  boostA = 1.0,
+  boostB = 1.0,
+  barY0 = 14,
+  barY1 = 166,
+  y0 = 90.0,
+  y1 = 90.0,
+  noBounce = false,
+  skipSeqAt50 = false,
+  expectNoValidStamp = false,
+}) {
+  const bg = buildBgWithCentralBar(barY0, barY1);
   const frameBuf = new Uint8Array(BYTES);
 
   exp.chronos_init();
@@ -615,7 +669,7 @@ function runLiveCoOcclusionScene({ boostA = 1.0, boostB = 1.0 }) {
   for (let f = 0; f < 90; f++) {
     x0 += vx0;
     x1 += vx1;
-    if (!bounced && x1 - x0 <= 11.0) {
+    if (!noBounce && !bounced && x1 - x0 <= 11.0) {
       bounced = true;
       const tmp = vx0;
       vx0 = vx1 * boostA;
@@ -623,10 +677,13 @@ function runLiveCoOcclusionScene({ boostA = 1.0, boostB = 1.0 }) {
     }
 
     frameBuf.set(bg);
-    stampDisc(frameBuf, x0, 90.0, 6.2, 248, 58, 68, 255, 230, 110);
-    stampDisc(frameBuf, x1, 90.0, 6.2, 30, 225, 250, 15, 45, 85);
-    paintBarOverlay(frameBuf);
+    stampDisc(frameBuf, x0, y0, 6.2, 248, 58, 68, 255, 230, 110);
+    stampDisc(frameBuf, x1, y1, 6.2, 30, 225, 250, 15, 45, 85);
+    paintBarOverlay(frameBuf, barY0, barY1);
 
+    if (skipSeqAt50 && f === 50) {
+      seq += 1;
+    }
     pushLiveFrame(frameBuf, seq++, ptsUs);
     ptsUs += dtUs;
 
@@ -675,9 +732,14 @@ function runLiveCoOcclusionScene({ boostA = 1.0, boostB = 1.0 }) {
       sawHeldAfterFresh = true;
     }
 
-    if (activeConfirmed >= 2 && liveStampFrame >= 0 && sawHeldAfterFresh && f >= liveStampFrame + 3) {
+    if (!expectNoValidStamp && activeConfirmed >= 2 && liveStampFrame >= 0 && sawHeldAfterFresh && f >= liveStampFrame + 3) {
       break;
     }
+  }
+
+  if (expectNoValidStamp) {
+    assert.equal(liveStampFrame, -1, 'Expected zero PROD_W2_CONSERVATION emissions under non-co-occluding / epoch-reset scenario');
+    return { maxCoastActive, liveStampFrame };
   }
 
   assert(!stampBeforeEmergenceValid, 'PROD_W2_CONSERVATION must not become valid before co-occlusion occurs or while coasting');
@@ -728,6 +790,24 @@ assert(
   liveViolated.netImpulse > liveViolated.envBound,
   `Live boosted co-occlusion expected netImpulse (${liveViolated.netImpulse}) > envBound (${liveViolated.envBound})`
 );
+
+// Single-coasting disc (disc 1 at y=111 outside [78..102] bar, no bounce) must NOT trigger co-occlusion
+runLiveCoOcclusionScene({
+  barY0: 78,
+  barY1: 102,
+  y0: 90.0,
+  y1: 111.0,
+  noBounce: true,
+  expectNoValidStamp: true,
+});
+
+// Continuity-epoch skip during occlusion (f=50) must reset pending conservation tracking
+runLiveCoOcclusionScene({
+  boostA: 1.0,
+  boostB: 1.0,
+  skipSeqAt50: true,
+  expectNoValidStamp: true,
+});
 
 console.log(
   `[PASS] Gate I5b (Case1 mask=${case1Point.mask} status=${case1Point.status} e=${case1Point.e.toFixed(3)} | ` +

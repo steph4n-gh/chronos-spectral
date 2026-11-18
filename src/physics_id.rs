@@ -103,6 +103,24 @@ fn hypot_f32(x: f32, y: f32) -> f32 {
 }
 
 #[inline(always)]
+fn hypot_f64(x: f64, y: f64) -> f64 {
+    let ax = x.abs();
+    let ay = y.abs();
+    let hi = ax.max(ay);
+    if hi == 0.0 {
+        0.0
+    } else {
+        let r = ax.min(ay) / hi;
+        hi * wasm_sqrtd(1.0 + r * r)
+    }
+}
+
+#[inline(always)]
+fn f64_fits_f32(x: f64) -> bool {
+    x.is_finite() && x.abs() <= (f32::MAX as f64)
+}
+
+#[inline(always)]
 fn fast_sin_cos(x: f32) -> (f32, f32) {
     (fast_sinf(x), fast_cosf(x))
 }
@@ -4651,7 +4669,8 @@ pub struct OcclPairTrackState {
     pub occl_seen_mask: u8,
     pub max_coast_a: u8,
     pub max_coast_b: u8,
-    pub _pad: u32,
+    pub co_coast_frames: u8,
+    pub _pad: [u8; 3],
 }
 
 impl OcclPairTrackState {
@@ -4683,7 +4702,8 @@ impl OcclPairTrackState {
             occl_seen_mask: 0,
             max_coast_a: 0,
             max_coast_b: 0,
-            _pad: 0,
+            co_coast_frames: 0,
+            _pad: [0; 3],
         }
     }
 
@@ -4714,7 +4734,8 @@ impl OcclPairTrackState {
         self.occl_seen_mask = 0;
         self.max_coast_a = 0;
         self.max_coast_b = 0;
-        self._pad = 0;
+        self.co_coast_frames = 0;
+        self._pad = [0; 3];
     }
 }
 
@@ -4728,6 +4749,7 @@ pub struct OccludedConservationState {
     pub live_event_seq: u32,
     pub last_frame_idx: u32,
     pub last_discont_seen: u32,
+    pub last_continuity_epoch: u32,
     pub has_last_frame: u8,
     pub _pad: [u8; 3],
 }
@@ -4736,60 +4758,61 @@ const _: () = assert!(core::mem::size_of::<OccludedConservationState>() <= 8_192
 
 #[derive(Clone, Copy)]
 struct AssignConservationEval {
-    j_net_mag: f32,
-    mom_resid_norm: f32,
-    ang_mom_resid_norm_trap: f32,
-    ang_mom_resid_norm_h1: f32,
-    d_lz_trap: f32,
-    dk: f32,
-    delta_ke_ratio: f32,
-    eps_k: f32,
-    l_env_max: f32,
-    l_scale: f32,
+    j_net_mag: f64,
+    mom_resid_norm: f64,
+    ang_mom_resid_norm_trap: f64,
+    ang_mom_resid_norm_h1: f64,
+    d_lz_trap: f64,
+    dk: f64,
+    delta_ke_ratio: f64,
+    eps_k: f64,
+    l_env_max: f64,
+    l_scale: f64,
     h0_ok: bool,
-    h0_chi2: f32,
-    h0_imp_resid: f32,
+    h0_chi2: f64,
+    h0_imp_resid: f64,
     h1_ok: bool,
-    h1_chi2: f32,
-    h1_imp_resid: f32,
-    h1_tau: f32,
-    h1_e_clamped: f32,
+    h1_chi2: f64,
+    h1_imp_resid: f64,
+    h1_tau: f64,
+    h1_e_clamped: f64,
+    finite_ok: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn eval_occluded_assignment(
-    x1_pre: f32,
-    y1_pre: f32,
-    vx1_pre: f32,
-    vy1_pre: f32,
-    m1: f32,
-    r1: f32,
-    x2_pre: f32,
-    y2_pre: f32,
-    vx2_pre: f32,
-    vy2_pre: f32,
-    m2: f32,
-    r2: f32,
-    x1_out: f32,
-    y1_out: f32,
-    vx1_out: f32,
-    vy1_out: f32,
-    x2_out: f32,
-    y2_out: f32,
-    vx2_out: f32,
-    vy2_out: f32,
-    dt: f32,
-    g_y: f32,
-    drag_beta_max: f32,
-    a_np: f32,
-    a_env_1: f32,
-    a_env_2: f32,
-    v_drag_1: f32,
-    v_drag_2: f32,
-    sigma_pos: f32,
-    sigma_vel: f32,
-    j_env_max: f32,
+    x1_pre: f64,
+    y1_pre: f64,
+    vx1_pre: f64,
+    vy1_pre: f64,
+    m1: f64,
+    r1: f64,
+    x2_pre: f64,
+    y2_pre: f64,
+    vx2_pre: f64,
+    vy2_pre: f64,
+    m2: f64,
+    r2: f64,
+    x1_out: f64,
+    y1_out: f64,
+    vx1_out: f64,
+    vy1_out: f64,
+    x2_out: f64,
+    y2_out: f64,
+    vx2_out: f64,
+    vy2_out: f64,
+    dt: f64,
+    g_y: f64,
+    drag_beta_max: f64,
+    a_np: f64,
+    a_env_1: f64,
+    a_env_2: f64,
+    v_drag_1: f64,
+    v_drag_2: f64,
+    sigma_pos: f64,
+    sigma_vel: f64,
+    j_env_max: f64,
 ) -> AssignConservationEval {
     let x_ref = 0.5 * (x1_pre + x2_pre);
     let y_ref = 0.5 * (y1_pre + y2_pre);
@@ -4799,10 +4822,10 @@ fn eval_occluded_assignment(
     let v1_out_sq = vx1_out * vx1_out + vy1_out * vy1_out;
     let v2_out_sq = vx2_out * vx2_out + vy2_out * vy2_out;
 
-    let v1_pre_mag = sqrt_f32(v1_pre_sq);
-    let v2_pre_mag = sqrt_f32(v2_pre_sq);
-    let v1_out_mag = sqrt_f32(v1_out_sq);
-    let v2_out_mag = sqrt_f32(v2_out_sq);
+    let v1_pre_mag = hypot_f64(vx1_pre, vy1_pre);
+    let v2_pre_mag = hypot_f64(vx2_pre, vy2_pre);
+    let v1_out_mag = hypot_f64(vx1_out, vy1_out);
+    let v2_out_mag = hypot_f64(vx2_out, vy2_out);
 
     // Net non-gravitational impulse across [0, dt]
     let p_pre_x = m1 * vx1_pre + m2 * vx2_pre;
@@ -4812,18 +4835,15 @@ fn eval_occluded_assignment(
     let j_grav_y = (m1 + m2) * g_y * dt;
     let j_net_x = p_post_x - p_pre_x;
     let j_net_y = (p_post_y - p_pre_y) - j_grav_y;
-    let j_net_mag = hypot_f32(j_net_x, j_net_y);
+    let j_net_mag = hypot_f64(j_net_x, j_net_y);
 
-    let p_scale = max_f32(
-        max_f32(
-            0.5 * (m1 * (v1_pre_mag + v1_out_mag)
-                + m2 * (v2_pre_mag + v2_out_mag)
-                + (m1 + m2) * abs_f32(g_y) * dt),
-            j_env_max,
-        ),
-        1.0e-3 * (m1 + m2),
-    );
-    let mom_resid_norm = if j_net_mag <= 1.0e-6 {
+    let p_scale = (0.5
+        * (m1 * (v1_pre_mag + v1_out_mag)
+            + m2 * (v2_pre_mag + v2_out_mag)
+            + (m1 + m2) * g_y.abs() * dt))
+        .max(j_env_max)
+        .max(1.0e-3 * (m1 + m2));
+    let mom_resid_norm = if j_net_mag <= 1.0e-6 || p_scale <= 0.0 {
         0.0
     } else {
         j_net_mag / p_scale
@@ -4840,37 +4860,30 @@ fn eval_occluded_assignment(
         * dt;
     let d_lz_trap = (l_post - l_pre) - tau_grav_trap;
 
-    let arm1_pre = hypot_f32(x1_pre - x_ref, y1_pre - y_ref) + r1;
-    let arm1_post = hypot_f32(x1_out - x_ref, y1_out - y_ref) + r1;
-    let arm1 = max_f32(arm1_pre, arm1_post);
-    let arm2_pre = hypot_f32(x2_pre - x_ref, y2_pre - y_ref) + r2;
-    let arm2_post = hypot_f32(x2_out - x_ref, y2_out - y_ref) + r2;
-    let arm2 = max_f32(arm2_pre, arm2_post);
-    let arm_eff = max_f32(0.5 * (arm1 + arm2), max_f32(r1 + r2, 1.0));
+    let arm1_pre = hypot_f64(x1_pre - x_ref, y1_pre - y_ref) + r1;
+    let arm1_post = hypot_f64(x1_out - x_ref, y1_out - y_ref) + r1;
+    let arm1 = arm1_pre.max(arm1_post);
+    let arm2_pre = hypot_f64(x2_pre - x_ref, y2_pre - y_ref) + r2;
+    let arm2_post = hypot_f64(x2_out - x_ref, y2_out - y_ref) + r2;
+    let arm2 = arm2_pre.max(arm2_post);
+    let arm_eff = (0.5 * (arm1 + arm2)).max((r1 + r2).max(1.0));
 
     let g_half = 0.5 * g_y * dt;
-    let g_half_sq = g_half * g_half;
     let sigma_l_pos = sigma_pos
-        * sqrt_f32(
-            m1 * m1 * (v1_pre_sq + v1_out_sq + g_half_sq)
-                + m2 * m2 * (v2_pre_sq + v2_out_sq + g_half_sq),
+        * hypot_f64(
+            m1 * hypot_f64(hypot_f64(vx1_pre, vy1_pre), hypot_f64(v1_out_mag, g_half)),
+            m2 * hypot_f64(hypot_f64(vx2_pre, vy2_pre), hypot_f64(v2_out_mag, g_half)),
         );
     let sigma_l_vel = sigma_vel
-        * sqrt_f32(
-            m1 * m1 * (arm1_pre * arm1_pre + arm1_post * arm1_post)
-                + m2 * m2 * (arm2_pre * arm2_pre + arm2_post * arm2_post),
-        );
+        * hypot_f64(m1 * hypot_f64(arm1_pre, arm1_post), m2 * hypot_f64(arm2_pre, arm2_post));
     let l_env_max = dt * (m1 * a_env_1 * arm1 + m2 * a_env_2 * arm2)
-        + 3.0 * hypot_f32(sigma_l_pos, sigma_l_vel)
+        + 3.0 * hypot_f64(sigma_l_pos, sigma_l_vel)
         + 1.0e-3 * (m1 + m2) * arm_eff * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
-    let l_scale = max_f32(
-        abs_f32(l_pre) + abs_f32(l_post),
-        max_f32(p_scale * arm_eff, l_env_max),
-    );
-    let ang_mom_resid_norm_trap = if abs_f32(d_lz_trap) <= 1.0e-5 {
+    let l_scale = (l_pre.abs() + l_post.abs()).max((p_scale * arm_eff).max(l_env_max));
+    let ang_mom_resid_norm_trap = if d_lz_trap.abs() <= 1.0e-5 || l_scale <= 0.0 {
         0.0
     } else {
-        abs_f32(d_lz_trap) / l_scale
+        d_lz_trap.abs() / l_scale
     };
 
     // Gravity-compensated mechanical energy change dK
@@ -4879,19 +4892,15 @@ fn eval_occluded_assignment(
     let w_grav = m1 * g_y * (y1_out - y1_pre) + m2 * g_y * (y2_out - y2_pre);
     let k_post_grav_work = k_post_raw - w_grav;
     let dk = k_post_grav_work - k_pre;
-    let k_ref = max_f32(
-        k_pre,
-        max_f32(abs_f32(k_post_grav_work), 1.0e-3 * (m1 + m2)),
-    );
-    let delta_ke_ratio = if abs_f32(dk) <= 1.0e-5 { 0.0 } else { dk / k_ref };
+    let k_ref = k_pre.max(k_post_grav_work.abs().max(1.0e-3 * (m1 + m2)));
+    let delta_ke_ratio = if dk.abs() <= 1.0e-5 || k_ref <= 0.0 { 0.0 } else { dk / k_ref };
 
     let sigma_k_vel = sigma_vel
-        * sqrt_f32(m1 * m1 * (v1_pre_sq + v1_out_sq) + m2 * m2 * (v2_pre_sq + v2_out_sq))
+        * hypot_f64(m1 * hypot_f64(v1_pre_mag, v1_out_mag), m2 * hypot_f64(v2_pre_mag, v2_out_mag))
         + 2.0 * (m1 + m2) * sigma_vel * sigma_vel;
-    let sigma_k_pos = sqrt_f32(2.0 * (m1 * m1 + m2 * m2)) * abs_f32(g_y) * sigma_pos;
-    let w_env_pos = persp_scale_bound_term(
+    let sigma_k_pos = 1.4142135623730951 * hypot_f64(m1, m2) * g_y.abs() * sigma_pos;
+    let w_env_pos = persp_scale_bound_term_f64(
         a_np,
-        drag_beta_max,
         dt,
         m1,
         m2,
@@ -4901,28 +4910,28 @@ fn eval_occluded_assignment(
         v2_out_mag,
     );
     let eps_k = w_env_pos
-        + 3.0 * hypot_f32(sigma_k_vel, sigma_k_pos)
-        + 1.0e-3 * max_f32(k_pre, m1 + m2);
+        + 3.0 * hypot_f64(sigma_k_vel, sigma_k_pos)
+        + 1.0e-3 * k_pre.max(m1 + m2);
 
     // Individual gravity-compensated velocity jumps & position propagation residuals
     let dv1_x = vx1_out - vx1_pre;
     let dv1_y = vy1_out - (vy1_pre + g_y * dt);
     let dv2_x = vx2_out - vx2_pre;
     let dv2_y = vy2_out - (vy2_pre + g_y * dt);
-    let vel_err_1 = hypot_f32(dv1_x, dv1_y);
-    let vel_err_2 = hypot_f32(dv2_x, dv2_y);
+    let vel_err_1 = hypot_f64(dv1_x, dv1_y);
+    let vel_err_2 = hypot_f64(dv2_x, dv2_y);
 
     let g_dt2_half = 0.5 * g_y * dt * dt;
     let dp1_x = (x1_pre + vx1_pre * dt) - x1_out;
     let dp1_y = (y1_pre + vy1_pre * dt + g_dt2_half) - y1_out;
     let dp2_x = (x2_pre + vx2_pre * dt) - x2_out;
     let dp2_y = (y2_pre + vy2_pre * dt + g_dt2_half) - y2_out;
-    let pos_err_1 = hypot_f32(dp1_x, dp1_y);
-    let pos_err_2 = hypot_f32(dp2_x, dp2_y);
+    let pos_err_1 = hypot_f64(dp1_x, dp1_y);
+    let pos_err_2 = hypot_f64(dp2_x, dp2_y);
 
     // H0: Ballistic pass-through without contact
-    let sqrt2 = 1.41421356f32;
-    let pos_noise = 3.0 * hypot_f32(sqrt2 * sigma_pos, sigma_vel * dt);
+    let sqrt2 = 1.4142135623730951f64;
+    let pos_noise = 3.0 * hypot_f64(sqrt2 * sigma_pos, sigma_vel * dt);
     let vel_noise = 3.0 * sqrt2 * sigma_vel;
     let num_eps_pos = 1.0e-3 * (1.0 + 0.01 * (v_drag_1 + v_drag_2) * dt);
     let num_eps_vel = 1.0e-3 * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
@@ -4935,19 +4944,19 @@ fn eval_occluded_assignment(
     let dk_2 = 0.5 * m2 * (v2_out_sq - v2_pre_sq) - m2 * g_y * (y2_out - y2_pre);
     let eps_k1 = a_np * dt * m1 * 0.5 * (v1_pre_mag + v1_out_mag)
         + 0.5 * m1 * (a_np * dt) * (a_np * dt)
-        + 3.0 * sigma_vel * m1 * sqrt_f32(v1_pre_sq + v1_out_sq)
-        + 3.0 * sqrt2 * m1 * abs_f32(g_y) * sigma_pos
+        + 3.0 * sigma_vel * m1 * hypot_f64(v1_pre_mag, v1_out_mag)
+        + 3.0 * sqrt2 * m1 * g_y.abs() * sigma_pos
         + 2.0 * m1 * sigma_vel * sigma_vel
-        + 1.0e-3 * max_f32(0.5 * m1 * v1_pre_sq, m1);
+        + 1.0e-3 * (0.5 * m1 * v1_pre_sq).max(m1);
     let eps_k2 = a_np * dt * m2 * 0.5 * (v2_pre_mag + v2_out_mag)
         + 0.5 * m2 * (a_np * dt) * (a_np * dt)
-        + 3.0 * sigma_vel * m2 * sqrt_f32(v2_pre_sq + v2_out_sq)
-        + 3.0 * sqrt2 * m2 * abs_f32(g_y) * sigma_pos
+        + 3.0 * sigma_vel * m2 * hypot_f64(v2_pre_mag, v2_out_mag)
+        + 3.0 * sqrt2 * m2 * g_y.abs() * sigma_pos
         + 2.0 * m2 * sigma_vel * sigma_vel
-        + 1.0e-3 * max_f32(0.5 * m2 * v2_pre_sq, m2);
+        + 1.0e-3 * (0.5 * m2 * v2_pre_sq).max(m2);
 
     let h0_cons_ok = j_net_mag <= j_env_max
-        && abs_f32(d_lz_trap) <= l_env_max
+        && d_lz_trap.abs() <= l_env_max
         && dk <= eps_k
         && dk_1 <= eps_k1
         && dk_2 <= eps_k2;
@@ -4964,8 +4973,8 @@ fn eval_occluded_assignment(
     let mut h0_chi2 = 9.0 * (r_p1 * r_p1 + r_p2 * r_p2 + r_v1 * r_v1 + r_v2 * r_v2);
     if !h0_cons_ok {
         let r_j = j_net_mag / j_env_max;
-        let r_l = abs_f32(d_lz_trap) / l_env_max;
-        let r_k = max_f32(0.0, dk) / eps_k;
+        let r_l = d_lz_trap.abs() / l_env_max;
+        let r_k = dk.max(0.0) / eps_k;
         h0_chi2 += 9.0 * (1.0 + r_j * r_j + r_l * r_l + r_k * r_k);
     }
     let h0_imp_resid = m1 * vel_err_1 + m2 * vel_err_2;
@@ -4973,13 +4982,11 @@ fn eval_occluded_assignment(
     // H1: Hidden two-body collision at tau in [0, dt]
     let j12_x = 0.5 * (m1 * dv1_x - m2 * dv2_x);
     let j12_y = 0.5 * (m1 * dv1_y - m2 * dv2_y);
-    let j12_mag = hypot_f32(j12_x, j12_y);
-    let sigma_j12 = 0.5 * sqrt_f32(2.0 * (m1 * m1 + m2 * m2)) * sigma_vel;
-    let j12_min = max_f32(
-        3.0 * sigma_j12 + 0.5 * (m1 * a_env_1 + m2 * a_env_2) * dt,
-        1.0e-2 * (m1 + m2),
-    );
-    let (nx, ny) = if j12_mag > 1.0e-8 {
+    let j12_mag = hypot_f64(j12_x, j12_y);
+    let sigma_j12 = 0.5 * 1.4142135623730951 * hypot_f64(m1, m2) * sigma_vel;
+    let j12_min = (3.0 * sigma_j12 + 0.5 * (m1 * a_env_1 + m2 * a_env_2) * dt)
+        .max(1.0e-2 * (m1 + m2));
+    let (nx, ny) = if j12_mag > 1.0e-12 {
         (j12_x / j12_mag, j12_y / j12_mag)
     } else {
         (1.0, 0.0)
@@ -5009,31 +5016,9 @@ fn eval_occluded_assignment(
     let vrel_pre_sq = vrel_pre_x * vrel_pre_x + vrel_pre_y * vrel_pre_y;
     let vrel_out_sq = vrel_out_x * vrel_out_x + vrel_out_y * vrel_out_y;
 
-    let u_seed = if dv_sq > 1.0e-8 {
-        clamp_f32(
-            (gap1_0x * dv1_x + gap1_0y * dv1_y + gap2_0x * dv2_x + gap2_0y * dv2_y) / dv_sq,
-            0.0,
-            dt,
-        )
-    } else {
-        clamp_f32(
-            -(dr0_x * vrel_pre_x + dr0_y * vrel_pre_y) / max_f32(vrel_pre_sq, 1.0e-8),
-            0.0,
-            dt,
-        )
-    };
     let r_sum = r1 + r2;
-    let d_contact = if j12_mag > 1.0e-8 {
-        clamp_f32(
-            (dr0_x + vrel_pre_x * u_seed) * nx + (dr0_y + vrel_pre_y * u_seed) * ny,
-            0.0,
-            r_sum,
-        )
-    } else {
-        0.0
-    };
-    let cx_off = d_contact * nx;
-    let cy_off = d_contact * ny;
+    let cx_off = r_sum * nx;
+    let cy_off = r_sum * ny;
 
     let a_tau = dv_sq + 0.5 * (vrel_pre_sq + vrel_out_sq);
     let b_tau = (gap1_0x * dv1_x + gap1_0y * dv1_y)
@@ -5041,14 +5026,14 @@ fn eval_occluded_assignment(
         - 0.5
             * (((dr0_x - cx_off) * vrel_pre_x + (dr0_y - cy_off) * vrel_pre_y)
                 + ((dr_post0_x - cx_off) * vrel_out_x + (dr_post0_y - cy_off) * vrel_out_y));
-    let tau = if a_tau > 1.0e-10 {
-        clamp_f32(b_tau / a_tau, 0.0, dt)
+    let tau = if a_tau > 1.0e-12 {
+        (b_tau / a_tau).clamp(0.0, dt)
     } else {
         0.5 * dt
     };
 
-    let kink1 = hypot_f32(gap1_0x - dv1_x * tau, gap1_0y - dv1_y * tau);
-    let kink2 = hypot_f32(gap2_0x - dv2_x * tau, gap2_0y - dv2_y * tau);
+    let kink1 = hypot_f64(gap1_0x - dv1_x * tau, gap1_0y - dv1_y * tau);
+    let kink2 = hypot_f64(gap2_0x - dv2_x * tau, gap2_0y - dv2_y * tau);
     let dr_pre_tx = dr0_x + vrel_pre_x * tau;
     let dr_pre_ty = dr0_y + vrel_pre_y * tau;
     let dr_post_tx = dr_post0_x + vrel_out_x * tau;
@@ -5056,12 +5041,12 @@ fn eval_occluded_assignment(
     let dr_mid_tx = 0.5 * (dr_pre_tx + dr_post_tx);
     let dr_mid_ty = 0.5 * (dr_pre_ty + dr_post_ty);
 
-    let sep_pre = hypot_f32(dr_pre_tx, dr_pre_ty);
-    let sep_post = hypot_f32(dr_post_tx, dr_post_ty);
-    let sep_mid = hypot_f32(dr_mid_tx, dr_mid_ty);
+    let sep_pre = hypot_f64(dr_pre_tx, dr_pre_ty);
+    let sep_post = hypot_f64(dr_post_tx, dr_post_ty);
+    let sep_mid = hypot_f64(dr_mid_tx, dr_mid_ty);
 
     let dt_rem = dt - tau;
-    let sigma_kink = sqrt_f32(
+    let sigma_kink = wasm_sqrtd(
         2.0 * sigma_pos * sigma_pos + sigma_vel * sigma_vel * (tau * tau + dt_rem * dt_rem),
     );
     let env_kink_1 = 0.5 * a_env_1 * (tau * tau + dt_rem * dt_rem);
@@ -5080,67 +5065,92 @@ fn eval_occluded_assignment(
             + 0.5 * ((x2_c - x_ref) + (x2_out - x_ref)) * dt_rem))
         * g_y;
     let d_lz_h1 = (l_post - l_pre) - tau_grav_h1;
-    let ang_mom_resid_norm_h1 = if abs_f32(d_lz_h1) <= 1.0e-5 {
+    let ang_mom_resid_norm_h1 = if d_lz_h1.abs() <= 1.0e-5 || l_scale <= 0.0 {
         0.0
     } else {
-        abs_f32(d_lz_h1) / l_scale
+        d_lz_h1.abs() / l_scale
     };
 
     // Normal approach, separation, and restitution
     let vn_pre = vrel_pre_x * nx + vrel_pre_y * ny;
     let vn_post = vrel_out_x * nx + vrel_out_y * ny;
     let v_close = -vn_pre;
-    let v_close_min = max_f32(2.0 * sigma_vel, 1.0e-3);
+    let v_close_min = (2.0 * sigma_vel).max(1.0e-3);
     let e_raw = if v_close > 1.0e-6 {
         vn_post / v_close
     } else {
         -1.0
     };
     let dv_rel_tol = 3.0 * sqrt2 * sigma_vel + 0.5 * (a_env_1 + a_env_2) * dt + num_eps_vel;
-    let e_tol = clamp_f32((1.5 * dv_rel_tol) / max_f32(v_close, 1.0), 0.02, 0.35);
-    let e_clamped = clamp_f32(e_raw, 0.0, 1.0);
+    let e_tol = ((1.5 * dv_rel_tol) / v_close.max(1.0e-3)).min(0.35);
+    let e_clamped = e_raw.clamp(0.0, 1.0);
 
     let mu = (m1 * m2) / (m1 + m2);
-    let vc_pos = max_f32(v_close, 0.0);
+    let vc_pos = v_close.max(0.0);
     let dk_expected = -0.5 * mu * (1.0 - e_clamped * e_clamped) * vc_pos * vc_pos;
     let w_drag_max =
         drag_beta_max * dt * (m1 * v_drag_1 * v_drag_1 + m2 * v_drag_2 * v_drag_2);
     let dk_consistent = dk <= eps_k && dk >= dk_expected - w_drag_max - 1.5 * eps_k;
 
-    let norm_side_ok = (dr_mid_tx * nx + dr_mid_ty * ny) >= -contact_pos_tol;
+    let norm_dot = dr_mid_tx * nx + dr_mid_ty * ny;
+    let norm_side_ok = if sep_mid > 1.0e-6 && r_sum > contact_pos_tol {
+        norm_dot >= 0.85 * sep_mid - contact_pos_tol
+    } else {
+        norm_dot >= -contact_pos_tol
+    };
+    let sep_mid_ok = (sep_mid - r_sum).abs() <= contact_pos_tol;
+    let sep_pre_ok =
+        sep_pre >= r_sum - 1.25 * contact_pos_tol && sep_pre <= r_sum + 1.25 * contact_pos_tol;
+    let sep_post_ok =
+        sep_post >= r_sum - 1.25 * contact_pos_tol && sep_post <= r_sum + 1.25 * contact_pos_tol;
     let contact_ok = kink1 <= kink_tol_1
         && kink2 <= kink_tol_2
-        && sep_mid <= r_sum + contact_pos_tol
-        && sep_pre <= r_sum + 1.25 * contact_pos_tol
-        && sep_post <= r_sum + 1.25 * contact_pos_tol
+        && sep_mid_ok
+        && sep_pre_ok
+        && sep_post_ok
         && norm_side_ok;
 
     let h1_dyn_ok = j12_mag > j12_min
         && v_close > v_close_min
+        && vn_post >= -dv_rel_tol
         && e_raw >= -e_tol
         && e_raw <= 1.0 + e_tol;
     let h1_ok = j_net_mag <= j_env_max
-        && abs_f32(d_lz_h1) <= l_env_max
+        && d_lz_h1.abs() <= l_env_max
         && dk_consistent
         && h1_dyn_ok
         && contact_ok;
 
     let r_j = j_net_mag / j_env_max;
-    let r_lh1 = abs_f32(d_lz_h1) / l_env_max;
+    let r_lh1 = d_lz_h1.abs() / l_env_max;
     let r_k1 = kink1 / kink_tol_1;
     let r_k2 = kink2 / kink_tol_2;
-    let r_sep = max_f32(0.0, sep_mid - r_sum) / contact_pos_tol;
-    let r_dk = max_f32(0.0, dk) / eps_k;
+    let r_sep = (sep_mid - r_sum).abs() / contact_pos_tol;
+    let r_dk = dk.max(0.0) / eps_k;
     let mut h1_chi2 = 9.0
         * (r_j * r_j + r_lh1 * r_lh1 + r_k1 * r_k1 + r_k2 * r_k2 + r_sep * r_sep + r_dk * r_dk);
     if !h1_ok {
         if !h1_dyn_ok || !norm_side_ok || !dk_consistent {
             h1_chi2 += 16.0;
         }
-        if sep_pre > r_sum + 1.25 * contact_pos_tol || sep_post > r_sum + 1.25 * contact_pos_tol {
+        if !sep_pre_ok || !sep_post_ok {
             h1_chi2 += 9.0;
         }
     }
+
+    let finite_ok = f64_fits_f32(j_net_mag)
+        && f64_fits_f32(mom_resid_norm)
+        && f64_fits_f32(ang_mom_resid_norm_trap)
+        && f64_fits_f32(ang_mom_resid_norm_h1)
+        && f64_fits_f32(delta_ke_ratio)
+        && f64_fits_f32(h0_chi2)
+        && f64_fits_f32(h0_imp_resid)
+        && f64_fits_f32(h1_chi2)
+        && f64_fits_f32(tau)
+        && f64_fits_f32(e_clamped)
+        && f64_fits_f32(eps_k)
+        && f64_fits_f32(l_env_max)
+        && f64_fits_f32(l_scale);
 
     AssignConservationEval {
         j_net_mag,
@@ -5161,21 +5171,21 @@ fn eval_occluded_assignment(
         h1_imp_resid: j_net_mag,
         h1_tau: tau,
         h1_e_clamped: e_clamped,
+        finite_ok,
     }
 }
 
 #[inline(always)]
-fn persp_scale_bound_term(
-    a_np: f32,
-    _drag_beta_max: f32,
-    dt: f32,
-    m1: f32,
-    m2: f32,
-    v1_pre_mag: f32,
-    v1_out_mag: f32,
-    v2_pre_mag: f32,
-    v2_out_mag: f32,
-) -> f32 {
+fn persp_scale_bound_term_f64(
+    a_np: f64,
+    dt: f64,
+    m1: f64,
+    m2: f64,
+    v1_pre_mag: f64,
+    v1_out_mag: f64,
+    v2_pre_mag: f64,
+    v2_out_mag: f64,
+) -> f64 {
     a_np * dt * (m1 * 0.5 * (v1_pre_mag + v1_out_mag) + m2 * 0.5 * (v2_pre_mag + v2_out_mag))
         + 0.5 * (m1 + m2) * (a_np * dt) * (a_np * dt)
 }
@@ -5195,37 +5205,37 @@ fn eval_occluded_pair_core(
         i += 1;
     }
 
-    let x1_pre = inp[0];
-    let y1_pre = inp[1];
-    let vx1_pre = inp[2];
-    let vy1_pre = inp[3];
-    let m1_in = inp[4];
-    let r1 = inp[5];
+    let x1_pre = inp[0] as f64;
+    let y1_pre = inp[1] as f64;
+    let vx1_pre = inp[2] as f64;
+    let vy1_pre = inp[3] as f64;
+    let m1_in = inp[4] as f64;
+    let r1 = inp[5] as f64;
 
-    let x2_pre = inp[6];
-    let y2_pre = inp[7];
-    let vx2_pre = inp[8];
-    let vy2_pre = inp[9];
-    let m2_in = inp[10];
-    let r2 = inp[11];
+    let x2_pre = inp[6] as f64;
+    let y2_pre = inp[7] as f64;
+    let vx2_pre = inp[8] as f64;
+    let vy2_pre = inp[9] as f64;
+    let m2_in = inp[10] as f64;
+    let r2 = inp[11] as f64;
 
-    let x_a = inp[12];
-    let y_a = inp[13];
-    let vx_a = inp[14];
-    let vy_a = inp[15];
+    let x_a = inp[12] as f64;
+    let y_a = inp[13] as f64;
+    let vx_a = inp[14] as f64;
+    let vy_a = inp[15] as f64;
 
-    let x_b = inp[16];
-    let y_b = inp[17];
-    let vx_b = inp[18];
-    let vy_b = inp[19];
+    let x_b = inp[16] as f64;
+    let y_b = inp[17] as f64;
+    let vx_b = inp[18] as f64;
+    let vy_b = inp[19] as f64;
 
-    let dt = inp[20];
-    let g_y = inp[21];
-    let drag_beta_max = inp[22];
-    let spin_magnus_bound = inp[23];
-    let persp_scale_bound = inp[24];
-    let sigma_pos = inp[25];
-    let sigma_vel = inp[26];
+    let dt = inp[20] as f64;
+    let g_y = inp[21] as f64;
+    let drag_beta_max = inp[22] as f64;
+    let spin_magnus_bound = inp[23] as f64;
+    let persp_scale_bound = inp[24] as f64;
+    let sigma_pos = inp[25] as f64;
+    let sigma_vel = inp[26] as f64;
     let tid_a = inp[27];
     let tid_b = inp[28];
     let event_frame = inp[29];
@@ -5252,22 +5262,30 @@ fn eval_occluded_pair_core(
         if m1_in < 0.0 || m2_in < 0.0 {
             return OCCL_STATUS_NONE;
         }
-        (1.0f32, 1.0f32)
+        (1.0f64, 1.0f64)
     };
 
+    let mass_ratio = m2 / m1;
+    if !f64_fits_f32(mass_ratio) {
+        return OCCL_STATUS_NONE;
+    }
+
     // Pre-state-only drag speed bounds (strictly non-circular)
-    let v1_pre_mag = hypot_f32(vx1_pre, vy1_pre);
-    let v2_pre_mag = hypot_f32(vx2_pre, vy2_pre);
-    let v_drag_1 = max_f32(v1_pre_mag, hypot_f32(vx1_pre, vy1_pre + g_y * dt));
-    let v_drag_2 = max_f32(v2_pre_mag, hypot_f32(vx2_pre, vy2_pre + g_y * dt));
+    let v1_pre_mag = hypot_f64(vx1_pre, vy1_pre);
+    let v2_pre_mag = hypot_f64(vx2_pre, vy2_pre);
+    let v_drag_1 = v1_pre_mag.max(hypot_f64(vx1_pre, vy1_pre + g_y * dt));
+    let v_drag_2 = v2_pre_mag.max(hypot_f64(vx2_pre, vy2_pre + g_y * dt));
 
     let a_np = spin_magnus_bound + persp_scale_bound;
     let a_env_1 = drag_beta_max * v_drag_1 + a_np;
     let a_env_2 = drag_beta_max * v_drag_2 + a_np;
 
-    let sigma_j = sqrt_f32(2.0 * (m1 * m1 + m2 * m2)) * sigma_vel;
+    let sigma_j = 1.4142135623730951 * hypot_f64(m1, m2) * sigma_vel;
     let j_num_eps = 1.0e-4 * (m1 + m2) * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
     let j_env_max = dt * (m1 * a_env_1 + m2 * a_env_2) + 3.0 * sigma_j + j_num_eps;
+    if !f64_fits_f32(j_env_max) {
+        return OCCL_STATUS_NONE;
+    }
 
     let keep = eval_occluded_assignment(
         x1_pre, y1_pre, vx1_pre, vy1_pre, m1, r1, x2_pre, y2_pre, vx2_pre, vy2_pre, m2, r2, x_a,
@@ -5279,6 +5297,9 @@ fn eval_occluded_pair_core(
         y_b, vx_b, vy_b, x_a, y_a, vx_a, vy_a, dt, g_y, drag_beta_max, a_np, a_env_1, a_env_2,
         v_drag_1, v_drag_2, sigma_pos, sigma_vel, j_env_max,
     );
+    if !keep.finite_ok || !swap.finite_ok {
+        return OCCL_STATUS_NONE;
+    }
 
     let mut mask: u32 = 0;
     if keep.h0_ok {
@@ -5311,9 +5332,9 @@ fn eval_occluded_pair_core(
         true
     } else {
         let kj = keep.j_net_mag / j_env_max;
-        let kk = max_f32(0.0, keep.dk) / keep.eps_k;
+        let kk = keep.dk.max(0.0) / keep.eps_k;
         let sj = swap.j_net_mag / j_env_max;
-        let sk = max_f32(0.0, swap.dk) / swap.eps_k;
+        let sk = swap.dk.max(0.0) / swap.eps_k;
         (sj * sj + sk * sk) < (kj * kj + kk * kk)
     };
     let top = if use_swap { &swap } else { &keep };
@@ -5324,14 +5345,14 @@ fn eval_occluded_pair_core(
         } else if keep.h0_ok && !keep.h1_ok {
             keep.ang_mom_resid_norm_trap
         } else {
-            min_f32(keep.ang_mom_resid_norm_trap, keep.ang_mom_resid_norm_h1)
+            keep.ang_mom_resid_norm_trap.min(keep.ang_mom_resid_norm_h1)
         }
     } else if swap.h1_ok && !swap.h0_ok {
         swap.ang_mom_resid_norm_h1
     } else if swap.h0_ok && !swap.h1_ok {
         swap.ang_mom_resid_norm_trap
     } else {
-        min_f32(swap.ang_mom_resid_norm_trap, swap.ang_mom_resid_norm_h1)
+        swap.ang_mom_resid_norm_trap.min(swap.ang_mom_resid_norm_h1)
     };
     let _ = (top.d_lz_trap, top.l_env_max, top.l_scale);
 
@@ -5352,27 +5373,27 @@ fn eval_occluded_pair_core(
     telem[0] = status as f32;
     telem[1] = mask as f32;
     telem[2] = admissible_count as f32;
-    telem[3] = top.j_net_mag;
-    telem[4] = j_env_max;
-    telem[5] = top.mom_resid_norm;
-    telem[6] = top_ang_mom_resid;
-    telem[7] = top.delta_ke_ratio;
-    telem[8] = keep.h0_chi2;
-    telem[9] = swap.h0_chi2;
-    telem[10] = keep.h1_chi2;
-    telem[11] = swap.h1_chi2;
-    telem[12] = est_tau_sec;
-    telem[13] = est_restitution_e;
+    telem[3] = top.j_net_mag as f32;
+    telem[4] = j_env_max as f32;
+    telem[5] = top.mom_resid_norm as f32;
+    telem[6] = top_ang_mom_resid as f32;
+    telem[7] = top.delta_ke_ratio as f32;
+    telem[8] = keep.h0_chi2 as f32;
+    telem[9] = swap.h0_chi2 as f32;
+    telem[10] = keep.h1_chi2 as f32;
+    telem[11] = swap.h1_chi2 as f32;
+    telem[12] = est_tau_sec as f32;
+    telem[13] = est_restitution_e as f32;
     telem[14] = tid_a;
     telem[15] = tid_b;
-    telem[16] = dt;
+    telem[16] = dt as f32;
     telem[17] = event_frame;
-    telem[18] = keep.h0_imp_resid;
-    telem[19] = swap.h0_imp_resid;
-    telem[20] = keep.h1_imp_resid;
-    telem[21] = swap.h1_imp_resid;
-    telem[22] = g_y;
-    telem[23] = m2 / m1;
+    telem[18] = keep.h0_imp_resid as f32;
+    telem[19] = swap.h0_imp_resid as f32;
+    telem[20] = keep.h1_imp_resid as f32;
+    telem[21] = swap.h1_imp_resid as f32;
+    telem[22] = g_y as f32;
+    telem[23] = mass_ratio as f32;
 
     status
 }
@@ -5387,6 +5408,7 @@ impl OccludedConservationState {
             live_event_seq: 0,
             last_frame_idx: 0,
             last_discont_seen: 0,
+            last_continuity_epoch: 0,
             has_last_frame: 0,
             _pad: [0; 3],
         }
@@ -5408,10 +5430,18 @@ impl OccludedConservationState {
         self.has_last_frame = 0;
     }
 
+    pub fn reset_continuity(&mut self) {
+        self.telem.fill(0.0);
+        self.live_event_seq = 0;
+        self.last_continuity_epoch = 0;
+        self.clear_tracking_state();
+    }
+
     pub fn reset(&mut self) {
         self.telem.fill(0.0);
         self.input.fill(0.0);
         self.live_event_seq = 0;
+        self.last_continuity_epoch = 0;
         self.clear_tracking_state();
     }
 
@@ -5571,6 +5601,7 @@ struct SamplePt {
 #[derive(Clone, Copy)]
 pub struct CollisionArenaView<'a> {
     pub frame_idx: u32,
+    pub continuity_epoch: u32,
     pub lookahead_k: u8,
     pub scene_gravity_conf: f32,
     pub scene_gravity_px_s2: f32,
@@ -6564,12 +6595,15 @@ fn update_live_occluded_pairs(
         }
     }
     if (cons.has_last_frame != 0 && arena.frame_idx != cons.last_frame_idx.wrapping_add(1))
+        || (cons.last_continuity_epoch != 0
+            && arena.continuity_epoch != cons.last_continuity_epoch)
         || (max_discont > 0
             && (max_discont != cons.last_discont_seen || max_discont == arena.frame_idx))
     {
-        cons.clear_tracking_state();
+        cons.reset_continuity();
         cons.last_discont_seen = max_discont;
     }
+    cons.last_continuity_epoch = arena.continuity_epoch;
     cons.has_last_frame = 1;
     cons.last_frame_idx = arena.frame_idx;
 
@@ -6656,7 +6690,6 @@ fn update_live_occluded_pairs(
     let prox_r = PAIR_SCAN_PROX_SD * s;
     let prox_r2 = prox_r * prox_r;
     let far_r2 = (1.35 * prox_r) * (1.35 * prox_r);
-    let direct_r2 = (DIRECT_COLLISION_RADIUS_SD * s) * (DIRECT_COLLISION_RADIUS_SD * s);
 
     for i in 0..MAX_TARGETS {
         let ti = &tracks[i];
@@ -6812,13 +6845,13 @@ fn update_live_occluded_pairs(
                             live_in[2] = pr.pre_vx1;
                             live_in[3] = pr.pre_vy1;
                             live_in[4] = 1.0;
-                            live_in[5] = 9.0 * s;
+                            live_in[5] = 6.0 * s;
                             live_in[6] = pr.pre_x2;
                             live_in[7] = pr.pre_y2;
                             live_in[8] = pr.pre_vx2;
                             live_in[9] = pr.pre_vy2;
                             live_in[10] = 1.0;
-                            live_in[11] = 9.0 * s;
+                            live_in[11] = 6.0 * s;
                             live_in[12] = ra_post.px0;
                             live_in[13] = ra_post.py0;
                             live_in[14] = ra_post.vx;
@@ -6853,6 +6886,7 @@ fn update_live_occluded_pairs(
                         pr.has_pre = 0;
                         pr.max_coast_a = 0;
                         pr.max_coast_b = 0;
+                        pr.co_coast_frames = 0;
                         pr.cooldown_until = arena.frame_idx.saturating_add(12);
                     }
                 } else if dist2 > far_r2 {
@@ -6932,23 +6966,13 @@ fn update_live_occluded_pairs(
                             pr.max_coast_b = cb;
                         }
                     }
-                    let both_coast_ok = pr.occl_seen_mask == 3
+                    if ca > 0 && cb > 0 {
+                        pr.co_coast_frames = pr.co_coast_frames.saturating_add(1);
+                    }
+                    let both_coast_ok = pr.co_coast_frames >= 1
+                        && pr.occl_seen_mask == 3
                         && (pr.max_coast_a >= 2 || pr.max_coast_b >= 2);
-                    let one_coast_near = if pr.max_coast_a >= 3 || pr.max_coast_b >= 3 {
-                        let dt_so_far = max_f32((t_now - pr.pre_t_sec) as f32, 0.0);
-                        let p1x = pr.pre_x1 + pr.pre_vx1 * dt_so_far;
-                        let p1y =
-                            pr.pre_y1 + pr.pre_vy1 * dt_so_far + 0.5 * g_pair * dt_so_far * dt_so_far;
-                        let p2x = pr.pre_x2 + pr.pre_vx2 * dt_so_far;
-                        let p2y =
-                            pr.pre_y2 + pr.pre_vy2 * dt_so_far + 0.5 * g_pair * dt_so_far * dt_so_far;
-                        let pdx = p2x - p1x;
-                        let pdy = p2y - p1y;
-                        pdx * pdx + pdy * pdy <= direct_r2
-                    } else {
-                        false
-                    };
-                    if both_coast_ok || one_coast_near {
+                    if both_coast_ok {
                         pr.both_occluded = 1;
                     }
                 }

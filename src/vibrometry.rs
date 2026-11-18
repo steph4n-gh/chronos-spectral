@@ -53,7 +53,7 @@ const PI_64: f64 = 3.14159265358979323846;
 const TWO_PI_64: f64 = 6.28318530717958647692;
 const HALF_PI_64: f64 = 1.57079632679489661923;
 const INV_TWO_PI_64: f64 = 0.15915494309189533577;
-const LN_ALPHA_BIN_63: f64 = -8.743363716677859;
+const LN2_64: f64 = 0.6931471805599453;
 
 #[inline(always)]
 fn abs_f32(x: f32) -> f32 {
@@ -154,7 +154,6 @@ fn exp_neg_f64(x: f64) -> f64 {
     if x < -700.0 {
         return 0.0;
     }
-    const LN2_64: f64 = 0.6931471805599453;
     const INV_LN2_64: f64 = 1.4426950408889634;
     let k = (x * INV_LN2_64 - 0.5) as i64;
     let r = x - (k as f64) * LN2_64;
@@ -171,6 +170,41 @@ fn exp_neg_f64(x: f64) -> f64 {
         return 0.0;
     }
     sum * f64::from_bits((exp_biased as u64) << 52)
+}
+
+#[inline(always)]
+fn ln_f64(x: f64) -> f64 {
+    if !x.is_finite() || x <= 0.0 {
+        return 0.0;
+    }
+    let bits = x.to_bits();
+    let mut k = ((bits >> 52) as i64) - 1023;
+    let mut m = f64::from_bits((bits & 0x000F_FFFF_FFFF_FFFF) | (1023u64 << 52));
+    if m > 1.4142135623730951 {
+        m *= 0.5;
+        k += 1;
+    }
+    let y = (m - 1.0) / (m + 1.0);
+    let y2 = y * y;
+    let poly = 1.0
+        + y2 * ((1.0 / 3.0)
+            + y2 * ((1.0 / 5.0)
+                + y2 * ((1.0 / 7.0)
+                    + y2 * ((1.0 / 9.0) + y2 * ((1.0 / 11.0) + y2 * (1.0 / 13.0))))));
+    2.0 * y * poly + (k as f64) * LN2_64
+}
+
+#[inline(always)]
+fn unambiguous_welch_k_end(dt_row_us: f32, df_hz: f64) -> usize {
+    if !dt_row_us.is_finite() || dt_row_us <= 0.0 || !df_hz.is_finite() || df_hz <= 0.0 {
+        return 1;
+    }
+    let f_opt_max = 0.48 * (1_000_000.0 / (dt_row_us as f64));
+    let mut k_end = ((f_opt_max / df_hz) as usize + 1).min(VIBRO_SPEC_BINS);
+    while k_end > 1 && ((k_end - 1) as f64) * df_hz > f_opt_max {
+        k_end -= 1;
+    }
+    k_end
 }
 
 #[inline(always)]
@@ -350,6 +384,7 @@ pub struct VibrometryState {
 
     // Internal Arena-backed scratch & continuity alignment state
     audio_interval_start_sample: u64,
+    last_fresh_audio_samples: u64,
     run_t0_us: u64,
     q_start_hist: [u32; VIBRO_HIST_FRAMES],
     q_step_hist: [i32; VIBRO_HIST_FRAMES],
@@ -371,7 +406,7 @@ pub struct VibrometryState {
     band_row_ux: [f32; VIBRO_MAX_ROWS],
     band_row_uy: [f32; VIBRO_MAX_ROWS],
     band_row_ok: [u8; VIBRO_MAX_ROWS],
-    cell_grad_ok: [u8; VIBRO_BANDS * VIBRO_CELL_H],
+    cell_grad_ok: [u8; VIBRO_BANDS * VIBRO_CELL_W],
     band_grad_ok: [u8; VIBRO_BANDS],
     band_axis_locked: [u8; VIBRO_BANDS],
     band_ax_x: [f32; VIBRO_BANDS],
@@ -389,6 +424,9 @@ pub struct VibrometryState {
     single_seg_k1_coh: f32,
     audio_has_prev_t: u8,
     skew_disturbed: u8,
+    rate_disturbed: u8,
+    scan_along_ey: u8,
+    pub fresh_solve: u8,
 }
 
 const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_750_000);
@@ -411,9 +449,11 @@ impl VibrometryState {
         self.welch_count = 0;
         self.single_seg_k1_coh = 0.0;
         self.audio_interval_start_sample = self.audio_total_samples;
+        self.last_fresh_audio_samples = self.audio_total_samples;
         self.last_audio_seg_end_sample = self.audio_total_samples;
         self.audio_last_t_end_us = 0;
         self.audio_has_prev_t = 0;
+        self.fresh_solve = 0;
     }
 
     #[inline(never)]
@@ -440,6 +480,9 @@ impl VibrometryState {
         self.planes.fill(0.0);
         self.reset_audio_welch_interval();
         self.skew_disturbed = 0;
+        self.rate_disturbed = 0;
+        self.scan_along_ey = 1;
+        self.fresh_solve = 0;
 
         let keep_mode = self.mode;
         let keep_calib_valid = self.calib_valid;
@@ -543,31 +586,50 @@ impl VibrometryState {
     ) -> u32 {
         let n = num_samples as usize;
         if n == 0 || n > AUDIO_STAGING_LEN {
+            self.fresh_solve = 0;
             if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
+                self.reset_audio_welch_interval();
+                self.planes.fill(0.0);
+                self.telem[3] = 0;
+                self.telem[4] = 0;
+                self.telem[6] = 0;
+                self.telem[21] = 0;
                 self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
+                if self.telem[0] == RS_STATE_READY {
+                    self.telem[0] = RS_STATE_WARMING;
+                }
             }
             return 0;
         }
-        if !sample_rate_hz.is_finite() || sample_rate_hz < 4000.0 || sample_rate_hz > 192_000.0 {
+        if !sample_rate_hz.is_finite()
+            || sample_rate_hz < 4000.0
+            || sample_rate_hz > 192_000.0
+            || (self.calib_valid != 0
+                && self.mode == RS_MODE_RS_WELCH
+                && abs_f32(sample_rate_hz - self.calib_audio_rate_hz) > 1.0)
+        {
+            self.rate_disturbed = 1;
+            self.reset_audio_welch_interval();
+            self.planes.fill(0.0);
+            self.fresh_solve = 0;
+            self.telem[3] = 0;
+            self.telem[4] = 0;
+            self.telem[6] = 0;
+            self.telem[21] = 0;
             if self.mode != RS_MODE_OFF {
+                self.telem[0] = RS_STATE_DISTURBED;
                 self.telem[2] |= RS_REASON_BAD_CALIB;
             }
-            return 0;
-        }
-        if self.calib_valid != 0
-            && self.mode == RS_MODE_RS_WELCH
-            && abs_f32(sample_rate_hz - self.calib_audio_rate_hz) > 1.0
-        {
-            self.telem[0] = RS_STATE_DISTURBED;
-            self.telem[2] |= RS_REASON_BAD_CALIB;
             return 0;
         }
         if !est_skew_us.is_finite() {
             self.skew_disturbed = 1;
             self.reset_audio_welch_interval();
             self.planes.fill(0.0);
+            self.fresh_solve = 0;
             self.telem[3] = 0;
             self.telem[4] = 0;
+            self.telem[6] = 0;
             self.telem[21] = 0;
             if self.mode != RS_MODE_OFF {
                 self.telem[0] = RS_STATE_DISTURBED;
@@ -583,8 +645,10 @@ impl VibrometryState {
             self.skew_disturbed = 1;
             self.reset_audio_welch_interval();
             self.planes.fill(0.0);
+            self.fresh_solve = 0;
             self.telem[3] = 0;
             self.telem[4] = 0;
+            self.telem[6] = 0;
             self.telem[21] = 0;
             if self.mode != RS_MODE_OFF {
                 self.telem[0] = RS_STATE_DISTURBED;
@@ -598,8 +662,10 @@ impl VibrometryState {
             if t_end_us <= self.audio_last_t_end_us {
                 self.reset_audio_welch_interval();
                 self.planes.fill(0.0);
+                self.fresh_solve = 0;
                 self.telem[3] = 0;
                 self.telem[4] = 0;
+                self.telem[6] = 0;
                 self.telem[21] = 0;
                 if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
                     self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
@@ -610,13 +676,16 @@ impl VibrometryState {
                 return 0;
             }
             let step_us = (t_end_us - self.audio_last_t_end_us) as f64;
-            if abs_f64(step_us - dt_audio_us) > 2.5 * dt_audio_us
+            let gap_tol_us = (0.15 * dt_audio_us).clamp(25.0, 1000.0);
+            if abs_f64(step_us - dt_audio_us) > gap_tol_us
                 || abs_f32(sample_rate_hz - self.audio_ring_rate_hz) > 1.0
             {
                 self.reset_audio_welch_interval();
                 self.planes.fill(0.0);
+                self.fresh_solve = 0;
                 self.telem[3] = 0;
                 self.telem[4] = 0;
+                self.telem[6] = 0;
                 self.telem[21] = 0;
                 if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
                     self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
@@ -644,7 +713,8 @@ impl VibrometryState {
             self.last_audio_seg_end_sample = self.audio_interval_start_sample;
         }
         self.skew_disturbed = 0;
-        self.telem[2] &= !RS_REASON_CLOCK_SKEW;
+        self.rate_disturbed = 0;
+        self.telem[2] &= !(RS_REASON_CLOCK_SKEW | RS_REASON_BAD_CALIB);
         self.audio_last_t_end_us = t_end_us;
         self.audio_has_prev_t = 1;
         self.audio_ring_rate_hz = sample_rate_hz;
@@ -684,6 +754,8 @@ impl VibrometryState {
             self.telem[0] = RS_STATE_UNCALIBRATED;
             return;
         }
+
+        self.fresh_solve = 0;
 
         let geom_changed = (self.ref_warm_frames > 0 || self.active_frames_in_run > 0)
             && (self.last_frame_w as usize != frame_w
@@ -740,6 +812,8 @@ impl VibrometryState {
         let o = meta.orientation & 7;
         let mut q_start = 0u32;
         let mut q_step = 1i32;
+        let mut scan_along_ey_now = 1u8;
+        let mut scan_len = frame_h;
 
         if uncalib_reasons == 0 {
             let (sx_tl, sy_tl) = engine_to_sensor_xy(
@@ -783,18 +857,29 @@ impl VibrometryState {
                 o,
             );
 
-            let aligned = if meta.scan_dir <= 1 {
-                (o & 1) == 0 && sy_tl == sy_tr && sy_bl == sy_br
+            let row_aligned = if meta.scan_dir <= 1 {
+                sy_tl == sy_tr && sy_bl == sy_br
             } else {
-                (o & 1) == 1 && sx_tl == sx_tr && sx_bl == sx_br
+                sx_tl == sx_tr && sx_bl == sx_br
             };
-            if !aligned {
+            let col_aligned = !row_aligned
+                && frame_w <= VIBRO_MAX_ROWS
+                && if meta.scan_dir <= 1 {
+                    sy_tl == sy_bl && sy_tr == sy_br
+                } else {
+                    sx_tl == sx_bl && sx_tr == sx_br
+                };
+
+            if !row_aligned && !col_aligned {
                 uncalib_reasons |= RS_REASON_AXIS_TRANSPOSED;
             } else {
+                scan_along_ey_now = if row_aligned { 1 } else { 0 };
+                scan_len = if row_aligned { frame_h } else { frame_w };
+                let (nx1, ny1) = if row_aligned { (0, 1) } else { (1, 0) };
                 let (c0, c1, extent) = if meta.scan_dir <= 1 {
                     let (_, sy_1) = engine_to_sensor_xy(
-                        0,
-                        1,
+                        nx1,
+                        ny1,
                         ow,
                         meta.crop_w,
                         meta.crop_h,
@@ -805,8 +890,8 @@ impl VibrometryState {
                     (sy_tl, sy_1, meta.src_h)
                 } else {
                     let (sx_1, _) = engine_to_sensor_xy(
-                        0,
-                        1,
+                        nx1,
+                        ny1,
                         ow,
                         meta.crop_w,
                         meta.crop_h,
@@ -822,9 +907,10 @@ impl VibrometryState {
                     (extent - 1 - c0, extent - 1 - c1)
                 };
                 q_start = q0;
-                q_step = if oh > 1 && q1 < q0 { -1 } else { 1 };
+                q_step = if scan_len > 1 && q1 < q0 { -1 } else { 1 };
             }
         }
+        self.scan_along_ey = scan_along_ey_now;
 
         if uncalib_reasons != 0 {
             let gap_bit = if hard_gap { RS_REASON_FRAME_GAP } else { 0 };
@@ -851,11 +937,18 @@ impl VibrometryState {
             }
         }
 
-        if self.mode == RS_MODE_RS_WELCH && self.skew_disturbed != 0 {
+        if self.mode == RS_MODE_RS_WELCH && (self.skew_disturbed != 0 || self.rate_disturbed != 0) {
             self.planes.fill(0.0);
             self.telem[0] = RS_STATE_DISTURBED;
-            self.telem[2] |= RS_REASON_CLOCK_SKEW;
+            if self.skew_disturbed != 0 {
+                self.telem[2] |= RS_REASON_CLOCK_SKEW;
+            }
+            if self.rate_disturbed != 0 {
+                self.telem[2] |= RS_REASON_BAD_CALIB;
+            }
+            self.telem[3] = 0;
             self.telem[4] = 0;
+            self.telem[6] = 0;
             self.telem[21] = 0;
             return;
         }
@@ -891,7 +984,7 @@ impl VibrometryState {
         let slot = (self.hist_cursor as usize) % VIBRO_HIST_FRAMES;
         self.extract_signed_band_displacements(luma, frame_w, frame_h, o, slot);
         self.t_src_hist_us[slot] = meta.t_src_us;
-        self.frame_rows_hist[slot] = frame_h as u16;
+        self.frame_rows_hist[slot] = scan_len as u16;
         self.q_start_hist[slot] = q_start;
         self.q_step_hist[slot] = q_step;
         self.hist_cursor = ((slot + 1) % VIBRO_HIST_FRAMES) as u32;
@@ -900,10 +993,10 @@ impl VibrometryState {
         }
 
         if self.mode == RS_MODE_RS_ONLY {
-            self.solve_rs_only(frame_h);
+            self.solve_rs_only(scan_len);
         } else {
-            self.advance_welch_segments();
-            self.finalize_welch_solution();
+            let added = self.advance_welch_segments();
+            self.finalize_welch_solution(added);
         }
     }
 
@@ -933,63 +1026,124 @@ impl VibrometryState {
             const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
             self.cell_grad_ok.fill(0);
             self.band_grad_ok.fill(0);
-            let mut b = 0usize;
-            while b < VIBRO_BANDS {
-                let bx0 = (b * frame_w / VIBRO_BANDS + 1).min(frame_w - 1);
-                let bx1 = ((b + 1) * frame_w / VIBRO_BANDS)
-                    .saturating_sub(1)
-                    .min(frame_w - 1);
-                let ncols = bx1.saturating_sub(bx0);
-                let row_floor = 2.0e-5 * (ncols as f32);
-                let mut band_good_rows = 0usize;
+            if self.scan_along_ey != 0 {
+                let mut b = 0usize;
+                while b < VIBRO_BANDS {
+                    let bx0 = (b * frame_w / VIBRO_BANDS + 1).min(frame_w - 1);
+                    let bx1 = ((b + 1) * frame_w / VIBRO_BANDS)
+                        .saturating_sub(1)
+                        .min(frame_w - 1);
+                    let ncols = bx1.saturating_sub(bx0);
+                    let row_floor = 2.0e-5 * (ncols as f32);
+                    let mut band_good_rows = 0usize;
 
-                let mut cy = 0usize;
-                while cy < VIBRO_CELL_H {
-                    let ry0 = cy * frame_h / VIBRO_CELL_H;
-                    let ry1 = (cy + 1) * frame_h / VIBRO_CELL_H;
-                    let mut cell_good = 0usize;
-                    let mut ey = ry0;
-                    while ey < ry1 {
-                        let r = ey * frame_w;
-                        let ey_m = ey.saturating_sub(1);
-                        let ey_p = (ey + 1).min(frame_h - 1);
-                        let rm = ey_m * frame_w;
-                        let rp = ey_p * frame_w;
-                        let dy_scale = if ey_p > ey_m {
-                            1.0 / ((ey_p - ey_m) as f32)
-                        } else {
-                            0.0
-                        };
-                        let mut sum_g2 = 0.0f32;
-                        let mut ex = bx0;
-                        while ex < bx1 {
-                            let gx = 0.5
-                                * ((self.ref_luma_q16[r + ex + 1] as f32)
-                                    - (self.ref_luma_q16[r + ex - 1] as f32))
-                                * REF_INV;
-                            let gy = dy_scale
-                                * ((self.ref_luma_q16[rp + ex] as f32)
-                                    - (self.ref_luma_q16[rm + ex] as f32))
-                                * REF_INV;
-                            sum_g2 += gx * gx + gy * gy;
+                    let mut cy = 0usize;
+                    while cy < VIBRO_CELL_H {
+                        let ry0 = cy * frame_h / VIBRO_CELL_H;
+                        let ry1 = (cy + 1) * frame_h / VIBRO_CELL_H;
+                        let mut cell_good = 0usize;
+                        let mut ey = ry0;
+                        while ey < ry1 {
+                            let r = ey * frame_w;
+                            let ey_m = ey.saturating_sub(1);
+                            let ey_p = (ey + 1).min(frame_h - 1);
+                            let rm = ey_m * frame_w;
+                            let rp = ey_p * frame_w;
+                            let dy_scale = if ey_p > ey_m {
+                                1.0 / ((ey_p - ey_m) as f32)
+                            } else {
+                                0.0
+                            };
+                            let mut sum_g2 = 0.0f32;
+                            let mut ex = bx0;
+                            while ex < bx1 {
+                                let gx = 0.5
+                                    * ((self.ref_luma_q16[r + ex + 1] as f32)
+                                        - (self.ref_luma_q16[r + ex - 1] as f32))
+                                    * REF_INV;
+                                let gy = dy_scale
+                                    * ((self.ref_luma_q16[rp + ex] as f32)
+                                        - (self.ref_luma_q16[rm + ex] as f32))
+                                    * REF_INV;
+                                sum_g2 += gx * gx + gy * gy;
+                                ex += 1;
+                            }
+                            if ncols > 0 && sum_g2 >= row_floor {
+                                cell_good += 1;
+                                band_good_rows += 1;
+                            }
+                            ey += 1;
+                        }
+                        let cell_rows = ry1.saturating_sub(ry0).max(1);
+                        if cell_good * 2 >= cell_rows {
+                            self.cell_grad_ok[b * VIBRO_CELL_H + cy] = 1;
+                        }
+                        cy += 1;
+                    }
+                    if band_good_rows * 4 >= frame_h {
+                        self.band_grad_ok[b] = 1;
+                    }
+                    b += 1;
+                }
+            } else {
+                let mut b = 0usize;
+                while b < VIBRO_BANDS {
+                    let by0 = (b * frame_h / VIBRO_BANDS + 1).min(frame_h - 1);
+                    let by1 = ((b + 1) * frame_h / VIBRO_BANDS)
+                        .saturating_sub(1)
+                        .min(frame_h - 1);
+                    let nrows = by1.saturating_sub(by0);
+                    let col_floor = 2.0e-5 * (nrows as f32);
+                    let mut band_good_cols = 0usize;
+
+                    let mut cx = 0usize;
+                    while cx < VIBRO_CELL_W {
+                        let rx0 = cx * frame_w / VIBRO_CELL_W;
+                        let rx1 = (cx + 1) * frame_w / VIBRO_CELL_W;
+                        let mut cell_good = 0usize;
+                        let mut ex = rx0;
+                        while ex < rx1 {
+                            let ex_m = ex.saturating_sub(1);
+                            let ex_p = (ex + 1).min(frame_w - 1);
+                            let dx_scale = if ex_p > ex_m {
+                                1.0 / ((ex_p - ex_m) as f32)
+                            } else {
+                                0.0
+                            };
+                            let mut sum_g2 = 0.0f32;
+                            let mut ey = by0;
+                            while ey < by1 {
+                                let r = ey * frame_w;
+                                let rm = (ey - 1) * frame_w;
+                                let rp = (ey + 1) * frame_w;
+                                let gx = dx_scale
+                                    * ((self.ref_luma_q16[r + ex_p] as f32)
+                                        - (self.ref_luma_q16[r + ex_m] as f32))
+                                    * REF_INV;
+                                let gy = 0.5
+                                    * ((self.ref_luma_q16[rp + ex] as f32)
+                                        - (self.ref_luma_q16[rm + ex] as f32))
+                                    * REF_INV;
+                                sum_g2 += gx * gx + gy * gy;
+                                ey += 1;
+                            }
+                            if nrows > 0 && sum_g2 >= col_floor {
+                                cell_good += 1;
+                                band_good_cols += 1;
+                            }
                             ex += 1;
                         }
-                        if ncols > 0 && sum_g2 >= row_floor {
-                            cell_good += 1;
-                            band_good_rows += 1;
+                        let cell_cols = rx1.saturating_sub(rx0).max(1);
+                        if cell_good * 2 >= cell_cols {
+                            self.cell_grad_ok[b * VIBRO_CELL_W + cx] = 1;
                         }
-                        ey += 1;
+                        cx += 1;
                     }
-                    let cell_rows = ry1.saturating_sub(ry0).max(1);
-                    if cell_good * 2 >= cell_rows {
-                        self.cell_grad_ok[b * VIBRO_CELL_H + cy] = 1;
+                    if band_good_cols * 4 >= frame_w {
+                        self.band_grad_ok[b] = 1;
                     }
-                    cy += 1;
+                    b += 1;
                 }
-                if band_good_rows * 4 >= frame_h {
-                    self.band_grad_ok[b] = 1;
-                }
-                b += 1;
             }
         }
 
@@ -1012,95 +1166,174 @@ impl VibrometryState {
     ) {
         const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
         let slot_base = slot * VIBRO_BANDS * VIBRO_MAX_ROWS;
+        let scan_len = if self.scan_along_ey != 0 { frame_h } else { frame_w };
         let mut b = 0usize;
         while b < VIBRO_BANDS {
             let dst_base = slot_base + b * VIBRO_MAX_ROWS;
             if self.band_grad_ok[b] == 0 {
-                self.disp_hist[dst_base..dst_base + frame_h].fill(0.0);
+                self.disp_hist[dst_base..dst_base + scan_len].fill(0.0);
                 b += 1;
                 continue;
             }
-            let bx0 = (b * frame_w / VIBRO_BANDS + 1).min(frame_w - 1);
-            let bx1 = ((b + 1) * frame_w / VIBRO_BANDS)
-                .saturating_sub(1)
-                .min(frame_w - 1);
-            let ncols = bx1.saturating_sub(bx0);
-            let row_floor = 2.0e-5 * (ncols as f32);
 
             let mut m_xx = 0.0f32;
             let mut m_xy = 0.0f32;
             let mut m_yy = 0.0f32;
-            let mut ey = 0usize;
-            while ey < frame_h {
-                let r = ey * frame_w;
-                let ey_m = ey.saturating_sub(1);
-                let ey_p = (ey + 1).min(frame_h - 1);
-                let rm = ey_m * frame_w;
-                let rp = ey_p * frame_w;
-                let dy_half = if ey_p > ey_m {
-                    0.5 / ((ey_p - ey_m) as f32)
-                } else {
-                    0.0
-                };
-                let mut s_xx = 0.0f32;
-                let mut s_xy = 0.0f32;
-                let mut s_yy = 0.0f32;
-                let mut b_x = 0.0f32;
-                let mut b_y = 0.0f32;
-                let mut ex = bx0;
-                while ex < bx1 {
-                    let cur_c = luma[r + ex];
-                    let ref_c = (self.ref_luma_q16[r + ex] as f32) * REF_INV;
-                    let di = cur_c - ref_c;
+            if self.scan_along_ey != 0 {
+                let bx0 = (b * frame_w / VIBRO_BANDS + 1).min(frame_w - 1);
+                let bx1 = ((b + 1) * frame_w / VIBRO_BANDS)
+                    .saturating_sub(1)
+                    .min(frame_w - 1);
+                let ncols = bx1.saturating_sub(bx0);
+                let row_floor = 2.0e-5 * (ncols as f32);
 
-                    let cur_dx = luma[r + ex + 1] - luma[r + ex - 1];
-                    let ref_dx = ((self.ref_luma_q16[r + ex + 1] as f32)
-                        - (self.ref_luma_q16[r + ex - 1] as f32))
-                        * REF_INV;
-                    let gx = 0.25 * (cur_dx + ref_dx);
+                let mut ey = 0usize;
+                while ey < frame_h {
+                    let r = ey * frame_w;
+                    let ey_m = ey.saturating_sub(1);
+                    let ey_p = (ey + 1).min(frame_h - 1);
+                    let rm = ey_m * frame_w;
+                    let rp = ey_p * frame_w;
+                    let dy_half = if ey_p > ey_m {
+                        0.5 / ((ey_p - ey_m) as f32)
+                    } else {
+                        0.0
+                    };
+                    let mut s_xx = 0.0f32;
+                    let mut s_xy = 0.0f32;
+                    let mut s_yy = 0.0f32;
+                    let mut b_x = 0.0f32;
+                    let mut b_y = 0.0f32;
+                    let mut ex = bx0;
+                    while ex < bx1 {
+                        let cur_c = luma[r + ex];
+                        let ref_c = (self.ref_luma_q16[r + ex] as f32) * REF_INV;
+                        let di = cur_c - ref_c;
 
-                    let cur_dy = luma[rp + ex] - luma[rm + ex];
-                    let ref_dy = ((self.ref_luma_q16[rp + ex] as f32)
-                        - (self.ref_luma_q16[rm + ex] as f32))
-                        * REF_INV;
-                    let gy = dy_half * (cur_dy + ref_dy);
+                        let cur_dx = luma[r + ex + 1] - luma[r + ex - 1];
+                        let ref_dx = ((self.ref_luma_q16[r + ex + 1] as f32)
+                            - (self.ref_luma_q16[r + ex - 1] as f32))
+                            * REF_INV;
+                        let gx = 0.25 * (cur_dx + ref_dx);
 
-                    s_xx += gx * gx;
-                    s_xy += gx * gy;
-                    s_yy += gy * gy;
-                    b_x -= gx * di;
-                    b_y -= gy * di;
+                        let cur_dy = luma[rp + ex] - luma[rm + ex];
+                        let ref_dy = ((self.ref_luma_q16[rp + ex] as f32)
+                            - (self.ref_luma_q16[rm + ex] as f32))
+                            * REF_INV;
+                        let gy = dy_half * (cur_dy + ref_dy);
+
+                        s_xx += gx * gx;
+                        s_xy += gx * gy;
+                        s_yy += gy * gy;
+                        b_x -= gx * di;
+                        b_y -= gy * di;
+                        ex += 1;
+                    }
+
+                    let tr = s_xx + s_yy;
+                    if ncols > 0 && tr >= row_floor {
+                        let det = s_xx * s_yy - s_xy * s_xy;
+                        let (mut u_ex, mut u_ey) = if det > 0.04 * tr * tr {
+                            ((s_yy * b_x - s_xy * b_y) / det, (s_xx * b_y - s_xy * b_x) / det)
+                        } else {
+                            (b_x / tr, b_y / tr)
+                        };
+                        u_ex = u_ex.clamp(-3.0, 3.0);
+                        u_ey = u_ey.clamp(-3.0, 3.0);
+                        let (u_sx, u_sy) = rotate_disp_to_sensor(u_ex, u_ey, orientation);
+                        self.band_row_ux[ey] = u_sx;
+                        self.band_row_uy[ey] = u_sy;
+                        self.band_row_ok[ey] = 1;
+                        m_xx += u_sx * u_sx;
+                        m_xy += u_sx * u_sy;
+                        m_yy += u_sy * u_sy;
+                    } else {
+                        self.band_row_ux[ey] = 0.0;
+                        self.band_row_uy[ey] = 0.0;
+                        self.band_row_ok[ey] = 0;
+                    }
+                    ey += 1;
+                }
+            } else {
+                let by0 = (b * frame_h / VIBRO_BANDS + 1).min(frame_h - 1);
+                let by1 = ((b + 1) * frame_h / VIBRO_BANDS)
+                    .saturating_sub(1)
+                    .min(frame_h - 1);
+                let nrows = by1.saturating_sub(by0);
+                let col_floor = 2.0e-5 * (nrows as f32);
+
+                let mut ex = 0usize;
+                while ex < frame_w {
+                    let ex_m = ex.saturating_sub(1);
+                    let ex_p = (ex + 1).min(frame_w - 1);
+                    let dx_half = if ex_p > ex_m {
+                        0.5 / ((ex_p - ex_m) as f32)
+                    } else {
+                        0.0
+                    };
+                    let mut s_xx = 0.0f32;
+                    let mut s_xy = 0.0f32;
+                    let mut s_yy = 0.0f32;
+                    let mut b_x = 0.0f32;
+                    let mut b_y = 0.0f32;
+                    let mut ey = by0;
+                    while ey < by1 {
+                        let r = ey * frame_w;
+                        let rm = (ey - 1) * frame_w;
+                        let rp = (ey + 1) * frame_w;
+                        let cur_c = luma[r + ex];
+                        let ref_c = (self.ref_luma_q16[r + ex] as f32) * REF_INV;
+                        let di = cur_c - ref_c;
+
+                        let cur_dx = luma[r + ex_p] - luma[r + ex_m];
+                        let ref_dx = ((self.ref_luma_q16[r + ex_p] as f32)
+                            - (self.ref_luma_q16[r + ex_m] as f32))
+                            * REF_INV;
+                        let gx = dx_half * (cur_dx + ref_dx);
+
+                        let cur_dy = luma[rp + ex] - luma[rm + ex];
+                        let ref_dy = ((self.ref_luma_q16[rp + ex] as f32)
+                            - (self.ref_luma_q16[rm + ex] as f32))
+                            * REF_INV;
+                        let gy = 0.25 * (cur_dy + ref_dy);
+
+                        s_xx += gx * gx;
+                        s_xy += gx * gy;
+                        s_yy += gy * gy;
+                        b_x -= gx * di;
+                        b_y -= gy * di;
+                        ey += 1;
+                    }
+
+                    let tr = s_xx + s_yy;
+                    if nrows > 0 && tr >= col_floor {
+                        let det = s_xx * s_yy - s_xy * s_xy;
+                        let (mut u_ex, mut u_ey) = if det > 0.04 * tr * tr {
+                            ((s_yy * b_x - s_xy * b_y) / det, (s_xx * b_y - s_xy * b_x) / det)
+                        } else {
+                            (b_x / tr, b_y / tr)
+                        };
+                        u_ex = u_ex.clamp(-3.0, 3.0);
+                        u_ey = u_ey.clamp(-3.0, 3.0);
+                        let (u_sx, u_sy) = rotate_disp_to_sensor(u_ex, u_ey, orientation);
+                        self.band_row_ux[ex] = u_sx;
+                        self.band_row_uy[ex] = u_sy;
+                        self.band_row_ok[ex] = 1;
+                        m_xx += u_sx * u_sx;
+                        m_xy += u_sx * u_sy;
+                        m_yy += u_sy * u_sy;
+                    } else {
+                        self.band_row_ux[ex] = 0.0;
+                        self.band_row_uy[ex] = 0.0;
+                        self.band_row_ok[ex] = 0;
+                    }
                     ex += 1;
                 }
-
-                let tr = s_xx + s_yy;
-                if ncols > 0 && tr >= row_floor {
-                    let det = s_xx * s_yy - s_xy * s_xy;
-                    let (mut u_ex, mut u_ey) = if det > 0.04 * tr * tr {
-                        ((s_yy * b_x - s_xy * b_y) / det, (s_xx * b_y - s_xy * b_x) / det)
-                    } else {
-                        (b_x / tr, b_y / tr)
-                    };
-                    u_ex = u_ex.clamp(-3.0, 3.0);
-                    u_ey = u_ey.clamp(-3.0, 3.0);
-                    let (u_sx, u_sy) = rotate_disp_to_sensor(u_ex, u_ey, orientation);
-                    self.band_row_ux[ey] = u_sx;
-                    self.band_row_uy[ey] = u_sy;
-                    self.band_row_ok[ey] = 1;
-                    m_xx += u_sx * u_sx;
-                    m_xy += u_sx * u_sy;
-                    m_yy += u_sy * u_sy;
-                } else {
-                    self.band_row_ux[ey] = 0.0;
-                    self.band_row_uy[ey] = 0.0;
-                    self.band_row_ok[ey] = 0;
-                }
-                ey += 1;
             }
 
             if self.band_axis_locked[b] == 0 {
                 let tr_m = m_xx + m_yy;
-                if tr_m >= 1.0e-4 * (frame_h as f32) {
+                if tr_m >= 1.0e-4 * (scan_len as f32) {
                     let diff_m = m_xx - m_yy;
                     let disc_m =
                         crate::wasm_sqrtf((diff_m * diff_m + 4.0 * m_xy * m_xy).max(0.0));
@@ -1131,15 +1364,15 @@ impl VibrometryState {
                 (1.0, 0.0)
             };
 
-            let mut ey2 = 0usize;
-            while ey2 < frame_h {
-                let d = if self.band_row_ok[ey2] != 0 {
-                    (self.band_row_ux[ey2] * ax_x + self.band_row_uy[ey2] * ax_y).clamp(-3.0, 3.0)
+            let mut s2 = 0usize;
+            while s2 < scan_len {
+                let d = if self.band_row_ok[s2] != 0 {
+                    (self.band_row_ux[s2] * ax_x + self.band_row_uy[s2] * ax_y).clamp(-3.0, 3.0)
                 } else {
                     0.0
                 };
-                self.disp_hist[dst_base + ey2] = d;
-                ey2 += 1;
+                self.disp_hist[dst_base + s2] = d;
+                s2 += 1;
             }
             b += 1;
         }
@@ -1193,7 +1426,13 @@ impl VibrometryState {
     }
 
     #[inline(never)]
-    fn eval_segment_optical_quadrature(&mut self, obs_count: usize, w_sum: f64, df_hz: f64) {
+    fn eval_segment_optical_quadrature(
+        &mut self,
+        obs_count: usize,
+        w_sum: f64,
+        df_hz: f64,
+        k_end: usize,
+    ) {
         self.band_mean_y.fill(0.0);
         let mut j = 0usize;
         while j < obs_count {
@@ -1229,7 +1468,7 @@ impl VibrometryState {
             let mut wk_re = c1;
             let mut wk_im = s1;
             let mut k = 1usize;
-            while k < VIBRO_SPEC_BINS {
+            while k < k_end {
                 self.tmp_cos[k] = wk_re;
                 self.tmp_sin[k] = wk_im;
                 let n_re = wk_re * c1 - wk_im * s1;
@@ -1250,7 +1489,7 @@ impl VibrometryState {
                     let wy = wj * y * scale_y;
                     let row_b = b * VIBRO_SPEC_BINS;
                     let mut k2 = 1usize;
-                    while k2 < VIBRO_SPEC_BINS {
+                    while k2 < k_end {
                         self.seg_y_re[row_b + k2] += wy * self.tmp_cos[k2];
                         self.seg_y_im[row_b + k2] += wy * self.tmp_sin[k2];
                         k2 += 1;
@@ -1263,14 +1502,14 @@ impl VibrometryState {
     }
 
     #[inline(never)]
-    fn advance_welch_segments(&mut self) {
+    fn advance_welch_segments(&mut self) -> u32 {
         let h_cnt = self.hist_count as usize;
         if h_cnt == 0
             || self.audio_has_prev_t == 0
             || self.audio_total_samples.saturating_sub(self.audio_interval_start_sample)
                 < (AUDIO_FFT_N as u64)
         {
-            return;
+            return 0;
         }
 
         let oldest_hist = ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - h_cnt) % VIBRO_HIST_FRAMES;
@@ -1299,6 +1538,10 @@ impl VibrometryState {
         let dt_audio_us = 1_000_000.0 / fs;
         let t_win_us = (AUDIO_FFT_N as f64) * dt_audio_us;
         let df_hz = fs / (AUDIO_FFT_N as f64);
+        let k_end = unambiguous_welch_k_end(self.dt_row_us, df_hz);
+        if k_end <= 1 {
+            return 0;
+        }
 
         let mut s0 = if self.last_audio_seg_end_sample <= self.audio_interval_start_sample {
             self.audio_interval_start_sample
@@ -1311,6 +1554,7 @@ impl VibrometryState {
             s0 = min_s0;
         }
 
+        let mut added_segs = 0u32;
         while s0 + (AUDIO_FFT_N as u64) <= self.audio_total_samples {
             let t_seg_start_us = (self.audio_last_t_end_us as f64)
                 - ((self.audio_total_samples - s0) as f64) * dt_audio_us;
@@ -1429,14 +1673,15 @@ impl VibrometryState {
                 k += 1;
             }
 
-            self.eval_segment_optical_quadrature(obs_count, w_sum, df_hz);
+            self.eval_segment_optical_quadrature(obs_count, w_sum, df_hz, k_end);
 
             let w_slot = (self.welch_cursor as usize) % VIBRO_WELCH_SLOTS;
             let pxx_base = w_slot * VIBRO_SPEC_BINS;
+            self.welch_pxx[pxx_base..pxx_base + VIBRO_SPEC_BINS].fill(0.0);
             let mut k_aud = 1usize;
             let mut max_pxx_seg = -1.0f64;
             k = 1;
-            while k < VIBRO_SPEC_BINS {
+            while k < k_end {
                 let xr = self.seg_x_re[k];
                 let xi = self.seg_x_im[k];
                 let pxx = xr * xr + xi * xi;
@@ -1456,11 +1701,11 @@ impl VibrometryState {
 
             let mut b = 0usize;
             while b < VIBRO_BANDS {
+                let dst_b = (w_slot * VIBRO_BANDS + b) * VIBRO_SPEC_BINS;
                 if self.band_grad_ok[b] != 0 {
                     let src_b = b * VIBRO_SPEC_BINS;
-                    let dst_b = (w_slot * VIBRO_BANDS + b) * VIBRO_SPEC_BINS;
                     let mut k2 = 1usize;
-                    while k2 < VIBRO_SPEC_BINS {
+                    while k2 < k_end {
                         let xr = self.seg_x_re[k2];
                         let xi = self.seg_x_im[k2];
                         let yr = self.seg_y_re[src_b + k2];
@@ -1472,6 +1717,11 @@ impl VibrometryState {
                         self.welch_pxy_re[dst_b + k2] = pxy_r;
                         self.welch_pxy_im[dst_b + k2] = pxy_i;
                         k2 += 1;
+                    }
+                    if k_end < VIBRO_SPEC_BINS {
+                        self.welch_pyy[dst_b + k_end..dst_b + VIBRO_SPEC_BINS].fill(0.0);
+                        self.welch_pxy_re[dst_b + k_end..dst_b + VIBRO_SPEC_BINS].fill(0.0);
+                        self.welch_pxy_im[dst_b + k_end..dst_b + VIBRO_SPEC_BINS].fill(0.0);
                     }
 
                     let yr_a = self.seg_y_re[src_b + k_aud];
@@ -1497,13 +1747,16 @@ impl VibrometryState {
             if (self.welch_count as usize) < VIBRO_WELCH_SLOTS {
                 self.welch_count += 1;
             }
+            added_segs = added_segs.saturating_add(1);
             self.last_audio_seg_end_sample = s0 + (AUDIO_FFT_N as u64);
             s0 += AUDIO_HOP as u64;
         }
+        added_segs
     }
 
     #[inline(never)]
-    fn finalize_welch_solution(&mut self) {
+    fn finalize_welch_solution(&mut self, added_segs: u32) {
+        self.fresh_solve = 0;
         let k_segs = self.welch_count;
         self.telem[3] = k_segs;
         self.telem[9] = self.single_seg_k1_coh.to_bits();
@@ -1525,6 +1778,77 @@ impl VibrometryState {
 
         let df_hz = (self.audio_ring_rate_hz as f64) / (AUDIO_FFT_N as f64);
         self.telem[13] = (df_hz as f32).to_bits();
+        let k_end = unambiguous_welch_k_end(self.dt_row_us, df_hz);
+        if k_end <= 1 {
+            self.planes.fill(0.0);
+            self.welch_count = 0;
+            self.welch_cursor = 0;
+            self.telem[0] = RS_STATE_UNCALIBRATED;
+            self.telem[2] |= RS_REASON_BAD_CALIB;
+            self.telem[3] = 0;
+            self.telem[4] = 0;
+            self.telem[6] = 0;
+            self.telem[7] = (1.0f32).to_bits();
+            self.telem[21] = 0;
+            return;
+        }
+
+        let h_cnt = self.hist_count as usize;
+        let mut audio_covers_newest = true;
+        if h_cnt > 0 {
+            let oldest_hist =
+                ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - h_cnt) % VIBRO_HIST_FRAMES;
+            let newest_hist =
+                ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - 1) % VIBRO_HIST_FRAMES;
+            let dt_row = self.dt_row_us as f64;
+            let half_exp = 0.5 * (self.exposure_us as f64);
+            let old_rows = self.frame_rows_hist[oldest_hist] as i64;
+            let old_q_end = if self.q_step_hist[oldest_hist] >= 0 {
+                self.q_start_hist[oldest_hist] as f64
+            } else {
+                (self.q_start_hist[oldest_hist] as i64
+                    + (old_rows - 1) * (self.q_step_hist[oldest_hist] as i64))
+                    as f64
+            };
+            let opt_t_min_us =
+                (self.t_src_hist_us[oldest_hist] as f64) + old_q_end * dt_row + half_exp;
+            let cur_rows = self.frame_rows_hist[newest_hist] as i64;
+            let cur_q_min = if self.q_step_hist[newest_hist] >= 0 {
+                self.q_start_hist[newest_hist] as f64
+            } else {
+                (self.q_start_hist[newest_hist] as i64
+                    + (cur_rows - 1) * (self.q_step_hist[newest_hist] as i64))
+                    as f64
+            };
+            let opt_cur_min_us =
+                (self.t_src_hist_us[newest_hist] as f64) + cur_q_min * dt_row + half_exp;
+            let cur_q_max = if self.q_step_hist[newest_hist] >= 0 {
+                (self.q_start_hist[newest_hist] as i64
+                    + (cur_rows - 1) * (self.q_step_hist[newest_hist] as i64))
+                    as f64
+            } else {
+                self.q_start_hist[newest_hist] as f64
+            };
+            let opt_t_max_us =
+                (self.t_src_hist_us[newest_hist] as f64) + cur_q_max * dt_row + half_exp;
+            audio_covers_newest = (self.audio_last_t_end_us as f64) + dt_row >= opt_t_max_us;
+            let t_win_us = (AUDIO_FFT_N as f64) * 1_000_000.0 / (self.audio_ring_rate_hz as f64);
+            if opt_t_min_us > (self.audio_last_t_end_us as f64)
+                || (opt_cur_min_us - (self.audio_last_t_end_us as f64)) > 4.0 * t_win_us
+            {
+                self.welch_count = 0;
+                self.welch_cursor = 0;
+                self.planes.fill(0.0);
+                self.telem[0] = RS_STATE_WARMING;
+                self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
+                self.telem[3] = 0;
+                self.telem[4] = 0;
+                self.telem[6] = 0;
+                self.telem[7] = (1.0f32).to_bits();
+                self.telem[21] = 0;
+                return;
+            }
+        }
 
         if k_segs < 8 {
             self.planes.fill(0.0);
@@ -1536,9 +1860,21 @@ impl VibrometryState {
             return;
         }
 
+        let mut ok_bands = 0usize;
+        let mut b_cnt_i = 0usize;
+        while b_cnt_i < VIBRO_BANDS {
+            if self.band_grad_ok[b_cnt_i] != 0 {
+                ok_bands += 1;
+            }
+            b_cnt_i += 1;
+        }
+        let active_bins = k_end.saturating_sub(1).max(1);
+        let n_tests = (ok_bands.max(1) * active_bins).max(1);
+        let ln_alpha = ln_f64(0.01 / (n_tests as f64));
+
         let inv_k = 1.0 / (k_segs as f64);
         let k_eff = 0.95 * (k_segs as f64);
-        let gamma2_crit = 1.0 - exp_neg_f64(LN_ALPHA_BIN_63 / (k_eff - 1.0));
+        let gamma2_crit = 1.0 - exp_neg_f64(ln_alpha / (k_eff - 1.0));
         let gamma2_crit_f32 = gamma2_crit as f32;
 
         self.mean_pxx.fill(0.0);
@@ -1546,7 +1882,7 @@ impl VibrometryState {
         while s < (k_segs as usize) {
             let pxx_base = s * VIBRO_SPEC_BINS;
             let mut k = 1usize;
-            while k < VIBRO_SPEC_BINS {
+            while k < k_end {
                 self.mean_pxx[k] += self.welch_pxx[pxx_base + k];
                 k += 1;
             }
@@ -1556,7 +1892,7 @@ impl VibrometryState {
         let mut max_pxx = 0.0f64;
         let mut k_audio_peak = 1usize;
         let mut k = 1usize;
-        while k < VIBRO_SPEC_BINS {
+        while k < k_end {
             let v = self.mean_pxx[k] * inv_k;
             self.mean_pxx[k] = v;
             if v > max_pxx {
@@ -1585,7 +1921,7 @@ impl VibrometryState {
             while s2 < (k_segs as usize) {
                 let src = (s2 * VIBRO_BANDS + b) * VIBRO_SPEC_BINS;
                 let mut k2 = 1usize;
-                while k2 < VIBRO_SPEC_BINS {
+                while k2 < k_end {
                     self.band_mean_pyy[k2] += self.welch_pyy[src + k2];
                     self.band_mean_pxy_re[k2] += self.welch_pxy_re[src + k2];
                     self.band_mean_pxy_im[k2] += self.welch_pxy_im[src + k2];
@@ -1596,7 +1932,7 @@ impl VibrometryState {
 
             let mut max_pyy_b = 0.0f64;
             let mut k2 = 1usize;
-            while k2 < VIBRO_SPEC_BINS {
+            while k2 < k_end {
                 self.band_mean_pyy[k2] *= inv_k;
                 self.band_mean_pxy_re[k2] *= inv_k;
                 self.band_mean_pxy_im[k2] *= inv_k;
@@ -1608,7 +1944,7 @@ impl VibrometryState {
             let eps_yy_b = (1.0e-4 * max_pyy_b).max(1.0e-6);
 
             k2 = 1;
-            while k2 < VIBRO_SPEC_BINS {
+            while k2 < k_end {
                 let cr = self.band_mean_pxy_re[k2];
                 let ci = self.band_mean_pxy_im[k2];
                 let denom = (self.mean_pxx[k2] + eps_xx) * (self.band_mean_pyy[k2] + eps_yy_b);
@@ -1661,7 +1997,7 @@ impl VibrometryState {
 
             let mut max_pyy_b = 0.0f64;
             let mut k2 = 1usize;
-            while k2 < VIBRO_SPEC_BINS {
+            while k2 < k_end {
                 let mut sum_p = 0.0f64;
                 let mut s2 = 0usize;
                 while s2 < (k_segs as usize) {
@@ -1730,6 +2066,13 @@ impl VibrometryState {
             (self.band_amp[dom_b], self.band_phase[dom_b])
         };
 
+        let new_audio_arrived = self.audio_total_samples > self.last_fresh_audio_samples;
+        if added_segs > 0 && (new_audio_arrived || audio_covers_newest) {
+            self.fresh_solve = 1;
+            self.last_fresh_audio_samples = self.audio_total_samples;
+        } else {
+            self.fresh_solve = 0;
+        }
         self.telem[0] = RS_STATE_READY;
         self.telem[2] = reason_bits;
         self.telem[4] = valid_cells;
@@ -1998,6 +2341,7 @@ impl VibrometryState {
             self.band_phase.fill(0.0);
             self.band_coh.fill(0.0);
             let (valid_cells, _) = self.project_bands_to_grid(false, 0.0);
+            self.fresh_solve = 1;
             self.telem[0] = RS_STATE_READY;
             self.telem[2] = 0;
             self.telem[4] = valid_cells;
@@ -2131,6 +2475,7 @@ impl VibrometryState {
         }
 
         let (valid_cells, _) = self.project_bands_to_grid(false, 0.0);
+        self.fresh_solve = 1;
         self.telem[0] = RS_STATE_READY;
         self.telem[2] = reason_bits;
         self.telem[4] = valid_cells;
@@ -2154,29 +2499,51 @@ impl VibrometryState {
             let mut cx = 0usize;
             while cx < VIBRO_CELL_W {
                 let cell = cy * VIBRO_CELL_W + cx;
-                let c_x0 = 2 * cx;
-                let c_x1 = c_x0 + 2;
-                let b0 = c_x0 / 5;
-                let b1 = (c_x1 - 1) / 5;
-
                 let mut w_sum = 0.0f32;
                 let mut coh_sum = 0.0f32;
                 let mut ph_re = 0.0f32;
                 let mut ph_im = 0.0f32;
-                let mut b = b0;
-                while b <= b1 {
-                    let b_x0 = 5 * b;
-                    let b_x1 = b_x0 + 5;
-                    let ov_px = c_x1.min(b_x1).saturating_sub(c_x0.max(b_x0));
-                    let ov = (ov_px as f32) * 0.5;
-                    if ov > 0.0 && self.cell_grad_ok[b * VIBRO_CELL_H + cy] != 0 {
-                        w_sum += ov;
-                        coh_sum += ov * self.band_coh[b];
-                        let (s, c) = sin_cos_f64(self.band_phase[b] as f64);
-                        ph_re += ov * self.band_amp[b] * (c as f32);
-                        ph_im += ov * self.band_amp[b] * (s as f32);
+
+                if self.scan_along_ey != 0 {
+                    let c_x0 = 2 * cx;
+                    let c_x1 = c_x0 + 2;
+                    let b0 = c_x0 / 5;
+                    let b1 = (c_x1 - 1) / 5;
+                    let mut b = b0;
+                    while b <= b1 {
+                        let b_x0 = 5 * b;
+                        let b_x1 = b_x0 + 5;
+                        let ov_px = c_x1.min(b_x1).saturating_sub(c_x0.max(b_x0));
+                        let ov = (ov_px as f32) * 0.5;
+                        if ov > 0.0 && self.cell_grad_ok[b * VIBRO_CELL_H + cy] != 0 {
+                            w_sum += ov;
+                            coh_sum += ov * self.band_coh[b];
+                            let (s, c) = sin_cos_f64(self.band_phase[b] as f64);
+                            ph_re += ov * self.band_amp[b] * (c as f32);
+                            ph_im += ov * self.band_amp[b] * (s as f32);
+                        }
+                        b += 1;
                     }
-                    b += 1;
+                } else {
+                    let c_y0 = cy * VIBRO_BANDS;
+                    let c_y1 = (cy + 1) * VIBRO_BANDS;
+                    let b0 = c_y0 / VIBRO_CELL_H;
+                    let b1 = (c_y1 - 1) / VIBRO_CELL_H;
+                    let mut b = b0;
+                    while b <= b1 {
+                        let b_y0 = b * VIBRO_CELL_H;
+                        let b_y1 = b_y0 + VIBRO_CELL_H;
+                        let ov_u = c_y1.min(b_y1).saturating_sub(c_y0.max(b_y0));
+                        let ov = (ov_u as f32) * (1.0 / (VIBRO_BANDS as f32));
+                        if ov > 0.0 && self.cell_grad_ok[b * VIBRO_CELL_W + cx] != 0 {
+                            w_sum += ov;
+                            coh_sum += ov * self.band_coh[b];
+                            let (s, c) = sin_cos_f64(self.band_phase[b] as f64);
+                            ph_re += ov * self.band_amp[b] * (c as f32);
+                            ph_im += ov * self.band_amp[b] * (s as f32);
+                        }
+                        b += 1;
+                    }
                 }
 
                 if w_sum > 0.0 {

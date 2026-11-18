@@ -589,10 +589,10 @@ impl HodgeState {
             orth_eh_rel,
             orth_ch_rel,
             energy_part_err,
-        ) = if e_tot <= 1e-30 {
+        ) = if e_tot <= 1.0e-300 {
             (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         } else {
-            let denom = if e_tot > 1e-18 { e_tot } else { 1e-18 };
+            let denom = e_tot;
             (
                 e_ex / denom,
                 e_co / denom,

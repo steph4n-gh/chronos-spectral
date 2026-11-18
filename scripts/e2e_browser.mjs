@@ -4567,6 +4567,9 @@ async function main() {
               ok: document.body?.dataset?.surface === 'deck' &&
                   Boolean(document.getElementById('hodgeModeSelect')) &&
                   Boolean(document.getElementById('rsVibroModeSelect')) &&
+                  Boolean(document.getElementById('inpRsDtRowUs')) &&
+                  Boolean(document.getElementById('inpRsExposureUs')) &&
+                  Boolean(document.getElementById('selRsScanDir')) &&
                   Boolean(document.getElementById('diagHodge2Complex')) &&
                   Boolean(w2 && w2.available === true && w2.vibro?.available && w2.hodge?.available && w2.conservation?.available),
               avail: Boolean(w2?.available),
@@ -4586,6 +4589,46 @@ async function main() {
               }
             });
             window.__e2eW2DeckClsPo.observe({ type: 'layout-shift', buffered: false });
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) {
+              rm.value = '1';
+              rm.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return true;
+          })()`
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Fresh Deck UI RS Mode 1 reaches READY without probe overrides',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const v = w2?.vibro;
+            const diag = document.getElementById('diagRsWelch')?.textContent || '';
+            return {
+              ok: Boolean(v && v.state === 3 && diag.startsWith('READY · ')),
+              state: v?.state,
+              reason: v?.reasonFlags,
+              diag,
+            };
+          })()`,
+          15000
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) {
+              rm.value = '0';
+              rm.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const chkNative = document.getElementById('chkNativeRoi');
+            if (chkNative && chkNative.checked) {
+              chkNative.checked = false;
+              chkNative.dispatchEvent(new Event('change', { bubbles: true }));
+            }
             document.querySelector('[data-showcase="vortex_1200"]')?.click();
             return true;
           })()`
@@ -4633,6 +4676,12 @@ async function main() {
               h.converged === true &&
               h.coexactFrac > 0.85 &&
               h.orthEcRel < 1e-6 &&
+              typeof h.voidCx === 'number' &&
+              typeof h.voidCy === 'number' &&
+              Array.isArray(h.wakeBbox) &&
+              h.wakeBbox.length === 4 &&
+              !('voidR' in h) &&
+              !('wakeR' in h) &&
               w2?.stamps?.hodge?.valid === true &&
               diag.startsWith('READY · ')
             );
@@ -4694,6 +4743,38 @@ async function main() {
         if (w2HudBytes < 2500) {
           throw new Error(`Step 10a: Expected Hodge #hudCanvas screenshot >= 2500 B, got ${w2HudBytes} B`);
         }
+
+        // Switching to a preset without an overlayMode (model_rockets) must reset orphaned Hodge overlay 9 -> 0
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            document.querySelector('[data-showcase="model_rockets"]')?.click();
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Preset without overlayMode resets orphaned Hodge overlay 9 -> 0',
+          `(() => {
+            const hm = document.getElementById('hodgeModeSelect')?.value;
+            const ov = document.getElementById('fieldOverlayModeSelect')?.value;
+            return {
+              ok: hm === '0' && ov === '0' && window.__chronosUiState?.overlays?.fieldOverlayMode === 0,
+              hm,
+              ov,
+              uiOm: window.__chronosUiState?.overlays?.fieldOverlayMode,
+            };
+          })()`,
+          8000
+        );
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            document.getElementById('btnSrcTestbench')?.click();
+            return true;
+          })()`
+        );
 
         // 10b. Calibrated RS + Welch (K >= 8, 880 Hz) & Exposure-Null Banner (T_e = 1/880s)
         const rsWelchReport = await cdp.evalJs(
@@ -4855,15 +4936,55 @@ async function main() {
             const banner = document.getElementById('acquisitionStatusBanner');
             const nullSev = banner?.dataset?.severity || '';
             const nullTxt = banner?.textContent || '';
+
+            const chunkPcm = new Array(6000);
+            for (let i = 0; i < 6000; i++) {
+              chunkPcm[i] = 0.25 * Math.cos(2.0 * Math.PI * 440.0 * (i / 48000.0));
+            }
+            const chunkAck = await w2p.submitAudioBlock({
+              samples: chunkPcm,
+              tEndUs: 5_000_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            const nanSkewAck = await w2p.submitAudioBlock({
+              samples: [0.0, 0.0, 0.0, 0.0],
+              tEndUs: 5_050_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: NaN,
+            });
+            await new Promise((r) => setTimeout(r, 30));
+            const postNanVibro = w2p.getLastWave2();
+
             return {
               readyVibro: snapReady?.vibro || null,
               diagReady,
               nullVibro: snapNull?.vibro || null,
               nullSev,
               nullTxt,
+              chunkAck,
+              nanSkewAck,
+              postNanState: postNanVibro?.vibro?.state ?? -1,
+              postNanStampValid: Boolean(postNanVibro?.stamps?.vibro?.valid),
             };
           })()`
         );
+
+        if (
+          !rsWelchReport.chunkAck ||
+          rsWelchReport.chunkAck.accepted !== 1 ||
+          rsWelchReport.chunkAck.count !== 6000
+        ) {
+          throw new Error('Step 10b 6000-sample chunking gate failed: ' + JSON.stringify(rsWelchReport.chunkAck));
+        }
+        if (
+          !rsWelchReport.nanSkewAck ||
+          rsWelchReport.nanSkewAck.accepted !== 0 ||
+          rsWelchReport.postNanState !== 4 ||
+          rsWelchReport.postNanStampValid
+        ) {
+          throw new Error('Step 10b NaN estSkewUs rejection gate failed: ' + JSON.stringify(rsWelchReport));
+        }
 
         const rv = rsWelchReport.readyVibro;
         if (
@@ -4893,8 +5014,8 @@ async function main() {
           w2Session,
           `(async () => {
             const ack = await window.__chronosWave2Probe.evalOccludedPair([
-              100, 90, 150, 0, 1, 6,
-              160, 90, -150, 0, 1, 6,
+              100, 90, 150, 0, 1, 0,
+              160, 90, -150, 0, 1, 0,
               100, 90, -150, 0,
               160, 90, 150, 0,
               0.40, 0, 0.02, 1, 1, 1, 3,

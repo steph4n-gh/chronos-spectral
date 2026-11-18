@@ -1456,7 +1456,8 @@
       text-overflow: ellipsis;
     }
 
-    .select-field select {
+    .select-field select,
+    .select-field input[type="number"] {
       font-family: var(--font-mono);
       font-size: 0.72rem;
       font-weight: 600;
@@ -1469,13 +1470,20 @@
       cursor: pointer;
       inline-size: 100%;
       min-inline-size: 0;
+      box-sizing: border-box;
     }
 
-    .select-field select:hover {
+    .select-field input[type="number"] {
+      cursor: text;
+    }
+
+    .select-field select:hover,
+    .select-field input[type="number"]:hover {
       border-color: var(--border-accent);
     }
 
-    .select-field select:focus-visible {
+    .select-field select:focus-visible,
+    .select-field input[type="number"]:focus-visible {
       outline: 2px solid var(--brand-color);
       outline-offset: 2px;
     }
@@ -1731,6 +1739,7 @@
       button,
       .file-upload-label,
       .select-field select,
+      .select-field input[type="number"],
       .cal-field input {
         min-block-size: 36px;
       }
@@ -1847,6 +1856,10 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.44rem;
       margin-block-end: 0.52rem;
+    }
+
+    .continuum-rs-calib-row {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     @media (max-width: 640px) {
@@ -3191,6 +3204,27 @@
           </div>
         </div>
 
+        <div class="continuum-controls-row continuum-rs-calib-row">
+          <div class="select-field">
+            <label for="inpRsDtRowUs">RS Row dt (us)</label>
+            <input type="number" id="inpRsDtRowUs" name="rsDtRowUs" min="0" max="1000" step="0.5" value="40" />
+          </div>
+          <div class="select-field">
+            <label for="inpRsExposureUs">RS Exposure (us)</label>
+            <input type="number" id="inpRsExposureUs" name="rsExposureUs" min="0" max="200000" step="1" value="200" />
+          </div>
+          <div class="select-field">
+            <label for="selRsScanDir">RS Scan Axis</label>
+            <select id="selRsScanDir" name="rsScanDir">
+              <option value="-1">Unset (Fail Closed)</option>
+              <option value="0" selected>Top -&gt; Bottom (+Y)</option>
+              <option value="1">Bottom -&gt; Top (-Y)</option>
+              <option value="2">Left -&gt; Right (+X)</option>
+              <option value="3">Right -&gt; Left (-X)</option>
+            </select>
+          </div>
+        </div>
+
         <div class="toggle-list" style="margin-block-end: 0.48rem;">
           <label class="toggle-item" for="chkCovEllipses">
             <input type="checkbox" id="chkCovEllipses" name="showCovEllipses" />
@@ -4162,6 +4196,9 @@
       metrologyModeSelect: document.getElementById('metrologyModeSelect'),
       hodgeModeSelect: document.getElementById('hodgeModeSelect'),
       rsVibroModeSelect: document.getElementById('rsVibroModeSelect'),
+      inpRsDtRowUs: document.getElementById('inpRsDtRowUs'),
+      inpRsExposureUs: document.getElementById('inpRsExposureUs'),
+      selRsScanDir: document.getElementById('selRsScanDir'),
       chkCovEllipses: document.getElementById('chkCovEllipses'),
       chkNativeRoi: document.getElementById('chkNativeRoi'),
       rangeRoiX0: document.getElementById('rangeRoiX0'),
@@ -4626,7 +4663,112 @@
       bitmapCaptureBusy = false;
     }
 
+    let rsAudioCaptureCtx = null;
+    let rsAudioCaptureSource = null;
+    let rsAudioCaptureProc = null;
+    let rsAudioCaptureGain = null;
+    let rsAudioCaptureRateHz = 48000.0;
+    let rsAudioCaptureBaseUs = 0;
+    let rsAudioCaptureCursor = 0;
+
+    function stopRsLiveAudioCapture() {
+      if (rsAudioCaptureProc) {
+        try {
+          rsAudioCaptureProc.onaudioprocess = null;
+          rsAudioCaptureProc.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureProc = null;
+      }
+      if (rsAudioCaptureSource) {
+        try {
+          rsAudioCaptureSource.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureSource = null;
+      }
+      if (rsAudioCaptureGain) {
+        try {
+          rsAudioCaptureGain.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureGain = null;
+      }
+      if (rsAudioCaptureCtx) {
+        try {
+          rsAudioCaptureCtx.close();
+        } catch (_e) {}
+        rsAudioCaptureCtx = null;
+      }
+      rsAudioCaptureBaseUs = 0;
+      rsAudioCaptureCursor = 0;
+    }
+
+    function syncRsLiveAudioCapture() {
+      const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+      const hasAudioTrack = Boolean(
+        activeMediaStream &&
+        typeof activeMediaStream.getAudioTracks === 'function' &&
+        activeMediaStream.getAudioTracks().length > 0
+      );
+      if (rm !== 2 || !hasAudioTrack) {
+        stopRsLiveAudioCapture();
+        return;
+      }
+      if (rsAudioCaptureCtx) return;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try {
+        const ctx = new AC();
+        const src = ctx.createMediaStreamSource(activeMediaStream);
+        const proc = ctx.createScriptProcessor(2048, 1, 1);
+        const gain = ctx.createGain();
+        gain.gain.value = 0.0;
+        rsAudioCaptureRateHz = ctx.sampleRate || 48000.0;
+        rsAudioCaptureBaseUs = Math.round(performance.now() * 1000.0);
+        rsAudioCaptureCursor = 0;
+        const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 40.0;
+        const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 200.0;
+        worker.postMessage({
+          type: 'set_rs_calib',
+          rsMode: 2,
+          dtRowUs,
+          exposureUs,
+          audioRateHz: rsAudioCaptureRateHz,
+          maxSkewUs: 500.0,
+        });
+        proc.onaudioprocess = (ev) => {
+          const ch = ev.inputBuffer && ev.inputBuffer.numberOfChannels > 0
+            ? ev.inputBuffer.getChannelData(0)
+            : null;
+          if (!ch || ch.length === 0) return;
+          const samples = new Float32Array(ch.length);
+          samples.set(ch);
+          rsAudioCaptureCursor += samples.length;
+          const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
+          worker.postMessage(
+            {
+              type: 'push_audio_pcm',
+              samples,
+              tEndUs,
+              sampleRateHz: rsAudioCaptureRateHz,
+              estSkewUs: 0.0,
+            },
+            [samples.buffer]
+          );
+        };
+        src.connect(proc);
+        proc.connect(gain);
+        gain.connect(ctx.destination);
+        if (ctx.state === 'suspended') ctx.resume();
+        rsAudioCaptureCtx = ctx;
+        rsAudioCaptureSource = src;
+        rsAudioCaptureProc = proc;
+        rsAudioCaptureGain = gain;
+      } catch (_e) {
+        stopRsLiveAudioCapture();
+      }
+    }
+
     function stopMediaCapture(preserveLiveRetry = false) {
+      stopRsLiveAudioCapture();
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
@@ -6064,7 +6206,7 @@
           worker.postMessage({ type: 'set_hodge_config', hodgeMode: 1 });
         } else if (om === 11 && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
           dom.rsVibroModeSelect.value = '2';
-          worker.postMessage({ type: 'set_rs_calib', rsMode: 2 });
+          sendRsControlToWorker(true);
         }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
@@ -6096,10 +6238,68 @@
       });
     }
 
+    function readRsUiScanDir() {
+      const sdRaw = dom.selRsScanDir ? parseInt(dom.selRsScanDir.value, 10) : -1;
+      return Number.isInteger(sdRaw) && sdRaw >= 0 && sdRaw <= 3 ? sdRaw : 0xffffffff;
+    }
+
+    function sendRsControlToWorker(autoEnableNative = false) {
+      const rm = dom.rsVibroModeSelect
+        ? Math.max(0, Math.min(2, parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0))
+        : 0;
+      const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 0.0;
+      const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 0.0;
+      const scanDir = readRsUiScanDir();
+      if (rm > 0 && autoEnableNative && dom.chkNativeRoi && !dom.chkNativeRoi.checked) {
+        dom.chkNativeRoi.checked = true;
+      }
+      const n1 = Boolean(dom.chkNativeRoi && dom.chkNativeRoi.checked);
+      const xPct = dom.rangeRoiX0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiX0.value) || 0)) : 50;
+      const yPct = dom.rangeRoiY0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiY0.value) || 0)) : 50;
+      worker.postMessage({
+        type: 'set_roi',
+        native1to1: n1,
+        normX: xPct / 100.0,
+        normY: yPct / 100.0,
+        scanDir,
+      });
+      worker.postMessage({
+        type: 'set_rs_calib',
+        rsMode: rm,
+        dtRowUs,
+        exposureUs,
+        audioRateHz: rsAudioCaptureRateHz || 48000.0,
+        maxSkewUs: 500.0,
+      });
+      syncRsLiveAudioCapture();
+    }
+
     if (dom.rsVibroModeSelect) {
       dom.rsVibroModeSelect.addEventListener('change', () => {
         const rm = Math.max(0, Math.min(2, parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0));
-        worker.postMessage({ type: 'set_rs_calib', rsMode: rm });
+        sendRsControlToWorker(rm > 0);
+      });
+    }
+    if (dom.inpRsDtRowUs) {
+      dom.inpRsDtRowUs.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) sendRsControlToWorker(false);
+      });
+    }
+    if (dom.inpRsExposureUs) {
+      dom.inpRsExposureUs.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) sendRsControlToWorker(false);
+      });
+    }
+    if (dom.selRsScanDir) {
+      dom.selRsScanDir.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) {
+          sendRsControlToWorker(false);
+        } else {
+          worker.postMessage({ type: 'set_roi', scanDir: readRsUiScanDir() });
+        }
       });
     }
 
@@ -6862,10 +7062,19 @@
       const reqEpoch = sourceEpoch;
       let stream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
-          audio: false,
-        });
+        const wantAudio = Boolean(dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '2');
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
+            audio: wantAudio,
+          });
+        } catch (audioErr) {
+          if (!wantAudio) throw audioErr;
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
+            audio: false,
+          });
+        }
         if (reqEpoch !== sourceEpoch) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -6883,6 +7092,7 @@
         syncContextualSourceUi('webcam');
         dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
         worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
+        syncRsLiveAudioCapture();
         startVideoPump();
       } catch (err) {
         if (stream && activeMediaStream !== stream) {
@@ -7078,7 +7288,19 @@
       worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
       worker.postMessage({ type: 'set_hodge_config', hodgeMode: nextHodgeMode });
       worker.postMessage({ type: 'set_rs_calib', rsMode: nextRsMode });
+      syncRsLiveAudioCapture();
       worker.postMessage({ type: 'set_roi', native1to1: nextNativeRoi });
+      if (typeof (cfg && cfg.overlayMode) !== 'number' && dom.fieldOverlayModeSelect) {
+        const curOm = parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0;
+        const orphanedBos = curOm >= 5 && curOm <= 7 && nextBosMode === 0;
+        const orphanedHodge = curOm >= 8 && curOm <= 10 && nextHodgeMode === 0;
+        const orphanedRs = curOm === 11 && nextRsMode === 0;
+        if (orphanedBos || orphanedHodge || orphanedRs) {
+          dom.fieldOverlayModeSelect.value = '0';
+          dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: 0 });
+          worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: 0, overlaySyncSeq: nextOverlaySyncSeq() });
+        }
+      }
     }
 
     let pendingShowcaseEntryActive = false;

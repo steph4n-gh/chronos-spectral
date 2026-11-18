@@ -689,6 +689,76 @@ assert(
 );
 checkFiniteTelemAndPlanes('LiveStaggered');
 
+// Disabling swarm while paused MUST invalidate live Hodge stamp, clear planes, and return to STANDBY
+exp.chronos_set_swarm_mode(0);
+assert(
+  (w2Telem[24] & STAMP_VALID) === 0 &&
+    hTelemU32[0] === HODGE_STATE_STANDBY &&
+    hTelemU32[2] === 0 &&
+    hPlanes.every((v) => v === 0.0),
+  'chronos_set_swarm_mode(0) must invalidate live Hodge stamp, clear planes, and leave READY for STANDBY'
+);
+
+// Small finite exact field (u = 1e-11, v = 0, unit spacing) must keep normalized exactFrac ~= 1.0
+stageField(1.0, 1.0, () => [1e-11, 0.0, 1.0]);
+assert(exp.chronos_hodge_solve_injected(1.0, 1.0) === 1, 'Small finite injected field solve must succeed');
+{
+  const tTiny = readTelem();
+  assert(
+    tTiny.state === HODGE_STATE_READY &&
+      tTiny.converged === 1 &&
+      Math.abs(tTiny.exactFrac - 1.0) < 1e-5 &&
+      tTiny.energyPartErr < 1e-6,
+    `Expected exactFrac~=1.0 on u=1e-11 field, got ${JSON.stringify(tTiny)}`
+  );
+  checkFiniteTelemAndPlanes('TinyExact1e-11');
+}
+
+// Live SD 320x180 Hodge must use 40x22 spacing (voidCx <= 320, voidCy <= 180)
+{
+  exp.chronos_init();
+  exp.chronos_set_resolution(0);
+  exp.chronos_set_swarm_mode(2);
+  exp.chronos_set_hodge_mode(HODGE_MODE_EVERY_FRAME);
+  const sdBuf = new Uint8Array(320 * 180 * 4);
+  for (let f = 0; f < 14; f++) {
+    const hd = liveFrames[f];
+    for (let y = 0; y < 180; y++) {
+      for (let x = 0; x < 320; x++) {
+        const src = ((y * 2) * 640 + (x * 2)) * 4;
+        const dst = (y * 320 + x) * 4;
+        sdBuf[dst] = hd[src];
+        sdBuf[dst + 1] = hd[src + 1];
+        sdBuf[dst + 2] = hd[src + 2];
+        sdBuf[dst + 3] = 255;
+      }
+    }
+    new Uint8Array(buf, exp.chronos_get_ingest_rgba_ptr(), 320 * 180 * 4).set(sdBuf);
+    const tUs = BigInt(Math.round(f * dtSec * 1_000_000));
+    assert(
+      exp.chronos_set_ingest_meta(
+        1, f + 1, Number(tUs & 0xffffffffn), Number((tUs >> 32n) & 0xffffffffn), -1.0,
+        flagsBase, 320, 180, 0, 0, 320, 180, 0, 0xffffffff, 0, 0, 320, 180, 0, 1
+      ) === 1
+    );
+    exp.chronos_tick(dtSec);
+  }
+  const tSd = readTelem();
+  assert(
+    tSd.state === HODGE_STATE_READY &&
+      tSd.converged === 1 &&
+      (w2Telem[24] & STAMP_VALID) !== 0 &&
+      tSd.voidCx >= 0.0 &&
+      tSd.voidCx <= 320.0 &&
+      tSd.voidCy >= 0.0 &&
+      tSd.voidCy <= 180.0 &&
+      tSd.wakeX1 <= 320.0 &&
+      tSd.wakeY1 <= 180.0,
+    `Live SD 320x180 Hodge coordinates out of frame bounds: ${JSON.stringify(tSd)}`
+  );
+  checkFiniteTelemAndPlanes('LiveSD320x180');
+}
+
 console.log(
   `[PASS] Gate I3 (Hodge 40x22): Full=(V=${tFull.vAct},E=${tFull.eAct},F=${tFull.fAct},b1=${tFull.beta1}) | ` +
     `Cyl=(b1=${tCylTopo.beta1},holes=${tCylTopo.internalVoids}) vs Slit=(b1=${tSlitTopo.beta1},ports=${tSlitTopo.openPorts}) | ` +

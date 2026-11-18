@@ -5596,6 +5596,7 @@ pub unsafe extern "C" fn chronos_set_params(
     a.lab_mode = lab_mode.min(2);
     a.wave2_telem[2] = wave2_enabled_bits(a);
     if a.lab_mode != 2 {
+        a.collision_state.conservation.reset_continuity();
         set_stamp_invalid(
             &mut a.wave2_telem,
             WAVE2_PRODUCT_STAMPS_START + PROD_W2_CONSERVATION * STAMP_STRIDE,
@@ -6149,10 +6150,15 @@ pub unsafe extern "C" fn chronos_set_swarm_mode(mode: u32) {
         a.inspected_hero_tid = 0;
         a.inspected_micro_tid_pin = 0;
         a.swarm_telem_zeroed = 1;
+        a.hodge.reset_keep_mode();
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_MICRO * STAMP_STRIDE);
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE);
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_FTLE * STAMP_STRIDE);
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_MODAL_FIELD * STAMP_STRIDE);
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE,
+        );
         unsafe {
             release_wave1_owned_auto_heroes(a, a.frame_idx.saturating_sub(1), mode_dims(a.res_mode).6);
         }
@@ -6476,9 +6482,17 @@ pub unsafe extern "C" fn chronos_push_audio_block(
     est_skew_us: f32,
 ) -> u32 {
     let t_end_us = ((t_end_us_hi as u64) << 32) | (t_end_us_lo as u64);
-    arena_mut()
+    let a = arena_mut();
+    let ok = a
         .vibro
-        .push_audio_block(num_samples, t_end_us, sample_rate_hz, est_skew_us)
+        .push_audio_block(num_samples, t_end_us, sample_rate_hz, est_skew_us);
+    if ok == 0 || a.vibro.get_state() != vibrometry::RS_STATE_READY {
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE,
+        );
+    }
+    ok
 }
 
 #[no_mangle]
@@ -10606,6 +10620,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
             0
         });
         a.hodge.reset_keep_mode();
+        a.collision_state.conservation.reset_continuity();
     }
     a.wave2_telem[3] = meta.continuity_epoch;
     a.ring_meta[slot_in] = meta;
@@ -12123,6 +12138,7 @@ fn update_physics_and_telemetry(
     // 2. Two-Body Causal Collision & Conservation Analysis
     let col_arena = physics_id::CollisionArenaView {
         frame_idx: f_idx,
+        continuity_epoch: a.wave1_telem[6],
         lookahead_k: eff_k as u8,
         scene_gravity_conf: a.scene_gravity_conf,
         scene_gravity_px_s2: a.scene_gravity_px_s2,
@@ -17871,10 +17887,11 @@ fn run_wave2_post_tick(
     }
 
     let (grad_valid, grad_held, _) = a.continuum.grad_product_status();
+    let _ = (grid_w, grid_h);
     let hodge_ran = if swarm_active && a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
         if grad_valid && !grad_held {
-            let gdx = (frame_w as f32) / (grid_w as f32);
-            let gdy = (frame_h as f32) / (grid_h as f32);
+            let gdx = (frame_w as f32) / (hodge::HODGE_W as f32);
+            let gdy = (frame_h as f32) / (hodge::HODGE_H as f32);
             a.hodge.solve_from_continuum(
                 &a.continuum.export_field,
                 &a.continuum.cell_valid_mask,
@@ -17919,7 +17936,11 @@ fn finalize_wave2_stamps(
     if a.vibro.get_mode() != vibrometry::RS_MODE_OFF
         && a.vibro.get_state() == vibrometry::RS_STATE_READY
     {
-        set_stamp_fresh(&mut a.wave2_telem, vibro_base, &meta);
+        if a.vibro.fresh_solve != 0 {
+            set_stamp_fresh(&mut a.wave2_telem, vibro_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave2_telem, vibro_base, cont_ep);
+        }
     } else {
         set_stamp_invalid(&mut a.wave2_telem, vibro_base);
     }

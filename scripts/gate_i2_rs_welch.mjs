@@ -21,8 +21,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_WASM = path.join(ROOT, 'web', 'chronos_spectral.wasm');
 const wasmArg = process.argv.slice(2).find((a) => a.startsWith('--wasm='));
 const WASM_PATH = wasmArg ? path.resolve(wasmArg.slice('--wasm='.length)) : DEFAULT_WASM;
@@ -810,6 +811,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   assert(badSkew === 0, 'Excess clock skew must return 0');
   t = readTelem();
   assert(t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_CLOCK_SKEW) !== 0, 'Expected DISTURBED + CLOCK_SKEW');
+  assert(!t.stampValid && t.kSegs === 0, 'Excess skew must immediately invalidate stamp and clear Welch segments');
 
   // Re-establish READY then test backward audio timestamp
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
@@ -824,15 +826,16 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   assert(readTelem().kSegs >= 8, 'Must have K>=8 before backward audio check');
   const [bLo, bHi] = splitU64(BigInt(t0 + 500_000));
   assert(exp.chronos_push_audio_block(1600, bLo, bHi, 48000.0, 0.0) === 0, 'Backward audio block must return 0');
-  assert(readTelem().kSegs === 0 && (readTelem().reason & RS_REASON_AUDIO_UNDERRUN) !== 0, 'Backward audio must reset Welch count');
+  assert(readTelem().kSegs === 0 && !readTelem().stampValid && (readTelem().reason & RS_REASON_AUDIO_UNDERRUN) !== 0, 'Backward audio must reset Welch count and stamp');
 
-  // Forward audio gap (> 2.5 * dt_audio) resets Welch interval cleanly
+  // Single dropped 1,600-sample block gap resets Welch interval & invalidates stamp
   for (let f = 0; f < 30; f++) {
     const tSrcUs = t0 + 1_000_000 + Math.round((f * 1e6) / 30);
     const nextEnd = Math.round(((f + 1) / 30) * 48000);
-    const blkN = nextEnd - (f === 0 ? 0 : Math.round((f / 30) * 48000));
+    const prevEnd = f === 0 ? 0 : Math.round((f / 30) * 48000);
+    const blkN = nextEnd - prevEnd;
     pushAudioSamples({
-      startSampleIdx: f === 0 ? 0 : Math.round((f / 30) * 48000),
+      startSampleIdx: prevEnd,
       numSamples: blkN,
       t0Us: t0 + 1_000_000,
       sampleRateHz: 48000.0,
@@ -840,11 +843,149 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     });
     pushFrame({ seq: 30 + f, tSrcUs, dispFn: sigOpt });
   }
-  assert(readTelem().state === RS_STATE_READY, 'Expected recovery after forward audio interval jump');
-  const tGapJump = t0 + 5_000_000;
-  const [gLo, gHi] = splitU64(BigInt(tGapJump));
-  assert(exp.chronos_push_audio_block(1600, gLo, gHi, 48000.0, 0.0) === 1, 'Forward gap starts fresh interval');
-  assert(readTelem().kSegs === 0 && (readTelem().reason & RS_REASON_AUDIO_UNDERRUN) !== 0, 'Forward audio gap must reset Welch count');
+  assert(readTelem().state === RS_STATE_READY && readTelem().stampValid, 'Expected recovery before single-block gap');
+  const postDropCursor = Math.round(48000) + 1600; // skip one 1,600-sample block (~33.3 ms)
+  assert(
+    pushAudioSamples({
+      startSampleIdx: postDropCursor,
+      numSamples: 1600,
+      t0Us: t0 + 1_000_000,
+      sampleRateHz: 48000.0,
+      audioFn: sigAud,
+    }) === 1,
+    'Post-gap block starts fresh interval'
+  );
+  assert(
+    readTelem().kSegs === 0 && !readTelem().stampValid && (readTelem().reason & RS_REASON_AUDIO_UNDERRUN) !== 0,
+    'Single 1,600-sample audio gap must reset Welch count and invalidate stamp'
+  );
+
+  // Sample-rate mismatch block resets Welch interval & keeps DISTURBED across next video frame
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
+  sampleCursor = 0;
+  for (let f = 0; f < 30; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    const nextEnd = Math.round(((f + 1) / 30) * 48000);
+    pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+    sampleCursor = nextEnd;
+    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+  }
+  assert(readTelem().state === RS_STATE_READY && readTelem().stampValid, 'Expected READY before 44.1 kHz mismatch check');
+  const badRateRes = pushAudioSamples({
+    startSampleIdx: sampleCursor,
+    numSamples: 1600,
+    t0Us: t0,
+    sampleRateHz: 44100.0,
+    audioFn: sigAud,
+  });
+  assert(badRateRes === 0, 'Mismatched 44.1 kHz audio block must return 0');
+  t = readTelem();
+  assert(
+    t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid && t.kSegs === 0,
+    'Sample-rate mismatch must immediately clear Welch interval, enter DISTURBED|BAD_CALIB, and invalidate stamp'
+  );
+  pushFrame({ seq: 30, tSrcUs: t0 + 1_000_000, dispFn: sigOpt });
+  t = readTelem();
+  assert(
+    t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid,
+    'Subsequent video frame after rate rejection must stay DISTURBED until valid matching audio resumes'
+  );
+
+  // Stopping audio after READY holds original stamp transiently, then expires to WARMING|AUDIO_UNDERRUN
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
+  sampleCursor = 0;
+  for (let f = 0; f < 30; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    const nextEnd = Math.round(((f + 1) / 30) * 48000);
+    pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+    sampleCursor = nextEnd;
+    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+  }
+  assert(readTelem().state === RS_STATE_READY && readTelem().stampValid && (wave2U32[16] & 2) === 0, 'Expected fresh READY before audio stop');
+  const seqAtAudioStop = wave2U32[19] >>> 0;
+  let sawHeldOriginSeq = false;
+  let sawAdvancedFresh = false;
+  for (let f = 30; f < 66; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+    const v = readTelem();
+    const stFlags = wave2U32[16] >>> 0;
+    const stSeq = wave2U32[19] >>> 0;
+    if ((stFlags & 1) !== 0 && (stFlags & 2) !== 0 && stSeq === seqAtAudioStop) {
+      sawHeldOriginSeq = true;
+    }
+    if ((stFlags & 1) !== 0 && (stFlags & 2) === 0 && stSeq > seqAtAudioStop) {
+      sawAdvancedFresh = true;
+    }
+    if (f === 65) {
+      assert(
+        v.state === RS_STATE_WARMING && (v.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !v.stampValid,
+        `Expected expired WARMING|AUDIO_UNDERRUN after 36 audio-less frames, got state=${v.state} reason=${v.reason} valid=${v.stampValid}`
+      );
+    }
+  }
+  assert(sawHeldOriginSeq, 'First frame(s) after audio stop should hold original Welch source_seq');
+  assert(!sawAdvancedFresh, 'Stopped audio must never advance Welch stamp source_seq as fresh');
+
+  // Optical alias guard: 4375 Hz optical motion vs 5625 Hz audio tone @ dtRow=100us (10 kHz row lattice) must not couple
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 100.0, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+  sampleCursor = 0;
+  const optAlias = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * 4375.0 * tSec + 0.3), 0.0];
+  const audAlias = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * 5625.0 * tSec + 0.1);
+  for (let f = 0; f < 29; f++) {
+    const tSrcUs = t0 + f * 41_000;
+    const nextEnd = Math.round((f + 1) * 0.041 * 96000.0);
+    pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: audAlias });
+    sampleCursor = nextEnd;
+    pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: optAlias });
+  }
+  t = readTelem();
+  assert(
+    t.coupledCells === 0 && t.maxCoh < t.gamma2Crit,
+    `Aliased 5625 Hz audio must be excluded above optical Nyquist, got coupled=${t.coupledCells} g2=${t.maxCoh} dom=${t.domFreqHz}`
+  );
+
+  // SD 320x180 transposed column scan (o=0, scanDir=2) fits 320 <= 360 and reaches READY without AXIS_TRANSPOSED
+  {
+    const sdW = 320, sdH = 180, sdBytes = sdW * sdH * 4;
+    const sdBuf = new Uint8Array(sdBytes);
+    exp.chronos_init();
+    exp.chronos_set_resolution(0);
+    exp.chronos_set_swarm_mode(0);
+    assert(exp.chronos_set_rs_calib(RS_MODE_RS_ONLY, 25.0, 200.0, 0.0, 500.0) === 1);
+    for (let f = 0; f < 24; f++) {
+      const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+      for (let ey = 0; ey < sdH; ey++) {
+        for (let ex = 0; ex < sdW; ex++) {
+          const tMidSec = (tSrcUs + ex * 25.0 + 100.0) * 1e-6;
+          const ux = 0.45 * Math.cos(2.0 * Math.PI * 421.875 * tMidSec + 0.5);
+          const v = Math.max(0, Math.min(255, Math.round(sampleTexLuma(ex - ux, ey))));
+          const o = (ey * sdW + ex) * 4;
+          sdBuf[o] = v; sdBuf[o + 1] = v; sdBuf[o + 2] = v; sdBuf[o + 3] = 255;
+        }
+      }
+      const [tLo, tHi] = splitU64(BigInt(tSrcUs));
+      assert(
+        exp.chronos_set_ingest_meta(
+          1, f + 1, tLo, tHi, -1.0, INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_GEOM_KNOWN,
+          sdW, sdH, 0, 0, sdW, sdH, 0, 2, 0, 0, sdW, sdH, 0, 1
+        ) === 1,
+        `SD o=0,scanDir=2 frame ${f} ingest failed`
+      );
+      new Uint8Array(mem.buffer, exp.chronos_get_ingest_rgba_ptr(), sdBytes).set(sdBuf);
+      exp.chronos_pre_tick(1 / 30);
+      exp.chronos_post_tick(1 / 30);
+    }
+    const tsd = readTelem();
+    assert(
+      (tsd.reason & RS_REASON_AXIS_TRANSPOSED) === 0 &&
+        tsd.state === RS_STATE_READY &&
+        tsd.stampValid &&
+        Math.abs(tsd.domFreqHz - 421.875) < 35.0,
+      `SD 320x180 o=0,scanDir=2 expected READY ~421.875 Hz, got ${JSON.stringify(tsd)}`
+    );
+    exp.chronos_set_resolution(1);
+  }
 
   // Sequence gap (gapMask = 1) resets continuity then recovers after re-warming
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
