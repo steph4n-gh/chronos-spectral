@@ -4541,6 +4541,404 @@ async function main() {
       }
     }
 
+    // 10. Wave-2 Browser E2E: 40x22 Mesh Hodge, Calibrated RS+Welch (K>=8 + Exposure Null Banner), Occluded AMBIGUOUS & Zero-CLS
+    {
+      const baseUrl = `http://127.0.0.1:${srv.port}`;
+      const { targetId: w2TargetId } = await cdp.send('Target.createTarget', { url: `${baseUrl}/index.html?view=deck` });
+      const { sessionId: w2Session } = await cdp.send('Target.attachToTarget', { targetId: w2TargetId, flatten: true });
+      try {
+        await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, w2Session);
+        await cdp.send('Page.enable', {}, w2Session);
+        await cdp.send('Log.enable', {}, w2Session);
+        await cdp.send('Runtime.enable', {}, w2Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
+          w2Session
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Deck booted cleanly with Wave-2 probe & controls',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            return {
+              ok: document.body?.dataset?.surface === 'deck' &&
+                  Boolean(document.getElementById('hodgeModeSelect')) &&
+                  Boolean(document.getElementById('rsVibroModeSelect')) &&
+                  Boolean(document.getElementById('diagHodge2Complex')) &&
+                  Boolean(w2 && w2.available === true && w2.vibro?.available && w2.hodge?.available && w2.conservation?.available),
+              avail: Boolean(w2?.available),
+            };
+          })()`,
+          20000,
+          true
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            window.__e2eW2DeckCls = 0;
+            window.__e2eW2DeckClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW2DeckCls += e.value;
+              }
+            });
+            window.__e2eW2DeckClsPo.observe({ type: 'layout-shift', buffered: false });
+            document.querySelector('[data-showcase="vortex_1200"]')?.click();
+            return true;
+          })()`
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: vortex_1200 swarm initialized before enabling Hodge',
+          `(() => {
+            const btn = document.querySelector('[data-showcase="vortex_1200"]');
+            const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
+            return {
+              ok: btn?.getAttribute('aria-pressed') === 'true' && meta.startsWith('SWARM: ACTIVE'),
+              meta,
+            };
+          })()`,
+          20000
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const hm = document.getElementById('hodgeModeSelect');
+            hm.value = '2';
+            hm.dispatchEvent(new Event('change', { bubbles: true }));
+            const ov = document.getElementById('fieldOverlayModeSelect');
+            ov.value = '9';
+            ov.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`
+        );
+
+        const hodgeState = await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: 40x22 Mesh Hodge on vortex_1200 converges (READY, coexactFrac > 0.85, orthEcRel < 1e-6)',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const h = w2?.hodge;
+            const diag = document.getElementById('diagHodge2Complex')?.textContent || '';
+            const ok = Boolean(
+              h &&
+              h.state === 2 &&
+              h.converged === true &&
+              h.coexactFrac > 0.85 &&
+              h.orthEcRel < 1e-6 &&
+              w2?.stamps?.hodge?.valid === true &&
+              diag.startsWith('READY · ')
+            );
+            return {
+              ok,
+              state: h?.state,
+              converged: h?.converged,
+              exactFrac: h?.exactFrac,
+              coexactFrac: h?.coexactFrac,
+              harmFrac: h?.harmFrac,
+              orthEcRel: h?.orthEcRel,
+              beta1: h?.beta1,
+              diag,
+            };
+          })()`,
+          20000
+        );
+
+        for (const omVal of ['8', '10', '9']) {
+          await cdp.evalJs(
+            w2Session,
+            `(() => {
+              const ov = document.getElementById('fieldOverlayModeSelect');
+              ov.value = ${JSON.stringify(omVal)};
+              ov.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`
+          );
+          await waitForCondition(
+            cdp,
+            w2Session,
+            `Step 10a: Hodge fieldOverlayMode=${omVal} synced`,
+            `(() => ({ ok: window.__chronosUiState?.overlays?.fieldOverlayMode === ${Number(omVal)} }))()`,
+            4000
+          );
+        }
+
+        const w2HudRect = await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const el = document.getElementById('hudCanvas');
+            if (!el) return null;
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+            const r = el.getBoundingClientRect();
+            return {
+              x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))),
+              y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))),
+              width: Math.ceil(r.width),
+              height: Math.ceil(r.height),
+            };
+          })()`
+        );
+        const w2HudShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const w2HudBytes = w2HudShot?.data ? Buffer.from(w2HudShot.data, 'base64').byteLength : 0;
+        if (w2HudBytes < 2500) {
+          throw new Error(`Step 10a: Expected Hodge #hudCanvas screenshot >= 2500 B, got ${w2HudBytes} B`);
+        }
+
+        // 10b. Calibrated RS + Welch (K >= 8, 880 Hz) & Exposure-Null Banner (T_e = 1/880s)
+        const rsWelchReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            w1p.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            w1p.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            w1p.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_bos_config', bosMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 0.0, showHeroTargets: false });
+
+            const hm = document.getElementById('hodgeModeSelect');
+            if (hm) hm.value = '0';
+            const ov = document.getElementById('fieldOverlayModeSelect');
+            if (ov) { ov.value = '11'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) rm.value = '2';
+
+            const W = 640;
+            const H = 360;
+            const frameBytes = W * H * 4;
+            const rgba = new Uint8Array(frameBytes);
+
+            const ax = 0.27, ay = 0.13, bx = 0.19, by = -0.31, cx = 0.37, cy = 0.29;
+            const npix = W * H;
+            const sA = new Float32Array(npix);
+            const cA = new Float32Array(npix);
+            const cB = new Float32Array(npix);
+            const sB = new Float32Array(npix);
+            const sC = new Float32Array(npix);
+            const cC = new Float32Array(npix);
+            for (let y = 0; y < H; y++) {
+              const row = y * W;
+              for (let x = 0; x < W; x++) {
+                const idx = row + x;
+                const pA = ax * x + ay * y;
+                const pB = bx * x + by * y;
+                const pC = cx * x + cy * y;
+                sA[idx] = Math.sin(pA); cA[idx] = Math.cos(pA);
+                cB[idx] = Math.cos(pB); sB[idx] = Math.sin(pB);
+                sC[idx] = Math.sin(pC); cC[idx] = Math.cos(pC);
+              }
+            }
+
+            const renderRsFrame = (tSrcUs, dtRowUs, exposureUs, fTone, ampPx, taps) => {
+              const expSec = exposureUs * 1e-6;
+              const invT = 1.0 / taps;
+              const scA = new Float64Array(taps);
+              const ccA = new Float64Array(taps);
+              const scB = new Float64Array(taps);
+              const ccB = new Float64Array(taps);
+              const scC = new Float64Array(taps);
+              const ccC = new Float64Array(taps);
+              const w2piF = 2.0 * Math.PI * fTone;
+              for (let y = 0; y < H; y++) {
+                const tMid = (tSrcUs + y * dtRowUs + 0.5 * exposureUs) * 1e-6;
+                for (let s = 0; s < taps; s++) {
+                  const tS = taps === 1 ? tMid : (tMid + ((s + 0.5) * invT - 0.5) * expSec);
+                  const ux = ampPx * Math.cos(w2piF * tS + 0.4);
+                  scA[s] = Math.sin(ax * ux); ccA[s] = Math.cos(ax * ux);
+                  scB[s] = Math.sin(bx * ux); ccB[s] = Math.cos(bx * ux);
+                  scC[s] = Math.sin(cx * ux); ccC[s] = Math.cos(cx * ux);
+                }
+                const row = y * W;
+                for (let x = 0; x < W; x++) {
+                  const idx = row + x;
+                  let acc = 0.0;
+                  for (let s = 0; s < taps; s++) {
+                    const vA = sA[idx] * ccA[s] - cA[idx] * scA[s];
+                    const vB = cB[idx] * ccB[s] + sB[idx] * scB[s];
+                    const vC = sC[idx] * ccC[s] - cC[idx] * scC[s];
+                    const l = 128.0 + 38.0 * vA + 34.0 * vB + 22.0 * vC;
+                    acc += l < 8.0 ? 8.0 : (l > 247.0 ? 247.0 : l);
+                  }
+                  const v = Math.round(acc * invT);
+                  const o = idx * 4;
+                  rgba[o] = v; rgba[o + 1] = v; rgba[o + 2] = v; rgba[o + 3] = 255;
+                }
+              }
+            };
+
+            const pumpRsSession = async ({ epoch, totalFrames, t0Us, fps, dtRowUs, exposureUs, audioRateHz, fTone, taps }) => {
+              w2p.postWorkerMsg({
+                type: 'set_rs_calib',
+                rsMode: 2,
+                dtRowUs,
+                exposureUs,
+                audioRateHz,
+                maxSkewUs: 500.0,
+              });
+              let cursor = 0;
+              for (let f = 0; f < totalFrames; f++) {
+                const tSrcUs = t0Us + Math.round((f * 1e6) / fps);
+                const endSample = Math.round((((f + 1) / fps) * audioRateHz));
+                const nAudio = endSample - cursor;
+                const pcm = new Array(nAudio);
+                for (let i = 0; i < nAudio; i++) {
+                  const tS = t0Us * 1e-6 + (cursor + i) / audioRateHz;
+                  pcm[i] = 0.5 * Math.cos(2.0 * Math.PI * fTone * tS + 0.1);
+                }
+                const tEndUs = t0Us + Math.round((endSample * 1e6) / audioRateHz);
+                const aAck = await w2p.submitAudioBlock({ samples: pcm, tEndUs, sampleRateHz: audioRateHz, estSkewUs: 0.0 });
+                if (!aAck || aAck.accepted !== 1) {
+                  throw new Error('Step 10b audio push rejected at frame ' + f + ': ' + JSON.stringify(aAck));
+                }
+                cursor = endSample;
+
+                renderRsFrame(tSrcUs, dtRowUs, exposureUs, fTone, 0.85, taps);
+                const ab = rgba.buffer.slice(0);
+                const fAck = await w1p.submitTestFrame({
+                  type: 'video_rgba',
+                  epoch,
+                  seq: f + 1,
+                  width: W,
+                  height: H,
+                  buffer: ab,
+                  dtSec: 1 / fps,
+                  mediaTimeSec: (f + 1) / fps,
+                  tSrcUs,
+                }, [ab]);
+                if (!fAck || fAck.type !== 'frame_ack') {
+                  throw new Error('Step 10b frame rejected at f=' + f + ': ' + JSON.stringify(fAck));
+                }
+              }
+            };
+
+            await pumpRsSession({
+              epoch: 910,
+              totalFrames: 30,
+              t0Us: 1_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1000.0,
+              audioRateHz: 45056.0,
+              fTone: 880.0,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 60));
+            const snapReady = w2p.getLastWave2();
+            const diagReady = document.getElementById('diagRsWelch')?.textContent || '';
+
+            await pumpRsSession({
+              epoch: 911,
+              totalFrames: 28,
+              t0Us: 3_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1e6 / 880.0,
+              audioRateHz: 48000.0,
+              fTone: 880.0,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 60));
+            const snapNull = w2p.getLastWave2();
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const nullSev = banner?.dataset?.severity || '';
+            const nullTxt = banner?.textContent || '';
+            return {
+              readyVibro: snapReady?.vibro || null,
+              diagReady,
+              nullVibro: snapNull?.vibro || null,
+              nullSev,
+              nullTxt,
+            };
+          })()`
+        );
+
+        const rv = rsWelchReport.readyVibro;
+        if (
+          !rv ||
+          rv.state !== 3 ||
+          rv.welchK < 8 ||
+          Math.abs(rv.domFreqHz - 880.0) >= 1.0 ||
+          rv.maxCohGamma2 <= 0.90 ||
+          rv.coupledCellsCount < 1 ||
+          !rsWelchReport.diagReady.startsWith('READY · ')
+        ) {
+          throw new Error('Step 10b RS+Welch READY gate failed: ' + JSON.stringify({ rv, diagReady: rsWelchReport.diagReady }));
+        }
+        const nv = rsWelchReport.nullVibro;
+        if (
+          !nv ||
+          nv.exposureNullFlag !== true ||
+          Math.abs(nv.sincH) >= 0.05 ||
+          rsWelchReport.nullSev !== 'warn' ||
+          !rsWelchReport.nullTxt.includes('EXPOSURE_NULL')
+        ) {
+          throw new Error('Step 10b Exposure-Null banner gate failed: ' + JSON.stringify({ nv, nullSev: rsWelchReport.nullSev, nullTxt: rsWelchReport.nullTxt }));
+        }
+
+        // 10c. Occluded Equal-Mass AMBIGUOUS Conservation + UI Check
+        const consReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const ack = await window.__chronosWave2Probe.evalOccludedPair([
+              100, 90, 150, 0, 1, 6,
+              160, 90, -150, 0, 1, 6,
+              100, 90, -150, 0,
+              160, 90, 150, 0,
+              0.40, 0, 0.02, 1, 1, 1, 3,
+              11, 12, 42, 1, 0,
+            ]);
+            await new Promise((r) => setTimeout(r, 50));
+            return {
+              ack,
+              lastCons: window.__chronosWave2Probe?.getLastWave2()?.conservation || null,
+              diagCons: document.getElementById('diagOcclConservation')?.textContent || '',
+            };
+          })()`
+        );
+        const oc = consReport.lastCons || consReport.ack?.conservation;
+        if (
+          !oc ||
+          oc.status !== 2 ||
+          (oc.ambiguityMask & 6) !== 6 ||
+          !consReport.diagCons.includes('AMBIGUOUS')
+        ) {
+          throw new Error('Step 10c Occluded conservation AMBIGUOUS gate failed: ' + JSON.stringify(consReport));
+        }
+
+        // 10d. Zero-CLS Check
+        await new Promise((r) => setTimeout(r, 80));
+        const w2DeckCls = await cdp.evalJs(
+          w2Session,
+          `(() => {
+            if (window.__e2eW2DeckClsPo) window.__e2eW2DeckClsPo.disconnect();
+            return window.__e2eW2DeckCls || 0;
+          })()`
+        );
+        if (w2DeckCls >= 0.000001) {
+          throw new Error(`Step 10d: Expected 0.000000 CLS across Wave-2 Deck flows, got ${w2DeckCls}`);
+        }
+
+        console.log(
+          `  [PASS] Step 10 (Wave-2 Hodge 40x22, Calibrated RS+Welch & Exposure Null, Occluded AMBIGUOUS Conservation): hodge=(state=${hodgeState.state}, co=${hodgeState.coexactFrac.toFixed(3)}, orth=${hodgeState.orthEcRel.toExponential(1)}, hud=${w2HudBytes}B), rsWelch=(K=${rv.welchK}, f=${rv.domFreqHz.toFixed(2)}Hz, g2=${rv.maxCohGamma2.toFixed(4)}, cells=${rv.coupledCellsCount}), expNull=(H=${nv.sincH.toFixed(4)}, sev=${rsWelchReport.nullSev}), occl=(st=${oc.status}, mask=${oc.ambiguityMask}, diag="${consReport.diagCons}"), CLS=${w2DeckCls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: w2TargetId }).catch(() => {});
+      }
+    }
+
     if (pageErrors.length > 0) {
       throw new Error(`Browser reported ${pageErrors.length} error(s):\n${pageErrors.join('\n')}`);
     }

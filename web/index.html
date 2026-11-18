@@ -3145,6 +3145,10 @@
               <option value="5">BOS Refraction |eps| (128x64)</option>
               <option value="6">BOS Neumann Potential Phi (128x64)</option>
               <option value="7">BOS Curl Check (dv/dx - du/dy)</option>
+              <option value="8">Hodge Exact |grad phi| (40x22)</option>
+              <option value="9">Hodge Coexact |curl* psi| (40x22)</option>
+              <option value="10">Hodge Harmonic |h| (40x22)</option>
+              <option value="11">RS Welch Coherence gamma^2 (40x22)</option>
             </select>
           </div>
         </div>
@@ -3164,6 +3168,25 @@
               <option value="0" selected>Off (Fast Baseline)</option>
               <option value="1">Lossless 2x2 Cov + LOO Bench</option>
               <option value="2">H.264 2x2 Cov + Hero Promo</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="hodgeModeSelect">Mesh Hodge 2-Complex (40x22)</label>
+            <select id="hodgeModeSelect" name="hodgeMode">
+              <option value="0" selected>Off (Velocity Only)</option>
+              <option value="1">Mode 1 · Staggered 2f (40x22)</option>
+              <option value="2">Mode 2 · Every Frame (40x22)</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="rsVibroModeSelect">Rolling-Shutter Vibrometry</label>
+            <select id="rsVibroModeSelect" name="rsVibroMode">
+              <option value="0" selected>Off (No RS Vibro)</option>
+              <option value="1">Mode 1 · Calibrated RS Only</option>
+              <option value="2">Mode 2 · RS + Welch Audio</option>
             </select>
           </div>
         </div>
@@ -3266,6 +3289,22 @@
             <div class="kpi-card">
               <span class="kpi-label">2x2 COV · HERO CANDS</span>
               <span class="kpi-value" id="diagMetrologyCov">0 usable · 0 cand</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">WAVE-2 STAMPS (V·H·C)</span>
+              <span class="kpi-value" id="diagWave2Stamps" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">--</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">RS VIBRO · WELCH COH</span>
+              <span class="kpi-value" id="diagRsWelch" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">HODGE 2-COMPLEX (Ex·Co·Ha)</span>
+              <span class="kpi-value" id="diagHodge2Complex" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">OCCLUDED CONSERVATION</span>
+              <span class="kpi-value" id="diagOcclConservation" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">NONE</span>
             </div>
           </div>
         </details>
@@ -4121,6 +4160,8 @@
       fieldOverlayModeSelect: document.getElementById('fieldOverlayModeSelect'),
       bosModeSelect: document.getElementById('bosModeSelect'),
       metrologyModeSelect: document.getElementById('metrologyModeSelect'),
+      hodgeModeSelect: document.getElementById('hodgeModeSelect'),
+      rsVibroModeSelect: document.getElementById('rsVibroModeSelect'),
       chkCovEllipses: document.getElementById('chkCovEllipses'),
       chkNativeRoi: document.getElementById('chkNativeRoi'),
       rangeRoiX0: document.getElementById('rangeRoiX0'),
@@ -4153,6 +4194,10 @@
       diagRoiGeom: document.getElementById('diagRoiGeom'),
       diagBosState: document.getElementById('diagBosState'),
       diagMetrologyCov: document.getElementById('diagMetrologyCov'),
+      diagWave2Stamps: document.getElementById('diagWave2Stamps'),
+      diagRsWelch: document.getElementById('diagRsWelch'),
+      diagHodge2Complex: document.getElementById('diagHodge2Complex'),
+      diagOcclConservation: document.getElementById('diagOcclConservation'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -4326,7 +4371,7 @@
           showEcaOverlay: Boolean(st.overlays.showEcaOverlay),
           showKalman: Boolean(st.overlays.showKalman),
           showCovEllipses: Boolean(st.overlays.showCovEllipses),
-          fieldOverlayMode: Math.max(0, Math.min(7, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
+          fieldOverlayMode: Math.max(0, Math.min(11, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
         }),
         pointerTool: st.pointerTool,
         viewport: st.viewport,
@@ -4365,7 +4410,7 @@
           showCovEllipses: typeof event.showCovEllipses === 'boolean' ? event.showCovEllipses : state.overlays.showCovEllipses,
           fieldOverlayMode:
             typeof event.fieldOverlayMode === 'number' && Number.isFinite(event.fieldOverlayMode)
-              ? Math.max(0, Math.min(7, Math.round(event.fieldOverlayMode)))
+              ? Math.max(0, Math.min(11, Math.round(event.fieldOverlayMode)))
               : state.overlays.fieldOverlayMode,
         };
         if (
@@ -5446,22 +5491,57 @@
         let bannerTxt = 'ACQUISITION STEADY · MONOTONIC PTS & 100% RING COMMIT';
         const dm = w1 && w1.dispMeta;
         const bosActive = bos && bos.available && bos.reqMode > 0;
+        const w2 = m.wave2;
+        const w2v = w2 && w2.vibro && w2.vibro.available ? w2.vibro : null;
+        const w2vActive = Boolean(w2v && w2v.reqMode > 0);
+        const w2h = w2 && w2.hodge && w2.hodge.available ? w2.hodge : null;
+        const w2hActive = Boolean(w2h && w2h.reqMode > 0);
+        const w2c = w2 && w2.conservation && w2.conservation.available ? w2.conservation : null;
+        const w2vNull = Boolean(w2v && (w2v.exposureNullFlag || ((w2v.reasonMask || 0) & 64) !== 0));
+        const w2vHardFail = Boolean(w2v && (((w2v.reasonMask || 0) & ((1 << 4) | (1 << 5))) !== 0));
         if (bosActive && bos.state === 3) {
           severity = 'danger';
           const reasons = (bos.reasonFlags || []).join(', ') || 'CAMERA MOTION';
           bannerTxt = `⚠ TRIPOD FAILURE / DISTURBED (${reasons}) · SHIFT (${bos.shiftX.toFixed(2)}, ${bos.shiftY.toFixed(2)}) px · REF INVALIDATED`;
+        } else if (w2vActive && (w2v.state === 4 || w2vNull)) {
+          severity = w2vHardFail ? 'danger' : 'warn';
+          const sincAbs = Number.isFinite(w2v.sincH) ? Math.abs(w2v.sincH).toFixed(3) : '--';
+          const rTxt = (w2v.reasonFlags || []).slice(0, 3).join('+') || (w2vNull ? 'EXPOSURE_NULL' : 'DISTURBED');
+          bannerTxt = w2vNull
+            ? `⚠ RS EXPOSURE_NULL (|H|=${sincAbs} < 0.05) · ${rTxt}`
+            : `⚠ RS VIBRO DISTURBED (${rTxt})`;
+        } else if (w2hActive && w2h.state === 3) {
+          severity = 'warn';
+          bannerTxt = '⚠ HODGE PCG UNCONVERGED · FIELD INVALIDATED';
+        } else if (w2c && w2c.status === 3) {
+          severity = 'warn';
+          bannerTxt = `⚠ OCCLUDED CONSERVATION VIOLATED · T${w2c.tidA || 0}-T${w2c.tidB || 0}`;
         } else if (dm && dm.frameGapFlag !== 0) {
           severity = 'warn';
           bannerTxt = `⚠ ACQUISITION GAP [${(dm.gapLabels || []).join('+')}] · EP ${w1.continuityEpoch} · PTS MONOTONIC GUARD`;
         } else if (roi && roi.fallbackScale) {
           severity = 'warn';
           bannerTxt = `⚠ NATIVE 1:1 UNAVAILABLE (${roi.srcW}x${roi.srcH} < ${roi.engineW}x${roi.engineH}) · RESCALED`;
+        } else if (w2vActive && w2v.state === 1) {
+          severity = 'warn';
+          bannerTxt = `⚠ RS CALIBRATION REQUIRED (${(w2v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'})`;
         } else if (bosActive && bos.state === 2) {
           severity = 'ok';
           bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/8192 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
+        } else if (w2vActive && w2v.state === 3) {
+          severity = 'ok';
+          const fTxt = Number.isFinite(w2v.domFreqHz) ? w2v.domFreqHz.toFixed(1) : '--';
+          const gTxt = Number.isFinite(w2v.maxCohGamma2) ? w2v.maxCohGamma2.toFixed(3) : '--';
+          bannerTxt = `◆ RS VIBROMETRY READY · K=${w2v.welchK || 0} · ${fTxt} Hz · g2=${gTxt}`;
         } else if (bosActive && bos.state === 1) {
           severity = 'info';
           bannerTxt = `BOS REFERENCE WARMING (${bos.warmupCnt}/16) · KEEP CAMERA STATIC ON TRIPOD`;
+        } else if (w2vActive && w2v.state === 2) {
+          severity = 'info';
+          bannerTxt = `RS WELCH WARMING · ${w2v.activeFramesInRun || 0}f · K=${w2v.welchK || 0}/8`;
+        } else if (w2c && w2c.status === 2) {
+          severity = 'info';
+          bannerTxt = `◆ OCCLUDED CONSERVATION AMBIGUOUS (${(w2c.hypotheses || []).join(' / ') || 'H0_SWAP / H1_KEEP'})`;
         } else if (roi && roi.native1to1Active) {
           severity = 'ok';
           bannerTxt = `◆ NATIVE 1:1 ROI (${roi.cropX0},${roi.cropY0} ${roi.cropW}x${roi.cropH}) · ZERO IMPLICIT RESCALE`;
@@ -5473,8 +5553,92 @@
       }
     }
 
+    function updateWave2DomUi(m) {
+      const w2 = m && m.wave2 ? m.wave2 : null;
+      window.__chronosLastWave2Snap = w2;
+      if (!w2) return;
+
+      if (dom.diagWave2Stamps) {
+        if (w2.available && w2.stamps) {
+          const st = w2.stamps;
+          const sc = (s) => (!s || !s.valid ? '-' : (s.held ? 'H' : 'V'));
+          setTextIfChanged(
+            dom.diagWave2Stamps,
+            `${sc(st.vibro)}${sc(st.hodge)}${sc(st.conservation)} · EP ${w2.continuityEpoch || 0}`
+          );
+        } else {
+          setTextIfChanged(dom.diagWave2Stamps, '--');
+        }
+      }
+
+      if (dom.diagRsWelch) {
+        const v = w2.vibro;
+        let rsTxt = 'OFF';
+        if (v && v.available) {
+          if (v.state === 3) {
+            const fTxt = Number.isFinite(v.domFreqHz) ? v.domFreqHz.toFixed(1) : '--';
+            const gTxt = Number.isFinite(v.maxCohGamma2) ? v.maxCohGamma2.toFixed(2) : '--';
+            rsTxt = `READY · K=${v.welchK || 0} · ${fTxt}Hz · g2=${gTxt}`;
+          } else if (v.state === 2) {
+            rsTxt = `WARMING · K=${v.welchK || 0}`;
+          } else if (v.state === 1) {
+            rsTxt = `UNCALIB · ${(v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'}`;
+          } else if (v.state === 4) {
+            rsTxt = `DISTURBED · ${(v.reasonFlags || []).slice(0, 2).join('+') || 'FAULT'}`;
+          }
+        }
+        setTextIfChanged(dom.diagRsWelch, rsTxt);
+      }
+
+      if (dom.diagHodge2Complex) {
+        const h = w2.hodge;
+        let hTxt = 'OFF';
+        if (h && h.available) {
+          if (h.state === 2) {
+            const ex = Number.isFinite(h.exactFrac) ? (h.exactFrac * 100).toFixed(0) : '--';
+            const co = Number.isFinite(h.coexactFrac) ? (h.coexactFrac * 100).toFixed(0) : '--';
+            const ha = Number.isFinite(h.harmFrac) ? (h.harmFrac * 100).toFixed(0) : '--';
+            hTxt = `READY · ${ex}/${co}/${ha}% · b1=${h.beta1 || 0}`;
+          } else if (h.state === 3) {
+            hTxt = 'UNCONV';
+          } else if (h.state === 1) {
+            hTxt = 'STANDBY';
+          }
+        }
+        setTextIfChanged(dom.diagHodge2Complex, hTxt);
+      }
+
+      if (dom.diagOcclConservation) {
+        const c = w2.conservation;
+        let cTxt = 'NONE';
+        if (c && c.available && (c.status || 0) > 0) {
+          const hyps = (c.hypotheses || []).join('/') || `T${c.tidA || 0}-T${c.tidB || 0}`;
+          cTxt = `${c.statusLabel || 'NONE'} · ${hyps}`;
+        }
+        setTextIfChanged(dom.diagOcclConservation, cTxt);
+      }
+    }
+
     let lastWorkerAckOrReject = null;
     let pendingWorkerAckWaiter = null;
+    let nextW2ReqId = 1;
+    const pendingW2Requests = new Map();
+
+    function sendWave2Rpc(msgType, fields, timeoutMs = 4000) {
+      return new Promise((resolve) => {
+        const reqId = nextW2ReqId++;
+        const timer = setTimeout(() => {
+          pendingW2Requests.delete(reqId);
+          resolve({ timeout: true, reqId });
+        }, timeoutMs);
+        pendingW2Requests.set(reqId, (ack) => {
+          clearTimeout(timer);
+          resolve(ack);
+        });
+        worker.postMessage({ type: msgType, reqId, wantAck: true, ...fields });
+      });
+    }
+
     window.__chronosWave1Probe = {
       postWorkerMsg: (payload, transfers = []) => {
         worker.postMessage(payload, transfers);
@@ -5508,8 +5672,31 @@
       getLastWave1: () => window.__chronosLastWave1Snap || null,
     };
 
+    window.__chronosWave2Probe = {
+      postWorkerMsg: (payload, transfers = []) => {
+        worker.postMessage(payload, transfers);
+      },
+      getLastWave2: () => window.__chronosLastWave2Snap || null,
+      submitAudioBlock: ({ samples, tEndUs, sampleRateHz, estSkewUs = 0.0 }) =>
+        sendWave2Rpc('push_audio_pcm', { samples, tEndUs, sampleRateHz, estSkewUs }),
+      evalOccludedPair: (input) =>
+        sendWave2Rpc('eval_occluded_pair_test', { input }),
+    };
+
     worker.onmessage = (ev) => {
       const m = ev.data;
+      if (m.type === 'wave2_audio_ack' || m.type === 'wave2_cons_test_ack') {
+        if (m.type === 'wave2_cons_test_ack' && m.conservation && window.__chronosLastWave2Snap) {
+          window.__chronosLastWave2Snap.conservation = m.conservation;
+          updateWave2DomUi({ wave2: window.__chronosLastWave2Snap });
+        }
+        const cb = typeof m.reqId === 'number' ? pendingW2Requests.get(m.reqId) : null;
+        if (cb) {
+          pendingW2Requests.delete(m.reqId);
+          cb(m);
+        }
+        return;
+      }
       if (m.type === 'frame_ack' || m.type === 'ingest_rejected') {
         lastWorkerAckOrReject = { ...m };
         if (pendingWorkerAckWaiter) {
@@ -5794,6 +5981,7 @@
         updateSlotRosterUi(m.slotRoster);
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
         updateWave1DomUi(m);
+        updateWave2DomUi(m);
         if (activeSurface === 'showcase' && typeof updateShowcaseProofCards === 'function') {
           updateShowcaseProofCards(m, medMs);
         }
@@ -5866,11 +6054,17 @@
 
     if (dom.fieldOverlayModeSelect) {
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
-        const om = Math.max(0, Math.min(7, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        const om = Math.max(0, Math.min(11, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
-        if (om >= 5 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
+        if (om >= 5 && om <= 7 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
           dom.bosModeSelect.value = '1';
           worker.postMessage({ type: 'set_bos_config', bosMode: 1, overlayKind: om - 5, gaugeRoi: [4, 4, 18, 60] });
+        } else if (om >= 8 && om <= 10 && dom.hodgeModeSelect && dom.hodgeModeSelect.value === '0') {
+          dom.hodgeModeSelect.value = '1';
+          worker.postMessage({ type: 'set_hodge_config', hodgeMode: 1 });
+        } else if (om === 11 && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
+          dom.rsVibroModeSelect.value = '2';
+          worker.postMessage({ type: 'set_rs_calib', rsMode: 2 });
         }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
@@ -5892,6 +6086,20 @@
         const mm = Math.max(0, Math.min(2, parseInt(dom.metrologyModeSelect.value || '0', 10) || 0));
         const showEll = mm > 0 && dom.chkCovEllipses ? dom.chkCovEllipses.checked : false;
         worker.postMessage({ type: 'set_metrology_config', metrologyMode: mm, showCovEllipses: showEll });
+      });
+    }
+
+    if (dom.hodgeModeSelect) {
+      dom.hodgeModeSelect.addEventListener('change', () => {
+        const hm = Math.max(0, Math.min(2, parseInt(dom.hodgeModeSelect.value || '0', 10) || 0));
+        worker.postMessage({ type: 'set_hodge_config', hodgeMode: hm });
+      });
+    }
+
+    if (dom.rsVibroModeSelect) {
+      dom.rsVibroModeSelect.addEventListener('change', () => {
+        const rm = Math.max(0, Math.min(2, parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0));
+        worker.postMessage({ type: 'set_rs_calib', rsMode: rm });
       });
     }
 
@@ -6852,18 +7060,24 @@
       const nextMetMode = cfg && typeof cfg.metrologyMode === 'number' ? cfg.metrologyMode : 0;
       const nextShowCov = Boolean(cfg && cfg.showCovEllipses);
       const nextNativeRoi = Boolean(cfg && cfg.native1to1);
+      const nextHodgeMode = cfg && typeof cfg.hodgeMode === 'number' ? cfg.hodgeMode : 0;
+      const nextRsMode = cfg && typeof cfg.rsMode === 'number' ? cfg.rsMode : 0;
       if (dom.bosModeSelect) dom.bosModeSelect.value = String(nextBosMode);
       if (dom.metrologyModeSelect) dom.metrologyModeSelect.value = String(nextMetMode);
+      if (dom.hodgeModeSelect) dom.hodgeModeSelect.value = String(nextHodgeMode);
+      if (dom.rsVibroModeSelect) dom.rsVibroModeSelect.value = String(nextRsMode);
       if (dom.chkNativeRoi) dom.chkNativeRoi.checked = nextNativeRoi;
       dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: nextShowCov });
       worker.postMessage({
         type: 'set_bos_config',
         bosMode: nextBosMode,
-        overlayKind: cfg && typeof cfg.overlayMode === 'number' && cfg.overlayMode >= 5 ? cfg.overlayMode - 5 : 0,
+        overlayKind: cfg && typeof cfg.overlayMode === 'number' && cfg.overlayMode >= 5 && cfg.overlayMode <= 7 ? cfg.overlayMode - 5 : 0,
         gaugeRoi: cfg && Array.isArray(cfg.bosGauge) ? cfg.bosGauge : [0, 0, 0, 0],
         resetRef: nextBosMode > 0,
       });
       worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
+      worker.postMessage({ type: 'set_hodge_config', hodgeMode: nextHodgeMode });
+      worker.postMessage({ type: 'set_rs_calib', rsMode: nextRsMode });
       worker.postMessage({ type: 'set_roi', native1to1: nextNativeRoi });
     }
 

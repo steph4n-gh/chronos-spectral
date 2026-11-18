@@ -649,6 +649,33 @@ function validateWasmModuleAndPointers(wasmModule, exp, mem, frameBytes, checkSw
     checkPtr('rigidBodies', exp.chronos_get_rigid_bodies_ptr(), 32 * 8 * 4);
     checkPtr('modalField', exp.chronos_get_modal_field_ptr(), 880 * 4);
   }
+  if (typeof exp.chronos_get_wave2_telemetry_ptr === 'function') {
+    checkPtr('wave2Telem', exp.chronos_get_wave2_telemetry_ptr(), 64 * 4);
+  }
+  if (typeof exp.chronos_get_audio_staging_ptr === 'function') {
+    checkPtr('audioStaging', exp.chronos_get_audio_staging_ptr(), 4096 * 4);
+  }
+  if (typeof exp.chronos_get_vibro_telemetry_ptr === 'function') {
+    checkPtr('vibroTelem', exp.chronos_get_vibro_telemetry_ptr(), 32 * 4);
+  }
+  if (typeof exp.chronos_get_vibro_planes_ptr === 'function') {
+    checkPtr('vibroPlanes', exp.chronos_get_vibro_planes_ptr(), 2704 * 4);
+  }
+  if (typeof exp.chronos_get_hodge_telemetry_ptr === 'function') {
+    checkPtr('hodgeTelem', exp.chronos_get_hodge_telemetry_ptr(), 32 * 4);
+  }
+  if (typeof exp.chronos_get_hodge_planes_ptr === 'function') {
+    checkPtr('hodgePlanes', exp.chronos_get_hodge_planes_ptr(), 6160 * 4);
+  }
+  if (typeof exp.chronos_get_hodge_inject_ptr === 'function') {
+    checkPtr('hodgeInject', exp.chronos_get_hodge_inject_ptr(), 2640 * 4);
+  }
+  if (typeof exp.chronos_get_conservation_telemetry_ptr === 'function') {
+    checkPtr('consTelem', exp.chronos_get_conservation_telemetry_ptr(), 32 * 4);
+  }
+  if (typeof exp.chronos_get_conservation_input_ptr === 'function') {
+    checkPtr('consInput', exp.chronos_get_conservation_input_ptr(), 32 * 4);
+  }
 
   ranges.sort((a, b) => a.start - b.start);
   for (let i = 1; i < ranges.length; i++) {
@@ -1209,8 +1236,8 @@ function createWasmSession(resMode, swarmModeInt, labMode) {
     ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 880)
     : null;
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_702_240)) {
-    ptrErrors.push(`invalidWave1ArenaBytes(${telem[20]})`);
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 24_117_248)) {
+    ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
   }
   const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
 
@@ -1317,8 +1344,8 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
     }
   }
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_702_240)) {
-    ptrErrors.push(`invalidWave1ArenaBytes(${telem[20]})`);
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 24_117_248)) {
+    ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
   }
   sess.arenaBytes = arenaBytes;
   sess.ptrErrors = ptrErrors;

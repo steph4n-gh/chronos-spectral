@@ -2951,6 +2951,12 @@ else
   node scripts/gate_i6_captures.mjs --no-chrome
 fi
 
+echo ""
+echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation)..."
+node scripts/gate_i2_rs_welch.mjs
+node scripts/gate_i3_hodge.mjs
+node scripts/gate_i5b_conservation.mjs
+
 CERT_PARTIAL=0
 if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
   CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")

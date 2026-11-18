@@ -109,6 +109,67 @@ let wave1CoreAbiValid = false;
 let wave1MetrologyAbiValid = false;
 let wave1BosAbiValid = false;
 
+// Wave-2 ABI constants & views (Vibrometry, Hodge 2-complex, Occluded Conservation)
+const WAVE2_TELEM_LEN = 64;
+const VIBRO_TELEM_LEN = 32;
+const VIBRO_PLANES_LEN = 2704;
+const AUDIO_STAGING_LEN = 4096;
+const HODGE_TELEM_LEN = 32;
+const HODGE_PLANES_LEN = 6160;
+const HODGE_INJECT_LEN = 2640;
+const CONSERVATION_LEN = 32;
+
+const VIBRO_STATE_LABELS = ['OFF', 'UNCALIB', 'WARMING', 'READY', 'DISTURBED'];
+const RS_REASON_NAMES = [
+  'BAD_CALIB',
+  'NO_SCAN_DIR',
+  'NOT_NATIVE_1TO1',
+  'FRAME_GAP',
+  'CAMERA_MOTION',
+  'CLOCK_SKEW',
+  'EXPOSURE_NULL',
+  'LOW_GRAD',
+  'AUDIO_UNDERRUN',
+  'AXIS_TRANSPOSED',
+  'NO_PTS',
+];
+const HODGE_STATE_LABELS = ['OFF', 'STANDBY', 'READY', 'UNCONV'];
+const OCCL_STATUS_LABELS = ['NONE', 'UNIQUE', 'AMBIGUOUS', 'VIOLATED'];
+const OCCL_HYP_NAMES = ['H0_KEEP', 'H0_SWAP', 'H1_KEEP', 'H1_SWAP'];
+
+let wave2TelemView = null;
+let wave2TelemF32View = null;
+let vibroTelemView = null;
+let vibroPlanesView = null;
+let audioStagingView = null;
+let hodgeTelemView = null;
+let hodgePlanesView = null;
+let hodgeInjectView = null;
+let conservationTelemView = null;
+let conservationInputView = null;
+
+let wave2CoreAbiValid = false;
+let wave2VibroAbiValid = false;
+let wave2HodgeAbiValid = false;
+let wave2ConsAbiValid = false;
+
+const rsCalibConfig = {
+  mode: 0,
+  dtRowUs: 0.0,
+  exposureUs: 0.0,
+  audioRateHz: 48000.0,
+  maxSkewUs: 500.0,
+};
+let hodgeReqMode = 0;
+let manualConsTestActive = false;
+const w2ScratchU32 = new Uint32Array(1);
+const w2ScratchF32 = new Float32Array(w2ScratchU32.buffer);
+
+function u32BitsToF32(u) {
+  w2ScratchU32[0] = u >>> 0;
+  return w2ScratchF32[0];
+}
+
 let nativeRoiEnabled = false;
 let roiOffsetNormX = 0.5;
 let roiOffsetNormY = 0.5;
@@ -196,6 +257,112 @@ function clearWave1Views() {
   bosPlanesView = null;
   bosValidView = null;
   bosRgbaView = null;
+  clearWave2Views();
+}
+
+function clearWave2Views() {
+  wave2CoreAbiValid = false;
+  wave2VibroAbiValid = false;
+  wave2HodgeAbiValid = false;
+  wave2ConsAbiValid = false;
+  wave2TelemView = null;
+  wave2TelemF32View = null;
+  vibroTelemView = null;
+  vibroPlanesView = null;
+  audioStagingView = null;
+  hodgeTelemView = null;
+  hodgePlanesView = null;
+  hodgeInjectView = null;
+  conservationTelemView = null;
+  conservationInputView = null;
+}
+
+function refreshWave2Views() {
+  clearWave2Views();
+  if (!wasmMemory || !wasmExports) return false;
+  const buf = wasmMemory.buffer;
+  const bufLen = buf.byteLength;
+
+  if (typeof wasmExports.chronos_get_wave2_telemetry_ptr === 'function') {
+    const w2Ptr = wasmExports.chronos_get_wave2_telemetry_ptr();
+    if ((w2Ptr & 3) === 0 && validatePtrSpan(bufLen, w2Ptr, WAVE2_TELEM_LEN * 4)) {
+      wave2TelemView = new Uint32Array(buf, w2Ptr, WAVE2_TELEM_LEN);
+      wave2TelemF32View = new Float32Array(buf, w2Ptr, WAVE2_TELEM_LEN);
+      wave2CoreAbiValid = true;
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_rs_calib === 'function' &&
+    typeof wasmExports.chronos_get_audio_staging_ptr === 'function' &&
+    typeof wasmExports.chronos_push_audio_block === 'function' &&
+    typeof wasmExports.chronos_get_vibro_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_vibro_planes_ptr === 'function'
+  ) {
+    const asPtr = wasmExports.chronos_get_audio_staging_ptr();
+    const vtPtr = wasmExports.chronos_get_vibro_telemetry_ptr();
+    const vpPtr = wasmExports.chronos_get_vibro_planes_ptr();
+    if (
+      (asPtr & 3) === 0 && validatePtrSpan(bufLen, asPtr, AUDIO_STAGING_LEN * 4) &&
+      (vtPtr & 3) === 0 && validatePtrSpan(bufLen, vtPtr, VIBRO_TELEM_LEN * 4) &&
+      (vpPtr & 3) === 0 && validatePtrSpan(bufLen, vpPtr, VIBRO_PLANES_LEN * 4)
+    ) {
+      audioStagingView = new Float32Array(buf, asPtr, AUDIO_STAGING_LEN);
+      vibroTelemView = new Uint32Array(buf, vtPtr, VIBRO_TELEM_LEN);
+      vibroPlanesView = new Float32Array(buf, vpPtr, VIBRO_PLANES_LEN);
+      wave2VibroAbiValid = true;
+      if (rsCalibConfig.mode > 0) {
+        wasmExports.chronos_set_rs_calib(
+          rsCalibConfig.mode,
+          rsCalibConfig.dtRowUs,
+          rsCalibConfig.exposureUs,
+          rsCalibConfig.audioRateHz,
+          rsCalibConfig.maxSkewUs
+        );
+      }
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_hodge_mode === 'function' &&
+    typeof wasmExports.chronos_get_hodge_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_hodge_planes_ptr === 'function' &&
+    typeof wasmExports.chronos_get_hodge_inject_ptr === 'function' &&
+    typeof wasmExports.chronos_hodge_solve_injected === 'function'
+  ) {
+    const htPtr = wasmExports.chronos_get_hodge_telemetry_ptr();
+    const hpPtr = wasmExports.chronos_get_hodge_planes_ptr();
+    const hiPtr = wasmExports.chronos_get_hodge_inject_ptr();
+    if (
+      (htPtr & 3) === 0 && validatePtrSpan(bufLen, htPtr, HODGE_TELEM_LEN * 4) &&
+      (hpPtr & 3) === 0 && validatePtrSpan(bufLen, hpPtr, HODGE_PLANES_LEN * 4) &&
+      (hiPtr & 3) === 0 && validatePtrSpan(bufLen, hiPtr, HODGE_INJECT_LEN * 4)
+    ) {
+      hodgeTelemView = new Uint32Array(buf, htPtr, HODGE_TELEM_LEN);
+      hodgePlanesView = new Float32Array(buf, hpPtr, HODGE_PLANES_LEN);
+      hodgeInjectView = new Float32Array(buf, hiPtr, HODGE_INJECT_LEN);
+      wave2HodgeAbiValid = true;
+      wasmExports.chronos_set_hodge_mode(hodgeReqMode);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_get_conservation_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_conservation_input_ptr === 'function' &&
+    typeof wasmExports.chronos_eval_occluded_pair === 'function'
+  ) {
+    const ctPtr = wasmExports.chronos_get_conservation_telemetry_ptr();
+    const ciPtr = wasmExports.chronos_get_conservation_input_ptr();
+    if (
+      (ctPtr & 3) === 0 && validatePtrSpan(bufLen, ctPtr, CONSERVATION_LEN * 4) &&
+      (ciPtr & 3) === 0 && validatePtrSpan(bufLen, ciPtr, CONSERVATION_LEN * 4)
+    ) {
+      conservationTelemView = new Float32Array(buf, ctPtr, CONSERVATION_LEN);
+      conservationInputView = new Float32Array(buf, ciPtr, CONSERVATION_LEN);
+      wave2ConsAbiValid = true;
+    }
+  }
+  return wave2CoreAbiValid;
 }
 
 function validatePtrSpan(bufLen, ptr, byteLen) {
@@ -299,6 +466,7 @@ function refreshWave1Views() {
       }
     }
   }
+  refreshWave2Views();
   return wave1CoreAbiValid;
 }
 
@@ -404,6 +572,19 @@ const bosRingValid = new Uint8Array(RING_LEN);
 let bosOverlayCanvas = null;
 let bosOverlayCtx = null;
 let bosOverlayImgData = null;
+
+// Wave-2 40x22 overlay canvas & delayed-display ring buffers
+const vibroRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(VIBRO_TELEM_LEN));
+const vibroRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(VIBRO_PLANES_LEN));
+const vibroRingValid = new Uint8Array(RING_LEN);
+const hodgeRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(HODGE_TELEM_LEN));
+const hodgeRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(HODGE_PLANES_LEN));
+const hodgeRingValid = new Uint8Array(RING_LEN);
+const consRingTelem = Array.from({ length: RING_LEN }, () => new Float32Array(CONSERVATION_LEN));
+const consRingValid = new Uint8Array(RING_LEN);
+let w2OverlayCanvas = null;
+let w2OverlayCtx = null;
+let w2OverlayImgData = null;
 
 // OffscreenCanvases & 2D contexts (pre-allocated once at boot)
 let hudCanvas = null;
@@ -1829,6 +2010,10 @@ function clearVisualQueues() {
   swarmRingValid.fill(0);
   covRingValid.fill(0);
   bosRingValid.fill(0);
+  vibroRingValid.fill(0);
+  hodgeRingValid.fill(0);
+  consRingValid.fill(0);
+  manualConsTestActive = false;
   ringIngestFrameId.fill(0);
   ringIngestFrameValid.fill(0);
   ringIngestTimeMs.fill(-1.0);
@@ -3689,7 +3874,7 @@ function computeConvexHullCount(n) {
 }
 
 function renderFieldFallback2D(W, H, visCount, sx, sy) {
-  if (fieldOverlayMode > 0) {
+  if (fieldOverlayMode >= 1 && fieldOverlayMode <= 4) {
     if (!field2dCanvas || field2dCanvas.width !== FIELD_GRID_W || field2dCanvas.height !== FIELD_GRID_H) {
       field2dCanvas = new OffscreenCanvas(FIELD_GRID_W, FIELD_GRID_H);
       field2dCtx = field2dCanvas.getContext('2d');
@@ -4006,6 +4191,223 @@ function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
   lastFieldRenderMs = performance.now() - t0;
 }
 
+function resolveWave2RingOrLive(dispSlot, effK, ringValid, ringTelem, ringPlanes, liveOk, liveTelem, livePlanes) {
+  if (dispSlot >= 0 && dispSlot < RING_LEN && ringValid[dispSlot] === 1) {
+    return { t: ringTelem[dispSlot], p: ringPlanes[dispSlot] };
+  }
+  if (liveOk && liveTelem && livePlanes && (effK === 0 || !hasAnyRenderedFrame() || dispSlot < 0 || dispSlot >= RING_LEN || ringValid[dispSlot] === 0)) {
+    return { t: liveTelem, p: livePlanes };
+  }
+  return null;
+}
+
+function drawHudCaptionBox(x, y, text, borderColor, bgColor, textColor) {
+  hudCtx.save();
+  hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  const cw = hudCtx.measureText(text).width + 12;
+  hudCtx.fillStyle = bgColor;
+  hudCtx.fillRect(x, y, cw, 17);
+  hudCtx.strokeStyle = borderColor;
+  hudCtx.lineWidth = 1;
+  hudCtx.strokeRect(x, y, cw, 17);
+  hudCtx.fillStyle = textColor;
+  hudCtx.fillText(text, x + 6, y + 12);
+  hudCtx.restore();
+}
+
+function renderWave2Overlays(W, H, dispSlot, effK) {
+  const isHodgeMode = fieldOverlayMode >= 8 && fieldOverlayMode <= 10;
+  const isVibroMode = fieldOverlayMode === 11;
+
+  if (isHodgeMode && w2OverlayCtx && w2OverlayImgData) {
+    const src = resolveWave2RingOrLive(
+      dispSlot,
+      effK,
+      hodgeRingValid,
+      hodgeRingTelem,
+      hodgeRingPlanes,
+      wave2HodgeAbiValid,
+      hodgeTelemView,
+      hodgePlanesView
+    );
+    const ht = src ? src.t : null;
+    const hp = src ? src.p : null;
+    const hState = ht ? (ht[0] >>> 0) : 0;
+
+    if (hp && hState === 2) {
+      const uOff = fieldOverlayMode === 8 ? 0 : (fieldOverlayMode === 9 ? FIELD_CELLS * 2 : FIELD_CELLS * 4);
+      const vOff = uOff + FIELD_CELLS;
+      let maxMag = 0.0;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const u = hp[uOff + c];
+        const v = hp[vOff + c];
+        if (Number.isFinite(u) && Number.isFinite(v)) {
+          const m = Math.hypot(u, v);
+          if (m > maxMag) maxMag = m;
+        }
+      }
+      const normMax = Math.max(0.25, maxMag);
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const u = hp[uOff + c];
+        const v = hp[vOff + c];
+        if (!Number.isFinite(u) || !Number.isFinite(v)) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const t = Math.min(1.0, Math.hypot(u, v) / normMax);
+        if (t < 0.02) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        if (fieldOverlayMode === 8) {
+          px[o] = Math.round(14 + t * 116);
+          px[o + 1] = Math.round(115 + t * 140);
+          px[o + 2] = Math.round(205 + t * 50);
+        } else if (fieldOverlayMode === 9) {
+          px[o] = Math.round(28 + t * 227);
+          px[o + 1] = Math.round(150 + t * 85);
+          px[o + 2] = Math.round(185 - t * 145);
+        } else {
+          px[o] = Math.round(135 + t * 120);
+          px[o + 1] = Math.round(40 + t * 115);
+          px[o + 2] = Math.round(205 + t * 50);
+        }
+        px[o + 3] = Math.round(28 + t * 158);
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    }
+
+    const stLabel = HODGE_STATE_LABELS[Math.max(0, Math.min(3, hState))] || 'OFF';
+    let hCap =
+      fieldOverlayMode === 8
+        ? 'HODGE EXACT |grad phi| (40x22)'
+        : fieldOverlayMode === 9
+        ? 'HODGE COEXACT |curl* psi| (40x22)'
+        : 'HODGE HARMONIC |h| (40x22)';
+    hCap += ` · ${stLabel}`;
+    if (ht && hState === 2) {
+      const ex = u32BitsToF32(ht[12]);
+      const co = u32BitsToF32(ht[13]);
+      const ha = u32BitsToF32(ht[14]);
+      const beta1 = ht[7] >>> 0;
+      const vAct = ht[3] >>> 0;
+      hCap += ` · Ex ${(ex * 100).toFixed(0)}% Co ${(co * 100).toFixed(0)}% Ha ${(ha * 100).toFixed(0)}% · b1=${beta1} V=${vAct}`;
+    } else if (hState === 3) {
+      hCap += ' [UNCONVERGED]';
+    }
+    drawHudCaptionBox(
+      10,
+      44,
+      hCap,
+      hState === 3 ? '#ff4d6d' : 'rgba(56, 242, 122, 0.55)',
+      hState === 3 ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
+      hState === 3 ? '#fecdd3' : '#a7f3d0'
+    );
+  } else if (isVibroMode && w2OverlayCtx && w2OverlayImgData) {
+    const src = resolveWave2RingOrLive(
+      dispSlot,
+      effK,
+      vibroRingValid,
+      vibroRingTelem,
+      vibroRingPlanes,
+      wave2VibroAbiValid,
+      vibroTelemView,
+      vibroPlanesView
+    );
+    const vt = src ? src.t : null;
+    const vp = src ? src.p : null;
+    const vState = vt ? (vt[0] >>> 0) : 0;
+    const vReason = vt ? (vt[2] >>> 0) : 0;
+
+    if (vp && vState === 3) {
+      const px = w2OverlayImgData.data;
+      const gCrit = vt ? Math.max(0.05, Math.min(0.99, u32BitsToF32(vt[7]))) : 0.45;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const coh = vp[FIELD_CELLS + c];
+        if (!Number.isFinite(coh) || coh <= 0.02) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const t = Math.min(1.0, Math.max(0.0, coh));
+        const coupled = t >= gCrit;
+        px[o] = coupled ? Math.round(24 + t * 110) : 54;
+        px[o + 1] = coupled ? Math.round(190 + t * 65) : Math.round(90 + t * 60);
+        px[o + 2] = coupled ? Math.round(160 + t * 95) : 140;
+        px[o + 3] = coupled ? Math.round(65 + t * 135) : Math.round(16 + t * 48);
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    }
+
+    const stLabel = VIBRO_STATE_LABELS[Math.max(0, Math.min(4, vState))] || 'OFF';
+    let vCap = `RS WELCH COH g2 (40x22) · ${stLabel}`;
+    if (vt && vState >= 2) {
+      const kSeg = vt[3] >>> 0;
+      const domF = u32BitsToF32(vt[5]);
+      const maxC = u32BitsToF32(vt[6]);
+      const sincH = u32BitsToF32(vt[8]);
+      vCap += ` · K=${kSeg} · ${domF.toFixed(1)}Hz · g2=${maxC.toFixed(3)} · H=${sincH.toFixed(2)}`;
+    }
+    if (vReason !== 0) {
+      const flags = [];
+      for (let b = 0; b < RS_REASON_NAMES.length; b++) {
+        if (vReason & (1 << b)) flags.push(RS_REASON_NAMES[b]);
+      }
+      if (flags.length > 0) vCap += ` [${flags.slice(0, 2).join('+')}]`;
+    }
+    const isWarn = vState === 4 || vState === 1 || (vReason & (1 << 6)) !== 0;
+    drawHudCaptionBox(
+      10,
+      44,
+      vCap,
+      isWarn ? '#ff4d6d' : 'rgba(0, 229, 255, 0.55)',
+      isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
+      isWarn ? '#fecdd3' : '#bae6fd'
+    );
+  }
+
+  let consArr = null;
+  if (!manualConsTestActive && dispSlot >= 0 && dispSlot < RING_LEN && consRingValid[dispSlot] === 1) {
+    consArr = consRingTelem[dispSlot];
+  } else if (wave2ConsAbiValid && conservationTelemView) {
+    consArr = conservationTelemView;
+  }
+  const consStatus = consArr ? (Math.round(consArr[0]) | 0) : 0;
+  if (consStatus >= 1 && consStatus <= 3) {
+    const mask = Math.round(consArr[1]) >>> 0;
+    const tidA = Math.round(consArr[14]) | 0;
+    const tidB = Math.round(consArr[15]) | 0;
+    const hyps = [];
+    for (let b = 0; b < OCCL_HYP_NAMES.length; b++) {
+      if (mask & (1 << b)) hyps.push(OCCL_HYP_NAMES[b]);
+    }
+    const stLbl = OCCL_STATUS_LABELS[consStatus] || 'NONE';
+    const badgeY = (fieldOverlayMode > 0) ? 65 : 44;
+    const borderC = consStatus === 1 ? '#38f27a' : (consStatus === 2 ? '#ffb703' : '#ff4d6d');
+    const textC = consStatus === 1 ? '#a7f3d0' : (consStatus === 2 ? '#fde68a' : '#fecdd3');
+    drawHudCaptionBox(
+      10,
+      badgeY,
+      `OCCL T${tidA}-T${tidB} · ${stLbl} · ${hyps.length > 0 ? hyps.join('/') : 'NONE'}`,
+      borderC,
+      consStatus === 3 ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
+      textC
+    );
+  }
+}
+
 function renderWave1Overlays(W, H, dispSlot, effK, sx, sy) {
   const isBosMode = fieldOverlayMode >= 5 && fieldOverlayMode <= 7;
   if (isBosMode && bosOverlayCtx && bosOverlayImgData) {
@@ -4071,6 +4473,8 @@ function renderWave1Overlays(W, H, dispSlot, effK, sx, sy) {
     hudCtx.fillText(bosCap, 16, 56);
     hudCtx.restore();
   }
+
+  renderWave2Overlays(W, H, dispSlot, effK);
 
   if (showCovEllipses) {
     let dispMicro = null;
@@ -6718,12 +7122,12 @@ function buildChronos1000Snapshot(medianMs, effK, fIdxNow = 0, dispSlot = -1) {
   return out;
 }
 
-function decodeStamp(base) {
-  if (!wave1TelemView || !wave1TelemF32View) return null;
-  const validity = wave1TelemView[base] >>> 0;
-  const tLo = wave1TelemView[base + 4] >>> 0;
-  const tHi = wave1TelemView[base + 5] >>> 0;
-  const ageRaw = wave1TelemF32View[base + 6];
+function decodeStampFrom(u32View, f32View, base) {
+  if (!u32View || !f32View) return null;
+  const validity = u32View[base] >>> 0;
+  const tLo = u32View[base + 4] >>> 0;
+  const tHi = u32View[base + 5] >>> 0;
+  const ageRaw = f32View[base + 6];
   return {
     validity,
     valid: (validity & 1) !== 0,
@@ -6731,13 +7135,21 @@ function decodeStamp(base) {
     ptsKnown: (validity & 4) !== 0,
     captureAge: (validity & 8) !== 0,
     handoffAge: (validity & 16) !== 0,
-    continuityEpoch: wave1TelemView[base + 1] >>> 0,
-    sourceEpoch: wave1TelemView[base + 2] >>> 0,
-    sourceSeq: wave1TelemView[base + 3] >>> 0,
+    continuityEpoch: u32View[base + 1] >>> 0,
+    sourceEpoch: u32View[base + 2] >>> 0,
+    sourceSeq: u32View[base + 3] >>> 0,
     ptsUs: tHi * 4294967296 + tLo,
     ageMs: Number.isFinite(ageRaw) ? ageRaw : -1.0,
-    engineFrameIdx: wave1TelemView[base + 7] >>> 0,
+    engineFrameIdx: u32View[base + 7] >>> 0,
   };
+}
+
+function decodeStamp(base) {
+  return decodeStampFrom(wave1TelemView, wave1TelemF32View, base);
+}
+
+function decodeWave2Stamp(base) {
+  return decodeStampFrom(wave2TelemView, wave2TelemF32View, base);
 }
 
 function readRingMetaSlot(slot) {
@@ -6985,6 +7397,172 @@ function buildWave1Snapshot(dispSlot) {
   };
 
   return { wave1: w1, roi, bos, metrology };
+}
+
+function decodeConservationArr(ca) {
+  const cStatus = Math.max(0, Math.min(3, Math.round(ca[0]) | 0));
+  const cMask = Math.round(ca[1]) >>> 0;
+  const hyps = [];
+  for (let b = 0; b < OCCL_HYP_NAMES.length; b++) {
+    if (cMask & (1 << b)) hyps.push(OCCL_HYP_NAMES[b]);
+  }
+  return {
+    available: true,
+    status: cStatus,
+    statusLabel: OCCL_STATUS_LABELS[cStatus] || 'NONE',
+    ambiguityMask: cMask,
+    hypotheses: hyps,
+    admissibleCount: Math.round(ca[2]) >>> 0,
+    jNetMag: finiteOrNull(ca[3]) ?? 0.0,
+    jEnvMax: finiteOrNull(ca[4]) ?? 0.0,
+    momResidNorm: finiteOrNull(ca[5]) ?? 0.0,
+    angMomResidNorm: finiteOrNull(ca[6]) ?? 0.0,
+    deltaKeRatio: finiteOrNull(ca[7]) ?? 0.0,
+    chi2: [
+      finiteOrNull(ca[8]) ?? 0.0,
+      finiteOrNull(ca[9]) ?? 0.0,
+      finiteOrNull(ca[10]) ?? 0.0,
+      finiteOrNull(ca[11]) ?? 0.0,
+    ],
+    estTauSec: finiteOrNull(ca[12]) ?? 0.0,
+    estRestitutionE: finiteOrNull(ca[13]) ?? 0.0,
+    tidA: Math.round(ca[14]) | 0,
+    tidB: Math.round(ca[15]) | 0,
+    occlDtSec: finiteOrNull(ca[16]) ?? 0.0,
+    eventFrame: Math.round(ca[17]) >>> 0,
+    impResids: [
+      finiteOrNull(ca[18]) ?? 0.0,
+      finiteOrNull(ca[19]) ?? 0.0,
+      finiteOrNull(ca[20]) ?? 0.0,
+      finiteOrNull(ca[21]) ?? 0.0,
+    ],
+    gravityYUsed: finiteOrNull(ca[22]) ?? 0.0,
+    massRatio: finiteOrNull(ca[23]) ?? 1.0,
+  };
+}
+
+function buildWave2Snapshot(dispSlot) {
+  const effK = telemView ? Math.round(telemView[1]) : 0;
+  const core = wave2CoreAbiValid && wave2TelemView && wave2TelemF32View ? {
+    available: true,
+    abiVersion: wave2TelemView[0] >>> 0,
+    arenaSizeBytes: wave2TelemView[1] >>> 0,
+    enabledBits: wave2TelemView[2] >>> 0,
+    continuityEpoch: wave2TelemView[3] >>> 0,
+    stamps: {
+      vibro: decodeWave2Stamp(16),
+      hodge: decodeWave2Stamp(24),
+      conservation: decodeWave2Stamp(32),
+    },
+  } : {
+    available: false,
+    abiVersion: 0,
+    arenaSizeBytes: 0,
+    enabledBits: 0,
+    continuityEpoch: 0,
+    stamps: { vibro: null, hodge: null, conservation: null },
+  };
+
+  const vibroSrc = resolveWave2RingOrLive(
+    dispSlot, effK, vibroRingValid, vibroRingTelem, vibroRingPlanes,
+    wave2VibroAbiValid, vibroTelemView, vibroPlanesView
+  );
+  const vt = vibroSrc ? vibroSrc.t : (wave2VibroAbiValid ? vibroTelemView : null);
+  const vibro = vt ? (() => {
+    const vState = Math.max(0, Math.min(4, vt[0] >>> 0));
+    const rMask = vt[2] >>> 0;
+    const rList = [];
+    for (let b = 0; b < RS_REASON_NAMES.length; b++) {
+      if (rMask & (1 << b)) rList.push(RS_REASON_NAMES[b]);
+    }
+    return {
+      available: true,
+      reqMode: rsCalibConfig.mode,
+      state: vState,
+      stateLabel: VIBRO_STATE_LABELS[vState] || 'OFF',
+      mode: vt[1] >>> 0,
+      reasonMask: rMask,
+      reasonFlags: rList,
+      welchK: vt[3] >>> 0,
+      validCells: vt[4] >>> 0,
+      domFreqHz: finiteOrNull(u32BitsToF32(vt[5])) ?? 0.0,
+      maxCohGamma2: finiteOrNull(u32BitsToF32(vt[6])) ?? 0.0,
+      gamma2Crit: finiteOrNull(u32BitsToF32(vt[7])) ?? 0.0,
+      sincH: finiteOrNull(u32BitsToF32(vt[8])) ?? 1.0,
+      k1TrapCoh: finiteOrNull(u32BitsToF32(vt[9])) ?? 0.0,
+      clockSkewUs: finiteOrNull(u32BitsToF32(vt[10])) ?? 0.0,
+      domPhaseRad: finiteOrNull(u32BitsToF32(vt[11])) ?? 0.0,
+      domAmpPx: finiteOrNull(u32BitsToF32(vt[12])) ?? 0.0,
+      freqBinHzStep: finiteOrNull(u32BitsToF32(vt[13])) ?? 0.0,
+      dtRowUs: finiteOrNull(u32BitsToF32(vt[14])) ?? 0.0,
+      exposureUs: finiteOrNull(u32BitsToF32(vt[15])) ?? 0.0,
+      audioRateHz: finiteOrNull(u32BitsToF32(vt[16])) ?? 0.0,
+      maxSkewUs: finiteOrNull(u32BitsToF32(vt[17])) ?? 0.0,
+      audioTotalSamples: vt[18] >>> 0,
+      activeFramesInRun: vt[19] >>> 0,
+      domBandIdx: vt[20] >>> 0,
+      coupledCellsCount: vt[21] >>> 0,
+      exposureNullFlag: (rMask & (1 << 6)) !== 0,
+      calib: { ...rsCalibConfig },
+    };
+  })() : { available: false, reqMode: rsCalibConfig.mode, state: 0, stateLabel: 'OFF', reasonMask: 0, reasonFlags: [] };
+
+  const hodgeSrc = resolveWave2RingOrLive(
+    dispSlot, effK, hodgeRingValid, hodgeRingTelem, hodgeRingPlanes,
+    wave2HodgeAbiValid, hodgeTelemView, hodgePlanesView
+  );
+  const ht = hodgeSrc ? hodgeSrc.t : (wave2HodgeAbiValid ? hodgeTelemView : null);
+  const hodge = ht ? (() => {
+    const hState = Math.max(0, Math.min(3, ht[0] >>> 0));
+    return {
+      available: true,
+      reqMode: hodgeReqMode,
+      state: hState,
+      stateLabel: HODGE_STATE_LABELS[hState] || 'OFF',
+      mode: ht[1] >>> 0,
+      converged: (ht[2] >>> 0) !== 0,
+      vAct: ht[3] >>> 0,
+      eAct: ht[4] >>> 0,
+      fAct: ht[5] >>> 0,
+      compCnt: ht[6] >>> 0,
+      beta1: ht[7] >>> 0,
+      internalVoids: ht[8] >>> 0,
+      openPorts: ht[9] >>> 0,
+      wakeHyps: ht[10] >>> 0,
+      totalEnergy: finiteOrNull(u32BitsToF32(ht[11])) ?? 0.0,
+      exactFrac: finiteOrNull(u32BitsToF32(ht[12])) ?? 0.0,
+      coexactFrac: finiteOrNull(u32BitsToF32(ht[13])) ?? 0.0,
+      harmFrac: finiteOrNull(u32BitsToF32(ht[14])) ?? 0.0,
+      orthEcRel: finiteOrNull(u32BitsToF32(ht[15])) ?? 0.0,
+      orthEhRel: finiteOrNull(u32BitsToF32(ht[16])) ?? 0.0,
+      orthChRel: finiteOrNull(u32BitsToF32(ht[17])) ?? 0.0,
+      energyPartErr: finiteOrNull(u32BitsToF32(ht[18])) ?? 0.0,
+      exactCgRes: finiteOrNull(u32BitsToF32(ht[19])) ?? 0.0,
+      coexactCgRes: finiteOrNull(u32BitsToF32(ht[20])) ?? 0.0,
+      primaryVoidCirc: finiteOrNull(u32BitsToF32(ht[21])) ?? 0.0,
+      primaryWakeDeficit: finiteOrNull(u32BitsToF32(ht[22])) ?? 0.0,
+      voidX: finiteOrNull(u32BitsToF32(ht[23])) ?? 0.0,
+      voidY: finiteOrNull(u32BitsToF32(ht[24])) ?? 0.0,
+      voidR: finiteOrNull(u32BitsToF32(ht[25])) ?? 0.0,
+      wakeX: finiteOrNull(u32BitsToF32(ht[26])) ?? 0.0,
+      wakeY: finiteOrNull(u32BitsToF32(ht[27])) ?? 0.0,
+      wakeR: finiteOrNull(u32BitsToF32(ht[28])) ?? 0.0,
+      exactIters: ht[29] >>> 0,
+      coexactIters: ht[30] >>> 0,
+    };
+  })() : { available: false, reqMode: hodgeReqMode, state: 0, stateLabel: 'OFF' };
+
+  let ca = null;
+  if (!manualConsTestActive && dispSlot >= 0 && dispSlot < RING_LEN && consRingValid[dispSlot] === 1) {
+    ca = consRingTelem[dispSlot];
+  } else if (wave2ConsAbiValid && conservationTelemView) {
+    ca = conservationTelemView;
+  }
+  const conservation = ca
+    ? decodeConservationArr(ca)
+    : { available: false, status: 0, statusLabel: 'NONE', ambiguityMask: 0, hypotheses: [] };
+
+  return { ...core, vibro, hodge, conservation };
 }
 
 function emitTelemetrySnapshot() {
@@ -7292,6 +7870,7 @@ function emitTelemetrySnapshot() {
     roi: w1Snap.roi,
     bos: w1Snap.bos,
     metrology: w1Snap.metrology,
+    wave2: buildWave2Snapshot(dispSlotNow),
   });
 }
 
@@ -7540,6 +8119,28 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
     bosRingValid[slotIdx] = 1;
   } else {
     bosRingValid[slotIdx] = 0;
+  }
+  if (wave2VibroAbiValid && vibroTelemView && vibroPlanesView && vibroTelemView[0] > 0) {
+    vibroRingTelem[slotIdx].set(vibroTelemView);
+    vibroRingPlanes[slotIdx].set(vibroPlanesView);
+    vibroRingValid[slotIdx] = 1;
+  } else {
+    vibroRingValid[slotIdx] = 0;
+  }
+  if (wave2HodgeAbiValid && hodgeTelemView && hodgePlanesView && hodgeTelemView[0] > 0) {
+    hodgeRingTelem[slotIdx].set(hodgeTelemView);
+    hodgeRingPlanes[slotIdx].set(hodgePlanesView);
+    hodgeRingValid[slotIdx] = 1;
+  } else {
+    hodgeRingValid[slotIdx] = 0;
+  }
+  const liveConsStamp = wave2CoreAbiValid ? decodeWave2Stamp(32) : null;
+  if (wave2ConsAbiValid && conservationTelemView && liveConsStamp && liveConsStamp.valid) {
+    consRingTelem[slotIdx].set(conservationTelemView);
+    consRingValid[slotIdx] = 1;
+    manualConsTestActive = false;
+  } else {
+    consRingValid[slotIdx] = 0;
   }
   lastSwarmCopyMs = performance.now() - tCopy0;
   lastLambda2 = lambda2;
@@ -8505,6 +9106,9 @@ self.onmessage = async (ev) => {
     bosOverlayCanvas = new OffscreenCanvas(BOS_W, BOS_H);
     bosOverlayCtx = bosOverlayCanvas.getContext('2d');
     bosOverlayImgData = bosOverlayCtx.createImageData(BOS_W, BOS_H);
+    w2OverlayCanvas = new OffscreenCanvas(FIELD_GRID_W, FIELD_GRID_H);
+    w2OverlayCtx = w2OverlayCanvas.getContext('2d');
+    w2OverlayImgData = w2OverlayCtx.createImageData(FIELD_GRID_W, FIELD_GRID_H);
 
     try {
       const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261115c1k');
@@ -8838,7 +9442,7 @@ self.onmessage = async (ev) => {
       lastOverlaySyncSeq = msg.overlaySyncSeq;
     }
     const rawO = Number(msg.fieldOverlayMode);
-    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(7, Math.round(rawO))) : 0;
+    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(11, Math.round(rawO))) : 0;
     if (fieldOverlayMode >= 5 && fieldOverlayMode <= 7) {
       bosOverlayKind = fieldOverlayMode - 5;
       if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
@@ -8932,6 +9536,113 @@ self.onmessage = async (ev) => {
     }
     if (typeof msg.showCovEllipses === 'boolean') {
       showCovEllipses = msg.showCovEllipses;
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_rs_calib') {
+    const reqM = msg.rsMode !== undefined ? msg.rsMode : msg.mode;
+    if (typeof reqM === 'number' && Number.isFinite(reqM)) {
+      rsCalibConfig.mode = Math.max(0, Math.min(2, Math.round(reqM)));
+    }
+    if (typeof msg.dtRowUs === 'number' && Number.isFinite(msg.dtRowUs)) {
+      rsCalibConfig.dtRowUs = Math.max(0.0, msg.dtRowUs);
+    }
+    if (typeof msg.exposureUs === 'number' && Number.isFinite(msg.exposureUs)) {
+      rsCalibConfig.exposureUs = Math.max(0.0, msg.exposureUs);
+    }
+    if (typeof msg.audioRateHz === 'number' && Number.isFinite(msg.audioRateHz)) {
+      rsCalibConfig.audioRateHz = Math.max(0.0, msg.audioRateHz);
+    }
+    if (typeof msg.maxSkewUs === 'number' && Number.isFinite(msg.maxSkewUs)) {
+      rsCalibConfig.maxSkewUs = Math.max(0.0, msg.maxSkewUs);
+    }
+    if (wave2VibroAbiValid && typeof wasmExports.chronos_set_rs_calib === 'function') {
+      wasmExports.chronos_set_rs_calib(
+        rsCalibConfig.mode,
+        rsCalibConfig.dtRowUs,
+        rsCalibConfig.exposureUs,
+        rsCalibConfig.audioRateHz,
+        rsCalibConfig.maxSkewUs
+      );
+    }
+    if (rsCalibConfig.mode === 0) vibroRingValid.fill(0);
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'push_audio_pcm') {
+    let accepted = 0;
+    let pushed = 0;
+    if (wave2VibroAbiValid && audioStagingView && typeof wasmExports.chronos_push_audio_block === 'function') {
+      const src = msg.samples;
+      const n = src && typeof src.length === 'number' ? Math.min(AUDIO_STAGING_LEN, src.length | 0) : 0;
+      if (n > 0) {
+        for (let i = 0; i < n; i++) {
+          audioStagingView[i] = Number(src[i]) || 0.0;
+        }
+        const tEnd = Number(msg.tEndUs);
+        const tEndSafe = Number.isFinite(tEnd) && tEnd >= 0 ? Math.floor(tEnd) : 0;
+        const tLo = tEndSafe >>> 0;
+        const tHi = Math.floor(tEndSafe / 4294967296) >>> 0;
+        const sRate = typeof msg.sampleRateHz === 'number' && Number.isFinite(msg.sampleRateHz)
+          ? msg.sampleRateHz
+          : (rsCalibConfig.audioRateHz || 48000.0);
+        const skew = typeof msg.estSkewUs === 'number' && Number.isFinite(msg.estSkewUs)
+          ? msg.estSkewUs
+          : 0.0;
+        accepted = wasmExports.chronos_push_audio_block(n >>> 0, tLo, tHi, sRate, skew) >>> 0;
+        pushed = n;
+      }
+    }
+    if (msg.wantAck) {
+      self.postMessage({
+        type: 'wave2_audio_ack',
+        reqId: msg.reqId ?? null,
+        accepted,
+        count: pushed,
+        totalSamples: vibroTelemView ? (vibroTelemView[18] >>> 0) : 0,
+      });
+    }
+    if (msg.wantAck || !telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_hodge_config') {
+    if (typeof msg.hodgeMode === 'number' && Number.isFinite(msg.hodgeMode)) {
+      hodgeReqMode = Math.max(0, Math.min(2, Math.round(msg.hodgeMode)));
+      if (wave2HodgeAbiValid && typeof wasmExports.chronos_set_hodge_mode === 'function') {
+        wasmExports.chronos_set_hodge_mode(hodgeReqMode);
+      }
+      if (hodgeReqMode === 0) hodgeRingValid.fill(0);
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'eval_occluded_pair_test') {
+    let ok = 0;
+    let decoded = null;
+    if (wave2ConsAbiValid && conservationInputView && conservationTelemView && typeof wasmExports.chronos_eval_occluded_pair === 'function') {
+      conservationInputView.fill(0.0);
+      const inp = msg.input;
+      if (inp && typeof inp.length === 'number') {
+        const n = Math.min(CONSERVATION_LEN, inp.length | 0);
+        for (let i = 0; i < n; i++) {
+          conservationInputView[i] = Number(inp[i]) || 0.0;
+        }
+      }
+      ok = wasmExports.chronos_eval_occluded_pair() >>> 0;
+      manualConsTestActive = true;
+      decoded = decodeConservationArr(conservationTelemView);
+    }
+    if (msg.wantAck !== false) {
+      self.postMessage({
+        type: 'wave2_cons_test_ack',
+        reqId: msg.reqId ?? null,
+        ok,
+        conservation: decoded,
+      });
     }
     redrawPausedHudIfReady();
     if (!telemView || !hasAnyRenderedFrame()) {

@@ -81,18 +81,42 @@ Unlike the 14 real-camera recordings documented in [web/samples/ATTRIBUTION.md](
 
 ## 3. Excluded and out-of-scope regimes
 
-To avoid unverified metrology claims, the following acquisition regimes are explicitly outside Wave-1 scope:
+To avoid unverified metrology claims, the following acquisition regimes are explicitly rejected or marked unavailable:
 - Handheld smartphone `BOS` without physical tripod stabilization and stationary background reference reset.
 - Uncalibrated gas thermometry (`Delta T`) or densitometry (`Delta rho`) without calibrated optical path geometry and Gladstone-Dale constants.
-- Rolling-shutter acoustic/vibration phase attribution without calibrated per-row readout timing ($\Delta t_{\text{row}}$), exposure $T_e$, and multi-segment capture-clock coherence.
+- Rolling-shutter acoustic/vibration phase attribution without calibrated per-row readout timing (`dt_row_us`), exposure `T_e`, known PTS, native `1:1` orientation mapping, and multi-segment capture-clock coherence.
 - Dual-camera `SE(3)` triangulation from ungenlocked consumer webcams experiencing uncompensated inter-camera shutter skew.
 
 ---
 
-## 4. Verification command
+## 4. Wave-2 acquisition and identifiability guards
 
-Run the automated Gate `I6` capture, metadata, browser decode, attribution, and reproducible physics verification suite:
+### 4.1 Rolling-shutter vibrometry and multi-segment Welch coherence (`src/vibrometry.rs`, Gate `I2`)
+
+1. **Calibrated scan-time geometry & hard refusals:** Rolling-shutter scan times are inverted through the committed `IngestSlotMeta` `D4` orientation transform and visible crop origin to recover true sensor scan coordinate `q`. Transposed scan axes exceeding the `360`-row axis (`RS_REASON_AXIS_TRANSPOSED`), missing scan direction (`RS_REASON_NO_SCAN_DIR`), non-monotonic or unknown PTS (`RS_REASON_NO_PTS` / `RS_REASON_FRAME_GAP`), rescaled non-native ingest (`RS_REASON_NOT_NATIVE_1TO1`), global camera motion (`RS_REASON_CAMERA_MOTION`), invalid calibration (`RS_REASON_BAD_CALIB`), and audio clock skew past `max_skew_us` (`RS_REASON_CLOCK_SKEW`) transition vibrometry out of `READY` rather than reporting false phase/frequency attribution.
+2. **Exposure sinc envelope and nulls:** Signed row displacement is measured via optical gradient against `ref_luma_q16`, and recovered spectral amplitudes apply $H(f) = \sin(\pi f T_e)/(\pi f T_e)$ (`H(0) = 1.0`). When $|H(f)| < 0.05$, the kernel raises `RS_REASON_EXPOSURE_NULL` (`0x40`), surfaces a `warn` banner in `#acquisitionStatusBanner`, and suppresses `1 / H` amplitude amplification and phase inversion so shutter nulls cannot blow up noise.
+3. **Welch `K >= 8` vs `K = 1` trap:** Magnitude-squared coherence equals `1.0` identically for a single segment (`K = 1`, diagnostic `telem[9]`). Coupled significance stays suppressed until at least `K >= 8` overlapping `1024`-sample Welch segments share contiguous optical support and audio timestamps, evaluated against the Bonferroni-corrected null threshold across the `64`-bin spectrum.
+
+### 4.2 Bounded `40x22` mesh Hodge `2`-complex (`src/hodge.rs`, Gate `I3`)
+
+1. **Cell-vertex complex & complementary dual topology:** Active vertices require `cell_valid_mask[i] & CELL_VALID_GRAD`, forming up to `(V, E, F) = (880, 1698, 819)` using one consistent positive `W_1` edge metric across both exact (`grad phi`) and coexact (`curl* psi`) Jacobi-PCG solves plus edge-level orthogonality checks.
+2. **Enclosed internal holes vs open ports & wake hypotheses:** Flooding complementary plaquettes from the exterior grid border across absent edges distinguishes enclosed internal holes (`beta_1`, circulation carriers) from open outer ports. Because missing texture or unseeded flow cells also leave absent vertices, wake deficits and voids are reported strictly as occupancy-gap hypotheses rather than proof of physical obstacles.
+3. **Convergence gating:** Failing PCG residual tolerance transitions Hodge state to `UNCONV` (`state = 3`), invalidates `PROD_W2_HODGE`, and suppresses overlay rendering.
+
+### 4.3 Two-body occluded conservation and four-branch ambiguity (`src/physics_id.rs`, Gate `I5b`)
+
+1. **Non-circular branch scoring:** Across co-occluded track pairs (`CollisionTrackView::coasting`), all four branches (`H0_KEEP`, `H0_SWAP`, `H1_KEEP`, `H1_SWAP`) are tested against kinematic continuity, equal-and-opposite impulse balance, linear/angular momentum residuals, and admissible restitution (`0 <= e <= 1`) using declared non-circular mass priors (`mass_known` flag or documented `1:1` prior).
+2. **Explicit `UNIQUE` vs `AMBIGUOUS` vs `VIOLATED` outputs:** Symmetric equal-mass elastic head-on collisions behind an occluder admit both `H0_SWAP` (pass-through) and `H1_KEEP` (elastic bounce) as `AMBIGUOUS` rather than fabricating a false unique winner, whereas unphysical impulse/energy violations transition to `VIOLATED`.
+
+---
+
+## 5. Verification commands
+
+Run the automated Gate `I6` and Wave-2 verification suites:
 
 ```bash
 node scripts/gate_i6_captures.mjs
+node scripts/gate_i2_rs_welch.mjs
+node scripts/gate_i3_hodge.mjs
+node scripts/gate_i5b_conservation.mjs
 ```

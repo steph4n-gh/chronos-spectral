@@ -17934,12 +17934,12 @@ fn finalize_wave2_stamps(
     {
         if hodge_ran && !hodge_grad_held {
             set_stamp_fresh(&mut a.wave2_telem, hodge_base, &meta);
-        } else if grad_valid && hodge_grad_held {
+        } else if grad_valid {
             if (a.wave2_telem[hodge_base] & STAMP_VALID) != 0
                 && a.wave2_telem[hodge_base + 1] == cont_ep
             {
                 hold_or_invalidate_stamp(&mut a.wave2_telem, hodge_base, cont_ep);
-            } else {
+            } else if hodge_ran && hodge_grad_held {
                 // Mirror originating observation from PROD_GRAD if Hodge solved from held gradient
                 let grad_base = WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE;
                 if (a.wave1_telem[grad_base] & STAMP_VALID) != 0
@@ -17952,6 +17952,8 @@ fn finalize_wave2_stamps(
                 } else {
                     set_stamp_invalid(&mut a.wave2_telem, hodge_base);
                 }
+            } else {
+                set_stamp_invalid(&mut a.wave2_telem, hodge_base);
             }
         } else {
             set_stamp_invalid(&mut a.wave2_telem, hodge_base);
