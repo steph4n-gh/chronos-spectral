@@ -992,6 +992,26 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     );
   }
 
+  // Exact-cutoff tone (4800.0 Hz == inclusive f_opt_max=4800.0 Hz @ dtRow=100us, 96 kHz)
+  {
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 100.0, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    let exactCursor = 0;
+    const opt4800 = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * 4800.0 * tSec + 0.2), 0.0];
+    const aud4800 = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * 4800.0 * tSec + 0.4);
+    for (let f = 0; f < 29; f++) {
+      const tSrcUs = t0 + f * 41_000;
+      const nextEnd = Math.round((f + 1) * 0.041 * 96000.0);
+      pushAudioSamples({ startSampleIdx: exactCursor, numSamples: nextEnd - exactCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: aud4800 });
+      exactCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: opt4800 });
+    }
+    const tsExact = readTelem();
+    assert(
+      tsExact.state === RS_STATE_READY && tsExact.coupledCells === 880 && tsExact.maxCoh > 0.90,
+      `Exact-cutoff 4800.0 Hz tone (<= 4800.0 Hz) must couple all 880 cells, got state=${tsExact.state} coupled=${tsExact.coupledCells} g2=${tsExact.maxCoh}`
+    );
+  }
+
   // Valid near-cutoff straddle (4850 Hz <= f_opt_max=4873.10 Hz @ dtRow=98.5us) & weak in-band + strong distant OOB (7500 Hz)
   {
     initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 98.5, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });

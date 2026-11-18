@@ -4976,11 +4976,13 @@ async function main() {
               t0Us: 7_000_000,
               fps: 30,
               dtRowUs: 25.0,
-              exposureUs: 200.0,
+              exposureUs: 1000.0,
               audioRateHz: 48000.0,
-              fTone: 421.875,
-              taps: 5,
+              fTone: 843.75,
+              taps: 11,
             });
+            await new Promise((r) => setTimeout(r, 60));
+            const preFaultVibro = w2p.getLastWave2();
             await w2p.submitAudioBlock({
               samples: new Array(1600).fill(0.1),
               tEndUs: 8_050_000,
@@ -4998,12 +5000,13 @@ async function main() {
               t0Us: 10_000_000,
               fps: 30,
               dtRowUs: 25.0,
-              exposureUs: 200.0,
+              exposureUs: 1000.0,
               audioRateHz: 48000.0,
-              fTone: 421.875,
-              taps: 5,
+              fTone: 843.75,
+              taps: 11,
             });
             await new Promise((r) => setTimeout(r, 110));
+            const preDropVibro = w2p.getLastWave2();
 
             return {
               readyVibro: snapReady?.vibro || null,
@@ -5017,9 +5020,11 @@ async function main() {
               u64WrapTimeAck,
               postNanState: postNanVibro?.vibro?.state ?? -1,
               postNanStampValid: Boolean(postNanVibro?.stamps?.vibro?.valid),
+              preFaultState: preFaultVibro?.vibro?.state ?? -1,
               delayedFaultState: delayedFaultVibro?.vibro?.state ?? -1,
               delayedFaultReason: delayedFaultVibro?.vibro?.reasonMask ?? 0,
               delayedFaultStampValid: Boolean(delayedFaultVibro?.stamps?.vibro?.valid),
+              preDropState: preDropVibro?.vibro?.state ?? -1,
             };
           })()`
         );
@@ -5098,9 +5103,11 @@ async function main() {
           !rsWelchReport.u64WrapTimeAck ||
           rsWelchReport.u64WrapTimeAck.accepted !== 0 ||
           rsWelchReport.u64WrapTimeAck.count !== 0 ||
+          rsWelchReport.preFaultState !== 3 ||
           rsWelchReport.delayedFaultState !== 4 ||
           (rsWelchReport.delayedFaultReason & 1) === 0 ||
           rsWelchReport.delayedFaultStampValid ||
+          rsWelchReport.preDropState !== 3 ||
           rsWelchReport.dropGapAccepted !== 1 ||
           rsWelchReport.dropGapState !== 2 ||
           (rsWelchReport.dropGapReason & 0x100) === 0 ||

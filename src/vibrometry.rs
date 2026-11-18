@@ -1998,7 +1998,11 @@ impl VibrometryState {
                 let a1 = crate::wasm_sqrt_f64(p_edge.max(0.0));
                 if a0 + a1 > 0.0 {
                     let delta = ((2.0 * a1 - a0) / (a0 + a1)).clamp(0.0, 1.0);
-                    if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max {
+                    // Allow tiny discrete-N/f32-quantization bias in Grandke's Hann estimator right at f_opt_max.
+                    let k_end_f = k_end as f64;
+                    let k_cube = (k_end_f * k_end_f * k_end_f).max(1.0);
+                    let cutoff_tol_bins = 2.0e-4 + 0.05 / k_cube;
+                    if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max + cutoff_tol_bins * df_hz {
                         inband_straddle_ok = true;
                     }
                 }

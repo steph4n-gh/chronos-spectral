@@ -5333,7 +5333,15 @@ fn eval_occluded_pair_core(
     };
 
     let mass_ratio = m2 / m1;
-    if !f64_fits_f32(mass_ratio) {
+    let inv_mass_ratio = m1 / m2;
+    let mass_ratio_f32 = mass_ratio as f32;
+    let inv_mass_ratio_f32 = inv_mass_ratio as f32;
+    if !f64_fits_f32(mass_ratio)
+        || !f64_fits_f32(inv_mass_ratio)
+        || !mass_ratio_f32.is_normal()
+        || !inv_mass_ratio_f32.is_normal()
+        || !f64_fits_f32(m1 + m2)
+    {
         return OCCL_STATUS_NONE;
     }
 

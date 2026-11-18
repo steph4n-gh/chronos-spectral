@@ -391,6 +391,21 @@ assertNear(case1Point.tau, 0.20, 1e-3, 'Case 1 tau');
   for (let k = 0; k < 32; k++) {
     assert.equal(consTelem[k], 0.0, `Expected zeroed telemetry[${k}] on extreme mass overflow`);
   }
+
+  const extremeUnderflowMass = stageEval(
+    makeInput({
+      p1: [10, 10, 0, 0, 1e37, 0.0],
+      p2: [50, 10, 0, 0, 1e-37, 0.0],
+      a: [10, 10, 0, 0],
+      b: [50, 10, 0, 0],
+      dt: 1.0,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(extremeUnderflowMass.status, OCCL_STATUS_NONE, 'Underflowing 1e-37/1e37 mass ratio must fail closed to NONE');
+  for (let k = 0; k < 32; k++) {
+    assert.equal(consTelem[k], 0.0, `Expected zeroed telemetry[${k}] on extreme mass underflow`);
+  }
 }
 
 // Hard-sphere surface-contact bounce within position uncertainty also keeps both branches admissible
