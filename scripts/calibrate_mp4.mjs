@@ -602,16 +602,16 @@ function validateWasmModuleAndPointers(wasmModule, exp, mem, frameBytes, checkSw
   }
   const memBytes = mem.buffer.byteLength;
   if (checkSwarm) {
-    const expectedWave2Bytes = 320 * 65536;
-    if (memBytes !== expectedWave2Bytes) {
-      errs.push(`wave2MemoryBytes=${memBytes}!==${expectedWave2Bytes}`);
+    const expectedWave1Bytes = 448 * 65536;
+    if (memBytes !== expectedWave1Bytes) {
+      errs.push(`wave1MemoryBytes=${memBytes}!==${expectedWave1Bytes}`);
     }
     let grew = false;
     try {
       mem.grow(1);
       grew = true;
     } catch (_) {
-      // Expected RangeError on non-growable 320-page Wasm memory
+      // Expected RangeError on non-growable 448-page Wasm memory
     }
     if (grew) errs.push('wasmMemoryGrowSucceeded');
   }
@@ -629,8 +629,18 @@ function validateWasmModuleAndPointers(wasmModule, exp, mem, frameBytes, checkSw
   checkPtr('telemetry', exp.chronos_get_telemetry_ptr(), TELEMETRY_LEN * 4);
   checkPtr('laplacian', exp.chronos_get_laplacian_ptr(), 1024 * 4);
   checkPtr('fiedler', exp.chronos_get_fiedler_ptr(), 32 * 4);
+  const fullRingSlotBytes = Math.max(frameBytes, 640 * 360 * 4);
   for (let s = 0; s < 12; s++) {
-    checkPtr(`ring[${s}]`, exp.chronos_get_ring_slot_ptr(s), frameBytes);
+    checkPtr(`ring[${s}]`, exp.chronos_get_ring_slot_ptr(s), fullRingSlotBytes);
+  }
+  if (typeof exp.chronos_get_ring_meta_ptr === 'function') {
+    checkPtr('ringMeta', exp.chronos_get_ring_meta_ptr(), 12 * 24 * 4);
+  }
+  if (typeof exp.chronos_get_row_luma_ptr === 'function') {
+    checkPtr('rowLuma', exp.chronos_get_row_luma_ptr(), 12 * 360 * 4);
+  }
+  if (typeof exp.chronos_get_wave1_telemetry_ptr === 'function') {
+    checkPtr('wave1Telem', exp.chronos_get_wave1_telemetry_ptr(), 192 * 4);
   }
   if (checkSwarm) {
     checkPtr('swarmTelemetry', exp.chronos_get_swarm_telemetry_ptr(), 64 * 4);
@@ -1199,8 +1209,8 @@ function createWasmSession(resMode, swarmModeInt, labMode) {
     ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 880)
     : null;
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_800_000)) {
-    ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_702_240)) {
+    ptrErrors.push(`invalidWave1ArenaBytes(${telem[20]})`);
   }
   const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
 
@@ -1307,8 +1317,8 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
     }
   }
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_800_000)) {
-    ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 20_702_240)) {
+    ptrErrors.push(`invalidWave1ArenaBytes(${telem[20]})`);
   }
   sess.arenaBytes = arenaBytes;
   sess.ptrErrors = ptrErrors;

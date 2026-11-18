@@ -289,7 +289,7 @@ async function main() {
         const collisions = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10);
         return {
           ok: kernel.includes('0 HEAP ALLOC / 0 IMPORTS') &&
-              arena.includes('320 PAGES / 20.00 MB') &&
+              arena.includes('448 PAGES / 28.00 MB') &&
               resMeta === '320×180 SD RGBA' &&
               targets === '4 / 16' &&
               collisions >= 2 &&
@@ -975,8 +975,8 @@ async function main() {
         };
       })()`
     );
-    if (selectMeta.optgroups !== 3 || selectMeta.options !== 15) {
-      throw new Error(`Expected 3 <optgroup> and 15 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (selectMeta.optgroups !== 4 || selectMeta.options !== 18) {
+      throw new Error(`Expected 4 <optgroup> and 18 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);
@@ -3479,6 +3479,1065 @@ async function main() {
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: scTargetId }).catch(() => {});
+      }
+    }
+
+    // 9. Wave-1 Live Showcase BOS Plume, Neumann Potential / Curl Overlays, Native 1:1 ROI Offset, Tripod Failure Warning & Zero-CLS
+    {
+      const baseUrl = `http://127.0.0.1:${srv.port}`;
+      const { targetId: w1TargetId } = await cdp.send('Target.createTarget', { url: `${baseUrl}/index.html` });
+      const { sessionId: w1Session } = await cdp.send('Target.attachToTarget', { targetId: w1TargetId, flatten: true });
+      try {
+        await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, w1Session);
+        await cdp.send('Page.enable', {}, w1Session);
+        await cdp.send('Log.enable', {}, w1Session);
+        await cdp.send('Runtime.enable', {}, w1Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
+          w1Session
+        );
+
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9a: Showcase booted cleanly with Wave-1 BOS controls',
+          `(() => {
+            const kernelTxt = (document.getElementById('scValKernel')?.textContent || '').trim();
+            return {
+              ok: document.body?.dataset?.surface === 'showcase' &&
+                  Boolean(document.getElementById('btnHeroBosPlume')) &&
+                  Boolean(document.getElementById('acquisitionStatusBanner')) &&
+                  kernelTxt.endsWith('ms / frame') &&
+                  !kernelTxt.startsWith('--')
+            };
+          })()`,
+          20000,
+          true
+        );
+
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            window.__e2eW1Cls = 0;
+            window.__e2eW1ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW1Cls += e.value;
+              }
+            });
+            window.__e2eW1ClsPo.observe({ type: 'layout-shift', buffered: false });
+            document.getElementById('btnHeroBosPlume')?.click();
+            return true;
+          })()`
+        );
+
+        const bosReadyState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9a: Showcase Thermal Plume (BOS) reaches READY + 1:1 Native ROI + fresh stamps',
+          `(() => {
+            const btn = document.getElementById('btnHeroBosPlume');
+            const selVal = document.getElementById('sampleVideoSelect')?.value || '';
+            const bosMode = document.getElementById('bosModeSelect')?.value || '';
+            const ovMode = document.getElementById('fieldOverlayModeSelect')?.value || '';
+            const roiChk = document.getElementById('chkNativeRoi')?.checked === true;
+            const covChk = document.getElementById('chkCovEllipses')?.checked === true;
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            const diagBos = document.getElementById('diagBosState')?.textContent || '';
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const diagStamps = document.getElementById('diagWave1Stamps')?.textContent || '';
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const sev = banner?.dataset?.severity || '';
+            const st = window.__chronosUiState;
+            return {
+              ok: btn?.getAttribute('aria-pressed') === 'true' &&
+                  selVal.endsWith('bos_thermal_plume.mp4') &&
+                  bosMode === '1' &&
+                  ovMode === '5' &&
+                  roiChk &&
+                  covChk &&
+                  roiTxt.startsWith('1:1 NATIVE (0,0 640x360)') &&
+                  diagBos.startsWith('READY · ') &&
+                  diagIngest.includes(' · OK · ') &&
+                  diagStamps.length >= 6 &&
+                  diagStamps[5] === 'V' &&
+                  sev === 'ok' &&
+                  st?.overlays?.fieldOverlayMode === 5 &&
+                  st?.overlays?.showCovEllipses === true,
+              roiTxt,
+              diagBos,
+              diagIngest,
+              diagStamps,
+              sev,
+            };
+          })()`,
+          22000
+        );
+
+        const bosHudBytes = await (async () => {
+          const rect = await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const r = document.getElementById('hudCanvas').getBoundingClientRect();
+              return { x: Math.max(0, Math.floor(r.left)), y: Math.max(0, Math.floor(r.top)), width: Math.ceil(r.width), height: Math.ceil(r.height), scale: 1 };
+            })()`
+          );
+          const shot = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, clip: rect }, w1Session);
+          return shot?.data ? Buffer.from(shot.data, 'base64').byteLength : 0;
+        })();
+        if (bosHudBytes < 2500) {
+          throw new Error(`Step 9a: Expected BOS #hudCanvas screenshot >= 2500 B, got ${bosHudBytes} B`);
+        }
+
+        await new Promise((r) => setTimeout(r, 80));
+        const w1ShowcaseCls = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (window.__e2eW1ClsPo) window.__e2eW1ClsPo.disconnect();
+            return window.__e2eW1Cls || 0;
+          })()`
+        );
+        if (w1ShowcaseCls >= 0.000001) {
+          throw new Error(`Step 9a: Expected 0.000000 CLS on Showcase BOS flow, got ${w1ShowcaseCls}`);
+        }
+
+        // 9b. Switch to Full Deck + attach fresh Deck CLS observer + verify Neumann Potential (6) & Curl Check (7) + SD Native 1:1 ROI non-zero (crop_x0, crop_y0) offset
+        await cdp.evalJs(w1Session, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b: Deck surface active for BOS mode switching',
+          `(() => ({ ok: document.body?.dataset?.surface === 'deck' }))()`,
+          6000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
+            window.__e2eW1DeckCls = 0;
+            window.__e2eW1DeckClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW1DeckCls += e.value;
+              }
+            });
+            window.__e2eW1DeckClsPo.observe({ type: 'layout-shift', buffered: false });
+            resolve(true);
+          })))`
+        );
+
+        for (const modeVal of ['6', '7']) {
+          await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const sel = document.getElementById('fieldOverlayModeSelect');
+              sel.value = ${JSON.stringify(modeVal)};
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`
+          );
+          await waitForCondition(
+            cdp,
+            w1Session,
+            `Step 9b: BOS fieldOverlayMode=${modeVal} synced cleanly`,
+            `(() => ({
+              ok: document.getElementById('fieldOverlayModeSelect')?.value === ${JSON.stringify(modeVal)} &&
+                  window.__chronosUiState?.overlays?.fieldOverlayMode === ${Number(modeVal)}
+            }))()`,
+            4000
+          );
+        }
+
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnResSd')?.click();
+            const chk = document.getElementById('chkNativeRoi');
+            if (chk && !chk.checked) {
+              chk.checked = true;
+              chk.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const rx = document.getElementById('rangeRoiX0');
+            const ry = document.getElementById('rangeRoiY0');
+            if (rx) { rx.value = '100'; rx.dispatchEvent(new Event('input', { bubbles: true })); }
+            if (ry) { ry.value = '100'; ry.dispatchEvent(new Event('input', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const roiOffsetState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b: SD Native 1:1 ROI shifts to (320,180 320x180) without implicit rescaling',
+          `(() => {
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            return { ok: roiTxt === '1:1 NATIVE (320,180 320x180)', roiTxt };
+          })()`,
+          8000
+        );
+
+        // 9c. Restore HD and trigger Controlled Handheld Failure -> banner turns danger with SHIFT readout
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnResHd')?.click();
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/bos_handheld_failure.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`
+        );
+        const failureBannerState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9c: bos_handheld_failure.mp4 triggers Tripod Failure Warning banner (data-severity="danger")',
+          `(() => {
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const sev = banner?.dataset?.severity || '';
+            const txt = banner?.textContent || '';
+            const diagBos = document.getElementById('diagBosState')?.textContent || '';
+            const diagCov = document.getElementById('diagMetrologyCov')?.textContent || '';
+            return {
+              ok: sev === 'danger' &&
+                  txt.includes('TRIPOD FAILURE / DISTURBED') &&
+                  diagBos.startsWith('DISTURBED · '),
+              sev,
+              txt,
+              diagBos,
+              diagCov,
+            };
+          })()`,
+          24000
+        );
+
+        // 9d. Perspective Flyby Decoy: 2x2 covariance active across multiple frames with 0 false I1 Hero promos
+        const epBeforeDecoy = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const m = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = m ? Number(m[1]) : 0;
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/perspective_flyby_decoy.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return curEp;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9d-init: perspective_flyby_decoy.mp4 booted to seq >= 20 on fresh continuity epoch',
+          `(() => {
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const mEp = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = mEp ? Number(mEp[1]) : 0;
+            const seqNum = snap?.wave1?.dispMeta?.sourceSeq || 0;
+            const metSel = document.getElementById('metrologyModeSelect')?.value || '';
+            const ellOn = document.getElementById('chkCovEllipses')?.checked === true;
+            const srcOk = (document.getElementById('hudSourceLabel')?.textContent || '').includes('PERSPECTIVE');
+            return {
+              ok: curEp > ${epBeforeDecoy} && srcOk && metSel === '2' && ellOn && seqNum >= 20 &&
+                  window.__chronosUiState?.overlays?.showCovEllipses === true,
+              curEp,
+              seqNum,
+            };
+          })()`,
+          24000
+        );
+        const decoyBudgetScale = Math.max(1.0, Math.min(2.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0') * 0.6));
+        const decoyDeadline = Date.now() + Math.round(22000 * decoyBudgetScale);
+        let decoyDistinct = 0;
+        let decoyPrevCommits = -1;
+        let decoyPrevSeq = -1;
+        let decoyMaxSeq = 0;
+        let decoyMaxUsable = 0;
+        let decoyLastDiag = '';
+        while (Date.now() < decoyDeadline) {
+          const sample = await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const snap = window.__chronosWave1Probe?.getLastWave1?.();
+              return {
+                diagCov: document.getElementById('diagMetrologyCov')?.textContent || '',
+                ep: snap?.wave1?.continuityEpoch || 0,
+                commits: snap?.wave1?.totalCommits || 0,
+                seq: snap?.wave1?.dispMeta?.sourceSeq || 0,
+                usable: snap?.metrology?.usableCovCount || 0,
+                cand: snap?.metrology?.promotedCandidates ?? -1,
+                autoHero: snap?.metrology?.activeAutoHeroes ?? -1,
+              };
+            })()`
+          );
+          if (sample.ep <= epBeforeDecoy) {
+            throw new Error(`Step 9d: continuity epoch regressed (${sample.ep} <= ${epBeforeDecoy})`);
+          }
+          if (sample.commits < decoyPrevCommits) {
+            throw new Error(`Step 9d: totalCommits went backward (${sample.commits} < ${decoyPrevCommits})`);
+          }
+          if (sample.cand !== 0 || sample.autoHero !== 0) {
+            throw new Error(`Step 9d: transient false Auto-Hero promotion on decoy seq=${sample.seq}: cand=${sample.cand}, autoHero=${sample.autoHero}, diag=${sample.diagCov}`);
+          }
+          if (sample.seq !== decoyPrevSeq && sample.commits > decoyPrevCommits) {
+            decoyDistinct++;
+            decoyPrevSeq = sample.seq;
+          }
+          decoyPrevCommits = sample.commits;
+          decoyMaxSeq = Math.max(decoyMaxSeq, sample.seq);
+          decoyMaxUsable = Math.max(decoyMaxUsable, sample.usable);
+          decoyLastDiag = sample.diagCov;
+          if (decoyMaxSeq >= 115 && decoyDistinct >= 8 && decoyMaxUsable >= 20) break;
+          await new Promise((r) => setTimeout(r, 90));
+        }
+        if (decoyMaxSeq < 115 || decoyDistinct < 8 || decoyMaxUsable < 20) {
+          throw new Error(`Step 9d: decoy loop incomplete (maxSeq=${decoyMaxSeq}, distinct=${decoyDistinct}, maxUsable=${decoyMaxUsable}, diag=${decoyLastDiag})`);
+        }
+        const decoyState = { diagCov: `${decoyLastDiag} (${decoyDistinct} samples, maxSeq=${decoyMaxSeq}, maxUsable=${decoyMaxUsable})` };
+
+        // 9e. Real Starling Swarm + H.264 2x2 Covariance Ellipse + Auto-Hero Promotion & Retirement Proof
+        const epBeforeStarling = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const m = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = m ? Number(m[1]) : 0;
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/starling_murmuration_1000.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return curEp;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e: Starling clip booted on fresh continuity epoch before enabling H.264 2x2 metrology',
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const mEp = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = mEp ? Number(mEp[1]) : 0;
+            const srcOk = (document.getElementById('hudSourceLabel')?.textContent || '').includes('STARLING');
+            return { ok: curEp > ${epBeforeStarling} && srcOk, curEp, diagIngest };
+          })()`,
+          15000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
+            const sw = document.getElementById('swarmModeSelect');
+            if (sw && sw.value !== '2') { sw.value = '2'; sw.dispatchEvent(new Event('change', { bubbles: true })); }
+            const mm = document.getElementById('metrologyModeSelect');
+            if (mm) { mm.value = '2'; mm.dispatchEvent(new Event('change', { bubbles: true })); }
+            const chk = document.getElementById('chkCovEllipses');
+            if (chk && !chk.checked) { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const denseCovState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e: Dense starling swarm runs 2x2 covariance + LOO residual Auto-Hero promotion (cand >= 1, tgts in 1..3)',
+          `(() => {
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v && v.playbackRate !== 0.25) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const diagCov = document.getElementById('diagMetrologyCov')?.textContent || '';
+            const mUsable = diagCov.match(/(\\d+)\\s+usable/);
+            const mCand = diagCov.match(/(\\d+)\\s+cand/);
+            const usable = mUsable ? Number(mUsable[1]) : 0;
+            const cand = mCand ? Number(mCand[1]) : 0;
+            const autoHero = snap?.metrology?.activeAutoHeroes ?? 0;
+            const conf = parseInt((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0].replace(/,/g, ''), 10) || 0;
+            const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+            return {
+              ok: conf >= 900 &&
+                  usable >= 300 &&
+                  cand >= 1 &&
+                  tgts >= 1 &&
+                  tgts <= 3 &&
+                  window.__chronosUiState?.overlays?.showCovEllipses === true,
+              diagCov,
+              conf,
+              usable,
+              cand,
+              autoHero,
+              tgts,
+            };
+          })()`,
+          24000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const mm = document.getElementById('metrologyModeSelect');
+            if (mm) { mm.value = '0'; mm.dispatchEvent(new Event('change', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const starlingMetOffState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e-off: Disabling metrology mode=0 clears candidates & enabled bit 0 while keeping legacy tracking intact',
+          `(() => {
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const autoHero = snap?.metrology?.activeAutoHeroes ?? -1;
+            const cand = snap?.metrology?.promotedCandidates ?? -1;
+            const enabledBits = snap?.wave1?.enabledBits ?? 1;
+            return {
+              ok: autoHero === 0 && cand === 0 && (enabledBits & 1) === 0,
+              autoHero,
+              cand,
+              enabledBits,
+            };
+          })()`,
+          12000
+        );
+
+        // 9f. Browser 8x4 Orientation x scanDir Matrix, 360x640 Quarter-Turn Native, Undersized Non-Smooth Fallback & Reject
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const v = document.getElementById('hiddenVideoSource') || document.querySelector('video');
+            if (v) {
+              v.defaultPlaybackRate = 1.0;
+              v.playbackRate = 1.0;
+              v.pause();
+            }
+            const sel = document.getElementById('sampleVideoSelect');
+            if (sel) sel.value = '';
+            const probe = window.__chronosWave1Probe;
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 0 });
+            probe.postWorkerMsg({ type: 'set_bos_config', bosMode: 0 });
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 0 });
+            probe.postWorkerMsg({ type: 'set_field_overlay_mode', fieldOverlayMode: 0 });
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 1.0, showHeroTargets: false, showcaseMinimalScopes: false });
+            probe.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9f-drain: Wait for paused video backpressure to settle before matrix checks',
+          `(() => ({ ok: window.__chronosWave1Probe?.getBusyState?.().workerFrameBusy === false }))()`,
+          5000
+        );
+        await new Promise((r) => setTimeout(r, 80));
+        const orientMatrixReport = await cdp.evalJs(
+          w1Session,
+          `(async () => {
+            const probe = window.__chronosWave1Probe;
+            const hudEl = document.getElementById('hudCanvas');
+            const readCanvas = document.createElement('canvas');
+            readCanvas.width = 960;
+            readCanvas.height = 540;
+            const rCtx = readCanvas.getContext('2d', { willReadFrequently: true });
+            const srcCanvas = document.createElement('canvas');
+            const sCtx = srcCanvas.getContext('2d');
+            const waitRafs = () => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+            const sampleCornerColors = () => {
+              rCtx.drawImage(hudEl, 0, 0);
+              const pts = [[200, 135], [760, 135], [200, 405], [760, 405]];
+              return pts.map(([x, y]) => {
+                const d = rCtx.getImageData(x, y, 1, 1).data;
+                if (d[0] > 200 && d[1] < 55 && d[2] < 55) return 'R';
+                if (d[0] < 55 && d[1] > 200 && d[2] < 55) return 'G';
+                if (d[0] < 55 && d[1] < 55 && d[2] > 200) return 'B';
+                if (d[0] > 200 && d[1] > 200 && d[2] < 55) return 'Y';
+                return d[0] + ',' + d[1] + ',' + d[2];
+              }).join('');
+            };
+            const paintQuadrants = (w, h) => {
+              srcCanvas.width = w;
+              srcCanvas.height = h;
+              const hw = w >> 1;
+              const hh = h >> 1;
+              sCtx.fillStyle = '#ff0000'; sCtx.fillRect(0, 0, hw, hh);
+              sCtx.fillStyle = '#00ff00'; sCtx.fillRect(hw, 0, w - hw, hh);
+              sCtx.fillStyle = '#0000ff'; sCtx.fillRect(0, hh, hw, h - hh);
+              sCtx.fillStyle = '#ffff00'; sCtx.fillRect(hw, hh, w - hw, h - hh);
+            };
+            const expectedCorners = ['RGBY', 'BRYG', 'YBGR', 'GYRB', 'GRYB', 'RBGY', 'BYRG', 'YGBR'];
+            let seq = 1;
+            const epoch = 901;
+            let quarterTurnCount = 0;
+            for (let o = 0; o < 8; o++) {
+              const swapped = (o & 1) === 1;
+              const sw = swapped ? 360 : 640;
+              const sh = swapped ? 640 : 360;
+              paintQuadrants(sw, sh);
+              const rawImgData = (scanDirIdx) => sCtx.getImageData(0, 0, sw, sh).data.buffer.slice(0);
+              for (let sd = 0; sd < 4; sd++) {
+                probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: o, scanDir: sd });
+                let ack;
+                const ts = seq * 33333;
+                if ((sd & 1) === 0) {
+                  const bmp = await createImageBitmap(srcCanvas);
+                  ack = await probe.submitTestFrame({
+                    type: 'video_frame',
+                    epoch,
+                    seq,
+                    bitmap: bmp,
+                    dtSec: 1 / 30,
+                    mediaTimeSec: seq / 30,
+                    tSrcUs: ts,
+                  }, [bmp]);
+                } else {
+                  const buf = rawImgData(sd);
+                  ack = await probe.submitTestFrame({
+                    type: 'video_rgba',
+                    epoch,
+                    seq,
+                    width: sw,
+                    height: sh,
+                    buffer: buf,
+                    dtSec: 1 / 30,
+                    mediaTimeSec: seq / 30,
+                    tSrcUs: ts,
+                  }, [buf]);
+                }
+                if (!ack || ack.type !== 'frame_ack') {
+                  throw new Error('Step 9f matrix frame failed o=' + o + ' sd=' + sd + ': ' + JSON.stringify(ack));
+                }
+                const snap = probe.getLastWave1();
+                if (!snap || !snap.roi || snap.roi.orientation !== o || snap.roi.scanDir !== sd || !snap.roi.native1to1Active) {
+                  throw new Error('Step 9f ROI metadata mismatch o=' + o + ' sd=' + sd + ': ' + JSON.stringify(snap?.roi));
+                }
+                if (swapped) {
+                  if (snap.roi.srcW !== 360 || snap.roi.srcH !== 640 || snap.roi.engineW !== 640 || snap.roi.engineH !== 360) {
+                    throw new Error('Step 9f quarter-turn dims mismatch o=' + o + ': ' + JSON.stringify(snap.roi));
+                  }
+                  quarterTurnCount++;
+                }
+                let gotColors = '';
+                for (let rf = 0; rf < 24; rf++) {
+                  await waitRafs();
+                  gotColors = sampleCornerColors();
+                  if (gotColors === expectedCorners[o]) break;
+                }
+                if (gotColors !== expectedCorners[o]) {
+                  throw new Error('Step 9f HUD D4 mismatch o=' + o + ' sd=' + sd + ': got ' + gotColors + ' expected ' + expectedCorners[o]);
+                }
+                seq++;
+              }
+            }
+
+            // Undersized 160x90 sharp edge non-smoothed fallback check
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 160;
+            srcCanvas.height = 90;
+            sCtx.fillStyle = '#ff0000'; sCtx.fillRect(0, 0, 80, 90);
+            sCtx.fillStyle = '#0000ff'; sCtx.fillRect(80, 0, 80, 90);
+            const smallBmp = await createImageBitmap(srcCanvas);
+            const smallAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: smallBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [smallBmp]);
+            seq++;
+            if (!smallAck || smallAck.type !== 'frame_ack') throw new Error('Step 9f undersized ack failed');
+            const smallSnap = probe.getLastWave1();
+            if (!smallSnap?.roi || smallSnap.roi.native1to1Active !== false || smallSnap.roi.fallbackScale !== true) {
+              throw new Error('Step 9f undersized fallback flag mismatch: ' + JSON.stringify(smallSnap?.roi));
+            }
+            let leftPx = null;
+            let rightPx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              leftPx = rCtx.getImageData(478, 140, 1, 1).data;
+              rightPx = rCtx.getImageData(482, 140, 1, 1).data;
+              if (leftPx[1] <= 15 && rightPx[1] <= 15 && leftPx[0] >= 200 && rightPx[2] >= 200) break;
+            }
+            if (!leftPx || !rightPx || leftPx[0] < 240 || leftPx[2] > 15 || rightPx[2] < 240 || rightPx[0] > 15) {
+              throw new Error('Step 9f undersized fallback was smoothed! L=' + Array.from(leftPx || []) + ' R=' + Array.from(rightPx || []));
+            }
+
+            // preScaled=true on 640x360 must never mark native1to1Active=true
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            sCtx.fillStyle = '#00ff00'; sCtx.fillRect(0, 0, 640, 360);
+            const preBmp = await createImageBitmap(srcCanvas);
+            const preAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: preBmp,
+              preScaled: true,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [preBmp]);
+            seq++;
+            if (!preAck || preAck.type !== 'frame_ack') throw new Error('Step 9f preScaled ack failed');
+            const preSnap = probe.getLastWave1();
+            if (!preSnap?.roi || preSnap.roi.native1to1Active !== false || preSnap.roi.fallbackScale !== true) {
+              throw new Error('Step 9f preScaled native flag mismatch: ' + JSON.stringify(preSnap?.roi));
+            }
+
+            // Invalid byteLength video_rgba must reject without deadlocking busy state
+            const commitsBeforeRej = preSnap.wave1.totalCommits;
+            const badBuf = new Uint8Array(1024).buffer;
+            const rejAck = await probe.submitTestFrame({
+              type: 'video_rgba',
+              epoch,
+              seq,
+              width: 640,
+              height: 360,
+              buffer: badBuf,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [badBuf]);
+            seq++;
+            const busyAfterRej = probe.getBusyState().workerFrameBusy;
+            if (!rejAck || rejAck.type !== 'ingest_rejected' || busyAfterRej !== false) {
+              throw new Error('Step 9f reject contract failed: ' + JSON.stringify({ rejAck, busyAfterRej }));
+            }
+            const recBmp = await createImageBitmap(srcCanvas);
+            const recAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: recBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [recBmp]);
+            const recSnap = probe.getLastWave1();
+            if (!recAck || recAck.type !== 'frame_ack' || recSnap.wave1.totalCommits !== commitsBeforeRej + 1) {
+              throw new Error('Step 9f post-reject recovery failed: ' + JSON.stringify({ recAck, commitsBeforeRej, after: recSnap?.wave1?.totalCommits }));
+            }
+
+            // Browser visibleRect provenance: coded 640x360 with visibleRect (40,20,560,320) + x0=10,y0=5 -> RingMeta (560x320, crop=10,5), sampled at coded (50,25)
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 0 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, x0: 10, y0: 5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            sCtx.fillStyle = '#001000'; sCtx.fillRect(0, 0, 640, 360);
+            sCtx.fillStyle = '#ff00ff'; sCtx.fillRect(50, 25, 320, 180);
+            const vrBmp = await createImageBitmap(srcCanvas);
+            const vrAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch: epoch + 1,
+              seq: 1,
+              bitmap: vrBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: 0.0,
+              tSrcUs: 0,
+              geom: { visibleRect: { x: 40, y: 20, width: 560, height: 320 } },
+            }, [vrBmp]);
+            if (!vrAck || vrAck.type !== 'frame_ack') {
+              throw new Error('Step 9f visibleRect frame failed: ' + JSON.stringify(vrAck));
+            }
+            const vrSnap = probe.getLastWave1();
+            if (!vrSnap?.roi || vrSnap.roi.srcW !== 560 || vrSnap.roi.srcH !== 320 || vrSnap.roi.cropX0 !== 10 || vrSnap.roi.cropY0 !== 5 || !vrSnap.roi.native1to1Active) {
+              throw new Error('Step 9f visibleRect ROI coords mismatch: ' + JSON.stringify(vrSnap?.roi));
+            }
+            let vrPx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              vrPx = rCtx.getImageData(480, 270, 1, 1).data;
+              if (vrPx[0] > 200 && vrPx[2] > 200 && vrPx[1] < 55) break;
+            }
+            if (!vrPx || vrPx[0] < 200 || vrPx[2] < 200 || vrPx[1] > 55) {
+              throw new Error('Step 9f visibleRect did not sample coded (50,25) magenta region: ' + Array.from(vrPx || []));
+            }
+
+            // Synchronous dispatchBitmapFrameToWorker DataCloneError (closed ImageBitmap) clears workerFrameBusy=false and does not wedge
+            const deadBmp = await createImageBitmap(srcCanvas);
+            deadBmp.close();
+            const busyBeforeErr = probe.getBusyState();
+            const syncDispatchOk = probe.dispatchBitmapFrame({
+              epoch: busyBeforeErr.sourceEpoch,
+              seq: busyBeforeErr.frameSeq + 50,
+              bitmap: deadBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: -1,
+              tSrcUs: null,
+              captureAgeMs: -1,
+              enqueuedEpochMs: performance.now(),
+              gapMask: 0,
+              geom: null,
+            });
+            const busyAfterErr = probe.getBusyState();
+            if (syncDispatchOk !== false || busyAfterErr.workerFrameBusy !== false) {
+              throw new Error('Step 9f synchronous transfer throw leaked busy state: ' + JSON.stringify({ syncDispatchOk, busyAfterErr }));
+            }
+            const afterDeadBmp = await createImageBitmap(srcCanvas);
+            const afterDeadAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch: epoch + 1,
+              seq: 2,
+              bitmap: afterDeadBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: 1 / 30,
+              tSrcUs: 33333,
+            }, [afterDeadBmp]);
+            if (!afterDeadAck || afterDeadAck.type !== 'frame_ack') {
+              throw new Error('Step 9f post-DataCloneError worker recovery failed: ' + JSON.stringify(afterDeadAck));
+            }
+
+            // lastPresentedFrames skip-gap preservation when bitmapCaptureBusy drops frame curP+1
+            const hiddenVid = document.getElementById('hiddenVideoSource');
+            if (!hiddenVid || hiddenVid.readyState < 2) {
+              throw new Error('Step 9f expected loaded hiddenVideoSource for capture-busy skip check');
+            }
+            await hiddenVid.play().catch(() => {});
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 1.0, showHeroTargets: false });
+            for (let wt = 0; wt < 60 && (probe.getBusyState().lastPresentedFrames < 1 || probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+              await new Promise((res) => setTimeout(res, 25));
+            }
+            const busy0 = probe.getBusyState();
+            if (busy0.lastPresentedFrames < 1 || busy0.bitmapCaptureBusy || busy0.workerFrameBusy) {
+              throw new Error('Step 9f video pump did not become ready for skip-gap check: ' + JSON.stringify(busy0));
+            }
+            const curP = busy0.lastPresentedFrames;
+            probe.setCaptureBusyForTest(true);
+            const droppedWhileBusy = await probe.forwardVideoFrameForTest(
+              -1,
+              performance.now(),
+              { presentedFrames: curP + 1 }
+            );
+            const busyDuringDrop = probe.getBusyState();
+            probe.setCaptureBusyForTest(false);
+            if (droppedWhileBusy !== false || busyDuringDrop.lastPresentedFrames !== curP) {
+              hiddenVid.pause();
+              throw new Error('Step 9f bitmapCaptureBusy must not advance lastPresentedFrames: ' + JSON.stringify({ droppedWhileBusy, curP, got: busyDuringDrop.lastPresentedFrames }));
+            }
+            const pNext = probe.forwardVideoFrameForTest(
+              -1,
+              performance.now() + 33,
+              { presentedFrames: curP + 2 }
+            );
+            hiddenVid.pause();
+            const nextSent = await pNext;
+            if (nextSent !== true || probe.getBusyState().lastPresentedFrames !== curP + 2) {
+              throw new Error('Step 9f post-busy skip capture did not advance lastPresentedFrames to curP+2: ' + JSON.stringify({ nextSent, got: probe.getBusyState().lastPresentedFrames, curP }));
+            }
+            for (let wt = 0; wt < 60 && probe.getBusyState().workerFrameBusy; wt++) {
+              await new Promise((res) => setTimeout(res, 20));
+            }
+            const skipSnap = probe.getLastWave1();
+            if (!skipSnap?.wave1?.dispMeta || (skipSnap.wave1.dispMeta.frameGapFlag & 1) === 0) {
+              throw new Error('Step 9f dropped presentedFrame curP+1 failed to emit FRAME_GAP_SEQ (bit 0): ' + JSON.stringify(skipSnap?.wave1?.dispMeta));
+            }
+
+            // bitmapCaptureBusy drop without presentedFrames still preserves FRAME_GAP_SEQ (bit 0)
+            if (hiddenVid.ended) hiddenVid.currentTime = 0;
+            await hiddenVid.play().catch(() => {});
+            probe.setCaptureBusyForTest(true);
+            const dropNoPres = await probe.forwardVideoFrameForTest(-1, performance.now() + 66, null);
+            const busyGapNoPres = probe.getBusyState().pendingVideoGapMask;
+            hiddenVid.pause();
+            probe.setCaptureBusyForTest(false);
+            if (dropNoPres !== false || (busyGapNoPres & 1) === 0) {
+              throw new Error('Step 9f bitmapCaptureBusy without presentedFrames failed to set bit0: ' + JSON.stringify({ dropNoPres, busyGapNoPres, paused: hiddenVid.paused, ended: hiddenVid.ended, readyState: hiddenVid.readyState }));
+            }
+
+            // Async in-flight createImageBitmap overlap must preserve FRAME_GAP_SEQ across F1 commit for F3
+            const origCreateImageBitmap = window.createImageBitmap;
+            try {
+              // Flush pending bit cleanly via F0 first
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const pF0 = Math.max(curP + 3, probe.getBusyState().lastPresentedFrames + 1);
+              const f0Sent = await probe.forwardVideoFrameForTest(-1, performance.now() + 80, { presentedFrames: pF0 });
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              if ((f0Sent !== true && probe.getBusyState().lastPresentedFrames < pF0) || probe.getBusyState().pendingVideoGapMask !== 0) {
+                throw new Error('Step 9f async overlap pre-flush failed: ' + JSON.stringify({ f0Sent, busy: probe.getBusyState() }));
+              }
+              let releaseF1Bitmap = null;
+              let rejectF1Bitmap = null;
+              let f1Intercepted = false;
+              window.createImageBitmap = (src, ...rest) => {
+                if (!f1Intercepted && src === hiddenVid) {
+                  f1Intercepted = true;
+                  return new Promise((res, rej) => {
+                    releaseF1Bitmap = () => origCreateImageBitmap(srcCanvas).then(res, rej);
+                    rejectF1Bitmap = rej;
+                  });
+                }
+                return origCreateImageBitmap(src, ...rest);
+              };
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const pF1 = probe.getBusyState().lastPresentedFrames + 1;
+              const f1Promise = probe.forwardVideoFrameForTest(-1, performance.now() + 110, { presentedFrames: pF1 });
+              for (let wt = 0; wt < 30 && !releaseF1Bitmap; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseF1Bitmap || !probe.getBusyState().bitmapCaptureBusy) {
+                if (rejectF1Bitmap) rejectF1Bitmap(new Error('abort_overlap'));
+                hiddenVid.pause();
+                throw new Error('Step 9f failed to pause inside in-flight createImageBitmap');
+              }
+              const f2Drop = await probe.forwardVideoFrameForTest(-1, performance.now() + 125, { presentedFrames: pF1 + 1 });
+              const midOverlapGap = probe.getBusyState().pendingVideoGapMask;
+              hiddenVid.pause();
+              window.createImageBitmap = origCreateImageBitmap;
+              releaseF1Bitmap();
+              const f1Sent = await f1Promise;
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const gapAfterF1 = probe.getBusyState().pendingVideoGapMask;
+              if (f2Drop !== false || (midOverlapGap & 1) === 0 || f1Sent !== true || (gapAfterF1 & 1) === 0) {
+                throw new Error('Step 9f async createImageBitmap overlap lost pendingVideoGapMask: ' + JSON.stringify({ f2Drop, midOverlapGap, f1Sent, gapAfterF1 }));
+              }
+              const commitsBeforeF3 = probe.getLastWave1()?.wave1?.totalCommits ?? 0;
+              await hiddenVid.play().catch(() => {});
+              const pF3 = Math.max(pF1 + 2, probe.getBusyState().lastPresentedFrames + 1);
+              let f3Sent = false;
+              if (probe.getBusyState().pendingVideoGapMask !== 0) {
+                f3Sent = await probe.forwardVideoFrameForTest(-1, performance.now() + 145, { presentedFrames: pF3 });
+              }
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const f3Snap = probe.getLastWave1();
+              const committedByF3OrRvfc = f3Sent === true || (f3Snap?.wave1?.totalCommits ?? 0) > commitsBeforeF3;
+              if (!committedByF3OrRvfc || probe.getBusyState().pendingVideoGapMask !== 0 || !f3Snap?.wave1?.dispMeta || (f3Snap.wave1.dispMeta.frameGapFlag & 1) === 0) {
+                throw new Error('Step 9f F3 after async overlap failed to commit FRAME_GAP_SEQ: ' + JSON.stringify({ f3Sent, committedByF3OrRvfc, busy: probe.getBusyState(), dispMeta: f3Snap?.wave1?.dispMeta }));
+              }
+
+              // Epoch-switch held-createImageBitmap lock regression: stale epoch-1 finish must NOT unlock epoch-2 capture B or allow C to overtake B
+              let releaseEp1 = null;
+              let releaseEp2 = null;
+              let epTrap = 0;
+              window.createImageBitmap = (src, ...rest) => {
+                if (src === hiddenVid && epTrap < 2) {
+                  epTrap++;
+                  const trapIdx = epTrap;
+                  return new Promise((res, rej) => {
+                    const rel = () => origCreateImageBitmap(srcCanvas).then(res, rej);
+                    if (trapIdx === 1) releaseEp1 = rel;
+                    else releaseEp2 = rel;
+                  });
+                }
+                return origCreateImageBitmap(src, ...rest);
+              };
+              const tEp1 = Math.max(20.0, Math.ceil((hiddenVid.currentTime || 0) + 2)) + 0.1;
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const ep1Promise = probe.forwardVideoFrameForTest(tEp1, performance.now() + 180, null);
+              for (let wt = 0; wt < 30 && !releaseEp1; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseEp1 || !probe.getBusyState().bitmapCaptureBusy) {
+                throw new Error('Step 9f epoch-switch test failed to trap epoch-1 createImageBitmap');
+              }
+              const ep2 = probe.simulateEpochFlushForTest();
+              if (probe.getBusyState().bitmapCaptureBusy !== false) {
+                throw new Error('Step 9f epoch-switch flush did not reset bitmapCaptureBusy for new epoch');
+              }
+              const ep2Promise = probe.forwardVideoFrameForTest(0.2, performance.now() + 200, null);
+              for (let wt = 0; wt < 30 && !releaseEp2; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseEp2 || !probe.getBusyState().bitmapCaptureBusy) {
+                throw new Error('Step 9f epoch-switch test failed to trap epoch-2 Capture B createImageBitmap');
+              }
+              // Stale epoch-1 capture finishes first while epoch-2 Capture B is in flight
+              releaseEp1();
+              const ep1Result = await ep1Promise;
+              if (ep1Result !== false || probe.getBusyState().bitmapCaptureBusy !== true) {
+                throw new Error('Step 9f stale epoch-1 finish cleared epoch-2 bitmapCaptureBusy lock: ' + JSON.stringify({ ep1Result, busy: probe.getBusyState() }));
+              }
+              // Capture C arrives while Capture B is still awaiting: MUST NOT leapfrog Capture B!
+              const ep2CDrop = await probe.forwardVideoFrameForTest(0.3, performance.now() + 215, null);
+              if (ep2CDrop !== false || (probe.getBusyState().pendingVideoGapMask & 1) === 0) {
+                throw new Error('Step 9f epoch-2 Capture C overtook in-flight Capture B: ' + JSON.stringify({ ep2CDrop, busy: probe.getBusyState() }));
+              }
+              hiddenVid.pause();
+              window.createImageBitmap = origCreateImageBitmap;
+              releaseEp2();
+              const ep2BSent = await ep2Promise;
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const bMeta = probe.getLastWave1()?.wave1?.dispMeta;
+              if (ep2BSent !== true || !bMeta || bMeta.sourceEpoch !== ep2 || bMeta.tSrcUs !== 200000) {
+                throw new Error('Step 9f epoch-2 Capture B (0.2s) did not land first cleanly: ' + JSON.stringify({ ep2BSent, ep2, bMeta }));
+              }
+              await hiddenVid.play().catch(() => {});
+              const ep2DSent = await probe.forwardVideoFrameForTest(0.3, performance.now() + 235, null);
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const dMeta = probe.getLastWave1()?.wave1?.dispMeta;
+              if (ep2DSent !== true || !dMeta || dMeta.sourceEpoch !== ep2 || dMeta.tSrcUs !== 300000 || dMeta.sourceSeq <= bMeta.sourceSeq || (dMeta.frameGapFlag & 1) === 0) {
+                throw new Error('Step 9f epoch-2 Capture D (0.3s) ordering/gap mismatch after B: ' + JSON.stringify({ ep2DSent, ep2, bSeq: bMeta.sourceSeq, dMeta }));
+              }
+            } finally {
+              window.createImageBitmap = origCreateImageBitmap;
+              hiddenVid.pause();
+            }
+
+            // Live burst + pause settle check on #hudCanvas + repeat set_resolution(1->1) check
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            const burstEp = Math.max(epoch + 2, busy0.sourceEpoch + 2);
+            const burstColors = ['#ff0000', '#ff0000', '#ff0000', '#00ffff'];
+            for (let bi = 0; bi < burstColors.length; bi++) {
+              sCtx.fillStyle = burstColors[bi];
+              sCtx.fillRect(0, 0, 640, 360);
+              const bBmp = await createImageBitmap(srcCanvas);
+              const bAck = await probe.submitTestFrame({
+                type: 'video_frame',
+                epoch: burstEp,
+                seq: bi + 1,
+                bitmap: bBmp,
+                dtSec: 1 / 30,
+                mediaTimeSec: bi / 30,
+                tSrcUs: bi * 33333,
+              }, [bBmp]);
+              if (!bAck || bAck.type !== 'frame_ack') {
+                throw new Error('Step 9f burst+pause frame failed bi=' + bi + ': ' + JSON.stringify(bAck));
+              }
+            }
+            let settlePx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              settlePx = rCtx.getImageData(480, 270, 1, 1).data;
+              if (settlePx[0] < 35 && settlePx[1] > 210 && settlePx[2] > 210) break;
+            }
+            if (!settlePx || settlePx[0] > 35 || settlePx[1] < 210 || settlePx[2] < 210) {
+              throw new Error('Step 9f burst+pause #hudCanvas failed to settle on final cyan frame: ' + Array.from(settlePx || []));
+            }
+
+            // Browser live Wave-1 owned Auto-Hero promotion (activeAutoHeroes >= 1) and mode=0 retirement
+            probe.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            probe.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 2 });
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 2, showCovEllipses: true });
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 0.0, showHeroTargets: true, showcaseMinimalScopes: false });
+            const promoEpoch = 902;
+            const sheetBuf = new Uint8Array(640 * 360 * 4);
+            const drawGaussianDot = (cx, cy, amp) => {
+              const x0 = Math.max(0, Math.floor(cx - 5));
+              const x1 = Math.min(639, Math.ceil(cx + 5));
+              const y0 = Math.max(0, Math.floor(cy - 5));
+              const y1 = Math.min(359, Math.ceil(cy + 5));
+              for (let y = y0; y <= y1; y++) {
+                const dy = y - cy;
+                for (let x = x0; x <= x1; x++) {
+                  const dx = x - cx;
+                  const v = Math.round(amp * 255 * Math.exp(-0.5 * (dx * dx + dy * dy) / (1.4 * 1.4)));
+                  const o = (y * 640 + x) * 4;
+                  const nv = Math.min(255, sheetBuf[o] + v);
+                  sheetBuf[o] = nv;
+                  sheetBuf[o + 1] = nv;
+                  sheetBuf[o + 2] = nv;
+                }
+              }
+            };
+            const fillGaussianSheet = (frameIdx) => {
+              for (let i = 0; i < 640 * 360 * 4; i += 4) {
+                sheetBuf[i] = 38;
+                sheetBuf[i + 1] = 38;
+                sheetBuf[i + 2] = 38;
+                sheetBuf[i + 3] = 255;
+              }
+              for (let r = 0; r < 4; r++) {
+                for (let c = 0; c < 6; c++) {
+                  drawGaussianDot(70 + c * 98 + 0.35 * frameIdx, 55 + r * 80 + 0.1 * frameIdx, 0.28);
+                }
+              }
+              let ox = 200 + 0.35 * frameIdx;
+              let oy = 180 + 0.1 * frameIdx;
+              if (frameIdx >= 16) {
+                const tau = frameIdx - 16;
+                ox += 24 * (1 - Math.cos(0.32 * tau));
+                oy += 22 * Math.sin(0.35 * tau);
+              }
+              drawGaussianDot(ox, oy, 0.34);
+            };
+            let sawAutoPromo = 0;
+            let sawActiveTgts = 0;
+            for (let t = 0; t < 28; t++) {
+              fillGaussianSheet(t);
+              const ab = sheetBuf.buffer.slice(0);
+              const sAck = await probe.submitTestFrame({
+                type: 'video_rgba',
+                epoch: promoEpoch,
+                seq: t + 1,
+                width: 640,
+                height: 360,
+                buffer: ab,
+                dtSec: 1 / 30,
+                mediaTimeSec: t / 30,
+                tSrcUs: t * 33333,
+              }, [ab]);
+              if (!sAck || sAck.type !== 'frame_ack') throw new Error('Step 9f-hero frame failed t=' + t);
+              const hSnap = probe.getLastWave1();
+              if (hSnap?.metrology?.activeAutoHeroes >= 1 && hSnap?.metrology?.promotedCandidates >= 1) {
+                sawAutoPromo = Math.max(sawAutoPromo, hSnap.metrology.activeAutoHeroes);
+                sawActiveTgts = Math.max(sawActiveTgts, hSnap.activeTargets || 0);
+              }
+            }
+            if (sawAutoPromo < 1 || sawAutoPromo > 3 || sawActiveTgts < 1) {
+              throw new Error('Step 9f-hero failed to promote owned Auto-Hero in browser: ' + JSON.stringify({ sawAutoPromo, sawActiveTgts, last: probe.getLastWave1()?.metrology }));
+            }
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 0, showCovEllipses: false });
+            for (let t = 28; t < 30; t++) {
+              fillGaussianSheet(t);
+              const ab = sheetBuf.buffer.slice(0);
+              await probe.submitTestFrame({
+                type: 'video_rgba',
+                epoch: promoEpoch,
+                seq: t + 1,
+                width: 640,
+                height: 360,
+                buffer: ab,
+                dtSec: 1 / 30,
+                mediaTimeSec: t / 30,
+                tSrcUs: t * 33333,
+              }, [ab]);
+            }
+            const retSnap = probe.getLastWave1();
+            if (!retSnap || retSnap.metrology.activeAutoHeroes !== 0 || retSnap.metrology.promotedCandidates !== 0 || retSnap.activeTargets !== 0 || (retSnap.wave1.enabledBits & 1) !== 0) {
+              throw new Error('Step 9f-hero mode=0 failed to retire owned Auto-Hero: ' + JSON.stringify({ retMet: retSnap?.metrology, tgts: retSnap?.activeTargets, en: retSnap?.wave1?.enabledBits }));
+            }
+            return { matrixFrames: 32, quarterTurnCount, commitsAfter: retSnap.wave1.totalCommits, sawAutoPromo, retiredAutoHeroes: retSnap.metrology.activeAutoHeroes };
+          })()`
+        );
+
+        await new Promise((r) => setTimeout(r, 80));
+        const w1DeckCls = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (window.__e2eW1DeckClsPo) window.__e2eW1DeckClsPo.disconnect();
+            return window.__e2eW1DeckCls || 0;
+          })()`
+        );
+        if (w1DeckCls >= 0.000001) {
+          throw new Error(`Step 9b-9f: Expected 0.000000 CLS across Deck BOS/ROI/Failure/Metrology/Orientation flows, got ${w1DeckCls}`);
+        }
+        const totalW1Cls = w1ShowcaseCls + w1DeckCls;
+
+        console.log(
+          `  [PASS] Step 9 (Wave-1 BOS Plume, Native 1:1 ROI, Tripod Failure, 2x2 Cov/Decoy & 8x4 D4 Matrix): bos=${bosReadyState.diagBos}, stamps=${bosReadyState.diagStamps}, hud=${bosHudBytes}B, roiOffset="${roiOffsetState.roiTxt}", failure="${failureBannerState.diagBos}" (${failureBannerState.sev}), decoy="${decoyState.diagCov}", denseCov="${denseCovState.diagCov}", metOffCands=${starlingMetOffState.cand}, matrix=${orientMatrixReport.matrixFrames} (qturn=${orientMatrixReport.quarterTurnCount}), ownedAutoPromo=${orientMatrixReport.sawAutoPromo}->${orientMatrixReport.retiredAutoHeroes}, CLS=${totalW1Cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: w1TargetId }).catch(() => {});
       }
     }
 

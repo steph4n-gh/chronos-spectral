@@ -33,8 +33,10 @@ let resScale = 1;
 let wasmExports = null;
 let wasmMemory = null;
 
-// Pre-allocated permanent views into 320-page (20 MB, up from 288-page Wave-1 baseline) static Wasm linear memory
+// Pre-allocated permanent views into 448-page (28.00 MiB = 29,360,128 B) static Wasm linear memory
+const MAX_WASM_PAGES = 448;
 const ringSlotU8 = new Array(RING_LEN);
+const ringSlotByteOffsets = new Int32Array(RING_LEN).fill(-1);
 const ringSlotImgData = new Array(RING_LEN);
 const ecaOverlayBackingBuf = new Uint8ClampedArray(MAX_FRAME_BYTES);
 let ecaResView = null;
@@ -45,7 +47,7 @@ let telemView = null;
 let slotMetaView = null;
 const slotPipImgData = new Array(MAX_TARGETS).fill(null);
 
-// CHRONOS-1000 Zero-ML Continuum & Micro-Swarm C-ABI Constants (parameterized grid)
+// Swarm & Wave-1 ABI Constants
 const MAX_MICRO = 1536;
 const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
 const MAX_RIGID_BODIES = 32;
@@ -56,17 +58,99 @@ const FIELD_CELLS = FIELD_GRID_W * FIELD_GRID_H; // 880
 const FIELD_STRIDE = 6; // [u_px_s, v_px_s, vorticity_s1, divergence_s1, ftle_s1, valid_weight]
 const SWARM_TELEM_LEN = 64;
 
+const RING_META_STRIDE = 24;
+const ROW_LUMA_H = 360;
+const WAVE1_TELEM_LEN = 192;
+const HERO_CAND_LEN = 4 + 16 * 8;
+const BOS_W = 128;
+const BOS_H = 64;
+const BOS_N = BOS_W * BOS_H; // 8192
+const BOS_TELEM_LEN = 32;
+const BOS_REASON_NAMES = [
+  'ANCHOR_SUP',
+  'EXT_PAN_CUT',
+  'INT_SHIFT',
+  'PHOTOM_MSE',
+  'DISCONT',
+  'NO_GAUGE',
+  'NONCONV',
+  'LOW_TEX',
+];
+const BOS_STATE_LABELS = ['OFF', 'WARM', 'READY', 'DISTURBED'];
+const GAP_FLAG_NAMES = ['SEQ_GAP', 'NONINC_PTS', 'EXCESS_DT', 'SEEK_RESTART', 'GEOM_CHANGE', 'SCENE_CUT', 'WRAP'];
+
 let microTracksView = null;
 let continuumFieldView = null;
 let rigidBodiesView = null;
 let modalFieldView = null;
 let swarmTelemView = null;
 
-let userSwarmMode = 0; // Persistent user selection (default Off per Astra-1 gate: 0=off, 1=auto, 2=forced)
+// Wave-1 core ABI views
+let ringMetaView = null;
+let ringMetaF32View = null;
+let rowLumaView = null;
+let wave1TelemView = null;
+let wave1TelemF32View = null;
+
+// Wave-1 metrology & BOS optional ABI views (populated when merged exports exist)
+let microCovView = null;
+let microResidualView = null;
+let microLoomView = null;
+let microQualityView = null;
+let heroCandidatesView = null;
+let heroCandidatesF32View = null;
+let bosTelemView = null;
+let bosTelemF32View = null;
+let bosPlanesView = null;
+let bosValidView = null;
+let bosRgbaView = null;
+
+let wave1CoreAbiValid = false;
+let wave1MetrologyAbiValid = false;
+let wave1BosAbiValid = false;
+
+let nativeRoiEnabled = false;
+let roiOffsetNormX = 0.5;
+let roiOffsetNormY = 0.5;
+let roiUseExplicitPx = false;
+let roiExplicitX0 = 0;
+let roiExplicitY0 = 0;
+let roiOrientation = 0;
+let roiScanDir = 0xffffffff;
+let workerExpectedEngineFrame = 0;
+const rgbaStageScratch = new Uint8Array(640 * 360 * 4);
+let lastIngestGeom = {
+  srcW: 320,
+  srcH: 180,
+  cropX0: 0,
+  cropY0: 0,
+  cropW: 320,
+  cropH: 180,
+  orientation: 0,
+  scanDir: 0xffffffff,
+  engineW: 320,
+  engineH: 180,
+  dstX: 0,
+  dstY: 0,
+  dstW: 320,
+  dstH: 180,
+  native1to1: 0,
+  fallbackScale: false,
+};
+let microMetrologyMode = 0;
+let showCovEllipses = false;
+let bosReqMode = 0;
+let bosOverlayKind = 0; // 0=|eps|, 1=phi, 2=curl
+let bosGaugeRoi = [0, 0, 0, 0];
+let workerLocalEpoch = 1;
+let workerLocalSeq = 0;
+let workerSimTimeSec = 0.0;
+
+let userSwarmMode = 0; // Persistent user selection: 0=off, 1=auto, 2=forced
 let swarmMode = 0; // Active mode applied to Wasm (includes dense scenario/sample overrides)
 let denseSwarmOverrideActive = false;
 let chronos1000AbiValid = false;
-let fieldOverlayMode = 0; // 0=off (tracks+hulls only), 1=velocity, 2=vorticity, 3=ftle, 4=modal_phase
+let fieldOverlayMode = 0; // 0=off, 1=velocity, 2=vorticity, 3=ftle, 4=modal, 5=bos_|eps|, 6=bos_phi, 7=bos_curl
 let inspectedMicroTid = 0;
 let lastInspectStatus = 'idle';
 let lastInspectReqSeq = 0;
@@ -91,6 +175,132 @@ let lastDtSecUsed = 1.0 / 30.0;
 let ingestElapsedMs = 0.0;
 let latestCausalTimeMs = 0.0;
 let latestCausalPtsMs = -1.0;
+
+function clearWave1Views() {
+  wave1CoreAbiValid = false;
+  wave1MetrologyAbiValid = false;
+  wave1BosAbiValid = false;
+  ringMetaView = null;
+  ringMetaF32View = null;
+  rowLumaView = null;
+  wave1TelemView = null;
+  wave1TelemF32View = null;
+  microCovView = null;
+  microResidualView = null;
+  microLoomView = null;
+  microQualityView = null;
+  heroCandidatesView = null;
+  heroCandidatesF32View = null;
+  bosTelemView = null;
+  bosTelemF32View = null;
+  bosPlanesView = null;
+  bosValidView = null;
+  bosRgbaView = null;
+}
+
+function validatePtrSpan(bufLen, ptr, byteLen) {
+  return Number.isInteger(ptr) && ptr > 0 && ptr + byteLen <= bufLen;
+}
+
+function refreshWave1Views() {
+  clearWave1Views();
+  if (!wasmMemory || !wasmExports) return false;
+  const buf = wasmMemory.buffer;
+  const bufLen = buf.byteLength;
+
+  if (
+    typeof wasmExports.chronos_set_ingest_meta === 'function' &&
+    typeof wasmExports.chronos_get_ring_meta_ptr === 'function' &&
+    typeof wasmExports.chronos_get_row_luma_ptr === 'function' &&
+    typeof wasmExports.chronos_get_wave1_telemetry_ptr === 'function'
+  ) {
+    const rmPtr = wasmExports.chronos_get_ring_meta_ptr();
+    const rlPtr = wasmExports.chronos_get_row_luma_ptr();
+    const w1Ptr = wasmExports.chronos_get_wave1_telemetry_ptr();
+    if (
+      (rmPtr & 3) === 0 && validatePtrSpan(bufLen, rmPtr, RING_LEN * RING_META_STRIDE * 4) &&
+      (rlPtr & 3) === 0 && validatePtrSpan(bufLen, rlPtr, RING_LEN * ROW_LUMA_H * 4) &&
+      (w1Ptr & 3) === 0 && validatePtrSpan(bufLen, w1Ptr, WAVE1_TELEM_LEN * 4)
+    ) {
+      ringMetaView = new Uint32Array(buf, rmPtr, RING_LEN * RING_META_STRIDE);
+      ringMetaF32View = new Float32Array(buf, rmPtr, RING_LEN * RING_META_STRIDE);
+      rowLumaView = new Float32Array(buf, rlPtr, RING_LEN * ROW_LUMA_H);
+      wave1TelemView = new Uint32Array(buf, w1Ptr, WAVE1_TELEM_LEN);
+      wave1TelemF32View = new Float32Array(buf, w1Ptr, WAVE1_TELEM_LEN);
+      wave1CoreAbiValid = true;
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_micro_metrology_mode === 'function' &&
+    typeof wasmExports.chronos_get_micro_cov_ptr === 'function' &&
+    typeof wasmExports.chronos_get_micro_residual_ptr === 'function' &&
+    typeof wasmExports.chronos_get_micro_loom_ptr === 'function' &&
+    typeof wasmExports.chronos_get_micro_quality_ptr === 'function' &&
+    typeof wasmExports.chronos_get_hero_candidates_ptr === 'function'
+  ) {
+    const covP = wasmExports.chronos_get_micro_cov_ptr();
+    const resP = wasmExports.chronos_get_micro_residual_ptr();
+    const loomP = wasmExports.chronos_get_micro_loom_ptr();
+    const qualP = wasmExports.chronos_get_micro_quality_ptr();
+    const candP = wasmExports.chronos_get_hero_candidates_ptr();
+    if (
+      (covP & 3) === 0 && validatePtrSpan(bufLen, covP, 3 * MAX_MICRO * 4) &&
+      (resP & 3) === 0 && validatePtrSpan(bufLen, resP, 3 * MAX_MICRO * 4) &&
+      (loomP & 3) === 0 && validatePtrSpan(bufLen, loomP, MAX_MICRO * 4) &&
+      (qualP & 3) === 0 && validatePtrSpan(bufLen, qualP, MAX_MICRO * 4) &&
+      (candP & 3) === 0 && validatePtrSpan(bufLen, candP, HERO_CAND_LEN * 4)
+    ) {
+      microCovView = new Float32Array(buf, covP, 3 * MAX_MICRO);
+      microResidualView = new Float32Array(buf, resP, 3 * MAX_MICRO);
+      microLoomView = new Float32Array(buf, loomP, MAX_MICRO);
+      microQualityView = new Uint32Array(buf, qualP, MAX_MICRO);
+      heroCandidatesView = new Uint32Array(buf, candP, HERO_CAND_LEN);
+      heroCandidatesF32View = new Float32Array(buf, candP, HERO_CAND_LEN);
+      wave1MetrologyAbiValid = true;
+      wasmExports.chronos_set_micro_metrology_mode(microMetrologyMode);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_bos_mode === 'function' &&
+    typeof wasmExports.chronos_get_bos_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_bos_planes_ptr === 'function' &&
+    typeof wasmExports.chronos_get_bos_valid_ptr === 'function' &&
+    typeof wasmExports.chronos_get_bos_rgba_ptr === 'function'
+  ) {
+    const btP = wasmExports.chronos_get_bos_telemetry_ptr();
+    const bpP = wasmExports.chronos_get_bos_planes_ptr();
+    const bvP = wasmExports.chronos_get_bos_valid_ptr();
+    const brP = wasmExports.chronos_get_bos_rgba_ptr();
+    if (
+      (btP & 3) === 0 && validatePtrSpan(bufLen, btP, BOS_TELEM_LEN * 4) &&
+      (bpP & 3) === 0 && validatePtrSpan(bufLen, bpP, 6 * BOS_N * 4) &&
+      validatePtrSpan(bufLen, bvP, BOS_N) &&
+      validatePtrSpan(bufLen, brP, BOS_N * 4)
+    ) {
+      bosTelemView = new Uint32Array(buf, btP, BOS_TELEM_LEN);
+      bosTelemF32View = new Float32Array(buf, btP, BOS_TELEM_LEN);
+      bosPlanesView = new Float32Array(buf, bpP, 6 * BOS_N);
+      bosValidView = new Uint8Array(buf, bvP, BOS_N);
+      bosRgbaView = new Uint8ClampedArray(buf, brP, BOS_N * 4);
+      wave1BosAbiValid = true;
+      wasmExports.chronos_set_bos_mode(bosReqMode);
+      if (typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
+        wasmExports.chronos_set_bos_overlay_kind(bosOverlayKind);
+      }
+      if (typeof wasmExports.chronos_set_bos_gauge_roi === 'function') {
+        wasmExports.chronos_set_bos_gauge_roi(
+          bosGaugeRoi[0],
+          bosGaugeRoi[1],
+          bosGaugeRoi[2],
+          bosGaugeRoi[3]
+        );
+      }
+    }
+  }
+  return wave1CoreAbiValid;
+}
 
 function hasChronos1000Exports() {
   return Boolean(
@@ -174,7 +384,8 @@ function isChronos1000Scenario(sc) {
 
 // Pre-allocated ring-aligned snapshot buffers so t-effK HUD renders stay locked to dispSlot
 const swarmRingValid = new Uint8Array(RING_LEN);
-const ringIngestFrameId = new Int32Array(RING_LEN).fill(-1);
+const ringIngestFrameId = new Uint32Array(RING_LEN);
+const ringIngestFrameValid = new Uint8Array(RING_LEN);
 const ringIngestTimeMs = new Float64Array(RING_LEN).fill(-1.0);
 const ringIngestPtsMs = new Float64Array(RING_LEN).fill(-1.0);
 const swarmRingMicro = Array.from({ length: RING_LEN }, () => new Float32Array(MAX_MICRO * MICRO_STRIDE));
@@ -182,6 +393,17 @@ const swarmRingField = Array.from({ length: RING_LEN }, () => new Float32Array(F
 const swarmRingBodies = Array.from({ length: RING_LEN }, () => new Float32Array(MAX_RIGID_BODIES * BODY_STRIDE));
 const swarmRingModal = Array.from({ length: RING_LEN }, () => new Float32Array(FIELD_CELLS));
 const swarmRingTelem = Array.from({ length: RING_LEN }, () => new Float32Array(SWARM_TELEM_LEN));
+
+// Wave-1 worker-resident delayed rings (zero 640x360 Wasm overlay allocations)
+const covRingBuf = Array.from({ length: RING_LEN }, () => new Float32Array(MAX_MICRO * 3));
+const qualRingBuf = Array.from({ length: RING_LEN }, () => new Uint32Array(MAX_MICRO));
+const covRingValid = new Uint8Array(RING_LEN);
+const bosRingRgba = Array.from({ length: RING_LEN }, () => new Uint8ClampedArray(BOS_N * 4));
+const bosRingTelem = Array.from({ length: RING_LEN }, () => new Float64Array(20));
+const bosRingValid = new Uint8Array(RING_LEN);
+let bosOverlayCanvas = null;
+let bosOverlayCtx = null;
+let bosOverlayImgData = null;
 
 // OffscreenCanvases & 2D contexts (pre-allocated once at boot)
 let hudCanvas = null;
@@ -198,6 +420,15 @@ let physicsPhaseCanvas = null;
 let physicsPhaseCtx = null;
 const slotPipCanvases = new Array(MAX_TARGETS).fill(null);
 const slotPipCtxs = new Array(MAX_TARGETS).fill(null);
+let inWorkerRafTick = false;
+let hudPresentRafId = 0;
+let hudPresentWatchdogId = 0;
+let hudSettleTimerId = 0;
+let pendingHudPresentDirty = false;
+let pendingHudPresentSlot = -1;
+let lastCommittedHudSlot = -1;
+let pendingHudSlotFast = true;
+let pendingHudFullHist = false;
 
 // Pre-allocated Per-Slot Sticky Hold-on-Loss & EMA-Smoothed Roster State (zero runtime GC)
 const SLOT_HOLD_FRAMES = 48; // ~1.5s graceful hold when a target exits or briefly drops
@@ -275,7 +506,8 @@ let totalStrikeEvents = 0;
 
 // Pre-allocated Mode C Localized Impact Shockwave Pool (synchronized to t - K presentation)
 const SHOCK_POOL = 24;
-const shockTriggerFrame = new Int32Array(SHOCK_POOL).fill(-1);
+const shockTriggerFrame = new Uint32Array(SHOCK_POOL);
+const shockTriggerArmed = new Uint8Array(SHOCK_POOL);
 const shockX = new Float32Array(SHOCK_POOL);
 const shockY = new Float32Array(SHOCK_POOL);
 const shockZone = new Uint8Array(SHOCK_POOL);
@@ -296,7 +528,8 @@ const slotLastStrikeX = new Float32Array(MAX_TARGETS);
 const slotLastStrikeY = new Float32Array(MAX_TARGETS);
 const prevRectHeading = new Float32Array(MAX_TARGETS);
 const prevRectTid = new Int32Array(MAX_TARGETS);
-const prevRectFrame = new Int32Array(MAX_TARGETS).fill(-1);
+const prevRectFrame = new Uint32Array(MAX_TARGETS);
+const prevRectValid = new Uint8Array(MAX_TARGETS);
 const slotRectAngVel = new Float32Array(MAX_TARGETS);
 
 // Pre-allocated Mode A Frozen Parabolic Apex Reticle & Live Accuracy Score Buffers
@@ -366,7 +599,7 @@ const TRAIL_LEN = 44;
 const trailOwnerTid = new Int32Array(TRAIL_SLOTS).fill(-1);
 const trailHead = new Uint8Array(TRAIL_SLOTS);
 const trailCount = new Uint8Array(TRAIL_SLOTS);
-const trailLastFrame = new Int32Array(TRAIL_SLOTS).fill(-1);
+const trailLastFrame = new Uint32Array(TRAIL_SLOTS);
 const trailX = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
 const trailY = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
 
@@ -1592,8 +1825,12 @@ const TARGET_COLORS = [
 const ZONE_COLORS = ['#00f0ff', '#ffb703', '#38f27a', '#ff4d6d'];
 
 function clearVisualQueues() {
+  cancelPendingHudRender();
   swarmRingValid.fill(0);
-  ringIngestFrameId.fill(-1);
+  covRingValid.fill(0);
+  bosRingValid.fill(0);
+  ringIngestFrameId.fill(0);
+  ringIngestFrameValid.fill(0);
   ringIngestTimeMs.fill(-1.0);
   ringIngestPtsMs.fill(-1.0);
   clearActiveInspectionSelection();
@@ -1602,7 +1839,8 @@ function clearVisualQueues() {
   ingestElapsedMs = 0.0;
   latestCausalTimeMs = 0.0;
   latestCausalPtsMs = -1.0;
-  shockTriggerFrame.fill(-1);
+  shockTriggerFrame.fill(0);
+  shockTriggerArmed.fill(0);
   shockAge.fill(-1);
   shockInDeg.fill(0.0);
   shockDeflectDeg.fill(0.0);
@@ -1618,7 +1856,8 @@ function clearVisualQueues() {
   slotLastStrikeY.fill(0.0);
   prevRectHeading.fill(0.0);
   prevRectTid.fill(0);
-  prevRectFrame.fill(-1);
+  prevRectFrame.fill(0);
+  prevRectValid.fill(0);
   slotRectAngVel.fill(0.0);
   padFlashAlpha.fill(0.0);
   apexLockTid.fill(0);
@@ -1638,7 +1877,7 @@ function clearVisualQueues() {
   trailOwnerTid.fill(-1);
   trailHead.fill(0);
   trailCount.fill(0);
-  trailLastFrame.fill(-1);
+  trailLastFrame.fill(0);
   slotHoldLeft.fill(0);
   slotHoldTid.fill(0);
   slotIdleDrawn.fill(0);
@@ -1931,6 +2170,7 @@ function renderPersistenceTimeline(force = false) {
 }
 
 function resetTestbenchState() {
+  workerExpectedEngineFrame = 0;
   const s = resScale;
   if (isChronos1000Scenario(benchScenario)) {
     resetChronos1000Scenario();
@@ -3591,8 +3831,9 @@ function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
 
   const dispSwarmActive = Boolean(dispSwarm && dispSwarm[1] > 0.5);
   const maskVal = intOrNull(dispSwarm[16], 0, 31) ?? 0;
+  const eulerianFieldMode = fieldOverlayMode >= 1 && fieldOverlayMode <= 4;
   let fieldNormMax = 1.0;
-  if (fieldOverlayMode > 0 && dispField) {
+  if (eulerianFieldMode && dispField) {
     fieldNormMax = packFieldOverlayTexture(dispField, dispModal, maskVal, dispSwarmActive);
   }
 
@@ -3602,7 +3843,7 @@ function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
     gl.clearColor(0.0, 0.0, 0.0, 0.0);
     gl.clear(gl.COLOR_BUFFER_BIT);
 
-    if (fieldOverlayMode > 0 && dispField) {
+    if (eulerianFieldMode && dispField) {
       gl.useProgram(fieldGlQuadProg);
       gl.bindVertexArray(fieldGlQuadVao);
       gl.activeTexture(gl.TEXTURE0);
@@ -3742,7 +3983,7 @@ function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
   }
 
   // Non-color Field Overlay legend caption (top-left clear of header strip)
-  if (fieldOverlayMode > 0) {
+  if (eulerianFieldMode) {
     let cap = '';
     if (fieldOverlayMode === 1) cap = `FIELD: VELOCITY |v| (0..${fieldNormMax.toFixed(0)} px/s)`;
     else if (fieldOverlayMode === 2) cap = `FIELD: VORTICITY CURL v (±${fieldNormMax.toFixed(2)} s⁻¹)`;
@@ -3765,24 +4006,147 @@ function renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy) {
   lastFieldRenderMs = performance.now() - t0;
 }
 
+function renderWave1Overlays(W, H, dispSlot, effK, sx, sy) {
+  const isBosMode = fieldOverlayMode >= 5 && fieldOverlayMode <= 7;
+  if (isBosMode && bosOverlayCtx && bosOverlayImgData) {
+    let dispBosRgba = null;
+    let dispBosState = 0;
+    let dispBosReason = 0;
+    let dispBosRelRes = 0.0;
+    let dispBosIters = 0;
+    let dispBosValidDisp = 0;
+    if (dispSlot >= 0 && dispSlot < RING_LEN && bosRingValid[dispSlot] === 1) {
+      dispBosRgba = bosRingRgba[dispSlot];
+      const bt = bosRingTelem[dispSlot];
+      dispBosState = bt[2] | 0;
+      dispBosReason = bt[3] | 0;
+      dispBosValidDisp = bt[4] | 0;
+      dispBosIters = bt[8] | 0;
+      dispBosRelRes = bt[12];
+    } else if (effK === 0 && wave1BosAbiValid && bosRgbaView && bosTelemView) {
+      dispBosRgba = bosRgbaView;
+      dispBosState = bosTelemView[2] | 0;
+      dispBosReason = bosTelemView[3] | 0;
+      dispBosValidDisp = bosTelemView[4] | 0;
+      dispBosIters = bosTelemView[8] | 0;
+      dispBosRelRes = bosTelemF32View[16];
+    }
+
+    if (dispBosRgba && dispBosState >= 2) {
+      bosOverlayImgData.data.set(dispBosRgba);
+      bosOverlayCtx.putImageData(bosOverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = fieldOverlayMode !== 7;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(bosOverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    }
+
+    let bosCap =
+      fieldOverlayMode === 5
+        ? 'BOS REFRACTION |eps| (128x64)'
+        : fieldOverlayMode === 6
+        ? 'BOS NEUMANN POTENTIAL Phi (128x64)'
+        : 'BOS CURL CHECK (dv/dx - du/dy)';
+    const stLabel = BOS_STATE_LABELS[Math.max(0, Math.min(3, dispBosState))] || 'OFF';
+    bosCap += ` · ${stLabel}`;
+    if (dispBosState === 2) {
+      bosCap += ` · ${dispBosValidDisp}/${BOS_N} · PCG ${dispBosIters} (${Number.isFinite(dispBosRelRes) ? dispBosRelRes.toExponential(1) : '--'})`;
+    } else if (dispBosState === 3 && dispBosReason !== 0) {
+      const reasons = [];
+      for (let b = 0; b < BOS_REASON_NAMES.length; b++) {
+        if (dispBosReason & (1 << b)) reasons.push(BOS_REASON_NAMES[b]);
+      }
+      bosCap += ` [${reasons.slice(0, 2).join('+')}]`;
+    }
+    hudCtx.save();
+    hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+    const cw = hudCtx.measureText(bosCap).width + 12;
+    hudCtx.fillStyle = dispBosState === 3 ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)';
+    hudCtx.fillRect(10, 44, cw, 17);
+    hudCtx.strokeStyle = dispBosState === 3 ? '#ff4d6d' : 'rgba(56, 242, 122, 0.55)';
+    hudCtx.lineWidth = 1;
+    hudCtx.strokeRect(10, 44, cw, 17);
+    hudCtx.fillStyle = dispBosState === 3 ? '#fecdd3' : '#a7f3d0';
+    hudCtx.fillText(bosCap, 16, 56);
+    hudCtx.restore();
+  }
+
+  if (showCovEllipses) {
+    let dispMicro = null;
+    let dispCov = null;
+    let dispQual = null;
+    if (dispSlot >= 0 && dispSlot < RING_LEN && swarmRingValid[dispSlot] === 1 && covRingValid[dispSlot] === 1) {
+      dispMicro = swarmRingMicro[dispSlot];
+      dispCov = covRingBuf[dispSlot];
+      dispQual = qualRingBuf[dispSlot];
+    } else if (effK === 0 && wave1MetrologyAbiValid && microTracksView && microCovView && microQualityView) {
+      dispMicro = microTracksView;
+      dispCov = microCovView;
+      dispQual = microQualityView;
+    }
+
+    if (dispMicro && dispCov && dispQual) {
+      hudCtx.save();
+      const k95 = 2.447747; // sqrt(chi^2_2(0.95) = 5.99146)
+      for (let i = 0; i < MAX_MICRO; i++) {
+        const qual = dispQual[i];
+        if ((qual & (1 << 3)) === 0) continue; // cov_usable bit 3
+        const mb = i * MICRO_STRIDE;
+        const st = intOrNull(dispMicro[mb + 5], 1, 2);
+        if (st === null) continue;
+        const px = dispMicro[mb + 1];
+        const py = dispMicro[mb + 2];
+        const cxx = dispCov[i];
+        const cxy = dispCov[MAX_MICRO + i];
+        const cyy = dispCov[2 * MAX_MICRO + i];
+        if (
+          !Number.isFinite(px) ||
+          !Number.isFinite(py) ||
+          !Number.isFinite(cxx) ||
+          !Number.isFinite(cxy) ||
+          !Number.isFinite(cyy)
+        ) {
+          continue;
+        }
+        const tr = cxx + cyy;
+        const diff = cxx - cyy;
+        const disc = Math.hypot(diff, 2.0 * cxy);
+        const l1 = Math.max(1e-4, 0.5 * (tr + disc));
+        const l2 = Math.max(1e-4, 0.5 * (tr - disc));
+        const ang = 0.5 * Math.atan2(2.0 * cxy, diff);
+        const rx = Math.min(36.0 * sx, Math.max(1.5, Math.sqrt(l1) * k95 * sx));
+        const ry = Math.min(36.0 * sy, Math.max(1.5, Math.sqrt(l2) * k95 * sy));
+        const isHeroCand = (qual & ((1 << 18) | (1 << 19))) !== 0;
+        hudCtx.strokeStyle = isHeroCand ? 'rgba(251, 191, 36, 0.92)' : 'rgba(56, 189, 248, 0.65)';
+        hudCtx.lineWidth = isHeroCand ? 1.5 : 0.9;
+        hudCtx.beginPath();
+        hudCtx.ellipse(px * sx, py * sy, rx, ry, ang, 0, Math.PI * 2);
+        hudCtx.stroke();
+      }
+      hudCtx.restore();
+    }
+  }
+}
+
 function renderMainHud(dispSlot) {
   if (!hudCtx) return;
   const W = hudCanvas.width;   // 960
   const H = hudCanvas.height;  // 540
   const sx = W / frameW;       // 3.0 in SD, 1.5 in HD
   const sy = H / frameH;       // 3.0 in SD, 1.5 in HD
-  const fIdx = Math.round(telemView[0]);
+  const fIdx = currentCausalEngineFrameU32();
   const effK = Math.round(telemView[1]);
-  const dispFrame = fIdx - effK;
+  const dispFrame = (fIdx - effK) >>> 0;
   const metricOn = isMetricCalibrated();
   const spdUnit = metricOn ? 'm/s' : 'px/s';
 
   // Activate any Mode C localized shockwaves whose scheduled presentation frame has arrived at t - K
   for (let q = 0; q < SHOCK_POOL; q++) {
-    if (shockTriggerFrame[q] >= 0 && fIdx >= shockTriggerFrame[q]) {
+    if (shockTriggerArmed[q] === 1 && ((fIdx - shockTriggerFrame[q]) >>> 0) < 0x80000000) {
       shockAge[q] = 0;
       padFlashAlpha[shockZone[q] & 3] = 1.0;
-      shockTriggerFrame[q] = -1;
+      shockTriggerArmed[q] = 0;
     }
   }
 
@@ -3833,8 +4197,9 @@ function renderMainHud(dispSlot) {
     }
   }
 
-  // 3a. CHRONOS-1000 Continuum Heatmap, 1,000+ Micro-Tracks & Rigid-Motion Hulls
+  // 3a. Continuum Heatmap, 1,000+ Micro-Tracks, Rigid-Motion Hulls, BOS & 2x2 Covariance Overlays
   renderChronos1000FieldLayer(W, H, dispSlot, effK, sx, sy);
+  renderWave1Overlays(W, H, dispSlot, effK, sx, sy);
 
   // 3b. Metric Ruler or 4-Point Perspective Homography Floor Grid Overlay
   renderCalibrationOverlay(W, H);
@@ -4042,7 +4407,7 @@ function renderMainHud(dispSlot) {
   if (Math.round(telemView[TELEM_GLOBAL + 9]) === 2) {
     trailOwnerTid.fill(-1);
     trailCount.fill(0);
-    trailLastFrame.fill(-1);
+    trailLastFrame.fill(0);
   }
 
   updateFrozenApexLocks(uDisp);
@@ -4101,7 +4466,7 @@ function renderMainHud(dispSlot) {
       if (
         trailOwnerTid[ts] !== tid ||
         trailCount[ts] === 0 ||
-        Math.abs(dispFrame - trailLastFrame[ts]) > 14
+        ((dispFrame - trailLastFrame[ts]) >>> 0) > 14
       ) {
         trailOwnerTid[ts] = tid;
         trailHead[ts] = 1;
@@ -5168,8 +5533,10 @@ function renderSpectralAndRingScope() {
   spectralCtx.fillStyle = '#9db4d4';
   spectralCtx.fillText(`NON-CAUSAL TIMELINE: PAST [t−11] → VIEW [t−${effK}] → FUTURE [t NOW]`, 10, midH + 12);
 
-  const fIdx = Math.round(telemView[0]);
-  const slotOldest = (fIdx + 1) % RING_LEN;
+  const fIdx = currentCausalEngineFrameU32();
+  const slotOldest = wave1CoreAbiValid && wave1TelemView && (wave1TelemView[2] >>> 0) < RING_LEN
+    ? ((wave1TelemView[2] >>> 0) + 1) % RING_LEN
+    : (fIdx + 1) % RING_LEN;
   const cellW = (W - 20) / RING_LEN;
   const cellH = H - ringTop - 8;
   const pIdx = Math.round(telemView[8]);
@@ -5705,40 +6072,358 @@ function computeMedianTickMs(count) {
   return (count & 1) ? wasmTimeSortBuf[mid] : 0.5 * (wasmTimeSortBuf[mid - 1] + wasmTimeSortBuf[mid]);
 }
 
-function drawCroppedLetterboxedFrame(bmp) {
-  const bw = Math.max(1, bmp.width || frameW);
-  const bh = Math.max(1, bmp.height || frameH);
-  const cx = Math.max(0.0, Math.min(0.98, cropNorm[0]));
-  const cy = Math.max(0.0, Math.min(0.98, cropNorm[1]));
-  const cw = Math.max(0.02, Math.min(1.0 - cx, cropNorm[2]));
-  const ch = Math.max(0.02, Math.min(1.0 - cy, cropNorm[3]));
-  const sx = Math.max(0, Math.min(bw - 1, Math.round(cx * bw)));
-  const sy = Math.max(0, Math.min(bh - 1, Math.round(cy * bh)));
-  const sw = Math.max(1, Math.min(bw - sx, Math.round(cw * bw)));
-  const sh = Math.max(1, Math.min(bh - sy, Math.round(ch * bh)));
+function orientedExtent(cw, ch, orientation) {
+  return (orientation & 1) === 0 ? [cw, ch] : [ch, cw];
+}
 
-  const srcAspect = sw / sh;
-  const dstAspect = frameW / frameH;
-  const fullFrame = sx === 0 && sy === 0 && sw === bw && sh === bh;
-  if (fullFrame && Math.abs(srcAspect - dstAspect) / dstAspect <= 0.02) {
-    simCtx.drawImage(bmp, 0, 0, frameW, frameH);
-    return;
+function applyOrientationTransform(ctx, cw, ch, orientation, dx, dy, dw, dh) {
+  const [ow, oh] = orientedExtent(cw, ch, orientation);
+  const sx = dw / Math.max(1, ow);
+  const sy = dh / Math.max(1, oh);
+  const o = orientation & 7;
+  let m11 = 1, m12 = 0, m21 = 0, m22 = 1, ox = 0, oy = 0;
+  switch (o) {
+    case 0: m11 = 1;  m12 = 0;  m21 = 0;  m22 = 1;  ox = 0;  oy = 0;  break;
+    case 1: m11 = 0;  m12 = 1;  m21 = -1; m22 = 0;  ox = ch; oy = 0;  break;
+    case 2: m11 = -1; m12 = 0;  m21 = 0;  m22 = -1; ox = cw; oy = ch; break;
+    case 3: m11 = 0;  m12 = -1; m21 = 1;  m22 = 0;  ox = 0;  oy = cw; break;
+    case 4: m11 = -1; m12 = 0;  m21 = 0;  m22 = 1;  ox = cw; oy = 0;  break;
+    case 5: m11 = 0;  m12 = 1;  m21 = 1;  m22 = 0;  ox = 0;  oy = 0;  break;
+    case 6: m11 = 1;  m12 = 0;  m21 = 0;  m22 = -1; ox = 0;  oy = ch; break;
+    case 7: m11 = 0;  m12 = -1; m21 = -1; m22 = 0;  ox = ch; oy = cw; break;
+  }
+  ctx.setTransform(m11 * sx, m12 * sy, m21 * sx, m22 * sy, dx + ox * sx, dy + oy * sy);
+}
+
+function unrotateBoxFromOriented(dispW, dispH, dispX0, dispY0, dispCw, dispCh, orientation) {
+  const o = orientation & 7;
+  const [rawSrcW, rawSrcH] = orientedExtent(dispW, dispH, o);
+  const [rawCw, rawCh] = orientedExtent(dispCw, dispCh, o);
+  const xFlip = (o & 4) !== 0;
+  const rotK = o & 3;
+  const rxMin = xFlip ? (dispW - dispX0 - dispCw) : dispX0;
+  const ryMin = dispY0;
+  let rawX0 = 0;
+  let rawY0 = 0;
+  if (rotK === 0) {
+    rawX0 = rxMin;
+    rawY0 = ryMin;
+  } else if (rotK === 1) {
+    rawX0 = ryMin;
+    rawY0 = rawSrcH - rxMin - dispCw;
+  } else if (rotK === 2) {
+    rawX0 = rawSrcW - rxMin - dispCw;
+    rawY0 = rawSrcH - ryMin - dispCh;
+  } else {
+    rawX0 = rawSrcW - ryMin - dispCh;
+    rawY0 = rxMin;
+  }
+  return {
+    srcW: rawSrcW,
+    srcH: rawSrcH,
+    cropX0: Math.max(0, Math.min(rawSrcW - rawCw, rawX0)),
+    cropY0: Math.max(0, Math.min(rawSrcH - rawCh, rawY0)),
+    cropW: rawCw,
+    cropH: rawCh,
+  };
+}
+
+function resolveIngestGeomSpec(bw, bh, infoGeom = null) {
+  const g = infoGeom || {};
+  const orientation =
+    typeof g.orientation === 'number' && Number.isInteger(g.orientation) && g.orientation >= 0 && g.orientation <= 7
+      ? g.orientation
+      : (roiOrientation & 7);
+  const scanDir =
+    typeof g.scanDir === 'number' && Number.isInteger(g.scanDir) && (g.scanDir === 0xffffffff || (g.scanDir >= 0 && g.scanDir <= 3))
+      ? (g.scanDir >>> 0)
+      : (roiScanDir >>> 0);
+  const alreadyOriented = Boolean(g.alreadyOriented);
+  const drawOrient = alreadyOriented ? 0 : orientation;
+  const reportedOrient = orientation;
+  const preScaled = Boolean(g.preScaled);
+
+  const vr = g.visibleRect && typeof g.visibleRect === 'object' ? g.visibleRect : null;
+  const visX0 = vr ? Math.max(0, Math.min(bw - 1, Math.trunc(vr.x || 0))) : 0;
+  const visY0 = vr ? Math.max(0, Math.min(bh - 1, Math.trunc(vr.y || 0))) : 0;
+  const visW = vr ? Math.max(1, Math.min(bw - visX0, Math.trunc(vr.width || (bw - visX0)))) : bw;
+  const visH = vr ? Math.max(1, Math.min(bh - visY0, Math.trunc(vr.height || (bh - visY0)))) : bh;
+
+  const [reqDrawCw, reqDrawCh] = alreadyOriented ? [frameW, frameH] : orientedExtent(frameW, frameH, reportedOrient);
+  const cropFitsReq =
+    (typeof g.cropW !== 'number' || g.cropW === reqDrawCw) &&
+    (typeof g.cropH !== 'number' || g.cropH === reqDrawCh);
+
+  if (nativeRoiEnabled && !preScaled && cropFitsReq && visW >= reqDrawCw && visH >= reqDrawCh) {
+    const maxX0 = visW - reqDrawCw;
+    const maxY0 = visH - reqDrawCh;
+    const hasExplicitCrop =
+      typeof g.cropX0 === 'number' && Number.isInteger(g.cropX0) &&
+      typeof g.cropY0 === 'number' && Number.isInteger(g.cropY0) &&
+      (typeof g.cropW !== 'number' || g.cropW === reqDrawCw) &&
+      (typeof g.cropH !== 'number' || g.cropH === reqDrawCh);
+    const relX0 = hasExplicitCrop
+      ? Math.max(0, Math.min(maxX0, g.cropX0))
+      : roiUseExplicitPx
+      ? Math.max(0, Math.min(maxX0, Math.round(roiExplicitX0)))
+      : Math.max(0, Math.min(maxX0, Math.round(Math.max(0.0, Math.min(1.0, roiOffsetNormX)) * maxX0)));
+    const relY0 = hasExplicitCrop
+      ? Math.max(0, Math.min(maxY0, g.cropY0))
+      : roiUseExplicitPx
+      ? Math.max(0, Math.min(maxY0, Math.round(roiExplicitY0)))
+      : Math.max(0, Math.min(maxY0, Math.round(Math.max(0.0, Math.min(1.0, roiOffsetNormY)) * maxY0)));
+    const metaBox = alreadyOriented
+      ? unrotateBoxFromOriented(visW, visH, relX0, relY0, reqDrawCw, reqDrawCh, reportedOrient)
+      : { srcW: visW, srcH: visH, cropX0: relX0, cropY0: relY0, cropW: reqDrawCw, cropH: reqDrawCh };
+    return {
+      srcW: metaBox.srcW,
+      srcH: metaBox.srcH,
+      cropX0: metaBox.cropX0,
+      cropY0: metaBox.cropY0,
+      codedCropX0: visX0 + relX0,
+      codedCropY0: visY0 + relY0,
+      cropW: metaBox.cropW,
+      cropH: metaBox.cropH,
+      drawCropW: reqDrawCw,
+      drawCropH: reqDrawCh,
+      orientation: reportedOrient,
+      drawOrient,
+      scanDir,
+      engineW: frameW,
+      engineH: frameH,
+      dstX: 0,
+      dstY: 0,
+      dstW: frameW,
+      dstH: frameH,
+      native1to1: 1,
+      fallbackScale: false,
+      allowSmoothing: false,
+      fullFrameFit: false,
+    };
   }
 
-  simCtx.fillStyle = '#000000';
-  simCtx.fillRect(0, 0, frameW, frameH);
-  let dw = frameW;
-  let dh = frameH;
+  let relX0 = 0;
+  let relY0 = 0;
+  let sw = visW;
+  let sh = visH;
+  if (
+    typeof g.cropX0 === 'number' && Number.isInteger(g.cropX0) &&
+    typeof g.cropY0 === 'number' && Number.isInteger(g.cropY0) &&
+    typeof g.cropW === 'number' && Number.isInteger(g.cropW) && g.cropW >= 1 &&
+    typeof g.cropH === 'number' && Number.isInteger(g.cropH) && g.cropH >= 1
+  ) {
+    relX0 = Math.max(0, Math.min(visW - 1, g.cropX0));
+    relY0 = Math.max(0, Math.min(visH - 1, g.cropY0));
+    sw = Math.max(1, Math.min(visW - relX0, g.cropW));
+    sh = Math.max(1, Math.min(visH - relY0, g.cropH));
+  } else {
+    const cx = Math.max(0.0, Math.min(0.98, cropNorm[0]));
+    const cy = Math.max(0.0, Math.min(0.98, cropNorm[1]));
+    const cwNorm = Math.max(0.02, Math.min(1.0 - cx, cropNorm[2]));
+    const chNorm = Math.max(0.02, Math.min(1.0 - cy, cropNorm[3]));
+    relX0 = Math.max(0, Math.min(visW - 1, Math.round(cx * visW)));
+    relY0 = Math.max(0, Math.min(visH - 1, Math.round(cy * visH)));
+    sw = Math.max(1, Math.min(visW - relX0, Math.round(cwNorm * visW)));
+    sh = Math.max(1, Math.min(visH - relY0, Math.round(chNorm * visH)));
+  }
+  const codedCropX0 = visX0 + relX0;
+  const codedCropY0 = visY0 + relY0;
+
+  const [ow, oh] = orientedExtent(sw, sh, drawOrient);
+  const srcAspect = ow / oh;
+  const dstAspect = frameW / frameH;
+  const fullVis = relX0 === 0 && relY0 === 0 && sw === visW && sh === visH;
+  const failedNative = Boolean(nativeRoiEnabled);
   let dx = 0;
   let dy = 0;
-  if (srcAspect > dstAspect) {
-    dh = Math.max(1, Math.round(frameW / srcAspect));
-    dy = (frameH - dh) >> 1;
+  let dw = frameW;
+  let dh = frameH;
+  if (fullVis && Math.abs(srcAspect - dstAspect) / dstAspect <= 0.02) {
+    dx = 0;
+    dy = 0;
+    dw = frameW;
+    dh = frameH;
   } else {
-    dw = Math.max(1, Math.round(frameH * srcAspect));
-    dx = (frameW - dw) >> 1;
+    if (srcAspect > dstAspect) {
+      dh = Math.max(1, Math.round(frameW / srcAspect));
+      dy = (frameH - dh) >> 1;
+    } else {
+      dw = Math.max(1, Math.round(frameH * srcAspect));
+      dx = (frameW - dw) >> 1;
+    }
   }
-  simCtx.drawImage(bmp, sx, sy, sw, sh, dx, dy, dw, dh);
+  const exact1to1Unflagged = !preScaled && ow === dw && oh === dh;
+  const metaBox = alreadyOriented
+    ? unrotateBoxFromOriented(visW, visH, relX0, relY0, sw, sh, reportedOrient)
+    : { srcW: visW, srcH: visH, cropX0: relX0, cropY0: relY0, cropW: sw, cropH: sh };
+  return {
+    srcW: metaBox.srcW,
+    srcH: metaBox.srcH,
+    cropX0: metaBox.cropX0,
+    cropY0: metaBox.cropY0,
+    codedCropX0,
+    codedCropY0,
+    cropW: metaBox.cropW,
+    cropH: metaBox.cropH,
+    drawCropW: sw,
+    drawCropH: sh,
+    orientation: reportedOrient,
+    drawOrient,
+    scanDir,
+    engineW: frameW,
+    engineH: frameH,
+    dstX: dx,
+    dstY: dy,
+    dstW: dw,
+    dstH: dh,
+    native1to1: 0,
+    fallbackScale: failedNative,
+    allowSmoothing: !failedNative && !exact1to1Unflagged,
+    fullFrameFit: dx === 0 && dy === 0 && dw === frameW && dh === frameH,
+  };
+}
+
+function drawCroppedLetterboxedFrame(bmp, infoGeom = null) {
+  const bw = Math.max(1, Math.trunc(bmp.width || frameW));
+  const bh = Math.max(1, Math.trunc(bmp.height || frameH));
+  const geom = resolveIngestGeomSpec(bw, bh, infoGeom);
+  const drawCw = typeof geom.drawCropW === 'number' ? geom.drawCropW : geom.cropW;
+  const drawCh = typeof geom.drawCropH === 'number' ? geom.drawCropH : geom.cropH;
+  simCtx.save();
+  simCtx.setTransform(1, 0, 0, 1, 0, 0);
+  if (!geom.fullFrameFit) {
+    simCtx.fillStyle = '#000000';
+    simCtx.fillRect(0, 0, frameW, frameH);
+  }
+  simCtx.imageSmoothingEnabled = geom.allowSmoothing;
+  applyOrientationTransform(
+    simCtx,
+    drawCw,
+    drawCh,
+    geom.drawOrient,
+    geom.dstX,
+    geom.dstY,
+    geom.dstW,
+    geom.dstH
+  );
+  const srcReadX = typeof geom.codedCropX0 === 'number' ? geom.codedCropX0 : geom.cropX0;
+  const srcReadY = typeof geom.codedCropY0 === 'number' ? geom.codedCropY0 : geom.cropY0;
+  simCtx.drawImage(
+    bmp,
+    srcReadX,
+    srcReadY,
+    drawCw,
+    drawCh,
+    0,
+    0,
+    drawCw,
+    drawCh
+  );
+  simCtx.restore();
+  lastIngestGeom = geom;
+  return geom;
+}
+
+function extractAndOrientRgba(srcRgba, bw, bh, infoGeom = null) {
+  const geom = resolveIngestGeomSpec(bw, bh, infoGeom);
+  const out = rgbaStageScratch.subarray(0, frameBytes);
+  const fullRect = geom.dstX === 0 && geom.dstY === 0 && geom.dstW === frameW && geom.dstH === frameH;
+  if (!fullRect) {
+    for (let i = 0; i < frameBytes; i += 4) {
+      out[i] = 0;
+      out[i + 1] = 0;
+      out[i + 2] = 0;
+      out[i + 3] = 255;
+    }
+  }
+  const cw = typeof geom.drawCropW === 'number' ? geom.drawCropW : geom.cropW;
+  const ch = typeof geom.drawCropH === 'number' ? geom.drawCropH : geom.cropH;
+  const [ow, oh] = orientedExtent(cw, ch, geom.drawOrient);
+  const orient = geom.drawOrient & 7;
+  const xFlip = (orient & 4) !== 0;
+  const rotK = orient & 3;
+  const sxBase = typeof geom.codedCropX0 === 'number' ? geom.codedCropX0 : geom.cropX0;
+  const syBase = typeof geom.codedCropY0 === 'number' ? geom.codedCropY0 : geom.cropY0;
+  const dw = geom.dstW;
+  const dh = geom.dstH;
+  const dx = geom.dstX;
+  const dy = geom.dstY;
+  const exact1to1 = dw === ow && dh === oh;
+
+  for (let py = 0; py < dh; py++) {
+    const oy = exact1to1
+      ? py
+      : (geom.allowSmoothing
+          ? Math.max(0, Math.min(oh - 1, ((py + 0.5) * oh) / dh - 0.5))
+          : Math.max(0, Math.min(oh - 1, Math.floor(((py + 0.5) * oh) / dh))));
+    const dstRow = (dy + py) * frameW + dx;
+    if (exact1to1 || !geom.allowSmoothing) {
+      const oyi = oy | 0;
+      for (let px = 0; px < dw; px++) {
+        const oxi = exact1to1
+          ? px
+          : Math.max(0, Math.min(ow - 1, Math.floor(((px + 0.5) * ow) / dw)));
+        const rx = xFlip ? (ow - 1 - oxi) : oxi;
+        const ry = oyi;
+        let u = 0;
+        let v = 0;
+        if (rotK === 0) {
+          u = rx;
+          v = ry;
+        } else if (rotK === 1) {
+          u = ry;
+          v = ch - 1 - rx;
+        } else if (rotK === 2) {
+          u = cw - 1 - rx;
+          v = ch - 1 - ry;
+        } else {
+          u = cw - 1 - ry;
+          v = rx;
+        }
+        const sOff = ((syBase + v) * bw + (sxBase + u)) * 4;
+        const dOff = (dstRow + px) * 4;
+        out[dOff] = srcRgba[sOff];
+        out[dOff + 1] = srcRgba[sOff + 1];
+        out[dOff + 2] = srcRgba[sOff + 2];
+        out[dOff + 3] = srcRgba[sOff + 3];
+      }
+    } else {
+      const y0 = Math.floor(oy);
+      const y1 = Math.min(oh - 1, y0 + 1);
+      const fy = oy - y0;
+      for (let px = 0; px < dw; px++) {
+        const ox = Math.max(0, Math.min(ow - 1, ((px + 0.5) * ow) / dw - 0.5));
+        const x0 = Math.floor(ox);
+        const x1 = Math.min(ow - 1, x0 + 1);
+        const fx = ox - x0;
+        const sampleAt = (sx0, sy0) => {
+          const rx = xFlip ? (ow - 1 - sx0) : sx0;
+          const ry = sy0;
+          let u = 0, v = 0;
+          if (rotK === 0) { u = rx; v = ry; }
+          else if (rotK === 1) { u = ry; v = ch - 1 - rx; }
+          else if (rotK === 2) { u = cw - 1 - rx; v = ch - 1 - ry; }
+          else { u = cw - 1 - ry; v = rx; }
+          return ((syBase + v) * bw + (sxBase + u)) * 4;
+        };
+        const o00 = sampleAt(x0, y0);
+        const o10 = sampleAt(x1, y0);
+        const o01 = sampleAt(x0, y1);
+        const o11 = sampleAt(x1, y1);
+        const w00 = (1 - fx) * (1 - fy);
+        const w10 = fx * (1 - fy);
+        const w01 = (1 - fx) * fy;
+        const w11 = fx * fy;
+        const dOff = (dstRow + px) * 4;
+        out[dOff] = Math.round(srcRgba[o00] * w00 + srcRgba[o10] * w10 + srcRgba[o01] * w01 + srcRgba[o11] * w11);
+        out[dOff + 1] = Math.round(srcRgba[o00 + 1] * w00 + srcRgba[o10 + 1] * w10 + srcRgba[o01 + 1] * w01 + srcRgba[o11 + 1] * w11);
+        out[dOff + 2] = Math.round(srcRgba[o00 + 2] * w00 + srcRgba[o10 + 2] * w10 + srcRgba[o01 + 2] * w01 + srcRgba[o11 + 2] * w11);
+        out[dOff + 3] = Math.round(srcRgba[o00 + 3] * w00 + srcRgba[o10 + 3] * w10 + srcRgba[o01 + 3] * w01 + srcRgba[o11 + 3] * w11);
+      }
+    }
+  }
+  lastIngestGeom = geom;
+  return { pixels: out, geom };
 }
 
 function finiteOrNull(v) {
@@ -5784,17 +6469,31 @@ function parseRigidBodyDescriptor(buf, bo) {
 
 function computeLookaheadTiming(effK, dispSlot, fIdxNow) {
   const k = intOrNull(effK, 0, RING_LEN - 1) ?? (Number.isFinite(effK) ? Math.max(0, Math.round(effK)) : 0);
+  const curF = fIdxNow >>> 0;
   if (k === 0) {
     return {
       lookaheadWindowMs: 0.0,
       lookaheadSource: 'zero_lookahead',
-      displayedFrameIdx: fIdxNow,
-      causalFrameIdx: fIdxNow,
+      displayedFrameIdx: curF,
+      causalFrameIdx: curF,
       renderedDelayFrames: 0,
     };
   }
-  const targetDispFrame = fIdxNow - k;
-  const ringMatch = dispSlot >= 0 && dispSlot < RING_LEN && ringIngestFrameId[dispSlot] === targetDispFrame;
+  const targetDispFrame = (curF - k) >>> 0;
+  const validDispSlot = dispSlot >= 0 && dispSlot < RING_LEN;
+  const slotMetaOff = validDispSlot ? dispSlot * RING_META_STRIDE : -1;
+  const slotEngineFrame = validDispSlot && ringMetaView
+    ? (ringMetaView[slotMetaOff + 3] >>> 0)
+    : (validDispSlot && ringIngestFrameValid[dispSlot] === 1 ? (ringIngestFrameId[dispSlot] >>> 0) : -1);
+  const dispCommitted = validDispSlot && (
+    ringMetaView
+      ? ((ringMetaView[slotMetaOff] & 1) !== 0)
+      : ringIngestFrameValid[dispSlot] === 1
+  );
+  const sameEpoch = !wave1CoreAbiValid || !wave1TelemView || !ringMetaView || slotMetaOff < 0
+    ? true
+    : ((ringMetaView[slotMetaOff + 23] >>> 0) === (wave1TelemView[6] >>> 0));
+  const ringMatch = validDispSlot && dispCommitted && sameEpoch && slotEngineFrame === targetDispFrame;
   if (
     ringMatch &&
     latestCausalPtsMs >= 0.0 &&
@@ -5805,7 +6504,7 @@ function computeLookaheadTiming(effK, dispSlot, fIdxNow) {
       lookaheadWindowMs: Math.max(0.0, latestCausalPtsMs - ringIngestPtsMs[dispSlot]),
       lookaheadSource: 'source_pts',
       displayedFrameIdx: targetDispFrame,
-      causalFrameIdx: fIdxNow,
+      causalFrameIdx: curF,
       renderedDelayFrames: k,
     };
   }
@@ -5818,7 +6517,7 @@ function computeLookaheadTiming(effK, dispSlot, fIdxNow) {
       lookaheadWindowMs: Math.max(0.0, latestCausalTimeMs - ringIngestTimeMs[dispSlot]),
       lookaheadSource: 'accumulated_dt',
       displayedFrameIdx: targetDispFrame,
-      causalFrameIdx: fIdxNow,
+      causalFrameIdx: curF,
       renderedDelayFrames: k,
     };
   }
@@ -5826,8 +6525,8 @@ function computeLookaheadTiming(effK, dispSlot, fIdxNow) {
   return {
     lookaheadWindowMs: k * dtSec * 1000.0,
     lookaheadSource: 'dt_estimate',
-    displayedFrameIdx: Math.max(0, targetDispFrame),
-    causalFrameIdx: fIdxNow,
+    displayedFrameIdx: targetDispFrame,
+    causalFrameIdx: curF,
     renderedDelayFrames: k,
   };
 }
@@ -6019,6 +6718,275 @@ function buildChronos1000Snapshot(medianMs, effK, fIdxNow = 0, dispSlot = -1) {
   return out;
 }
 
+function decodeStamp(base) {
+  if (!wave1TelemView || !wave1TelemF32View) return null;
+  const validity = wave1TelemView[base] >>> 0;
+  const tLo = wave1TelemView[base + 4] >>> 0;
+  const tHi = wave1TelemView[base + 5] >>> 0;
+  const ageRaw = wave1TelemF32View[base + 6];
+  return {
+    validity,
+    valid: (validity & 1) !== 0,
+    held: (validity & 2) !== 0,
+    ptsKnown: (validity & 4) !== 0,
+    captureAge: (validity & 8) !== 0,
+    handoffAge: (validity & 16) !== 0,
+    continuityEpoch: wave1TelemView[base + 1] >>> 0,
+    sourceEpoch: wave1TelemView[base + 2] >>> 0,
+    sourceSeq: wave1TelemView[base + 3] >>> 0,
+    ptsUs: tHi * 4294967296 + tLo,
+    ageMs: Number.isFinite(ageRaw) ? ageRaw : -1.0,
+    engineFrameIdx: wave1TelemView[base + 7] >>> 0,
+  };
+}
+
+function readRingMetaSlot(slot) {
+  if (!ringMetaView || !ringMetaF32View || slot < 0 || slot >= RING_LEN) return null;
+  const o = slot * RING_META_STRIDE;
+  const flags = ringMetaView[o] >>> 0;
+  if ((flags & 1) === 0) return null;
+  const tLo = ringMetaView[o + 4] >>> 0;
+  const tHi = ringMetaView[o + 5] >>> 0;
+  const ageRaw = ringMetaF32View[o + 6];
+  const gapFlag = ringMetaView[o + 21] >>> 0;
+  const gaps = [];
+  for (let b = 0; b < GAP_FLAG_NAMES.length; b++) {
+    if (gapFlag & (1 << b)) gaps.push(GAP_FLAG_NAMES[b]);
+  }
+  return {
+    flags,
+    committed: true,
+    ptsKnown: (flags & 2) !== 0,
+    captureAge: (flags & 4) !== 0,
+    handoffAge: (flags & 8) !== 0,
+    geomKnown: (flags & 16) !== 0,
+    sourceEpoch: ringMetaView[o + 1] >>> 0,
+    sourceSeq: ringMetaView[o + 2] >>> 0,
+    engineFrameIdx: ringMetaView[o + 3] >>> 0,
+    tSrcUs: tHi * 4294967296 + tLo,
+    ageMs: Number.isFinite(ageRaw) ? ageRaw : -1.0,
+    srcW: ringMetaView[o + 7] >>> 0,
+    srcH: ringMetaView[o + 8] >>> 0,
+    cropX0: ringMetaView[o + 9] >>> 0,
+    cropY0: ringMetaView[o + 10] >>> 0,
+    cropW: ringMetaView[o + 11] >>> 0,
+    cropH: ringMetaView[o + 12] >>> 0,
+    orientation: ringMetaView[o + 13] >>> 0,
+    scanDir: ringMetaView[o + 14] >>> 0,
+    engineW: ringMetaView[o + 15] >>> 0,
+    engineH: ringMetaView[o + 16] >>> 0,
+    dstX: ringMetaView[o + 17] >>> 0,
+    dstY: ringMetaView[o + 18] >>> 0,
+    dstW: ringMetaView[o + 19] >>> 0,
+    dstH: ringMetaView[o + 20] >>> 0,
+    frameGapFlag: gapFlag,
+    gapLabels: gaps,
+    native1to1Active: ringMetaView[o + 22] === 1,
+    continuityEpoch: ringMetaView[o + 23] >>> 0,
+  };
+}
+
+function buildWave1Snapshot(dispSlot) {
+  const w1 = wave1CoreAbiValid && wave1TelemView ? {
+    available: true,
+    abi: wave1TelemView[0] >>> 0,
+    arenaBytes: wave1TelemView[1] >>> 0,
+    lastCommittedSlot: wave1TelemView[2] >>> 0,
+    displaySlot: wave1TelemView[3] >>> 0,
+    totalCommits: (wave1TelemView[5] >>> 0) * 4294967296 + (wave1TelemView[4] >>> 0),
+    continuityEpoch: wave1TelemView[6] >>> 0,
+    enabledBits: wave1TelemView[7] >>> 0,
+    lastIngestStatus: wave1TelemView[8] >>> 0,
+    currentCommittedFlags: wave1TelemView[9] >>> 0,
+    validRowCount: wave1TelemView[10] >>> 0,
+    ringStride: wave1TelemView[11] >>> 0,
+    linkedStaticEnd: wave1TelemView[12] >>> 0,
+    dispMeta: readRingMetaSlot(dispSlot),
+    stamps: {
+      micro: decodeStamp(16),
+      grad: decodeStamp(24),
+      ftle: decodeStamp(32),
+      modalField: decodeStamp(40),
+      heroPhysics: decodeStamp(48),
+      bos: decodeStamp(56),
+    },
+  } : { available: false };
+
+  if (w1.available && rowLumaView && dispSlot >= 0 && dispSlot < RING_LEN) {
+    const validRows = Math.min(ROW_LUMA_H, w1.validRowCount || frameH);
+    let minL = 1.0;
+    let maxL = 0.0;
+    let sumL = 0.0;
+    const base = dispSlot * ROW_LUMA_H;
+    for (let r = 0; r < validRows; r++) {
+      const v = rowLumaView[base + r];
+      if (Number.isFinite(v)) {
+        if (v < minL) minL = v;
+        if (v > maxL) maxL = v;
+        sumL += v;
+      }
+    }
+    w1.dispRowLumaStats = validRows > 0
+      ? { min: minL, max: maxL, mean: sumL / validRows, validRows }
+      : null;
+  }
+
+  let metrology = {
+    available: wave1MetrologyAbiValid,
+    mode: microMetrologyMode,
+    showCovEllipses,
+    promotedCandidates: 0,
+    activeAutoHeroes: 0,
+    usableCovCount: 0,
+    loomRejectedCount: 0,
+    meanD2Bench: null,
+  };
+  if (wave1MetrologyAbiValid && heroCandidatesView && microQualityView && microResidualView) {
+    metrology.promotedCandidates = heroCandidatesView[0] >>> 0;
+    metrology.promoEpoch = heroCandidatesView[1] >>> 0;
+    metrology.activeAutoHeroes = heroCandidatesView[2] >>> 0;
+    let covUsable = 0;
+    let loomRejected = 0;
+    let d2Sum = 0.0;
+    let d2Cnt = 0;
+    for (let i = 0; i < MAX_MICRO; i++) {
+      const q = microQualityView[i];
+      if ((q & (1 << 3)) !== 0) covUsable++;
+      const d2 = microResidualView[2 * MAX_MICRO + i];
+      const benchUsable = (q & (1 << 4)) !== 0;
+      const loomUsable = (q & (1 << 17)) !== 0;
+      const isPromo = (q & (1 << 18)) !== 0;
+      if (benchUsable && Number.isFinite(d2) && d2 >= 0.0) {
+        d2Sum += d2;
+        d2Cnt++;
+        if (
+          loomUsable &&
+          d2 >= 18.42 &&
+          !isPromo &&
+          microLoomView &&
+          Number.isFinite(microLoomView[i]) &&
+          microLoomView[i] < 13.82
+        ) {
+          loomRejected++;
+        }
+      }
+    }
+    metrology.usableCovCount = covUsable;
+    metrology.loomRejectedCount = loomRejected;
+    metrology.meanD2Bench = d2Cnt > 0 ? d2Sum / d2Cnt : null;
+  }
+
+  let bos = {
+    available: wave1BosAbiValid,
+    reqMode: bosReqMode,
+    overlayKind: bosOverlayKind,
+    gaugeRoi: [...bosGaugeRoi],
+    state: 0,
+    stateLabel: 'OFF',
+    reasonMask: 0,
+    reasonFlags: [],
+    validDisp: 0,
+    validCurl: 0,
+    components: 0,
+    validGauge: 0,
+    pcgIters: 0,
+    path: 0,
+    warmupCnt: 0,
+    refEpoch: 0,
+    trueRelRes: 0.0,
+    curlRms: 0.0,
+    maxCurl: 0.0,
+    shiftX: 0.0,
+    shiftY: 0.0,
+    anchorMse: 0.0,
+    validFrac: 0.0,
+    rmsDisp: 0.0,
+  };
+  const bt = (dispSlot >= 0 && dispSlot < RING_LEN && bosRingValid[dispSlot] === 1)
+    ? bosRingTelem[dispSlot]
+    : null;
+  if (bt) {
+    const rMask = bt[3] | 0;
+    const rList = [];
+    for (let b = 0; b < BOS_REASON_NAMES.length; b++) {
+      if (rMask & (1 << b)) rList.push(BOS_REASON_NAMES[b]);
+    }
+    bos.reqMode = bt[1] | 0;
+    bos.state = bt[2] | 0;
+    bos.stateLabel = BOS_STATE_LABELS[Math.max(0, Math.min(3, bos.state))] || 'OFF';
+    bos.reasonMask = rMask;
+    bos.reasonFlags = rList;
+    bos.validDisp = bt[4] | 0;
+    bos.validCurl = bt[5] | 0;
+    bos.components = bt[6] | 0;
+    bos.validGauge = bt[7] | 0;
+    bos.pcgIters = bt[8] | 0;
+    bos.path = bt[9] | 0;
+    bos.warmupCnt = bt[10] | 0;
+    bos.refEpoch = bt[11] | 0;
+    bos.trueRelRes = finiteOrNull(bt[12]) ?? 0.0;
+    bos.curlRms = finiteOrNull(bt[13]) ?? 0.0;
+    bos.maxCurl = finiteOrNull(bt[14]) ?? 0.0;
+    bos.shiftX = finiteOrNull(bt[15]) ?? 0.0;
+    bos.shiftY = finiteOrNull(bt[16]) ?? 0.0;
+    bos.anchorMse = finiteOrNull(bt[17]) ?? 0.0;
+    bos.validFrac = finiteOrNull(bt[18]) ?? 0.0;
+    bos.rmsDisp = finiteOrNull(bt[19]) ?? 0.0;
+  } else if (wave1BosAbiValid && bosTelemView && bosTelemF32View) {
+    const rMask = bosTelemView[3] >>> 0;
+    const rList = [];
+    for (let b = 0; b < BOS_REASON_NAMES.length; b++) {
+      if (rMask & (1 << b)) rList.push(BOS_REASON_NAMES[b]);
+    }
+    bos.reqMode = bosTelemView[1] >>> 0;
+    bos.state = bosTelemView[2] >>> 0;
+    bos.stateLabel = BOS_STATE_LABELS[Math.max(0, Math.min(3, bos.state))] || 'OFF';
+    bos.reasonMask = rMask;
+    bos.reasonFlags = rList;
+    bos.validDisp = bosTelemView[4] >>> 0;
+    bos.validCurl = bosTelemView[5] >>> 0;
+    bos.components = bosTelemView[6] >>> 0;
+    bos.validGauge = bosTelemView[7] >>> 0;
+    bos.pcgIters = bosTelemView[8] >>> 0;
+    bos.path = bosTelemView[9] >>> 0;
+    bos.warmupCnt = bosTelemView[10] >>> 0;
+    bos.refEpoch = bosTelemView[11] >>> 0;
+    bos.trueRelRes = finiteOrNull(bosTelemF32View[16]) ?? 0.0;
+    bos.curlRms = finiteOrNull(bosTelemF32View[17]) ?? 0.0;
+    bos.maxCurl = finiteOrNull(bosTelemF32View[18]) ?? 0.0;
+    bos.shiftX = finiteOrNull(bosTelemF32View[19]) ?? 0.0;
+    bos.shiftY = finiteOrNull(bosTelemF32View[20]) ?? 0.0;
+    bos.anchorMse = finiteOrNull(bosTelemF32View[21]) ?? 0.0;
+    bos.validFrac = finiteOrNull(bosTelemF32View[22]) ?? 0.0;
+    bos.rmsDisp = finiteOrNull(bosTelemF32View[23]) ?? 0.0;
+  }
+
+  const dispNativeActive = Boolean(w1.dispMeta ? w1.dispMeta.native1to1Active : lastIngestGeom.native1to1);
+  const roi = {
+    native1to1: nativeRoiEnabled,
+    native1to1Active: dispNativeActive,
+    fallbackScale: Boolean(w1.dispMeta ? (nativeRoiEnabled && !dispNativeActive) : lastIngestGeom.fallbackScale),
+    normX: roiOffsetNormX,
+    normY: roiOffsetNormY,
+    cropX0: w1.dispMeta ? w1.dispMeta.cropX0 : lastIngestGeom.cropX0,
+    cropY0: w1.dispMeta ? w1.dispMeta.cropY0 : lastIngestGeom.cropY0,
+    cropW: w1.dispMeta ? w1.dispMeta.cropW : lastIngestGeom.cropW,
+    cropH: w1.dispMeta ? w1.dispMeta.cropH : lastIngestGeom.cropH,
+    srcW: w1.dispMeta ? w1.dispMeta.srcW : lastIngestGeom.srcW,
+    srcH: w1.dispMeta ? w1.dispMeta.srcH : lastIngestGeom.srcH,
+    orientation: w1.dispMeta ? w1.dispMeta.orientation : lastIngestGeom.orientation,
+    scanDir: w1.dispMeta ? w1.dispMeta.scanDir : lastIngestGeom.scanDir,
+    dstX: w1.dispMeta ? w1.dispMeta.dstX : lastIngestGeom.dstX,
+    dstY: w1.dispMeta ? w1.dispMeta.dstY : lastIngestGeom.dstY,
+    dstW: w1.dispMeta ? w1.dispMeta.dstW : lastIngestGeom.dstW,
+    dstH: w1.dispMeta ? w1.dispMeta.dstH : lastIngestGeom.dstH,
+    engineW: frameW,
+    engineH: frameH,
+  };
+
+  return { wave1: w1, roi, bos, metrology };
+}
+
 function emitTelemetrySnapshot() {
   if (!wasmExports || !telemView) return;
   let sumMs = 0.0;
@@ -6031,7 +6999,7 @@ function emitTelemetrySnapshot() {
   const meanMs = sumMs / Math.max(1, count);
   const medianMs = computeMedianTickMs(count);
   const effSampleRate = sourceMode === 'testbench' ? 60.0 : Math.max(8.0, sourceFps);
-  const fIdxNow = Math.round(telemView[0]);
+  const fIdxNow = currentCausalEngineFrameU32();
 
   const pIdx = resolvePrimarySlot();
   const focusTid = wasmExports ? wasmExports.chronos_get_focus_target() : 0;
@@ -6093,10 +7061,18 @@ function emitTelemetrySnapshot() {
   const distUnit = pMetricValid < -0.5
     ? 'OUT OF PLANE'
     : (metricOn ? 'm' : 'px');
-  const lastStrikeAgeFrames = lastStrikeFrame >= 0 ? Math.max(0, fIdxNow - lastStrikeFrame) : -1;
+  let lastStrikeAgeFrames = -1;
+  if (lastStrikeValid && lastStrikeFrame >= 0) {
+    const d = (fIdxNow - (lastStrikeFrame >>> 0)) >>> 0;
+    lastStrikeAgeFrames = d < 0x80000000 ? d : 0;
+  }
   const scatterFrameWasm = Math.round(telemView[TELEM_GLOBAL + 7]);
   if (scatterFrameWasm > 0) lastScatterFrame = scatterFrameWasm;
-  const scatterAgeFrames = lastScatterFrame > 0 ? Math.max(0, fIdxNow - lastScatterFrame) : -1;
+  let scatterAgeFrames = -1;
+  if (lastScatterFrame > 0) {
+    const dSc = (fIdxNow - (lastScatterFrame >>> 0)) >>> 0;
+    scatterAgeFrames = dSc < 0x80000000 ? dSc : 0;
+  }
 
   const slotRoster = new Array(MAX_TARGETS);
   for (let m = 0; m < MAX_TARGETS; m++) {
@@ -6199,9 +7175,10 @@ function emitTelemetrySnapshot() {
     }
   }
 
-  const dispSlotNow = Math.round(telemView[2]);
+  const dispSlotNow = currentDisplaySlot();
   const effKNow = Math.round(telemView[1]);
   const c1kSnap = buildChronos1000Snapshot(medianMs, effKNow, fIdxNow, dispSlotNow);
+  const w1Snap = buildWave1Snapshot(dispSlotNow);
   const oracleValid = sourceMode === 'testbench' && !isChronos1000Scenario(benchScenario);
 
   self.postMessage({
@@ -6311,65 +7288,213 @@ function emitTelemetrySnapshot() {
     physicsId: buildPhysicsIdSnapshot(pIdx, hasPrimary, pFxPx, pFyPx, speedPhys, speedUnit, pMetricValid, angVelDegS),
     slotRoster,
     chronos1000: c1kSnap,
+    wave1: w1Snap.wave1,
+    roi: w1Snap.roi,
+    bos: w1Snap.bos,
+    metrology: w1Snap.metrology,
   });
 }
 
-function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
+function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null) {
+  if (!wasmExports || !rawPixels || rawPixels.byteLength !== frameBytes) {
+    return { committed: false, status: 2, slotIdx: -1, dispSlot: -1, error: 'byteLength_mismatch' };
+  }
+
+  const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
+  const slotIdx = ringSlotByteOffsets.indexOf(ptr);
+  if (slotIdx < 0 || !ringSlotU8[slotIdx]) {
+    throw new Error(`Unmapped Wasm ingest pointer 0x${(ptr >>> 0).toString(16)} outside ringSlotByteOffsets`);
+  }
+
   const rawDt = Math.max(0.001, Number.isFinite(dtSec) && dtSec > 0 ? dtSec : 1.0 / 60.0);
   const fpsDt = Math.min(0.25, Math.max(0.002, rawDt));
   const instSourceFps = 1.0 / fpsDt;
   sourceFps = 0.90 * sourceFps + 0.10 * instSourceFps;
 
-  const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
-  let slotIdx = 0;
-  for (let s = 0; s < RING_LEN; s++) {
-    if (ringSlotU8[s].byteOffset === ptr) {
-      slotIdx = s;
-      break;
-    }
+  workerSimTimeSec += rawDt;
+  const info = ingestInfo || {};
+  const ingestEpoch = typeof info.epoch === 'number' && Number.isInteger(info.epoch) ? (info.epoch >>> 0) : workerLocalEpoch;
+  const ingestSeq = typeof info.seq === 'number' && Number.isInteger(info.seq) ? (info.seq >>> 0) : (++workerLocalSeq >>> 0);
+  const hasExplicitTSrcUs =
+    typeof info.tSrcUs === 'number' &&
+    Number.isFinite(info.tSrcUs) &&
+    info.tSrcUs >= 0 &&
+    info.ptsKnown !== false;
+  const hasMediaPts =
+    typeof mediaTimeSec === 'number' &&
+    Number.isFinite(mediaTimeSec) &&
+    mediaTimeSec >= 0.0;
+  const hasPtsNow = info.ptsKnown !== false && (hasMediaPts || hasExplicitTSrcUs);
+  const tUs = hasPtsNow
+    ? (hasExplicitTSrcUs
+        ? Math.round(info.tSrcUs)
+        : Math.max(0, Math.round(mediaTimeSec * 1_000_000)))
+    : 0;
+  const tLo = tUs >>> 0;
+  const tHi = Math.floor(tUs / 4294967296) >>> 0;
+
+  let ageMs = -1.0;
+  let ageFlags = 0;
+  if (typeof info.captureAgeMs === 'number' && Number.isFinite(info.captureAgeMs) && info.captureAgeMs >= 0.0) {
+    ageMs = info.captureAgeMs;
+    ageFlags = 4; // INGEST_FLAG_CAPTURE_AGE
+  } else if (typeof info.enqueuedEpochMs === 'number' && Number.isFinite(info.enqueuedEpochMs)) {
+    ageMs = Math.max(0.0, performance.timeOrigin + performance.now() - info.enqueuedEpochMs);
+    ageFlags = 8; // INGEST_FLAG_HANDOFF_AGE
   }
+
+  const preScaled = Boolean(info.fallbackScaled || (info.geom && info.geom.preScaled));
+  const geom = info.geom || {
+    srcW: frameW,
+    srcH: frameH,
+    cropX0: 0,
+    cropY0: 0,
+    cropW: frameW,
+    cropH: frameH,
+    orientation: roiOrientation & 7,
+    scanDir: roiScanDir >>> 0,
+    dstX: 0,
+    dstY: 0,
+    dstW: frameW,
+    dstH: frameH,
+    native1to1: !preScaled && nativeRoiEnabled && (roiOrientation & 1) === 0 ? 1 : 0,
+  };
+  if (preScaled) {
+    geom.native1to1 = 0;
+    geom.fallbackScale = Boolean(nativeRoiEnabled);
+  }
+  if (!info.geom) {
+    lastIngestGeom = {
+      ...geom,
+      engineW: frameW,
+      engineH: frameH,
+      fallbackScale: Boolean(nativeRoiEnabled && !geom.native1to1),
+    };
+  }
+  const metaFlags = (hasPtsNow ? 2 : 0) | ageFlags | 16; // PTS_KNOWN | AGE | GEOM_KNOWN
+  const gapMask = (typeof info.gapMask === 'number' ? info.gapMask : 0) & 0x3f;
+
+  const hasMetaSetter = typeof wasmExports.chronos_set_ingest_meta === 'function';
+  if (hasMetaSetter) {
+    const stagedOk = wasmExports.chronos_set_ingest_meta(
+      ingestEpoch,
+      ingestSeq,
+      tLo,
+      tHi,
+      ageMs,
+      metaFlags,
+      geom.srcW >>> 0,
+      geom.srcH >>> 0,
+      geom.cropX0 >>> 0,
+      geom.cropY0 >>> 0,
+      geom.cropW >>> 0,
+      geom.cropH >>> 0,
+      (geom.orientation ?? 0) >>> 0,
+      (geom.scanDir ?? 0xffffffff) >>> 0,
+      geom.dstX >>> 0,
+      geom.dstY >>> 0,
+      geom.dstW >>> 0,
+      geom.dstH >>> 0,
+      gapMask,
+      geom.native1to1 ? 1 : 0
+    );
+    if (!stagedOk) {
+      const rejectStatus = wave1TelemView ? (wave1TelemView[8] >>> 0) : 2;
+      return { committed: false, status: rejectStatus, slotIdx, dispSlot: -1 };
+    }
+  } else if (
+    typeof wasmExports.chronos_set_ingest_pts === 'function' &&
+    hasPtsNow
+  ) {
+    wasmExports.chronos_set_ingest_pts(tUs * 1e-6);
+  }
+
   ringSlotU8[slotIdx].set(rawPixels);
 
-  if (
-    typeof wasmExports.chronos_set_ingest_pts === 'function' &&
-    Number.isFinite(mediaTimeSec) &&
-    mediaTimeSec >= 0.0
-  ) {
-    wasmExports.chronos_set_ingest_pts(mediaTimeSec);
-  }
+  const prevCommits = wave1CoreAbiValid && wave1TelemView
+    ? ((wave1TelemView[5] >>> 0) * 4294967296 + (wave1TelemView[4] >>> 0))
+    : -1;
+  const expEngIdx = workerExpectedEngineFrame >>> 0;
 
   // Measure pure kernel compute path: Wasm Pre-Tick + Shifted Lanczos Fiedler + Wasm Post-Tick
   const t0 = performance.now();
-  wasmExports.chronos_pre_tick(rawDt);
-  const lambda2 = solveShiftedLanczosFiedler();
-  const dispSlot = wasmExports.chronos_post_tick(rawDt);
+  let preTickStarted = false;
+  let postTickFinished = false;
+  let lambda2 = 0.0;
+  let dispSlot = 0;
+  try {
+    wasmExports.chronos_pre_tick(rawDt);
+    preTickStarted = true;
+    lambda2 = solveShiftedLanczosFiedler();
+    dispSlot = wasmExports.chronos_post_tick(rawDt);
+    postTickFinished = true;
+  } catch (tickErr) {
+    if (preTickStarted && !postTickFinished) {
+      wasmExports.chronos_reset_tracks();
+      clearVisualQueues();
+      workerExpectedEngineFrame = 0;
+    }
+    return {
+      committed: false,
+      status: 4,
+      slotIdx: -1,
+      dispSlot: -1,
+      error: tickErr && tickErr.message ? tickErr.message : 'mid_tick_error',
+    };
+  }
   const wasmMs = performance.now() - t0;
+
+  const commitsNow = wave1CoreAbiValid && wave1TelemView
+    ? ((wave1TelemView[5] >>> 0) * 4294967296 + (wave1TelemView[4] >>> 0))
+    : -1;
+  const mOff = slotIdx * RING_META_STRIDE;
+  const commitOk = Boolean(
+    wave1CoreAbiValid &&
+    wave1TelemView &&
+    ringMetaView &&
+    postTickFinished &&
+    commitsNow === prevCommits + 1 &&
+    (wave1TelemView[8] >>> 0) === 1 &&
+    (wave1TelemView[9] & 1) !== 0 &&
+    (wave1TelemView[13] >>> 0) === 0 &&
+    (wave1TelemView[2] >>> 0) === (slotIdx >>> 0) &&
+    (ringMetaView[mOff] & 1) !== 0 &&
+    (ringMetaView[mOff + 1] >>> 0) === (ingestEpoch >>> 0) &&
+    (ringMetaView[mOff + 2] >>> 0) === (ingestSeq >>> 0) &&
+    (ringMetaView[mOff + 3] >>> 0) === expEngIdx
+  );
+  if (!commitOk) {
+    const rejectStatus = wave1TelemView ? (wave1TelemView[8] >>> 0) : 2;
+    return {
+      committed: false,
+      status: rejectStatus === 1 ? 2 : rejectStatus,
+      slotIdx,
+      dispSlot: -1,
+    };
+  }
+  workerExpectedEngineFrame = (expEngIdx + 1) >>> 0;
 
   lastDtSecUsed = rawDt;
   ingestElapsedMs += rawDt * 1000.0;
   latestCausalTimeMs = ingestElapsedMs;
-  const causalFrameNow = Math.round(telemView[0]);
-  const hasPtsNow = Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0.0;
+  const causalFrameNow = currentCausalEngineFrameU32();
   if (hasPtsNow) {
-    const ptsMsNow = mediaTimeSec * 1000.0;
+    const ptsMsNow = tUs * 0.001;
     if (latestCausalPtsMs >= 0.0 && ptsMsNow < latestCausalPtsMs) {
       ringIngestPtsMs.fill(-1.0);
     }
     latestCausalPtsMs = ptsMsNow;
-    if (slotIdx >= 0 && slotIdx < RING_LEN) {
-      ringIngestPtsMs[slotIdx] = ptsMsNow;
-    }
+    ringIngestPtsMs[slotIdx] = ptsMsNow;
   } else {
     latestCausalPtsMs = -1.0;
     ringIngestPtsMs.fill(-1.0);
   }
-  if (slotIdx >= 0 && slotIdx < RING_LEN) {
-    ringIngestFrameId[slotIdx] = causalFrameNow;
-    ringIngestTimeMs[slotIdx] = ingestElapsedMs;
-  }
+  ringIngestFrameId[slotIdx] = causalFrameNow;
+  ringIngestFrameValid[slotIdx] = 1;
+  ringIngestTimeMs[slotIdx] = ingestElapsedMs;
 
   const tCopy0 = performance.now();
-  if (hasChronos1000Exports() && slotIdx >= 0 && slotIdx < RING_LEN) {
+  if (hasChronos1000Exports()) {
     if (swarmTelemView && (intOrNull(swarmTelemView[1], 0, 1) === 1 || swarmMode === 2)) {
       swarmRingMicro[slotIdx].set(microTracksView);
       swarmRingField[slotIdx].set(continuumFieldView);
@@ -6377,9 +7502,44 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
       swarmRingModal[slotIdx].set(modalFieldView);
       swarmRingTelem[slotIdx].set(swarmTelemView);
       swarmRingValid[slotIdx] = 1;
+      if (wave1MetrologyAbiValid && microCovView && microQualityView) {
+        covRingBuf[slotIdx].set(microCovView);
+        qualRingBuf[slotIdx].set(microQualityView);
+        covRingValid[slotIdx] = 1;
+      } else {
+        covRingValid[slotIdx] = 0;
+      }
     } else {
       swarmRingValid[slotIdx] = 0;
+      covRingValid[slotIdx] = 0;
     }
+  }
+  if (wave1BosAbiValid && bosRgbaView && bosTelemView && bosTelemF32View && bosReqMode !== 0) {
+    bosRingRgba[slotIdx].set(bosRgbaView);
+    const bt = bosRingTelem[slotIdx];
+    bt[0] = 1;
+    bt[1] = bosTelemView[1];
+    bt[2] = bosTelemView[2];
+    bt[3] = bosTelemView[3];
+    bt[4] = bosTelemView[4];
+    bt[5] = bosTelemView[5];
+    bt[6] = bosTelemView[6];
+    bt[7] = bosTelemView[7];
+    bt[8] = bosTelemView[8];
+    bt[9] = bosTelemView[9];
+    bt[10] = bosTelemView[10];
+    bt[11] = bosTelemView[11];
+    bt[12] = bosTelemF32View[16];
+    bt[13] = bosTelemF32View[17];
+    bt[14] = bosTelemF32View[18];
+    bt[15] = bosTelemF32View[19];
+    bt[16] = bosTelemF32View[20];
+    bt[17] = bosTelemF32View[21];
+    bt[18] = bosTelemF32View[22];
+    bt[19] = bosTelemF32View[23];
+    bosRingValid[slotIdx] = 1;
+  } else {
+    bosRingValid[slotIdx] = 0;
   }
   lastSwarmCopyMs = performance.now() - tCopy0;
   lastLambda2 = lambda2;
@@ -6414,7 +7574,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
     auditOracleSwaps();
   }
 
-  const fIdx = Math.round(telemView[0]);
+  const fIdx = causalFrameNow;
   let frameHasBridge = false;
   for (let m = 0; m < MAX_TARGETS; m++) {
     const b = 32 + m * 56;
@@ -6425,9 +7585,10 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
         const tidM = Math.round(telemView[b + 1]);
         const pv = mapVelocityToPhysical(telemView[b + 2], telemView[b + 3], telemView[kb + 1], telemView[kb + 0]);
         if (pv[2] > 0.5 && pv[0] > 0.08) {
-          if (prevRectTid[m] === tidM && prevRectFrame[m] >= 0 && fIdx > prevRectFrame[m] && (fIdx - prevRectFrame[m]) <= 4) {
+          const fDelta = (fIdx - prevRectFrame[m]) >>> 0;
+          if (prevRectTid[m] === tidM && prevRectValid[m] === 1 && fDelta >= 1 && fDelta <= 4) {
             const dth = wrapDeg180(pv[1] - prevRectHeading[m]);
-            const spanDt = Math.max(0.002, (fIdx - prevRectFrame[m]) * fpsDt);
+            const spanDt = Math.max(0.002, fDelta * fpsDt);
             const instW = Math.max(-720.0, Math.min(720.0, dth / spanDt));
             slotRectAngVel[m] = 0.62 * slotRectAngVel[m] + 0.38 * instW;
           } else {
@@ -6436,13 +7597,15 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
           prevRectHeading[m] = pv[1];
           prevRectTid[m] = tidM;
           prevRectFrame[m] = fIdx;
+          prevRectValid[m] = 1;
         } else {
           slotRectAngVel[m] *= 0.78;
         }
       }
     } else {
       prevRectTid[m] = 0;
-      prevRectFrame[m] = -1;
+      prevRectFrame[m] = 0;
+      prevRectValid[m] = 0;
       slotRectAngVel[m] = 0.0;
     }
   }
@@ -6523,13 +7686,14 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
             lastStrikeDeflectDeg = rectSt[1];
             lastStrikeRestitution = rectSt[2];
             lastStrikeTid = Math.round(telemView[32 + m * 56 + 1]);
-            lastStrikeFrame = fIdx + Math.round(leadFrames);
+            lastStrikeFrame = (fIdx + Math.round(leadFrames)) >>> 0;
             lastStrikeValid = true;
           }
         }
 
         if (labMode === 2) {
-          shockTriggerFrame[shockWriteHead] = fIdx + Math.round(leadFrames);
+          shockTriggerFrame[shockWriteHead] = (fIdx + Math.round(leadFrames)) >>> 0;
+          shockTriggerArmed[shockWriteHead] = 1;
           shockX[shockWriteHead] = sxPos;
           shockY[shockWriteHead] = syPos;
           shockZone[shockWriteHead] = zone;
@@ -6567,10 +7731,11 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
   updatePersistenceState(fpsDt);
   pushPhysicsPhaseSample();
 
-  // Render all OffscreenCanvases inside Worker isolate
-  renderMainHud(dispSlot);
-  if (!showcaseMinimalScopes) {
-    renderSecondaryScopes(true, false);
+  // Render all OffscreenCanvases inside Worker isolate (isolated from committed frame ack)
+  try {
+    scheduleOffscreenHudPresent(dispSlot, true, false);
+  } catch (_hudErr) {
+    // Non-fatal HUD presentation fault must never invert an already committed frame into ingest_rejected
   }
 
   // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 56 columns)
@@ -6676,15 +7841,31 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec) {
 
   tickCounter++;
   if (tickCounter % 3 === 0 || sourceMode !== 'testbench') {
-    emitTelemetrySnapshot();
+    try {
+      emitTelemetrySnapshot();
+    } catch (_telemErr) {
+      // Telemetry post failure must not override an already committed frame ack
+    }
   }
+  return {
+    committed: Boolean(commitOk),
+    status: wave1TelemView ? (wave1TelemView[8] >>> 0) : 1,
+    slotIdx,
+    dispSlot,
+  };
 }
 
-function configureResolutionViews(mode) {
+function configureResolutionViews(mode, forceReset = false) {
   refreshChronos1000Views();
+  refreshWave1Views();
+  const prevResMode = resMode;
   const targetMode = mode ? 1 : 0;
   wasmExports.chronos_set_resolution(targetMode);
   resMode = wasmExports.chronos_get_resolution();
+  const didReset = Boolean(forceReset) || resMode !== prevResMode;
+  if (didReset) {
+    workerExpectedEngineFrame = 0;
+  }
   frameW = wasmExports.chronos_get_frame_w();
   frameH = wasmExports.chronos_get_frame_h();
   pipDim = wasmExports.chronos_get_pip_dim();
@@ -6692,20 +7873,29 @@ function configureResolutionViews(mode) {
   framePixels = frameW * frameH;
   frameBytes = framePixels * 4;
 
-  dispStageCanvas.width = frameW;
-  dispStageCanvas.height = frameH;
-  pipStageCanvas.width = pipDim;
-  pipStageCanvas.height = pipDim;
-  simCanvas.width = frameW;
-  simCanvas.height = frameH;
-  ecaStageCanvas.width = frameW;
-  ecaStageCanvas.height = frameH;
+  if (didReset || dispStageCanvas.width !== frameW || dispStageCanvas.height !== frameH) {
+    dispStageCanvas.width = frameW;
+    dispStageCanvas.height = frameH;
+  }
+  if (didReset || pipStageCanvas.width !== pipDim || pipStageCanvas.height !== pipDim) {
+    pipStageCanvas.width = pipDim;
+    pipStageCanvas.height = pipDim;
+  }
+  if (didReset || simCanvas.width !== frameW || simCanvas.height !== frameH) {
+    simCanvas.width = frameW;
+    simCanvas.height = frameH;
+  }
+  if (didReset || ecaStageCanvas.width !== frameW || ecaStageCanvas.height !== frameH) {
+    ecaStageCanvas.width = frameW;
+    ecaStageCanvas.height = frameH;
+  }
 
   ecaOverlayBuf = ecaOverlayBackingBuf.subarray(0, frameBytes);
   ecaOverlayImgData = new ImageData(ecaOverlayBuf, frameW, frameH);
 
   for (let s = 0; s < RING_LEN; s++) {
     const byteOff = wasmExports.chronos_get_ring_slot_ptr(s);
+    ringSlotByteOffsets[s] = byteOff;
     ringSlotU8[s] = new Uint8Array(wasmMemory.buffer, byteOff, frameBytes);
     ringSlotImgData[s] = new ImageData(
       new Uint8ClampedArray(wasmMemory.buffer, byteOff, frameBytes),
@@ -6738,13 +7928,14 @@ function configureResolutionViews(mode) {
       );
     }
   }
-  slotIdleDrawn.fill(0);
-
-  wasmTimeHist.fill(0.0);
-  timeHistIdx = 0;
-  tickCounter = 0;
-  clearVisualQueues();
-  resetTestbenchState();
+  if (didReset) {
+    slotIdleDrawn.fill(0);
+    wasmTimeHist.fill(0.0);
+    timeHistIdx = 0;
+    tickCounter = 0;
+    clearVisualQueues();
+    resetTestbenchState();
+  }
 }
 
 function renderSecondaryScopes(slotFast, fullHist) {
@@ -6756,13 +7947,136 @@ function renderSecondaryScopes(slotFast, fullHist) {
   renderPhysicsPhaseCanvas(fullHist);
 }
 
-function redrawPausedHudIfReady() {
-  if (wasmExports && telemView && Math.round(telemView[0]) > 0) {
-    const dispSlot = Math.round(telemView[2]);
+function cancelPendingHudRender() {
+  clearTimeout(hudPresentWatchdogId);
+  hudPresentWatchdogId = 0;
+  clearTimeout(hudSettleTimerId);
+  hudSettleTimerId = 0;
+  if (hudPresentRafId && typeof self.cancelAnimationFrame === 'function') {
+    self.cancelAnimationFrame(hudPresentRafId);
+  }
+  hudPresentRafId = 0;
+  pendingHudPresentDirty = false;
+  pendingHudPresentSlot = -1;
+  lastCommittedHudSlot = -1;
+  pendingHudSlotFast = true;
+  pendingHudFullHist = false;
+}
+
+function isCommittedRingSlot(slot) {
+  if (!Number.isInteger(slot) || slot < 0 || slot >= RING_LEN) return false;
+  if (wave1CoreAbiValid && ringMetaView) {
+    return (ringMetaView[slot * RING_META_STRIDE] & 1) !== 0;
+  }
+  return true;
+}
+
+function currentCausalEngineFrameU32() {
+  if (wave1CoreAbiValid && wave1TelemView && ringMetaView) {
+    const lastSlot = wave1TelemView[2] >>> 0;
+    if (lastSlot < RING_LEN && (ringMetaView[lastSlot * RING_META_STRIDE] & 1) !== 0) {
+      return ringMetaView[lastSlot * RING_META_STRIDE + 3] >>> 0;
+    }
+    return 0;
+  }
+  return telemView ? (Math.round(telemView[0]) >>> 0) : 0;
+}
+
+function currentDisplaySlot() {
+  if (wave1CoreAbiValid && wave1TelemView && ringMetaView) {
+    const w1Disp = wave1TelemView[3] >>> 0;
+    if (w1Disp < RING_LEN && isCommittedRingSlot(w1Disp)) {
+      return w1Disp;
+    }
+    return -1;
+  }
+  return telemView ? (intOrNull(telemView[2], 0, RING_LEN - 1) ?? -1) : -1;
+}
+
+function hasAnyRenderedFrame() {
+  if (!wasmExports || !telemView) return false;
+  if (wave1CoreAbiValid && wave1TelemView && ringMetaView) {
+    const w1Disp = wave1TelemView[3] >>> 0;
+    return w1Disp < RING_LEN && isCommittedRingSlot(w1Disp);
+  }
+  return currentCausalEngineFrameU32() > 0 || tickCounter > 0;
+}
+
+function flushPendingHudRender() {
+  clearTimeout(hudPresentWatchdogId);
+  hudPresentWatchdogId = 0;
+  clearTimeout(hudSettleTimerId);
+  hudSettleTimerId = 0;
+  if (hudPresentRafId && typeof self.cancelAnimationFrame === 'function') {
+    self.cancelAnimationFrame(hudPresentRafId);
+  }
+  hudPresentRafId = 0;
+  if (!pendingHudPresentDirty || !wasmExports || !telemView || !hasAnyRenderedFrame()) {
+    pendingHudPresentDirty = false;
+    pendingHudPresentSlot = -1;
+    return;
+  }
+  const w1Disp = wave1CoreAbiValid && wave1TelemView ? (wave1TelemView[3] >>> 0) : -1;
+  const dSlot = wave1CoreAbiValid && wave1TelemView && ringMetaView && isCommittedRingSlot(w1Disp)
+    ? w1Disp
+    : (pendingHudPresentSlot >= 0 && pendingHudPresentSlot < RING_LEN && isCommittedRingSlot(pendingHudPresentSlot)
+        ? pendingHudPresentSlot
+        : Math.round(telemView[2]));
+  if (!isCommittedRingSlot(dSlot)) {
+    pendingHudPresentDirty = false;
+    pendingHudPresentSlot = -1;
+    return;
+  }
+  const slotFast = pendingHudSlotFast;
+  const fullHist = pendingHudFullHist;
+  pendingHudPresentDirty = false;
+  pendingHudPresentSlot = -1;
+  pendingHudSlotFast = true;
+  pendingHudFullHist = false;
+  renderMainHud(dSlot);
+  if (!showcaseMinimalScopes) {
+    renderSecondaryScopes(slotFast, fullHist);
+  }
+  lastCommittedHudSlot = dSlot;
+  if (!inWorkerRafTick && sourceMode !== 'testbench') {
+    // Software 2D OffscreenCanvas in headless Chromium can drop a compositor push under burst load;
+    // re-present only after stream/UI activity settles (>90 ms) with zero steady-state overhead.
+    hudSettleTimerId = setTimeout(() => {
+      hudSettleTimerId = 0;
+      if (!wasmExports || !telemView || sourceMode === 'testbench' || pendingHudPresentDirty) return;
+      if (!isCommittedRingSlot(lastCommittedHudSlot) || !ringSlotImgData[lastCommittedHudSlot]) return;
+      if (!hasAnyRenderedFrame()) return;
+      renderMainHud(lastCommittedHudSlot);
+    }, 90);
+  }
+}
+
+function scheduleOffscreenHudPresent(dispSlot, slotFast, fullHist) {
+  clearTimeout(hudSettleTimerId);
+  hudSettleTimerId = 0;
+  if (inWorkerRafTick || typeof self.requestAnimationFrame !== 'function') {
+    if (inWorkerRafTick) cancelPendingHudRender();
     renderMainHud(dispSlot);
     if (!showcaseMinimalScopes) {
-      renderSecondaryScopes(false, true);
+      renderSecondaryScopes(slotFast, fullHist);
     }
+    return;
+  }
+  pendingHudPresentSlot = dispSlot;
+  pendingHudSlotFast = pendingHudPresentDirty ? (pendingHudSlotFast && slotFast) : slotFast;
+  pendingHudFullHist = pendingHudFullHist || fullHist;
+  pendingHudPresentDirty = true;
+  if (!hudPresentRafId) {
+    hudPresentRafId = self.requestAnimationFrame(flushPendingHudRender);
+    clearTimeout(hudPresentWatchdogId);
+    hudPresentWatchdogId = setTimeout(flushPendingHudRender, 80);
+  }
+}
+
+function redrawPausedHudIfReady() {
+  if (hasAnyRenderedFrame()) {
+    const dispSlot = Math.round(telemView[2]);
+    scheduleOffscreenHudPresent(dispSlot, false, true);
     emitTelemetrySnapshot();
   }
 }
@@ -7134,6 +8448,7 @@ function workerRafLoop(now) {
   const instFps = 1000.0 / dtMs;
   smoothFps = 0.92 * smoothFps + 0.08 * instFps;
 
+  inWorkerRafTick = true;
   try {
     if (wasmExports) {
       const simDt = 1.0 / 60.0;
@@ -7141,6 +8456,7 @@ function workerRafLoop(now) {
       processIngestedFrame(rawPixels, simDt, -1.0);
     }
   } finally {
+    inWorkerRafTick = false;
     scheduleNextWorkerTick();
   }
 }
@@ -7186,6 +8502,9 @@ self.onmessage = async (ev) => {
 
     ecaStageCanvas = new OffscreenCanvas(frameW, frameH);
     ecaStageCtx = ecaStageCanvas.getContext('2d');
+    bosOverlayCanvas = new OffscreenCanvas(BOS_W, BOS_H);
+    bosOverlayCtx = bosOverlayCanvas.getContext('2d');
+    bosOverlayImgData = bosOverlayCtx.createImageData(BOS_W, BOS_H);
 
     try {
       const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261115c1k');
@@ -7198,6 +8517,7 @@ self.onmessage = async (ev) => {
       wasmExports = instance.exports;
       wasmMemory = wasmExports.memory;
       wasmExports.chronos_init();
+      workerExpectedEngineFrame = 0;
       wasmExports.chronos_set_params(
         lookaheadK,
         ecaAdaptRate,
@@ -7232,7 +8552,7 @@ self.onmessage = async (ev) => {
       if (typeof msg.showHeroTargets === 'boolean') {
         showHeroTargets = msg.showHeroTargets;
       }
-      configureResolutionViews(msg.resMode || 0);
+      configureResolutionViews(msg.resMode || 0, true);
       applySceneCalibrationPreset('testbench');
       running = true;
       self.postMessage({
@@ -7256,7 +8576,8 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'set_resolution') {
     if (wasmExports) {
-      configureResolutionViews(msg.resMode ? 1 : 0);
+      const reqMode = msg.resMode !== undefined ? msg.resMode : msg.mode;
+      configureResolutionViews(reqMode ? 1 : 0, false);
       self.postMessage({
         type: 'resolution_changed',
         resMode,
@@ -7489,7 +8810,7 @@ self.onmessage = async (ev) => {
       );
       if (sourceMode !== 'testbench' || visualFlagChanged) {
         redrawPausedHudIfReady();
-        if (visualFlagChanged && (!telemView || Math.round(telemView[0]) <= 0)) {
+        if (visualFlagChanged && (!telemView || !hasAnyRenderedFrame())) {
           emitTelemetrySnapshot();
         }
       }
@@ -7509,7 +8830,7 @@ self.onmessage = async (ev) => {
     }
     syncSwarmConfigToMain(benchScenario);
     redrawPausedHudIfReady();
-    if (!telemView || Math.round(telemView[0]) <= 0) {
+    if (!telemView || !hasAnyRenderedFrame()) {
       emitTelemetrySnapshot();
     }
   } else if (msg.type === 'set_field_overlay_mode') {
@@ -7517,10 +8838,103 @@ self.onmessage = async (ev) => {
       lastOverlaySyncSeq = msg.overlaySyncSeq;
     }
     const rawO = Number(msg.fieldOverlayMode);
-    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(4, Math.round(rawO))) : 0;
+    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(7, Math.round(rawO))) : 0;
+    if (fieldOverlayMode >= 5 && fieldOverlayMode <= 7) {
+      bosOverlayKind = fieldOverlayMode - 5;
+      if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
+        wasmExports.chronos_set_bos_overlay_kind(bosOverlayKind);
+      }
+    }
     syncSwarmConfigToMain(benchScenario);
     redrawPausedHudIfReady();
-    if (!telemView || Math.round(telemView[0]) <= 0) {
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_roi') {
+    if (typeof msg.native1to1 === 'boolean') {
+      nativeRoiEnabled = msg.native1to1;
+    }
+    if (typeof msg.normX === 'number' && Number.isFinite(msg.normX)) {
+      roiOffsetNormX = Math.max(0.0, Math.min(1.0, msg.normX));
+      roiUseExplicitPx = false;
+    }
+    if (typeof msg.normY === 'number' && Number.isFinite(msg.normY)) {
+      roiOffsetNormY = Math.max(0.0, Math.min(1.0, msg.normY));
+      roiUseExplicitPx = false;
+    }
+    if (
+      typeof msg.x0 === 'number' &&
+      Number.isFinite(msg.x0) &&
+      typeof msg.y0 === 'number' &&
+      Number.isFinite(msg.y0)
+    ) {
+      roiUseExplicitPx = true;
+      roiExplicitX0 = Math.max(0, Math.round(msg.x0));
+      roiExplicitY0 = Math.max(0, Math.round(msg.y0));
+    }
+    if (
+      typeof msg.orientation === 'number' &&
+      Number.isInteger(msg.orientation) &&
+      msg.orientation >= 0 &&
+      msg.orientation <= 7
+    ) {
+      roiOrientation = msg.orientation;
+    }
+    if (
+      typeof msg.scanDir === 'number' &&
+      Number.isInteger(msg.scanDir) &&
+      (msg.scanDir === 0xffffffff || msg.scanDir === -1 || (msg.scanDir >= 0 && msg.scanDir <= 3))
+    ) {
+      roiScanDir = msg.scanDir >>> 0;
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_bos_config') {
+    if (typeof msg.bosMode === 'number' && Number.isFinite(msg.bosMode)) {
+      bosReqMode = Math.max(0, Math.min(2, Math.round(msg.bosMode)));
+      if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_mode === 'function') {
+        wasmExports.chronos_set_bos_mode(bosReqMode);
+      }
+      if (bosReqMode === 0) bosRingValid.fill(0);
+    }
+    if (typeof msg.overlayKind === 'number' && Number.isFinite(msg.overlayKind)) {
+      bosOverlayKind = Math.max(0, Math.min(2, Math.round(msg.overlayKind)));
+      if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
+        wasmExports.chronos_set_bos_overlay_kind(bosOverlayKind);
+      }
+    }
+    if (Array.isArray(msg.gaugeRoi) && msg.gaugeRoi.length === 4) {
+      const gx0 = Math.max(0, Math.min(BOS_W, Math.round(Number(msg.gaugeRoi[0]) || 0)));
+      const gy0 = Math.max(0, Math.min(BOS_H, Math.round(Number(msg.gaugeRoi[1]) || 0)));
+      const gx1 = Math.max(0, Math.min(BOS_W, Math.round(Number(msg.gaugeRoi[2]) || 0)));
+      const gy1 = Math.max(0, Math.min(BOS_H, Math.round(Number(msg.gaugeRoi[3]) || 0)));
+      bosGaugeRoi = [gx0, gy0, gx1, gy1];
+      if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_gauge_roi === 'function') {
+        wasmExports.chronos_set_bos_gauge_roi(gx0, gy0, gx1, gy1);
+      }
+    }
+    if (msg.resetRef && wave1BosAbiValid && typeof wasmExports.chronos_reset_bos_ref === 'function') {
+      wasmExports.chronos_reset_bos_ref();
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_metrology_config') {
+    if (typeof msg.metrologyMode === 'number' && Number.isFinite(msg.metrologyMode)) {
+      microMetrologyMode = Math.max(0, Math.min(2, Math.round(msg.metrologyMode)));
+      if (wave1MetrologyAbiValid && typeof wasmExports.chronos_set_micro_metrology_mode === 'function') {
+        wasmExports.chronos_set_micro_metrology_mode(microMetrologyMode);
+      }
+      if (microMetrologyMode === 0) covRingValid.fill(0);
+    }
+    if (typeof msg.showCovEllipses === 'boolean') {
+      showCovEllipses = msg.showCovEllipses;
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
       emitTelemetrySnapshot();
     }
   } else if (msg.type === 'inspect_point') {
@@ -7611,25 +9025,210 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'video_frame') {
     const bmp = msg.bitmap;
+    let ackPayload = null;
+    let rejectPayload = null;
     try {
       if (wasmExports && sourceMode !== 'testbench' && bmp) {
-        drawCroppedLetterboxedFrame(bmp);
+        const preScaledReq = Boolean(msg.preScaled || msg.fallbackScaled || (msg.geom && msg.geom.preScaled));
+        const infoGeom = preScaledReq ? { ...(msg.geom || {}), preScaled: true } : (msg.geom || null);
+        const geom = drawCroppedLetterboxedFrame(bmp, infoGeom);
         const rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
-        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0, msg.mediaTimeSec);
+        const ingestRes = processIngestedFrame(
+          rawPixels,
+          msg.dtSec || 1.0 / 30.0,
+          msg.mediaTimeSec,
+          {
+            epoch: msg.epoch,
+            seq: msg.seq,
+            ptsKnown: msg.ptsKnown,
+            tSrcUs: msg.tSrcUs,
+            captureAgeMs: msg.captureAgeMs,
+            enqueuedEpochMs: msg.enqueuedEpochMs,
+            gapMask: msg.gapMask,
+            fallbackScaled: preScaledReq,
+            geom,
+          }
+        );
+        if (ingestRes && ingestRes.committed && ingestRes.status === 1) {
+          ackPayload = {
+            type: 'frame_ack',
+            epoch: msg.epoch || 0,
+            seq: msg.seq || 0,
+            status: 1,
+            committed: true,
+          };
+        } else {
+          rejectPayload = {
+            type: 'ingest_rejected',
+            epoch: msg.epoch || 0,
+            seq: msg.seq || 0,
+            status: ingestRes ? ingestRes.status : 2,
+            error: ingestRes && ingestRes.error ? ingestRes.error : undefined,
+          };
+        }
+      } else {
+        rejectPayload = {
+          type: 'ingest_rejected',
+          epoch: msg.epoch || 0,
+          seq: msg.seq || 0,
+          status: 2,
+        };
       }
-    } finally {
-      if (bmp && typeof bmp.close === 'function') bmp.close();
-      self.postMessage({
-        type: 'frame_ack',
+    } catch (err) {
+      const errSt = wave1TelemView ? (wave1TelemView[8] >>> 0) : 2;
+      rejectPayload = {
+        type: 'ingest_rejected',
         epoch: msg.epoch || 0,
         seq: msg.seq || 0,
-      });
+        status: errSt !== 1 ? errSt : 2,
+        error: err && err.message ? err.message : 'video_frame_error',
+      };
+    } finally {
+      if (bmp && typeof bmp.close === 'function') bmp.close();
+      if (ackPayload) {
+        self.postMessage(ackPayload);
+      } else {
+        self.postMessage(
+          rejectPayload || {
+            type: 'ingest_rejected',
+            epoch: msg.epoch || 0,
+            seq: msg.seq || 0,
+            status: 2,
+          }
+        );
+      }
     }
   } else if (msg.type === 'video_rgba') {
-    if (wasmExports && sourceMode !== 'testbench' && msg.buffer) {
-      const rawPixels = new Uint8Array(msg.buffer);
-      if (rawPixels.byteLength === frameBytes) {
-        processIngestedFrame(rawPixels, msg.dtSec || 1.0 / 30.0, msg.mediaTimeSec);
+    let ackPayload = null;
+    let rejectPayload = null;
+    try {
+      if (wasmExports && sourceMode !== 'testbench' && msg.buffer) {
+        const srcPixels = new Uint8Array(msg.buffer);
+        const preScaledReq = Boolean(msg.preScaled || msg.fallbackScaled || (msg.geom && msg.geom.preScaled));
+        const hasDimSpec =
+          Boolean(msg.geom) ||
+          (typeof msg.width === 'number' && typeof msg.height === 'number');
+        const baseGeom =
+          msg.geom ||
+          (typeof msg.width === 'number' && typeof msg.height === 'number'
+            ? { srcW: msg.width, srcH: msg.height }
+            : { srcW: frameW, srcH: frameH });
+        const infoGeom = {
+          ...baseGeom,
+          ...(preScaledReq ? { preScaled: true } : {}),
+        };
+        const sw =
+          typeof infoGeom.srcW === 'number' && infoGeom.srcW > 0
+            ? Math.trunc(infoGeom.srcW)
+            : (typeof msg.width === 'number' ? Math.trunc(msg.width) : frameW);
+        const sh =
+          typeof infoGeom.srcH === 'number' && infoGeom.srcH > 0
+            ? Math.trunc(infoGeom.srcH)
+            : (typeof msg.height === 'number' ? Math.trunc(msg.height) : frameH);
+        let finalPixels = srcPixels;
+        let finalGeom = null;
+        if (sw <= 0 || sh <= 0 || srcPixels.byteLength !== sw * sh * 4) {
+          rejectPayload = {
+            type: 'ingest_rejected',
+            epoch: msg.epoch || 0,
+            seq: msg.seq || 0,
+            status: 2,
+            error: 'byteLength_mismatch',
+          };
+        } else {
+          const effOrient =
+            typeof infoGeom.orientation === 'number' &&
+            Number.isInteger(infoGeom.orientation) &&
+            infoGeom.orientation >= 0 &&
+            infoGeom.orientation <= 7
+              ? infoGeom.orientation
+              : (roiOrientation & 7);
+          const hasCropSpec =
+            Boolean(infoGeom.visibleRect) ||
+            typeof infoGeom.cropX0 === 'number' ||
+            cropNorm[0] !== 0 ||
+            cropNorm[1] !== 0 ||
+            cropNorm[2] !== 1 ||
+            cropNorm[3] !== 1;
+          const needXform =
+            hasDimSpec ||
+            effOrient !== 0 ||
+            hasCropSpec ||
+            sw !== frameW ||
+            sh !== frameH;
+          if (needXform) {
+            const xform = extractAndOrientRgba(srcPixels, sw, sh, infoGeom);
+            finalPixels = xform.pixels;
+            finalGeom = xform.geom;
+          } else {
+            finalGeom = resolveIngestGeomSpec(sw, sh, infoGeom);
+            lastIngestGeom = finalGeom;
+          }
+        }
+        if (!rejectPayload) {
+          const ingestRes = processIngestedFrame(
+            finalPixels,
+            msg.dtSec || 1.0 / 30.0,
+            msg.mediaTimeSec,
+            {
+              epoch: msg.epoch,
+              seq: msg.seq,
+              ptsKnown: msg.ptsKnown,
+              tSrcUs: msg.tSrcUs,
+              captureAgeMs: msg.captureAgeMs,
+              enqueuedEpochMs: msg.enqueuedEpochMs,
+              gapMask: msg.gapMask,
+              fallbackScaled: preScaledReq,
+              geom: finalGeom,
+            }
+          );
+          if (ingestRes && ingestRes.committed && ingestRes.status === 1) {
+            ackPayload = {
+              type: 'frame_ack',
+              epoch: msg.epoch || 0,
+              seq: msg.seq || 0,
+              status: 1,
+              committed: true,
+            };
+          } else {
+            rejectPayload = {
+              type: 'ingest_rejected',
+              epoch: msg.epoch || 0,
+              seq: msg.seq || 0,
+              status: ingestRes ? ingestRes.status : 2,
+              error: ingestRes && ingestRes.error ? ingestRes.error : undefined,
+            };
+          }
+        }
+      } else {
+        rejectPayload = {
+          type: 'ingest_rejected',
+          epoch: msg.epoch || 0,
+          seq: msg.seq || 0,
+          status: 2,
+        };
+      }
+    } catch (err) {
+      const errSt = wave1TelemView ? (wave1TelemView[8] >>> 0) : 2;
+      rejectPayload = {
+        type: 'ingest_rejected',
+        epoch: msg.epoch || 0,
+        seq: msg.seq || 0,
+        status: errSt !== 1 ? errSt : 2,
+        error: err && err.message ? err.message : 'video_rgba_error',
+      };
+    } finally {
+      if (ackPayload) {
+        self.postMessage(ackPayload);
+      } else {
+        self.postMessage(
+          rejectPayload || {
+            type: 'ingest_rejected',
+            epoch: msg.epoch || 0,
+            seq: msg.seq || 0,
+            status: 2,
+          }
+        );
       }
     }
   } else if (msg.type === 'lab_action') {
@@ -7770,8 +9369,10 @@ self.onmessage = async (ev) => {
             const medCount = Math.min(Math.max(1, tickCounter), TIME_HIST_LEN);
             const medMs = tickCounter > 0 ? computeMedianTickMs(medCount) : 0.0;
             const effK = telemView ? intOrNull(telemView[1], 0, RING_LEN - 1) ?? lookaheadK : lookaheadK;
-            const fIdxExp = telemView ? intOrNull(telemView[0], 0) ?? 0 : 0;
-            const dispSlotExp = telemView ? intOrNull(telemView[2], 0, RING_LEN - 1) ?? -1 : -1;
+            const fIdxExp = (wave1CoreAbiValid && wave1TelemView && ringMetaView)
+              ? currentCausalEngineFrameU32()
+              : (telemView ? (intOrNull(telemView[0], 0, 0xffffffff) ?? 0) : 0);
+            const dispSlotExp = currentDisplaySlot();
             const snap = buildChronos1000Snapshot(medMs, effK, fIdxExp, dispSlotExp);
             const bodies = [];
             const validMaskExp = Number.isInteger(snap.validityMask) ? snap.validityMask : 0;

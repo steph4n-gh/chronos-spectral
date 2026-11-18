@@ -1762,7 +1762,82 @@
         outline: 2px solid Highlight;
       }
     }
-    /* CHRONOS-1000 Zero-CLS Continuum Field Panel & Progressive Disclosure Drawer */
+    .acq-status-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      block-size: 1.75rem;
+      min-block-size: 1.75rem;
+      max-block-size: 1.75rem;
+      padding-inline: 0.56rem;
+      border-radius: 4px;
+      border: 1px solid #1e3354;
+      background-color: #060d19;
+      color: #a8c0df;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.67rem;
+      line-height: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      contain: layout style paint;
+    }
+
+    .acq-status-banner[data-severity="ok"] {
+      border-color: #218c4a;
+      background-color: #071913;
+      color: #86efac;
+    }
+
+    .acq-status-banner[data-severity="warn"] {
+      border-color: #c89628;
+      background-color: #1f1707;
+      color: #fde68a;
+    }
+
+    .acq-status-banner[data-severity="danger"] {
+      border-color: #d9385a;
+      background-color: #270b14;
+      color: #fecdd3;
+    }
+
+    .roi-control-well {
+      display: grid;
+      gap: 0.42rem;
+      padding: 0.48rem 0.54rem;
+      border-radius: 4px;
+      border: 1px solid #1d2e4d;
+      background-color: #08101e;
+    }
+
+    .roi-control-well .slider-val {
+      inline-size: 13ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roi-control-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.16rem;
+    }
+
+    #roiGeomMeta {
+      inline-size: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roi-control-title {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
     .continuum-panel {
       contain: layout style paint;
     }
@@ -2575,6 +2650,7 @@
           <input type="range" id="showcaseWipeSlider" min="0" max="100" step="1" value="28" aria-valuetext="28% raw video, 72% spectral wavefield" />
           <span id="showcaseWipeReadout" class="wipe-bar-readout">28% RAW · 72% SPECTRAL</span>
         </div>
+        <p id="acquisitionStatusBanner" class="acq-status-banner" role="status" aria-live="polite" data-severity="info">ACQUISITION STANDBY · MONOTONIC PTS &amp; TRIPOD GUARD READY</p>
       </div>
       </div>
 
@@ -2582,6 +2658,7 @@
         <div id="showcaseToolbar" class="showcase-toolbar" role="toolbar" focusgroup="toolbar wrap" aria-label="Hero showcase scenes and local optical inputs" aria-controls="hudCanvas">
           <div class="showcase-toolbar-group" role="group" aria-label="Featured real-camera physics scenes">
             <button type="button" id="btnHeroStarlings" class="hero-scene-btn" data-hero-scene="starling_1000" aria-pressed="true">🐦 Starling Swarm (1,400+ Birds)</button>
+            <button type="button" id="btnHeroBosPlume" class="hero-scene-btn" data-hero-scene="bos_plume" aria-pressed="false">🔥 Thermal Plume (BOS)</button>
             <button type="button" id="btnHeroRockets" class="hero-scene-btn" data-hero-scene="model_rockets" aria-pressed="false">🚀 Model Rockets (Smoke Bridge &amp; Chutes)</button>
             <button type="button" id="btnHeroPendulum" class="hero-scene-btn" data-hero-scene="chaos_pendulum" aria-pressed="false">🧲 Chaotic Pendulum (ODE Discovery)</button>
             <button type="button" id="btnHeroBilliards" class="hero-scene-btn" data-hero-scene="billiards" aria-pressed="false">🎱 Carom Billiards (L1 Impacts)</button>
@@ -2597,7 +2674,7 @@
           <div class="showcase-proof-card">
             <span class="showcase-proof-label">Wasm SIMD128 Latency</span>
             <span class="showcase-proof-val" id="scValKernel">-- ms / frame</span>
-            <span class="showcase-proof-sub" id="scSubKernel">2.13 MiB · 0 heap allocs · 320 pages</span>
+            <span class="showcase-proof-sub" id="scSubKernel">2.13 MiB · 0 heap allocs · 448 pages</span>
           </div>
           <div class="showcase-proof-card">
             <span class="showcase-proof-label">Live Tracked State</span>
@@ -3058,15 +3135,44 @@
             </select>
           </div>
           <div class="select-field">
-            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22)</label>
+            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22 / BOS 128x64)</label>
             <select id="fieldOverlayModeSelect" name="fieldOverlayMode">
               <option value="0" selected>Micro-Tracks + Rigid Hulls</option>
               <option value="1">Velocity |v| Field (40x22)</option>
               <option value="2">Vorticity Curl v (dv/dx - du/dy)</option>
               <option value="3">FTLE Coherent Ridges (16f)</option>
               <option value="4">Modal Vibration Phase ([-pi, pi])</option>
+              <option value="5">BOS Refraction |eps| (128x64)</option>
+              <option value="6">BOS Neumann Potential Phi (128x64)</option>
+              <option value="7">BOS Curl Check (dv/dx - du/dy)</option>
             </select>
           </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="bosModeSelect">BOS Schlieren Mode (Static Tripod)</label>
+            <select id="bosModeSelect" name="bosMode">
+              <option value="0" selected>Off (Standard Tracking)</option>
+              <option value="1">Mode 1 · Static Ref (Freeze @ 16f)</option>
+              <option value="2">Mode 2 · Clear-Only Slow Ref</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="metrologyModeSelect">Track 2x2 Covariance Metrology</label>
+            <select id="metrologyModeSelect" name="metrologyMode">
+              <option value="0" selected>Off (Fast Baseline)</option>
+              <option value="1">Lossless 2x2 Cov + LOO Bench</option>
+              <option value="2">H.264 2x2 Cov + Hero Promo</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle-list" style="margin-block-end: 0.48rem;">
+          <label class="toggle-item" for="chkCovEllipses">
+            <input type="checkbox" id="chkCovEllipses" name="showCovEllipses" />
+            <span>Overlay 2x2 Position Covariance Ellipses (95% Contour)</span>
+          </label>
         </div>
 
         <div class="kpi-grid continuum-kpi-grid">
@@ -3141,6 +3247,26 @@
               <span class="kpi-label">MEAN GRAPH STRAIN</span>
               <span class="kpi-value" id="diagMeanStrain">-- s⁻¹</span>
             </div>
+            <div class="kpi-card">
+              <span class="kpi-label">INGEST EPOCH / SEQ / GAP</span>
+              <span class="kpi-value" id="diagWave1Ingest">EP 0 · #0 · OK</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">WAVE-1 STAMPS (u·G·F·M·H·B)</span>
+              <span class="kpi-value" id="diagWave1Stamps">--</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">NATIVE ROI &amp; CROP</span>
+              <span class="kpi-value" id="diagRoiGeom">FULL / SCALE</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">BOS STATE · PCG · RES</span>
+              <span class="kpi-value" id="diagBosState">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">2x2 COV · HERO CANDS</span>
+              <span class="kpi-value" id="diagMetrologyCov">0 usable · 0 cand</span>
+            </div>
           </div>
         </details>
       </section>
@@ -3167,6 +3293,8 @@
           <button type="button" class="showcase-btn" data-showcase="newtons_cradle" aria-pressed="false">⚪ Newton's Cradle (45s)</button>
           <button type="button" class="showcase-btn" data-showcase="starling_1000" aria-pressed="false">🐦 Starling Murmuration (1,000+)</button>
           <button type="button" class="showcase-btn" data-showcase="vortex_1200" aria-pressed="false">🌀 Lamb-Oseen Vortex (1,200)</button>
+          <button type="button" class="showcase-btn" data-showcase="bos_plume" aria-pressed="false">🔥 Thermal Plume BOS (640×360)</button>
+          <button type="button" class="showcase-btn" data-showcase="bos_handheld_failure" aria-pressed="false">⚠ Handheld Tripod Fail (BOS)</button>
         </div>
       </div>
 
@@ -3212,6 +3340,11 @@
             </optgroup>
             <optgroup label="High-Density Continuum Swarms (1,000+ Targets)">
               <option value="./samples/starling_murmuration_1000.mp4" data-fps="30" data-lab="0" data-swarm="2">Starling Murmuration (13.0s · 30 fps · 1,353 extrema)</option>
+            </optgroup>
+            <optgroup label="Wave-1 BOS &amp; Failure Validation (640x360)">
+              <option value="./samples/bos_thermal_plume.mp4" data-fps="25" data-lab="0" data-swarm="2">Thermal Plume BOS (640×360 · 25 fps · Static Tripod)</option>
+              <option value="./samples/bos_handheld_failure.mp4" data-fps="25" data-lab="0" data-swarm="2">Handheld Shock / Sway Failure (640×360 · 25 fps · Tripod Guard)</option>
+              <option value="./samples/perspective_flyby_decoy.mp4" data-fps="25" data-lab="0" data-swarm="2">Perspective Flyby + Pan Decoy (640×360 · 25 fps · 3D Loom Gate)</option>
             </optgroup>
           </select>
         </div>
@@ -3263,6 +3396,31 @@
               <button type="button" id="btnVidStepFwd" class="action-btn">⏭ +1f</button>
               <button type="button" id="btnVidReplay" class="action-btn">↺ Replay</button>
             </div>
+          </div>
+        </div>
+
+        <div class="roi-control-well">
+          <div class="roi-control-header">
+            <span class="roi-control-title">Native 1:1 Sensor ROI Window</span>
+            <span class="panel-meta" id="roiGeomMeta">FULL / LETTERBOX</span>
+          </div>
+          <label class="toggle-item" for="chkNativeRoi">
+            <input type="checkbox" id="chkNativeRoi" name="nativeRoi" />
+            <span>Native 1:1 Crop (Zero Implicit Rescale)</span>
+          </label>
+          <div class="control-group">
+            <div class="slider-label-row">
+              <label for="rangeRoiX0">ROI Crop Offset X (crop_x0)</label>
+              <span class="slider-val" id="valRoiX0">50% (0 px)</span>
+            </div>
+            <input type="range" id="rangeRoiX0" min="0" max="100" step="1" value="50" aria-valuetext="50% horizontal crop offset" />
+          </div>
+          <div class="control-group">
+            <div class="slider-label-row">
+              <label for="rangeRoiY0">ROI Crop Offset Y (crop_y0)</label>
+              <span class="slider-val" id="valRoiY0">50% (0 px)</span>
+            </div>
+            <input type="range" id="rangeRoiY0" min="0" max="100" step="1" value="50" aria-valuetext="50% vertical crop offset" />
           </div>
         </div>
 
@@ -3582,6 +3740,8 @@
     let activeSurface = isInitialDeckSurface ? 'deck' : 'showcase';
     let isStaticHostMode = document.body.dataset.staticHost === 'true';
     let initialShowcaseBooted = false;
+    let workerKernelReady = false;
+    let pendingHeroSceneBeforeReady = null;
 
     const worker = new Worker('./worker.js?v=20261115c1k');
     worker.addEventListener('error', (err) => {
@@ -3880,7 +4040,10 @@
     let activeSourceMode = 'testbench'; // 'testbench' | 'webcam' | 'video' | 'live'
     let activeVideoFps = 30.0;
     let lastMediaTime = -1;
+    let lastPresentedFrames = -1;
+    let pendingVideoGapMask = 0;
     let lastPumpPerfMs = 0;
+    let pumpStartPerfMs = 0;
     let activeResMode = 0;
     let activeFrameW = 320;
     let activeFrameH = 180;
@@ -3890,6 +4053,8 @@
     let queuedPendingFrame = null;
     let pumpDroppedFrames = 0;
     let bitmapCaptureBusy = false;
+    let bitmapCaptureToken = 0;
+    let activeCaptureToken = 0;
     const fallbackCapCanvas = document.createElement('canvas');
     const fallbackCapCtx = fallbackCapCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -3954,6 +4119,16 @@
       continuumSummaryMeta: document.getElementById('continuumSummaryMeta'),
       swarmModeSelect: document.getElementById('swarmModeSelect'),
       fieldOverlayModeSelect: document.getElementById('fieldOverlayModeSelect'),
+      bosModeSelect: document.getElementById('bosModeSelect'),
+      metrologyModeSelect: document.getElementById('metrologyModeSelect'),
+      chkCovEllipses: document.getElementById('chkCovEllipses'),
+      chkNativeRoi: document.getElementById('chkNativeRoi'),
+      rangeRoiX0: document.getElementById('rangeRoiX0'),
+      rangeRoiY0: document.getElementById('rangeRoiY0'),
+      valRoiX0: document.getElementById('valRoiX0'),
+      valRoiY0: document.getElementById('valRoiY0'),
+      roiGeomMeta: document.getElementById('roiGeomMeta'),
+      acquisitionStatusBanner: document.getElementById('acquisitionStatusBanner'),
       kpiSwarmConfirmed: document.getElementById('kpiSwarmConfirmed'),
       kpiSwarmPeak: document.getElementById('kpiSwarmPeak'),
       kpiSwarmUnique: document.getElementById('kpiSwarmUnique'),
@@ -3973,6 +4148,11 @@
       diagKuramotoCom: document.getElementById('diagKuramotoCom'),
       diagFieldBackend: document.getElementById('diagFieldBackend'),
       diagMeanStrain: document.getElementById('diagMeanStrain'),
+      diagWave1Ingest: document.getElementById('diagWave1Ingest'),
+      diagWave1Stamps: document.getElementById('diagWave1Stamps'),
+      diagRoiGeom: document.getElementById('diagRoiGeom'),
+      diagBosState: document.getElementById('diagBosState'),
+      diagMetrologyCov: document.getElementById('diagMetrologyCov'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -4145,7 +4325,8 @@
           showAllOverlays: Boolean(st.overlays.showAllOverlays),
           showEcaOverlay: Boolean(st.overlays.showEcaOverlay),
           showKalman: Boolean(st.overlays.showKalman),
-          fieldOverlayMode: Math.max(0, Math.min(4, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
+          showCovEllipses: Boolean(st.overlays.showCovEllipses),
+          fieldOverlayMode: Math.max(0, Math.min(7, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
         }),
         pointerTool: st.pointerTool,
         viewport: st.viewport,
@@ -4181,9 +4362,10 @@
           showAllOverlays: typeof event.showAllOverlays === 'boolean' ? event.showAllOverlays : state.overlays.showAllOverlays,
           showEcaOverlay: typeof event.showEcaOverlay === 'boolean' ? event.showEcaOverlay : state.overlays.showEcaOverlay,
           showKalman: typeof event.showKalman === 'boolean' ? event.showKalman : state.overlays.showKalman,
+          showCovEllipses: typeof event.showCovEllipses === 'boolean' ? event.showCovEllipses : state.overlays.showCovEllipses,
           fieldOverlayMode:
             typeof event.fieldOverlayMode === 'number' && Number.isFinite(event.fieldOverlayMode)
-              ? Math.max(0, Math.min(4, Math.round(event.fieldOverlayMode)))
+              ? Math.max(0, Math.min(7, Math.round(event.fieldOverlayMode)))
               : state.overlays.fieldOverlayMode,
         };
         if (
@@ -4191,6 +4373,7 @@
           ov.showAllOverlays !== state.overlays.showAllOverlays ||
           ov.showEcaOverlay !== state.overlays.showEcaOverlay ||
           ov.showKalman !== state.overlays.showKalman ||
+          ov.showCovEllipses !== state.overlays.showCovEllipses ||
           ov.fieldOverlayMode !== state.overlays.fieldOverlayMode
         ) {
           nextOverlays = ov;
@@ -4254,6 +4437,7 @@
         showAllOverlays: false,
         showEcaOverlay: false,
         showKalman: true,
+        showCovEllipses: false,
         fieldOverlayMode: 0,
       },
       pointerTool: 'INSPECT_TARGET',
@@ -4273,6 +4457,9 @@
       }
       if (dom.chkKalman && dom.chkKalman.checked !== ov.showKalman) {
         dom.chkKalman.checked = ov.showKalman;
+      }
+      if (dom.chkCovEllipses && dom.chkCovEllipses.checked !== ov.showCovEllipses) {
+        dom.chkCovEllipses.checked = ov.showCovEllipses;
       }
       if (dom.fieldOverlayModeSelect && dom.fieldOverlayModeSelect.value !== String(ov.fieldOverlayMode)) {
         dom.fieldOverlayModeSelect.value = String(ov.fieldOverlayMode);
@@ -4390,6 +4577,7 @@
       }
       queuedPendingFrame = null;
       workerFrameBusy = false;
+      activeCaptureToken++;
       bitmapCaptureBusy = false;
     }
 
@@ -4397,6 +4585,8 @@
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
+      lastPresentedFrames = -1;
+      pendingVideoGapMask = 0;
       lastPumpPerfMs = 0;
       pumpDroppedFrames = 0;
       flushPendingQueue();
@@ -4429,83 +4619,230 @@
     function dispatchBitmapFrameToWorker(item) {
       if (!item || item.epoch !== sourceEpoch) {
         if (item && item.bitmap && typeof item.bitmap.close === 'function') item.bitmap.close();
-        return;
+        return false;
       }
       if (!workerFrameBusy) {
         workerFrameBusy = true;
-        worker.postMessage(
-          {
-            type: 'video_frame',
-            epoch: item.epoch,
-            seq: item.seq,
-            bitmap: item.bitmap,
-            dtSec: item.dtSec,
-            mediaTimeSec: item.mediaTimeSec,
-          },
-          [item.bitmap]
-        );
+        try {
+          worker.postMessage(
+            {
+              type: 'video_frame',
+              epoch: item.epoch,
+              seq: item.seq,
+              bitmap: item.bitmap,
+              dtSec: item.dtSec,
+              mediaTimeSec: item.mediaTimeSec,
+              tSrcUs: item.tSrcUs,
+              captureAgeMs: item.captureAgeMs,
+              enqueuedEpochMs: item.enqueuedEpochMs,
+              gapMask: item.gapMask,
+              geom: item.geom,
+            },
+            [item.bitmap]
+          );
+          return true;
+        } catch (_postErr) {
+          workerFrameBusy = false;
+          if (item.bitmap && typeof item.bitmap.close === 'function') item.bitmap.close();
+          pendingVideoGapMask = (pendingVideoGapMask | (item.gapMask || 0) | 1) & 0x3f;
+          return false;
+        }
       } else {
-        if (queuedPendingFrame && queuedPendingFrame.bitmap) {
-          queuedPendingFrame.bitmap.close();
+        if (queuedPendingFrame) {
+          item.gapMask = ((item.gapMask || 0) | (queuedPendingFrame.gapMask || 0) | 1) & 0x3f;
+          if (queuedPendingFrame.bitmap && typeof queuedPendingFrame.bitmap.close === 'function') {
+            queuedPendingFrame.bitmap.close();
+          }
           pumpDroppedFrames++;
         }
         queuedPendingFrame = item;
+        return true;
       }
     }
 
-    async function captureAndSendCurrentVideoFrame(dtSec, mediaTimeSec, expectedEpoch = sourceEpoch) {
-      if (videoEl.readyState < 2 || bitmapCaptureBusy || expectedEpoch !== sourceEpoch) return;
+    async function captureAndSendCurrentVideoFrame(
+      dtSec,
+      mediaTimeSec,
+      expectedEpoch = sourceEpoch,
+      metaExtras = null
+    ) {
+      const extras = metaExtras || {};
+      const incomingGap = (extras.gapMask || 0) & 0x3f;
+      if (videoEl.readyState < 2 || bitmapCaptureBusy || expectedEpoch !== sourceEpoch) {
+        if (expectedEpoch === sourceEpoch) {
+          const busyDropBit = bitmapCaptureBusy && videoEl.readyState >= 2 ? 1 : 0;
+          const missedMask = (incomingGap | busyDropBit) & 0x3f;
+          if (missedMask !== 0) {
+            pendingVideoGapMask = (pendingVideoGapMask | missedMask) & 0x3f;
+          }
+        }
+        return false;
+      }
       bitmapCaptureBusy = true;
+      const myCaptureToken = ++bitmapCaptureToken;
+      activeCaptureToken = myCaptureToken;
+      const effectiveGapMask = (pendingVideoGapMask | incomingGap) & 0x3f;
+      pendingVideoGapMask = 0;
       const seq = ++frameSeq;
+      const enqueuedEpochMs = performance.timeOrigin + performance.now();
+      const tSrcUs = Number.isFinite(extras.tSrcUs) && extras.tSrcUs >= 0
+        ? Math.round(extras.tSrcUs)
+        : (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0
+            ? Math.round(mediaTimeSec * 1_000_000)
+            : null);
+      const srcW = Math.max(0, Math.trunc(videoEl.videoWidth || 0));
+      const srcH = Math.max(0, Math.trunc(videoEl.videoHeight || 0));
+      const certifyVideo1to1 = (sampleW, sampleH) => {
+        if (extras.sar1to1 === true) return true;
+        if (typeof VideoFrame !== 'function') return false;
+        let vf = null;
+        try {
+          vf = new VideoFrame(videoEl);
+          return Boolean(
+            vf?.visibleRect?.width > 0 &&
+            vf.displayWidth === vf.visibleRect.width &&
+            vf.displayHeight === vf.visibleRect.height &&
+            sampleW === vf.visibleRect.width &&
+            sampleH === vf.visibleRect.height
+          );
+        } catch (_vfErr) {
+          return false;
+        } finally {
+          if (vf && typeof vf.close === 'function') {
+            vf.close();
+          }
+        }
+      };
+      const commitCaptureMetadata = () => {
+        if (typeof extras.presentedFrames === 'number' && Number.isFinite(extras.presentedFrames) && extras.presentedFrames >= 0) {
+          lastPresentedFrames = extras.presentedFrames;
+        }
+        if (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0) {
+          lastMediaTime = mediaTimeSec;
+        }
+        if (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0) {
+          lastPumpPerfMs = extras.nowPerfMs;
+        }
+      };
+      let dispatched = false;
       try {
         const bitmap = await createImageBitmap(videoEl);
         if (expectedEpoch !== sourceEpoch) {
           bitmap.close();
-          return;
+          return false;
         }
-        dispatchBitmapFrameToWorker({
+        const preScaledFrame = !certifyVideo1to1(bitmap.width, bitmap.height);
+        dispatched = dispatchBitmapFrameToWorker({
           epoch: expectedEpoch,
           seq,
           bitmap,
           dtSec,
           mediaTimeSec,
+          tSrcUs,
+          captureAgeMs: typeof extras.captureAgeMs === 'number' ? extras.captureAgeMs : -1.0,
+          enqueuedEpochMs,
+          gapMask: effectiveGapMask,
+          geom: extras.geom || {
+            visibleRect: {
+              x: 0,
+              y: 0,
+              width: Math.max(1, bitmap.width || srcW || activeFrameW),
+              height: Math.max(1, bitmap.height || srcH || activeFrameH),
+            },
+            preScaled: preScaledFrame,
+          },
         });
+        if (dispatched) {
+          commitCaptureMetadata();
+        } else if (expectedEpoch === sourceEpoch) {
+          pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
+        }
+        return dispatched;
       } catch (_err) {
         if (expectedEpoch === sourceEpoch && !workerFrameBusy) {
           try {
-            if (fallbackCapCanvas.width !== activeFrameW || fallbackCapCanvas.height !== activeFrameH) {
-              fallbackCapCanvas.width = activeFrameW;
-              fallbackCapCanvas.height = activeFrameH;
+            const capW = srcW > 0 ? srcW : activeFrameW;
+            const capH = srcH > 0 ? srcH : activeFrameH;
+            const fallbackPreScaled = srcW <= 0 || srcH <= 0 || !certifyVideo1to1(capW, capH);
+            if (fallbackCapCanvas.width !== capW || fallbackCapCanvas.height !== capH) {
+              fallbackCapCanvas.width = capW;
+              fallbackCapCanvas.height = capH;
             }
-            fallbackCapCtx.drawImage(videoEl, 0, 0, activeFrameW, activeFrameH);
-            const img = fallbackCapCtx.getImageData(0, 0, activeFrameW, activeFrameH);
+            fallbackCapCtx.imageSmoothingEnabled = false;
+            fallbackCapCtx.drawImage(videoEl, 0, 0, capW, capH);
+            const img = fallbackCapCtx.getImageData(0, 0, capW, capH);
             const copy = new Uint8Array(img.data);
-            worker.postMessage(
-              { type: 'video_rgba', buffer: copy.buffer, dtSec, mediaTimeSec },
-              [copy.buffer]
-            );
+            workerFrameBusy = true;
+            try {
+              worker.postMessage(
+                {
+                  type: 'video_rgba',
+                  epoch: expectedEpoch,
+                  seq,
+                  buffer: copy.buffer,
+                  dtSec,
+                  mediaTimeSec,
+                  tSrcUs,
+                  captureAgeMs: typeof extras.captureAgeMs === 'number' ? extras.captureAgeMs : -1.0,
+                  enqueuedEpochMs,
+                  gapMask: effectiveGapMask,
+                  fallbackScaled: fallbackPreScaled,
+                  geom: extras.geom || {
+                    srcW: capW,
+                    srcH: capH,
+                    preScaled: fallbackPreScaled,
+                  },
+                },
+                [copy.buffer]
+              );
+              commitCaptureMetadata();
+              dispatched = true;
+              return true;
+            } catch (_postErr) {
+              workerFrameBusy = false;
+              pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
+            }
           } catch (_fallbackErr) {
-            // Ignore transient decode or CORS probe race
+            pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
           }
+        } else if (expectedEpoch === sourceEpoch) {
+          pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
         }
+        return dispatched;
       } finally {
-        bitmapCaptureBusy = false;
+        if (activeCaptureToken === myCaptureToken) {
+          bitmapCaptureBusy = false;
+        }
       }
     }
 
-    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs, pumpEpoch) {
+    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs, pumpEpoch, rVfcMeta = null) {
       if (!videoPumpActive || pumpEpoch !== sourceEpoch || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
-        return;
+        return false;
       }
       const hasValidPts = Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0;
-      if (hasValidPts && mediaTimeSec === lastMediaTime && (activeSourceMode === 'video' || activeSourceMode === 'live')) {
-        return;
+      const hasPresented = rVfcMeta && typeof rVfcMeta.presentedFrames === 'number' && Number.isFinite(rVfcMeta.presentedFrames);
+      const presentedNow = hasPresented ? rVfcMeta.presentedFrames : -1;
+      if (hasPresented) {
+        if (lastPresentedFrames >= 0 && presentedNow === lastPresentedFrames) {
+          return false;
+        }
+      } else if (hasValidPts && mediaTimeSec === lastMediaTime && (activeSourceMode === 'video' || activeSourceMode === 'live')) {
+        return false;
+      }
+
+      let gapMask = 0;
+      if (hasPresented && lastPresentedFrames >= 0 && presentedNow > lastPresentedFrames + 1) {
+        gapMask |= 1; // FRAME_GAP_SEQ
       }
 
       // Detect <video loop> wrap-around or any backward seek (> 1 ms reversal) so tracks and PTS clocks reset cleanly
       if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 1e-3 < lastMediaTime) {
+        gapMask |= 8; // FRAME_GAP_SEEK_RESTART
         worker.postMessage({ type: 'lab_action', action: 'reset' });
         lastMediaTime = -1;
+        lastPresentedFrames = -1;
+        pendingVideoGapMask = 0;
         lastPumpPerfMs = 0;
       }
 
@@ -4518,8 +4855,17 @@
         const rawPerfDt = (nowPerfMs - lastPumpPerfMs) * 0.001;
         dtSec = rawPerfDt > 0.5 ? nomDt : Math.max(0.002, rawPerfDt);
       }
-      if (hasValidPts) lastMediaTime = mediaTimeSec;
-      lastPumpPerfMs = nowPerfMs;
+
+      let captureAgeMs = -1.0;
+      if (
+        rVfcMeta &&
+        typeof rVfcMeta.captureTime === 'number' &&
+        Number.isFinite(rVfcMeta.captureTime) &&
+        rVfcMeta.captureTime > 0 &&
+        nowPerfMs >= rVfcMeta.captureTime
+      ) {
+        captureAgeMs = nowPerfMs - rVfcMeta.captureTime;
+      }
 
       // Live MSE edge maintenance: preserve multi-segment HLS cushion (~10-22s) while bounding extreme drift (>35s)
       if (activeSourceMode === 'live' && activeMseMediaSource && videoEl.buffered.length > 0) {
@@ -4530,27 +4876,35 @@
       }
 
       updateVideoTimeLabel();
-      await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch);
+      return await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch, {
+        captureAgeMs,
+        gapMask,
+        presentedFrames: hasPresented ? presentedNow : -1,
+        nowPerfMs,
+      });
     }
 
     function startVideoPump() {
       videoPumpActive = true;
       lastMediaTime = -1;
+      lastPresentedFrames = -1;
+      pendingVideoGapMask = 0;
       lastPumpPerfMs = 0;
+      pumpStartPerfMs = performance.now();
       const myEpoch = sourceEpoch;
 
       if (typeof videoEl.requestVideoFrameCallback === 'function') {
         const onVideoFrame = (now, metadata) => {
           if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           videoEl.requestVideoFrameCallback(onVideoFrame);
-          forwardUniqueVideoFrame(metadata.mediaTime, now, myEpoch);
+          forwardUniqueVideoFrame(metadata.mediaTime, now, myEpoch, metadata);
         };
         videoEl.requestVideoFrameCallback(onVideoFrame);
       } else {
         const onRafFallback = (now) => {
           if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           requestAnimationFrame(onRafFallback);
-          forwardUniqueVideoFrame(videoEl.currentTime, now, myEpoch);
+          forwardUniqueVideoFrame(videoEl.currentTime, now, myEpoch, null);
         };
         requestAnimationFrame(onRafFallback);
       }
@@ -5023,9 +5377,146 @@
       });
     }
 
+    function updateWave1DomUi(m) {
+      const w1 = m.wave1;
+      const roi = m.roi;
+      const bos = m.bos;
+      const met = m.metrology;
+      window.__chronosLastWave1Snap = {
+        frameIdx: m.frameIdx,
+        activeTargets: m.activeTargets,
+        wave1: w1,
+        roi,
+        bos,
+        metrology: met,
+      };
+
+      if (roi && dom.roiGeomMeta) {
+        const roiTxt = roi.native1to1Active
+          ? `1:1 NATIVE (${roi.cropX0},${roi.cropY0} ${roi.cropW}x${roi.cropH})`
+          : (roi.fallbackScale ? 'FALLBACK RESCALE (SRC < ROI)' : `FIT ${roi.cropW}x${roi.cropH}->${roi.engineW}x${roi.engineH}`);
+        setTextIfChanged(dom.roiGeomMeta, roiTxt);
+        if (dom.valRoiX0 && dom.rangeRoiX0) {
+          const pctX = Math.round(Number(dom.rangeRoiX0.value) || 0);
+          setTextIfChanged(dom.valRoiX0, `${pctX}% (${roi.cropX0} px)`);
+        }
+        if (dom.valRoiY0 && dom.rangeRoiY0) {
+          const pctY = Math.round(Number(dom.rangeRoiY0.value) || 0);
+          setTextIfChanged(dom.valRoiY0, `${pctY}% (${roi.cropY0} px)`);
+        }
+        setTextIfChanged(dom.diagRoiGeom, roiTxt);
+      }
+
+      if (w1 && w1.available) {
+        const dm = w1.dispMeta;
+        const gapTag = dm && dm.frameGapFlag !== 0 && dm.gapLabels && dm.gapLabels.length
+          ? dm.gapLabels.join('|')
+          : 'OK';
+        const seqTxt = dm ? `${dm.sourceEpoch}:${dm.sourceSeq}` : `0:${m.frameIdx || 0}`;
+        setTextIfChanged(
+          dom.diagWave1Ingest,
+          `EP ${w1.continuityEpoch} · ${seqTxt} · ${gapTag} · ${w1.totalCommits}c`
+        );
+        const st = w1.stamps || {};
+        const sc = (s) => (!s || !s.valid ? '-' : (s.held ? 'H' : 'V'));
+        const stampTxt = `${sc(st.micro)}${sc(st.grad)}${sc(st.ftle)}${sc(st.modalField)}${sc(st.heroPhysics)}${sc(st.bos)} · ${w1.validRowCount}r`;
+        setTextIfChanged(dom.diagWave1Stamps, stampTxt);
+      }
+
+      if (bos && dom.diagBosState) {
+        const bosResTxt = bos.available && bos.state === 2
+          ? `READY · ${bos.validDisp}/8192 · ${bos.pcgIters}it · res ${bos.trueRelRes.toExponential(1)}`
+          : bos.available && bos.state === 3
+          ? `DISTURBED · ${(bos.reasonFlags || []).slice(0, 3).join('+') || 'MOTION'}`
+          : bos.available && bos.state === 1
+          ? `WARMING ${bos.warmupCnt}/16`
+          : (bos.available ? 'OFF' : 'STANDBY');
+        setTextIfChanged(dom.diagBosState, bosResTxt);
+      }
+
+      if (met && dom.diagMetrologyCov) {
+        const covTxt = met.available
+          ? `${met.usableCovCount} usable · ${met.loomRejectedCount} loom · ${met.promotedCandidates} cand`
+          : 'STANDBY';
+        setTextIfChanged(dom.diagMetrologyCov, covTxt);
+      }
+
+      if (dom.acquisitionStatusBanner) {
+        let severity = 'info';
+        let bannerTxt = 'ACQUISITION STEADY · MONOTONIC PTS & 100% RING COMMIT';
+        const dm = w1 && w1.dispMeta;
+        const bosActive = bos && bos.available && bos.reqMode > 0;
+        if (bosActive && bos.state === 3) {
+          severity = 'danger';
+          const reasons = (bos.reasonFlags || []).join(', ') || 'CAMERA MOTION';
+          bannerTxt = `⚠ TRIPOD FAILURE / DISTURBED (${reasons}) · SHIFT (${bos.shiftX.toFixed(2)}, ${bos.shiftY.toFixed(2)}) px · REF INVALIDATED`;
+        } else if (dm && dm.frameGapFlag !== 0) {
+          severity = 'warn';
+          bannerTxt = `⚠ ACQUISITION GAP [${(dm.gapLabels || []).join('+')}] · EP ${w1.continuityEpoch} · PTS MONOTONIC GUARD`;
+        } else if (roi && roi.fallbackScale) {
+          severity = 'warn';
+          bannerTxt = `⚠ NATIVE 1:1 UNAVAILABLE (${roi.srcW}x${roi.srcH} < ${roi.engineW}x${roi.engineH}) · RESCALED`;
+        } else if (bosActive && bos.state === 2) {
+          severity = 'ok';
+          bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/8192 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
+        } else if (bosActive && bos.state === 1) {
+          severity = 'info';
+          bannerTxt = `BOS REFERENCE WARMING (${bos.warmupCnt}/16) · KEEP CAMERA STATIC ON TRIPOD`;
+        } else if (roi && roi.native1to1Active) {
+          severity = 'ok';
+          bannerTxt = `◆ NATIVE 1:1 ROI (${roi.cropX0},${roi.cropY0} ${roi.cropW}x${roi.cropH}) · ZERO IMPLICIT RESCALE`;
+        }
+        if (dom.acquisitionStatusBanner.dataset.severity !== severity) {
+          dom.acquisitionStatusBanner.dataset.severity = severity;
+        }
+        setTextIfChanged(dom.acquisitionStatusBanner, bannerTxt);
+      }
+    }
+
+    let lastWorkerAckOrReject = null;
+    let pendingWorkerAckWaiter = null;
+    window.__chronosWave1Probe = {
+      postWorkerMsg: (payload, transfers = []) => {
+        worker.postMessage(payload, transfers);
+      },
+      submitTestFrame: (payload, transfers = []) => new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingWorkerAckWaiter = null;
+          resolve({ timeout: true });
+        }, 4000);
+        pendingWorkerAckWaiter = (msg) => {
+          clearTimeout(timer);
+          resolve(msg);
+        };
+        worker.postMessage(payload, transfers);
+      }),
+      getBusyState: () => ({ workerFrameBusy, bitmapCaptureBusy, lastPresentedFrames, pendingVideoGapMask, sourceEpoch, frameSeq, lastWorkerAckOrReject }),
+      dispatchBitmapFrame: (item) => dispatchBitmapFrameToWorker(item),
+      forwardVideoFrameForTest: (mt, perfMs, rVfcMeta) => forwardUniqueVideoFrame(mt, perfMs, sourceEpoch, rVfcMeta),
+      setCaptureBusyForTest: (busy) => {
+        if (busy) activeCaptureToken = ++bitmapCaptureToken;
+        bitmapCaptureBusy = Boolean(busy);
+      },
+      simulateEpochFlushForTest: () => {
+        sourceEpoch++;
+        lastMediaTime = -1;
+        lastPresentedFrames = -1;
+        pendingVideoGapMask = 0;
+        flushPendingQueue();
+        return sourceEpoch;
+      },
+      getLastWave1: () => window.__chronosLastWave1Snap || null,
+    };
+
     worker.onmessage = (ev) => {
       const m = ev.data;
-      if (m.type === 'frame_ack') {
+      if (m.type === 'frame_ack' || m.type === 'ingest_rejected') {
+        lastWorkerAckOrReject = { ...m };
+        if (pendingWorkerAckWaiter) {
+          const cb = pendingWorkerAckWaiter;
+          pendingWorkerAckWaiter = null;
+          cb(m);
+        }
         if (m.epoch === sourceEpoch) {
           workerFrameBusy = false;
           if (queuedPendingFrame) {
@@ -5037,6 +5528,7 @@
         return;
       }
       if (m.type === 'ready') {
+        workerKernelReady = true;
         dom.pillKernel.textContent = '◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
         dom.pillArena.textContent = `ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
@@ -5050,7 +5542,9 @@
         }
         if (activeSurface === 'showcase' && !initialShowcaseBooted) {
           initialShowcaseBooted = true;
-          activateHeroScene('starling_1000');
+          const targetScene = pendingHeroSceneBeforeReady || 'starling_1000';
+          pendingHeroSceneBeforeReady = null;
+          activateHeroScene(targetScene);
         }
       } else if (m.type === 'init_error') {
         dom.pillKernel.textContent = '⚠ KERNEL INIT FAILED';
@@ -5299,6 +5793,7 @@
 
         updateSlotRosterUi(m.slotRoster);
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+        updateWave1DomUi(m);
         if (activeSurface === 'showcase' && typeof updateShowcaseProofCards === 'function') {
           updateShowcaseProofCards(m, medMs);
         }
@@ -5371,10 +5866,76 @@
 
     if (dom.fieldOverlayModeSelect) {
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
-        const om = Math.max(0, Math.min(4, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        const om = Math.max(0, Math.min(7, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
+        if (om >= 5 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
+          dom.bosModeSelect.value = '1';
+          worker.postMessage({ type: 'set_bos_config', bosMode: 1, overlayKind: om - 5, gaugeRoi: [4, 4, 18, 60] });
+        }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
+    }
+
+    if (dom.bosModeSelect) {
+      dom.bosModeSelect.addEventListener('change', () => {
+        const bm = Math.max(0, Math.min(2, parseInt(dom.bosModeSelect.value || '0', 10) || 0));
+        const om = dom.fieldOverlayModeSelect ? (parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0) : 0;
+        const okind = om >= 5 && om <= 7 ? om - 5 : 0;
+        const payload = { type: 'set_bos_config', bosMode: bm, overlayKind: okind };
+        if (bm > 0) payload.gaugeRoi = [4, 4, 18, 60];
+        worker.postMessage(payload);
+      });
+    }
+
+    if (dom.metrologyModeSelect) {
+      dom.metrologyModeSelect.addEventListener('change', () => {
+        const mm = Math.max(0, Math.min(2, parseInt(dom.metrologyModeSelect.value || '0', 10) || 0));
+        const showEll = mm > 0 && dom.chkCovEllipses ? dom.chkCovEllipses.checked : false;
+        worker.postMessage({ type: 'set_metrology_config', metrologyMode: mm, showCovEllipses: showEll });
+      });
+    }
+
+    if (dom.chkCovEllipses) {
+      dom.chkCovEllipses.addEventListener('change', (e) => {
+        const on = Boolean(e.target.checked);
+        dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: on });
+        if (on && dom.metrologyModeSelect && dom.metrologyModeSelect.value === '0') {
+          dom.metrologyModeSelect.value = '2';
+          worker.postMessage({ type: 'set_metrology_config', metrologyMode: 2, showCovEllipses: true });
+        } else {
+          worker.postMessage({ type: 'set_metrology_config', showCovEllipses: on });
+        }
+      });
+    }
+
+    function sendRoiControlToWorker() {
+      const n1 = Boolean(dom.chkNativeRoi && dom.chkNativeRoi.checked);
+      const xPct = dom.rangeRoiX0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiX0.value) || 0)) : 50;
+      const yPct = dom.rangeRoiY0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiY0.value) || 0)) : 50;
+      if (dom.rangeRoiX0) {
+        dom.rangeRoiX0.setAttribute('aria-valuetext', `${xPct}% horizontal crop offset`);
+        syncRangeFallbackProgress(dom.rangeRoiX0);
+      }
+      if (dom.rangeRoiY0) {
+        dom.rangeRoiY0.setAttribute('aria-valuetext', `${yPct}% vertical crop offset`);
+        syncRangeFallbackProgress(dom.rangeRoiY0);
+      }
+      worker.postMessage({
+        type: 'set_roi',
+        native1to1: n1,
+        normX: xPct / 100.0,
+        normY: yPct / 100.0,
+      });
+    }
+
+    if (dom.chkNativeRoi) {
+      dom.chkNativeRoi.addEventListener('change', sendRoiControlToWorker);
+    }
+    if (dom.rangeRoiX0) {
+      dom.rangeRoiX0.addEventListener('input', sendRoiControlToWorker);
+    }
+    if (dom.rangeRoiY0) {
+      dom.rangeRoiY0.addEventListener('input', sendRoiControlToWorker);
     }
 
     function syncSwarmControlsForConfig(resTarget, swarmTarget, overlayTarget, postSwarmMode = false) {
@@ -6134,8 +6695,22 @@
       setTextIfChanged(dom.scSubKernel, `2.13 MiB · 0 heap allocs · ${m.resMode ? '640×360 HD' : '320×180 SD'}`);
 
       const c1k = m.chronos1000;
+      const bos = m.bos;
       const shownSwaps = m.sourceMode === 'testbench' ? (m.oracleSwaps ?? 0) : (m.padicSwaps ?? 0);
-      if (c1k && c1k.swarmActive) {
+      if (bos && bos.available && bos.reqMode > 0) {
+        const usable = m.metrology ? m.metrology.usableCovCount : 0;
+        const heroCands = m.metrology ? m.metrology.promotedCandidates : 0;
+        setTextIfChanged(dom.scValTracks, `BOS ${bos.stateLabel} · ${bos.validDisp}/8192 cells`);
+        setTextIfChanged(dom.scSubTracks, `${usable} 2x2 cov · ${heroCands} hero promo · 1:1 ${m.roi && m.roi.native1to1Active ? 'ON' : 'OFF'}`);
+        const bosStat = bos.state === 3
+          ? `TRIPOD DISTURBED (${(bos.reasonFlags || []).slice(0, 2).join('+') || 'MOTION'})`
+          : bos.state === 2
+          ? `RMS ${bos.rmsDisp.toFixed(3)} px · curl ${bos.curlRms.toFixed(3)}`
+          : `WARM ${bos.warmupCnt}/16 frames`;
+        setTextIfChanged(dom.scValPhysics, bosStat);
+        setTextIfChanged(dom.scSubPhysics, `Neumann Phi · PCG ${bos.pcgIters} iters · res ${bos.trueRelRes.toExponential(1)}`);
+        setTextIfChanged(dom.scValInspect, m.roi && m.roi.native1to1Active ? `1:1 Native ROI (${m.roi.cropW}x${m.roi.cropH})` : 'Click canvas to inspect micro-track');
+      } else if (c1k && c1k.swarmActive) {
         setTextIfChanged(dom.scValTracks, `${fmtIntOrDash(c1k.confirmedCount)} active (peak ${fmtIntOrDash(c1k.peakSimultaneous)})`);
         setTextIfChanged(dom.scSubTracks, `unique ${fmtIntOrDash(c1k.uniqueTracks)} · coast ${fmtIntOrDash(c1k.coastingCount)} · IDSW ${shownSwaps}`);
         const hasFtle = Number.isFinite(c1k.maxFtleS1) && c1k.maxFtleS1 > -900.0;
@@ -6258,8 +6833,11 @@
       chaos_pendulum: { url: './samples/chaotic_magnetic_pendulum.mp4', cal: 'preset' },
       coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
       newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
-      starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1 },
-      vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2 },
+      starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
+      bos_plume: { url: './samples/bos_thermal_plume.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      bos_handheld_failure: { url: './samples/bos_handheld_failure.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      perspective_flyby_decoy: { url: './samples/perspective_flyby_decoy.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 0, bosMode: 0, native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
       juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
       gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
       galileo: { url: './samples/galileo_pendulum_peg.mp4', cal: 'preset' },
@@ -6269,6 +6847,28 @@
 
     let pendingShowcaseCal = '';
 
+    function applyWave1PresetToUiAndWorker(cfg) {
+      const nextBosMode = cfg && typeof cfg.bosMode === 'number' ? cfg.bosMode : 0;
+      const nextMetMode = cfg && typeof cfg.metrologyMode === 'number' ? cfg.metrologyMode : 0;
+      const nextShowCov = Boolean(cfg && cfg.showCovEllipses);
+      const nextNativeRoi = Boolean(cfg && cfg.native1to1);
+      if (dom.bosModeSelect) dom.bosModeSelect.value = String(nextBosMode);
+      if (dom.metrologyModeSelect) dom.metrologyModeSelect.value = String(nextMetMode);
+      if (dom.chkNativeRoi) dom.chkNativeRoi.checked = nextNativeRoi;
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: nextShowCov });
+      worker.postMessage({
+        type: 'set_bos_config',
+        bosMode: nextBosMode,
+        overlayKind: cfg && typeof cfg.overlayMode === 'number' && cfg.overlayMode >= 5 ? cfg.overlayMode - 5 : 0,
+        gaugeRoi: cfg && Array.isArray(cfg.bosGauge) ? cfg.bosGauge : [0, 0, 0, 0],
+        resetRef: nextBosMode > 0,
+      });
+      worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
+      worker.postMessage({ type: 'set_roi', native1to1: nextNativeRoi });
+    }
+
+    let pendingShowcaseEntryActive = false;
+
     sampleVideoSelect.addEventListener('change', async () => {
       const url = sampleVideoSelect.value;
       const selOpt = sampleVideoSelect.selectedOptions[0];
@@ -6276,6 +6876,14 @@
       if (url && Number.isFinite(reqSwarm)) {
         syncSwarmControlsForConfig(1, reqSwarm, undefined, false);
       }
+      if (!pendingShowcaseEntryActive && url) {
+        const matchedEntry = Object.values(showcaseClipMap).find((c) => c && c.url === url) || {};
+        if (typeof matchedEntry.overlayMode === 'number') {
+          syncSwarmControlsForConfig(matchedEntry.resMode ?? 1, matchedEntry.swarmMode ?? reqSwarm, matchedEntry.overlayMode, false);
+        }
+        applyWave1PresetToUiAndWorker(matchedEntry);
+      }
+      pendingShowcaseEntryActive = false;
       const queuedCal = pendingShowcaseCal;
       pendingShowcaseCal = '';
       if (!url) return;
@@ -6378,6 +6986,7 @@
       }
       const cfg = showcaseClipMap[key];
       if (!cfg) return;
+      applyWave1PresetToUiAndWorker(cfg);
       if (cfg.benchScenario) {
         stopMediaCapture();
         sampleVideoSelect.value = '';
@@ -6393,17 +7002,24 @@
         syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
       }
       pendingShowcaseCal = cfg.cal;
+      pendingShowcaseEntryActive = true;
       sampleVideoSelect.value = cfg.url;
       sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function activateHeroScene(sceneKey) {
       if (sceneKey !== 'live_i80' && !showcaseClipMap[sceneKey]) return;
+      if (!workerKernelReady && activeSurface === 'showcase') {
+        pendingHeroSceneBeforeReady = sceneKey;
+        setHeroScenePressed(sceneKey);
+        return;
+      }
+      initialShowcaseBooted = true;
       showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
       setHeroScenePressed(sceneKey);
       const curWipe = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 0;
       const keepWipe = curWipe > 0 && curWipe < 100;
-      if (sceneKey === 'starling_1000') {
+      if (sceneKey === 'starling_1000' || sceneKey === 'bos_plume') {
         setShowcaseWipePercent(keepWipe ? curWipe : 28);
         setHeroTargetsVisible(false);
       } else {
@@ -6788,7 +7404,7 @@
       }
     }
 
-    [sliderK, sliderEca, sliderLambda, sliderGain].forEach(syncRangeFallbackProgress);
+    [sliderK, sliderEca, sliderLambda, sliderGain, dom.rangeRoiX0, dom.rangeRoiY0].filter(Boolean).forEach(syncRangeFallbackProgress);
 
     sliderK.addEventListener('input', () => {
       const k = parseInt(sliderK.value, 10);

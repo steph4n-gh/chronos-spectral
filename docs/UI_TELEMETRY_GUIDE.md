@@ -1,6 +1,6 @@
 # CHRONOS-SPECTRAL UI and telemetry guide
 
-This reference documents every UI panel, `OffscreenCanvas` visualization, dynamic KPI state transition, calibration rule, WebAudio synthesizer voice, and exported telemetry field in the CHRONOS-SPECTRAL Command Deck ([web/index.html](../web/index.html), [web/worker.js](../web/worker.js), [src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs), [src/soa_tracks.rs](../src/soa_tracks.rs), and [src/continuum_physics.rs](../src/continuum_physics.rs)).
+This reference documents every UI panel, `OffscreenCanvas` visualization, dynamic KPI state transition, calibration rule, WebAudio synthesizer voice, and exported telemetry field in the CHRONOS-SPECTRAL Command Deck and Showcase ([web/index.html](../web/index.html), [web/worker.js](../web/worker.js), [src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs), [src/soa_tracks.rs](../src/soa_tracks.rs), [src/continuum_physics.rs](../src/continuum_physics.rs), [src/bos.rs](../src/bos.rs), and [docs/ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)).
 
 Each entry documents:
 1. **What it is:** Exact UI label, DOM `#id` or CSS/canvas component, and source file.
@@ -15,7 +15,7 @@ Each entry documents:
 
 ```mermaid
 flowchart TB
-  WASM["Rust Wasm SIMD128 Kernel (src/lib.rs, physics_id.rs, soa_tracks.rs, continuum_physics.rs)\n320 Pages / 20.00 MB Static Arena\nrgba_ring[0..11] + telemetry[0..1567] + swarm_telem[0..63]"] --> WORKER["Web Worker Isolate (web/worker.js)\nLanczos Fiedler + DLT Homography + 18,000x56 Recorder"]
+  WASM["Rust Wasm SIMD128 Kernel (src/lib.rs, physics_id.rs, soa_tracks.rs, continuum_physics.rs, bos.rs)\n448 Pages / 28.00 MB Static Arena\nrgba_ring[0..11] + ring_meta[0..11] + wave1_telem[0..191] + bos_telem[0..31] + telemetry[0..1567] + swarm_telem[0..63]"] --> WORKER["Web Worker Isolate (web/worker.js)\nLanczos Fiedler + DLT Homography + 18,000x56 Recorder"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| HUD["Region 2A: #hudCanvas (960x540) + WebGL2 Field Layer"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| PIP["Region 2B: #pipCanvas (412x234)"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| ROSTERCANVAS["Region 2C: 16x .slot-pip-canvas (276x148)"]
@@ -40,7 +40,7 @@ Two architectural principles govern almost every indicator on the deck:
 
 ## Region 1: Top system telemetry header
 
-![Top command bar showing SIMD128 badge, zero-import check, 320-page arena size, kernel latency, FPS, and camera lock state](./assets/panels/02_header_telemetry.png)
+![Top command bar showing SIMD128 badge, zero-import check, 448-page arena size, kernel latency, FPS, and camera lock state](./assets/panels/02_header_telemetry.png)
 
 Source: `header.deck-header` ([web/index.html](../web/index.html)).
 
@@ -48,7 +48,7 @@ Source: `header.deck-header` ([web/index.html](../web/index.html)).
 | :--- | :--- | :--- | :--- |
 | `.brand-badge` | `WASM32 + SIMD128` | Static target architecture indicator. | Confirms the compute kernel executes packed `v128` SIMD instructions in `wasm32`. |
 | `#pillKernel` | `◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS` | Wasm instantiation status (`ready`, `init_error`, worker `error`). | Verifies the Rust module loaded with zero host imports and zero heap allocator calls; surfaces failures immediately. |
-| `#pillArena` | `ARENA: 320 PAGES / 20.00 MB` | Fixed `WebAssembly.Memory` capacity (`telemetry[20]` = `sizeof(Arena)` and `byteLength / 65536`). | Verifies static memory discipline across `SD` (`320x180`) and `HD` (`640x360`) resolution toggles with zero `memory.grow` leaks. |
+| `#pillArena` | `ARENA: 448 PAGES / 28.00 MB` | Fixed `WebAssembly.Memory` capacity (`telemetry[20]` = `sizeof(Arena) <= 20,702,240 B`, `wave1_telem[12]` = `__heap_base <= 20,833,312 B`, and `byteLength / 65536 = 448`). | Verifies static memory discipline across `SD` (`320x180`) and `HD` (`640x360`) resolution toggles with zero `memory.grow` leaks. |
 | `#pillPerf` | `◆ KERNEL: 0.700 ms` | 120-frame rolling median tick latency (`wasmMedianMs`, [web/worker.js](../web/worker.js)) covering `chronos_pre_tick`, Lanczos Fiedler, and `chronos_post_tick`. | Flags `▲` warn above per-frame compute budgets (`0.35 ms` SD / `1.00 ms` HD testbench; `0.75 ms` SD / `2.20 ms` HD real video). |
 | `#pillFps` | `FPS: 25` | Smoothed ingest frame rate (`sourceFps` EMA over incoming `dtSec`, or `60` on testbench). | Confirms `requestVideoFrameCallback` delivers unique decoded frames at native cadence rather than duplicate RAF polls. |
 | `#pillStreamHealth` | `◆ CAM LOCKED · LAG 320ms · DROP 0` | Live camera state (`telemetry[1257]`: `0` locked, `1` PTZ pan `telemetry[1258]`, `2` scene cut), buffered lookahead lag `telemetry[1256]` (`disp_lag_ms`), and JS `pumpDroppedFrames` (hidden in `testbench`). | Separates true object motion from panning cameras (`▲ PTZ PAN`) or cuts (`▲ CUT RESET`) and alerts on worker backpressure drops. |
@@ -245,7 +245,10 @@ Source: `#continuumFieldPanel` ([web/index.html](../web/index.html)), [src/soa_t
 | `#continuumPanelHeading` | Section `<h2>` title | Labels panel (`Continuum & Swarm Field`). |
 | `#continuumSummaryMeta` | Status pill (`aria-live="off"`) | Transitions across `SWARM: OFF · HERO 16`, `SWARM: AUTO STANDBY`, `SWARM: FORCED WAIT`, and `SWARM: ACTIVE · WEBGL2` (or `CANVAS2D`). |
 | `#swarmModeSelect` | `<select>` (`set_swarm_mode`) | `0` = Off (default), `1` = Auto-Density (Coarse Gate), `2` = Forced Active (`1,000+` targets). |
-| `#fieldOverlayModeSelect` | `<select>` (`set_field_overlay_mode`) | Switches HUD Field Layer: `0` Micro-Tracks + Rigid Hulls, `1` Velocity `|v|` (`40x22`), `2` Vorticity Curl, `3` FTLE Ridges, `4` Modal Phase (`[-pi, pi]`). |
+| `#fieldOverlayModeSelect` | `<select>` (`set_field_overlay_mode`) | Switches HUD Field Layer: `0` Micro-Tracks + Rigid Hulls, `1` Velocity `|v|` (`40x22`), `2` Vorticity Curl, `3` FTLE Ridges, `4` Modal Phase (`[-pi, pi]`), `5` BOS Refraction `|eps|` (`128x64`), `6` BOS Neumann Potential `Phi`, `7` BOS Curl Diagnostic. |
+| `#bosModeSelect` | `<select>` (`set_bos_config`) | Static-tripod Background-Oriented Schlieren mode: `0` Off, `1` Mode 1 Static Ref (freeze at `16f`), `2` Mode 2 Clear-Only Slow Ref maintenance (`alpha = 1/4096`). |
+| `#metrologyModeSelect` | `<select>` (`set_metrology_config`) | `2x2` track covariance calibration + LOO flow residual mode: `0` Off, `1` Lossless `2x2` Cov + LOO Bench, `2` H.264 `2x2` Cov + Auto-Hero Promotion (`3`-chord pinhole looming rejection). |
+| `#chkCovEllipses` | `<input type="checkbox">` (`set_metrology_config`) | Overlays delayed `95%` confidence `2x2` position covariance contours (`sqrt(chi^2_2(0.95)) = 2.4477`) in cyan (`micro`) or amber (`Hero candidate/bound`). |
 | `#swarmInspectReadout` | Single-line readout | Fixed height readout populated on `#hudCanvas` click (`INSP uT<tid> · B<id> · (x, y) · spd · FTLE`). |
 
 #### Primary swarm, latency split, and continuum KPIs (`4 Hz` `setTextIfChanged`)
@@ -263,7 +266,9 @@ Source: `#continuumFieldPanel` ([web/index.html](../web/index.html)), [src/soa_t
 
 #### Collapsed Expert Diagnostics Drawer (`#expertDiagnosticsDrawer`)
 
-Expands via `#expertDiagnosticsSummary` to expose `8` solver counters: `#diagAuctionSteps` (`Q12` Bertsekas epsilon-Auction step count and reacquisition counter), `#diagRawResiduals` (unclamped `8x8` Huber IC-LK residual and top `SE(2)` fit `RMSE`), `#diagValidityMask` (`0x00..0x1F` with `G F R M K` subsystem initials), `#diagFtleWindow` (mature FTLE tracks and cells), `#diagSparseGraph` (`k`-NN edge count and fine peak count `<= 2,048`), `#diagKuramotoCom` (swarm heading order `R` and velocity dispersion), `#diagFieldBackend` (`WEBGL2` vs `CANVAS2D` and frame render ms), and `#diagMeanStrain` (mean smoothed `k`-NN edge strain rate `s^-1`).
+Expands via `#expertDiagnosticsSummary` to expose `13` solver and Wave-1 diagnostic counters:
+- Swarm & continuum counters (`8`): `#diagAuctionSteps` (`Q12` Bertsekas epsilon-Auction step count and reacquisition counter), `#diagRawResiduals` (unclamped `8x8` Huber IC-LK residual and top `SE(2)` fit `RMSE`), `#diagValidityMask` (`0x00..0x1F` with `G F R M K` subsystem initials), `#diagFtleWindow` (mature FTLE tracks and cells), `#diagSparseGraph` (`k`-NN edge count and fine peak count `<= 2,048`), `#diagKuramotoCom` (swarm heading order `R` and velocity dispersion), `#diagFieldBackend` (`WEBGL2` vs `CANVAS2D` and frame render ms), and `#diagMeanStrain` (mean smoothed `k`-NN edge strain rate `s^-1`).
+- Wave-1 acquisition, ROI, BOS, and metrology counters (`5`): `#diagWave1Ingest` (`continuityEpoch`, `sourceEpoch:sourceSeq`, gap flags, and verified commits), `#diagWave1Stamps` (`6`-character `V`/`H`/`-` product stamp strip for `[micro, grad, ftle, modalField, heroPhysics, bos]` plus committed `row_luma_means` row count), `#diagRoiGeom` (`1:1 NATIVE (x0,y0 wxh)` vs `FIT wxh->wxh`), `#diagBosState` (`OFF`, `WARMING n/16`, `READY · valid/8192 · PCG iters · trueRelRes`, or `DISTURBED · reasonFlags`), and `#diagMetrologyCov` (`usableCovCount usable · loomRejectedCount loom · promotedCandidates cand`).
 
 ---
 
@@ -285,18 +290,20 @@ Each button (`aria-pressed`) atomically stops prior streams, enables `640x360 HD
 - `data-showcase="coupled_metronomes"` (`./samples/coupled_metronomes_sync.mp4`, `30 fps`, Mode B, `0.45 m` assumed span).
 - `data-showcase="newtons_cradle"` (`./samples/newtons_cradle_impulses.mp4`, `30 fps`, Mode C, `0.18 m` assumed cradle span, WebAudio synth auto-enabled).
 - `data-showcase="starling_1000"` (`./samples/starling_murmuration_1000.mp4`, `30 fps`, HD `resMode = 1`, `swarmMode = 2`, `fieldOverlayMode = 1`).
+- `#btnHeroBosPlume` (`data-hero-scene="bos_plume"`, `./samples/bos_thermal_plume.mp4`, `25 fps`, HD `resMode = 1`, `swarmMode = 2`, `bosMode = 1`, `bosGauge = [4, 4, 18, 60]`, `fieldOverlayMode = 5`, `native1to1 = true`, `metrologyMode = 2`, `showCovEllipses = true`, `28%` Split-Wipe). Paired with fixed-height zero-CLS `#acquisitionStatusBanner` (`role="status"`, `data-severity="info|ok|warn|danger"`) displaying steady PTS status, gaps, `1:1` ROI fallback, or BOS tripod disturbance/failure warnings (`TRIPOD FAILURE / DISTURBED`).
 - `data-showcase="vortex_1200"` (blind synthetic `vortex_swarm_1200` Lamb-Oseen dipole in HD `resMode = 1`, `swarmMode = 2`, `fieldOverlayMode = 2`).
 
 #### Panel 1: Optical Input Source
 
 | Control (`#id`) | Label / Behavior | Why it matters |
 | :--- | :--- | :--- |
-| `#inputResMeta` & `#btnResSd` / `#btnResHd` | `320x180 SD (32^2)` / `640x360 HD (64^2)` calling `chronos_set_resolution(0 or 1)`. | Trades `4x` pixel throughput against `2x` spatial acuity and `64x64` HD PiPs inside the fixed `20.00 MB` arena. |
+| `#inputResMeta` & `#btnResSd` / `#btnResHd` | `320x180 SD (32^2)` / `640x360 HD (64^2)` calling `chronos_set_resolution(0 or 1)`. | Trades `4x` pixel throughput against `2x` spatial acuity and `64x64` HD PiPs inside the fixed `28.00 MB` (`448`-page) arena. |
+| `#roiGeomMeta`, `#chkNativeRoi`, `#rangeRoiX0`, `#rangeRoiY0` | Enables Native `1:1` Sensor ROI cropping (`crop_x0`, `crop_y0`, zero implicit rescaling when `src >= engine`) with fixed-width `#valRoiX0` / `#valRoiY0` readouts (`CLS = 0.000000`). | Preserves exact sub-pixel optical modulation and integer `(x, y)` coordinates across HD sources or SD cropped inspection windows. |
 | `#btnSrcTestbench` | Switches to pixel-isolated `stepAndRenderBlindPillarScene` (`getImageData` only). | Provides zero-noise ground-truth physics scenarios and 1-to-1 oracle swap checks. |
 | `#btnSrcWebcam` | Live camera feed via deduplicated `requestVideoFrameCallback` (`640x360` @ `60 fps` ideal). | Exercises live exposure shifts and real sensor noise. |
 | `#btnSrcLiveStream` | Opens `<dialog id="liveStreamDialog">` (Region 5). | Connects browser tab, direct CORS, or FFmpeg MSE live streams. |
 | `#mp4Input` | Client-side local `video/*` loader via `URL.createObjectURL`. | Tests arbitrary local footage inside the sandboxed browser worker. |
-| `#sampleVideoSelect` | `14` built-in MP4s across `Extended HD Showcases`, `Calibration Benchmarks`, and `High-Density Continuum Swarms (1,000+ Targets)` (`data-swarm="2"`). | Instant one-click evaluation on compressed H.264 rocketry, traffic, chaos pendulum, metronome, collision, and murmuration footage. |
+| `#sampleVideoSelect` | `18` built-in MP4s across `4` `<optgroup>` groups (`Extended HD Showcases`, `Calibration Benchmarks`, `High-Density Continuum Swarms`, and `Wave-1 BOS & Failure Validation`). | Instant one-click evaluation on compressed H.264 rocketry, traffic, chaos pendulum, metronome, collision, murmuration, thermal plume BOS, handheld failure, and perspective decoy footage (provenance documented in [ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)). |
 | `#benchScenarioSelect` | `10` synthetic testbench scenarios (`pillar_crossing`, `multi_target_swarm`, `vortex_swarm_1200`, `murmuration_1200`, `modal_beam_1152`, `short_gap_bridge`, `ballistic_cascade`, `model_rocket_flight`, `harmonic_tremor`, `percussion_ricochet`). | Isolates specific physical regimes and `1,000+` target stress cases cleanly. |
 | `#liveStreamBar` & `#liveCropSelect` | Visible during live streaming; sets normalized crop ROI (`100%`, `85%`, `70%`) and displays `F#N · LAG · DISCONT`. | Trims player watermarks and timestamp banners so ECA only processes motion. |
 | `#videoTransportBar` | Visible in `video` mode (`#vidTimeLabel`, `#btnVidPlayPause`, `#btnVidStepBack`, `#btnVidStepFwd`, `#btnVidReplay`). | Steps deterministically by exact `+-1 / activeVideoFps` while paused (`-1f` resets tracker cleanly). |
@@ -380,7 +387,7 @@ Zero-copy `Float32Array` exports populated in `chronos_post_tick` ([src/lib.rs](
 
 ## Appendix B: Micro-Swarm, Continuum Field, and Rigid-Motion ABI
 
-When swarm and continuum exports are present in fixed Wasm memory (`320` pages), [web/worker.js](../web/worker.js) binds zero-GC `Float32Array` views directly over:
+When swarm and continuum exports are present in fixed Wasm memory (`448` pages), [web/worker.js](../web/worker.js) binds zero-GC `Float32Array` views directly over:
 
 1. **`chronos_get_micro_tracks_ptr()` (`[f32; 1536 * 8]`):** Per micro-slot stride-`8` causal state on ingested frame `f`: `[0] track_id`, `[1..2] pos_x/y`, `[3..4] vel_x/y`, `[5] state` (`0=inactive`, `1=confirmed observed`, `2=tentative/coasting`), `[6] body_id` (`0..32`), `[7] ftle_val` (`s^-1`).
 2. **`chronos_get_continuum_field_ptr()` (`[f32; 880 * 6]`):** Normalized `40x22` Eulerian field covering every SD/HD pixel row: `[0..1] u/v_px_s`, `[2] vorticity_s1`, `[3] divergence_s1`, `[4] ftle_s1` (`0.0` when `swarm_active == 0`, `-999.0` sentinel if invalid, finite otherwise), `[5] valid_weight` (`> 0.0` iff Eulerian gradient conditioned).
@@ -388,3 +395,11 @@ When swarm and continuum exports are present in fixed Wasm memory (`320` pages),
 4. **`chronos_get_rigid_bodies_ptr()` (`[f32; 32 * 8]`):** Multi-frame `SE(2)` rigid-motion component descriptors: `[0] body_id`, `[1] member_count`, `[2..3] cx/cy`, `[4..5] vx/vy`, `[6] unwrapped omega_rad_s`, `[7] se2_rmse_px`.
 5. **`chronos_get_swarm_telemetry_ptr()` (`[f32; 64]`):** `0..15` SoA counts (`swarm_mode`, `swarm_active`, `peak_count`, `active_count`, `confirmed_count`, `peak_simultaneous_confirmed`, `unique_tracks`, `coasting_count`, `auction_steps`, `reacq_events`, `mean_ic_lk_res`, `inspected_micro_tid`, `inspected_body_id`, `births`, `tentative_count`, `ambiguous_count`); `16..41` continuum & validity fields (`diagnostic_validity_mask` `bit0..bit4`, `valid_field_cells`, `max/rms vorticity`, `rms div`, `max_ftle`, `ftle_cells`, `rigid_body_count`, `top_rigid_omega/members/rmse/theta`, `modal_dom_freq/coherence/sensors/r2`, `kuramoto_r/psi`, `com_x/y/vx/vy`, `vel_dispersion`, `mean_knn_strain`, `knn_edge_count`, `ftle_mature_tracks` `[39]`, `modal_r2_antiphase` `[41]`); `42..63` reserved `0.0`.
 6. **Runtime Control & Exact-ID Inspection:** `chronos_set_swarm_mode(mode)`, `chronos_get_swarm_mode()`, `chronos_inspect_field_point(x, y) -> u32`, and `chronos_inspect_micro_track(track_id) -> u32` (direct micro-ID to Hero promotion bridge).
+
+## Appendix C: Wave-1 Ingest (`I0`/`I4`), `2x2` Metrology (`I1`), and BOS (`I5`) ABI
+
+Fixed `448`-page (`29,360,128 B`) linear memory reserves `Arena <= 20,702,240 B` and Wave-1 static end `<= 20,833,312 B`, exposing host read-only typed views over:
+
+1. **100% Frame Ring Ingest & Stamps (`src/lib.rs`):** `chronos_set_ingest_meta(...) -> u32` stages `source_epoch`, `source_seq`, 64-bit `t_src_us_lo/hi`, `age_ms`, `flags`, Native ROI geometry `(src_w/h, crop_x0/y0/w/h, orientation 0..7, scan_dir 0..3 | 0xffffffff, dst_x/y/w/h)`, `gap_mask`, and `native_1to1`; `chronos_get_ring_meta_ptr()` (`[u32; 12 * 24]`), `chronos_get_row_luma_ptr()` (`[f32; 12 * 360]`, unconditionally committed every tick prior to downstream skips via SIMD128 reduction), and `chronos_get_wave1_telemetry_ptr()` (`[u32; 192]`: ABI header `0..15` with ratified `wave1_telem[7]` bits `0=micro_metrology_mode!=0` and `1=bos_mode!=0` and `wave1_telem[13]=split_phase` (`1` while split tick is open between `chronos_pre_tick` and `chronos_post_tick`, `0` after `post_tick` or `reset_tracks`), product stamps `[micro, grad, ftle, modal_field, hero_physics, bos]` at `16..63`, and Hero slot stamps `64..191`).
+2. **Track Covariance, LOO Flow Residual & Auto-Hero Metrology (`src/soa_tracks.rs`, `src/continuum_physics.rs`):** `chronos_set_micro_metrology_mode(0|1|2) -> u32`, planar `chronos_get_micro_cov_ptr()` (`[f32; 3 * 1536]` `[cxx, cxy, cyy]`), planar `chronos_get_micro_residual_ptr()` (`[f32; 3 * 1536]` `[rx, ry, d2_bench]`), `chronos_get_micro_loom_ptr()` (`[f32; 1536]` `d2_nonloom`), `chronos_get_micro_quality_ptr()` (`[u32; 1536]` bitmask), and `chronos_get_hero_candidates_ptr()` (`[u32; 4 + 16 * 8]` `[num_cands, promo_epoch, active_auto_hero_cnt, 0]` + candidates).
+3. **Controlled Tripod BOS & Neumann Poisson (`src/bos.rs`):** `chronos_set_bos_mode(0|1|2) -> u32`, `chronos_reset_bos_ref()`, `chronos_set_bos_gauge_roi(x0, y0, x1, y1) -> u32`, `chronos_set_bos_overlay_kind(0|1|2) -> u32`, `chronos_get_bos_telemetry_ptr()` (`[u32; 32]`), `chronos_get_bos_planes_ptr()` (`[f32; 6 * 8192]` `[eps_x, eps_y, phi, var_x, var_y, curl]`), `chronos_get_bos_valid_ptr()` (`[u8; 8192]`), `chronos_get_bos_rgba_ptr()` (`[u8; 4 * 8192]`), and `chronos_bos_solve_manufactured_test(case_id, a, b) -> u32`.

@@ -5,6 +5,7 @@ pub(crate) mod simd_ops;
 pub(crate) mod physics_id;
 pub(crate) mod soa_tracks;
 pub(crate) mod continuum_physics;
+pub(crate) mod bos;
 
 use core::arch::wasm32::{
     f32x4_abs, f32x4_add, f32x4_div, f32x4_extract_lane, f32x4_floor, f32x4_ge, f32x4_gt,
@@ -13,7 +14,24 @@ use core::arch::wasm32::{
     i32x4, i32x4_bitmask, i32x4_shuffle, v128, v128_bitselect, v128_load, v128_store,
 };
 use core::panic::PanicInfo;
-use core::ptr::addr_of_mut;
+use core::ptr::{addr_of, addr_of_mut};
+
+#[cfg(target_arch = "wasm32")]
+extern "C" {
+    static __heap_base: u8;
+}
+
+#[inline(always)]
+fn linked_static_end_bytes() -> u32 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        addr_of!(__heap_base) as usize as u32
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        0
+    }
+}
 pub use simd_ops::padic_ultrametric_val;
 use simd_ops::{
     advect_bg_subpixel_simd128, build_tpl_ic_lk_cache, cam_pyr_tile_4x6x8_simd128,
@@ -227,7 +245,8 @@ fn frame_dt_span_sec(
     f_b: u32,
     fallback_dt: f32,
 ) -> f32 {
-    if f_b > f_a && (f_b - f_a) < (HIST_RING_LEN as u32) {
+    let span = f_b.wrapping_sub(f_a);
+    if span > 0 && span < (HIST_RING_LEN as u32) {
         let dt =
             (hist_t_sec[(f_b as usize) & HIST_MASK] - hist_t_sec[(f_a as usize) & HIST_MASK])
                 as f32;
@@ -235,7 +254,14 @@ fn frame_dt_span_sec(
             return dt;
         }
     }
-    ((f_b.saturating_sub(f_a).max(1)) as f32) * fallback_dt.max(1e-3)
+    let fallback_frames = if span > 0 && span < 0x8000_0000 { span } else { 1 };
+    (fallback_frames as f32) * fallback_dt.max(1e-3)
+}
+
+#[inline(always)]
+fn ring_slot_back_cursor(cursor: u64, offset: usize) -> usize {
+    let s = (cursor % (RING_LEN as u64)) as usize;
+    (s + RING_LEN - (offset % RING_LEN)) % RING_LEN
 }
 
 #[inline(always)]
@@ -554,9 +580,10 @@ pub struct TargetTrack {
     pub pivot_r: f32,
     pub reacq_count: u16,
     pub tpl_grad_dirty: u8,
-    pub _pad_reacq: u8,
+    pub wave1_auto_owned: u8,
     pub anchor_mu_a: f32,
     pub anchor_std_a: f32,
+    pub phys_stamp_tid: u32,
 }
 
 /// 4-Mode Interacting Multiple Model (IMM) state per active track:
@@ -689,6 +716,117 @@ pub struct LanczosScratch {
     pub last_n: usize,
 }
 
+pub const WAVE1_ABI_VERSION: u32 = 1;
+pub const WAVE1_TELEM_LEN: usize = 192;
+pub const INGEST_CTRL_LEN: usize = 12;
+pub const INGEST_RING_STRIDE_WORDS: u32 = 24;
+
+pub const INGEST_FLAG_COMMITTED: u32 = 1 << 0;
+pub const INGEST_FLAG_PTS_KNOWN: u32 = 1 << 1;
+pub const INGEST_FLAG_CAPTURE_AGE: u32 = 1 << 2;
+pub const INGEST_FLAG_HANDOFF_AGE: u32 = 1 << 3;
+pub const INGEST_FLAG_GEOM_KNOWN: u32 = 1 << 4;
+
+pub const FRAME_GAP_SEQ: u32 = 1 << 0;
+pub const FRAME_GAP_NONINC_PTS: u32 = 1 << 1;
+pub const FRAME_GAP_EXCESS_DT: u32 = 1 << 2;
+pub const FRAME_GAP_SEEK_RESTART: u32 = 1 << 3;
+pub const FRAME_GAP_GEOM_CHANGE: u32 = 1 << 4;
+pub const FRAME_GAP_SCENE_CUT: u32 = 1 << 5;
+pub const FRAME_GAP_WRAP: u32 = 1 << 6;
+
+pub const INGEST_STATUS_EMPTY: u32 = 0;
+pub const INGEST_STATUS_OK: u32 = 1;
+pub const INGEST_STATUS_INVALID: u32 = 2;
+pub const INGEST_STATUS_DUP: u32 = 3;
+pub const INGEST_STATUS_PHASE_ERR: u32 = 4;
+
+pub const STAMP_VALID: u32 = 1 << 0;
+pub const STAMP_HELD: u32 = 1 << 1;
+pub const WAVE1_PRODUCT_STAMPS_START: usize = 16;
+pub const WAVE1_HERO_STAMPS_START: usize = 64;
+pub const STAMP_STRIDE: usize = 8;
+
+pub const PROD_MICRO: usize = 0;
+pub const PROD_GRAD: usize = 1;
+pub const PROD_FTLE: usize = 2;
+pub const PROD_MODAL_FIELD: usize = 3;
+pub const PROD_HERO_PHYSICS: usize = 4;
+pub const PROD_BOS: usize = 5;
+
+const CTRL_PENDING_VALID: usize = 0;
+const CTRL_TICK_PHASE: usize = 1;
+const CTRL_NOM_DT_US: usize = 2;
+const CTRL_DUP_GUARD_ACTIVE: usize = 3;
+const CTRL_HERO_PHYS_RAN: usize = 4;
+const CTRL_HERO_PHYS_SLOT_MASK: usize = 5;
+const CTRL_AUTO_HERO_MASK: usize = 6;
+const CTRL_AUTO_HERO_MICRO_BASE: usize = 7; // 7, 8, 9 hold micro_tid for up to 3 auto-promoted Heroes
+const CTRL_AUTO_HERO_SLOTS: usize = 10;     // packed bytes: (slot_m + 1) per binding k in 0..3, 0 = empty
+
+#[repr(C, align(16))]
+#[derive(Copy, Clone)]
+pub struct IngestSlotMeta {
+    pub flags: u32,
+    pub source_epoch: u32,
+    pub source_seq: u32,
+    pub engine_frame_idx: u32,
+    pub t_src_us_lo: u32,
+    pub t_src_us_hi: u32,
+    pub age_ms_bits: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub crop_x0: u32,
+    pub crop_y0: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub orientation: u32,
+    pub scan_dir: u32,
+    pub engine_w: u32,
+    pub engine_h: u32,
+    pub dst_x: u32,
+    pub dst_y: u32,
+    pub dst_w: u32,
+    pub dst_h: u32,
+    pub frame_gap_flag: u32,
+    pub native_1to1_active: u32,
+    pub continuity_epoch: u32,
+}
+
+impl IngestSlotMeta {
+    #[inline(always)]
+    const fn zeroed() -> Self {
+        Self {
+            flags: 0,
+            source_epoch: 0,
+            source_seq: 0,
+            engine_frame_idx: 0,
+            t_src_us_lo: 0,
+            t_src_us_hi: 0,
+            age_ms_bits: 0,
+            src_w: 0,
+            src_h: 0,
+            crop_x0: 0,
+            crop_y0: 0,
+            crop_w: 0,
+            crop_h: 0,
+            orientation: 0,
+            scan_dir: 0,
+            engine_w: 0,
+            engine_h: 0,
+            dst_x: 0,
+            dst_y: 0,
+            dst_w: 0,
+            dst_h: 0,
+            frame_gap_flag: 0,
+            native_1to1_active: 0,
+            continuity_epoch: 0,
+        }
+    }
+}
+
+const _: () = assert!(core::mem::size_of::<IngestSlotMeta>() == 96);
+
 #[repr(C, align(16))]
 pub struct Arena {
     // 1. 12-Frame Circular RGBA Display & Lossless Pixel Ring Buffer (up to 640x360: 11,059,200 B)
@@ -765,7 +903,30 @@ pub struct Arena {
     // 8. Exported Flat Telemetry Vector (zero-marshaling Float32Array view)
     pub telemetry: [f32; TELEMETRY_LEN],
 
-    // 9. Scalar Control, Resolution Mode, Spectral & Timing State
+    // 9. Alignment-packed scalar/scratch fields and Wave-1 state (`<= 20,702,240 B`)
+    pub ic_lk_cache: [TplIcLkCache; MAX_TARGETS],
+    pub micro_swarm: soa_tracks::MicroSwarmState,
+    pub bos: bos::BosState,
+    pub ring_meta: [IngestSlotMeta; RING_LEN],
+    pub pending_ingest_meta: IngestSlotMeta,
+    pub row_luma_means: [[f32; MAX_FRAME_H]; RING_LEN],
+    pub wave1_telem: [u32; WAVE1_TELEM_LEN],
+    pub ingest_ctrl: [u32; INGEST_CTRL_LEN],
+    pub continuum: continuum_physics::ContinuumState,
+    pub lanczos_scratch: LanczosScratch,
+    pub ode_scratch: physics_id::PhysicsIdScratch,
+    pub lyap_scratch: physics_id::LyapunovScratch,
+    pub collision_state: physics_id::CollisionAnalyzerState,
+    pub ode_states: [physics_id::OdeTrackState; MAX_TARGETS],
+    pub pend_states: [physics_id::PendulumState; MAX_TARGETS],
+    pub imm: [ImmTrack; MAX_TARGETS],
+    pub cum_time_sec: f64,
+    pub prev_raw_pts_sec: f64,
+    pub pending_pts_sec: f64,
+    pub hist_t_sec: [f64; HIST_RING_LEN],
+    pub phys_ts: [f64; HIST_RING_LEN],
+    pub chroma_tile_mask: [u64; 24],
+    pub ring_cursor: u64,
     pub res_mode: u32,
     pub frame_idx: u32,
     pub next_track_id: u32,
@@ -800,12 +961,6 @@ pub struct Arena {
     pub scatter_th1_deg: f32,
     pub scatter_th2_deg: f32,
     pub scatter_event_frame: u32,
-
-    // 10. Per-Slot Source Presentation Timestamps & Pixel-Domain Camera-Motion Guard
-    pub cum_time_sec: f64,
-    pub prev_raw_pts_sec: f64,
-    pub pending_pts_sec: f64,
-    pub hist_t_sec: [f64; HIST_RING_LEN],
     pub has_explicit_pts: u32,
     pub last_discont_frame: u32,
     pub discont_count: u32,
@@ -824,40 +979,27 @@ pub struct Arena {
     pub last_grav_arc_frame: u32,
     pub last_strike_tid: u32,
     pub last_strike_frame: u32,
-
-    // 11. 4-Mode IMM + #![no_std] Physics Identification & Two-Body/Ensemble Telemetry State
-    pub imm: [ImmTrack; MAX_TARGETS],
-    pub ode_states: [physics_id::OdeTrackState; MAX_TARGETS],
-    pub ode_scratch: physics_id::PhysicsIdScratch,
-    pub pend_states: [physics_id::PendulumState; MAX_TARGETS],
-    pub lyap_scratch: physics_id::LyapunovScratch,
-    pub collision_state: physics_id::CollisionAnalyzerState,
     pub lyap_cache: [f32; MAX_TARGETS],
     pub phys_xs: [f32; HIST_RING_LEN],
     pub phys_ys: [f32; HIST_RING_LEN],
-    pub phys_ts: [f64; HIST_RING_LEN],
-    pub phys_vis: [u8; HIST_RING_LEN],
     pub active_rgba_slot: u32,
-    pub chroma_tile_mask: [u64; 24],
-    pub ic_lk_cache: [TplIcLkCache; MAX_TARGETS],
-    pub micro_swarm: soa_tracks::MicroSwarmState,
-    pub continuum: continuum_physics::ContinuumState,
-    pub continuum_was_active: u8,
-    pub swarm_mode_cached: u8,
-    pub swarm_telem_zeroed: u8,
-    pub last_scene_cut: u8,
-    pub pre_tick_seen: u8,
     pub last_pan_dx_f: f32,
     pub last_pan_dy_f: f32,
     pub inspected_hero_tid: u32,
     pub inspected_micro_tid_pin: u32,
     pub last_pre_tick_frame: u32,
     pub physics_telem_dirty_mask: u16,
-    pub lanczos_scratch: LanczosScratch,
+    pub phys_vis: [u8; HIST_RING_LEN],
+    pub continuum_was_active: u8,
+    pub swarm_mode_cached: u8,
+    pub swarm_telem_zeroed: u8,
+    pub last_scene_cut: u8,
+    pub pre_tick_seen: u8,
 }
 
-// Compile-time structural bound: Arena + 16 KiB stack + .rodata <= 320 pages (20,971,520 B)
-const _: () = assert!(core::mem::size_of::<Arena>() <= 20_800_000);
+// Compile-time structural bound: Arena + MetrologyState + BosState <= 20,702,240 B within 448 pages (29,360,128 B)
+// Compile-time structural bound: Arena + MetrologyState + BosState <= 20,702,240 B within 448 pages (29,360,128 B)
+const _: () = assert!(core::mem::size_of::<Arena>() <= 20_702_240);
 
 static mut ARENA: Arena = unsafe { core::mem::zeroed() };
 
@@ -2735,7 +2877,7 @@ unsafe fn backtrack_gap_in_rgba_ring(
     s: f32,
     use_entry_guide: bool,
 ) {
-    if max_back == 0 || f_idx == 0 {
+    if max_back == 0 || a.ring_cursor == 0 {
         return;
     }
     let roi_dim = 48 * scale_px; // 48 in SD, 96 in HD (<= MAX_ROI_DIM)
@@ -2764,17 +2906,17 @@ unsafe fn backtrack_gap_in_rgba_ring(
     let denom_b = (max_back + 1) as f32;
 
     for b in 1..=max_back {
-        if (f_idx as usize) < b {
+        if a.ring_cursor < (b as u64) {
             break;
         }
-        let past_f = f_idx - (b as u32);
-        if a.last_discont_frame > 0 && past_f < a.last_discont_frame {
+        let past_f = f_idx.wrapping_sub(b as u32);
+        if a.last_discont_frame > 0 && f_idx.wrapping_sub(a.last_discont_frame) < (b as u32) {
             break;
         }
-        if !use_entry_guide && past_f.saturating_add(2) < orig_birth {
+        if !use_entry_guide && f_idx.wrapping_sub(orig_birth).saturating_add(2) < (b as u32) {
             break;
         }
-        let slot_b = (past_f as usize) % RING_LEN;
+        let slot_b = ring_slot_back_cursor(a.ring_cursor, b);
         let cam_back_x = a.cum_cam_x - a.hist_cam_x[(past_f as usize) & HIST_MASK];
         let cam_back_y = a.cum_cam_y - a.hist_cam_y[(past_f as usize) & HIST_MASK];
         if a.targets[m].ring_vis[slot_b] != 0 {
@@ -4063,8 +4205,8 @@ fn solve_noncausal_fista_target(
     for u in 0..RING_LEN {
         let s = (head_slot + 1 + u) % RING_LEN;
         let mut v_u = t.ring_vis[s];
-        if (frame_idx as usize) + u >= (RING_LEN - 1) {
-            let f_u = ((frame_idx as usize) + u - (RING_LEN - 1)) as u32;
+        if frame_idx >= (RING_LEN - 1 - u) as u32 {
+            let f_u = frame_idx - (RING_LEN - 1 - u) as u32;
             if last_discont_frame > 0 && f_u < last_discont_frame {
                 v_u = 0;
             }
@@ -4185,15 +4327,15 @@ fn solve_noncausal_fista_target(
                     // keep evaluating the exact Two-Point Cubic Hermite Bridge across full occlusions up to 28 frames!
                     let u1 = gap_end;
                     let can_bridge_from_entry = t.has_entry != 0
-                        && (frame_idx as usize) + u1 >= (RING_LEN - 1)
+                        && frame_idx >= (RING_LEN - 1 - u1) as u32
                         && {
-                            let f_re = (frame_idx as usize) + u1 - (RING_LEN - 1);
+                            let f_re = (frame_idx - (RING_LEN - 1 - u1) as u32) as usize;
                             let f_en = t.entry_frame as usize;
                             f_en < f_re && (f_re - f_en) <= 28
                         };
 
                     if can_bridge_from_entry {
-                        let f_re = (frame_idx as usize) + u1 - (RING_LEN - 1);
+                        let f_re = (frame_idx - (RING_LEN - 1 - u1) as u32) as usize;
                         let f_en = t.entry_frame as usize;
                         let dt = (f_re - f_en) as f32;
                         let v0x = t.entry_vx;
@@ -4210,8 +4352,8 @@ fn solve_noncausal_fista_target(
                             }
                         };
                         for k in 0..gap_end {
-                            if (frame_idx as usize) + k >= (RING_LEN - 1) {
-                                let f_k = (frame_idx as usize) + k - (RING_LEN - 1);
+                            if frame_idx >= (RING_LEN - 1 - k) as u32 {
+                                let f_k = (frame_idx - (RING_LEN - 1 - k) as u32) as usize;
                                 if f_k > f_en && f_k < f_re {
                                     let tau = ((f_k - f_en) as f32) / dt;
                                     let tau2 = tau * tau;
@@ -4951,6 +5093,185 @@ fn solve_noncausal_fista_target(
 // Exported C ABI Entrypoints
 // ============================================================================
 
+#[inline(always)]
+fn set_stamp_invalid(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize) {
+    wave1_telem[base] = 0;
+    wave1_telem[base + 1] = 0;
+    wave1_telem[base + 2] = 0;
+    wave1_telem[base + 3] = 0;
+    wave1_telem[base + 4] = 0;
+    wave1_telem[base + 5] = 0;
+    wave1_telem[base + 6] = (-1.0f32).to_bits();
+    wave1_telem[base + 7] = 0;
+}
+
+#[inline(always)]
+fn set_stamp_fresh(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize, meta: &IngestSlotMeta) {
+    let time_bits = (meta.flags & (INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_CAPTURE_AGE | INGEST_FLAG_HANDOFF_AGE)) << 1;
+    wave1_telem[base] = STAMP_VALID | time_bits;
+    wave1_telem[base + 1] = meta.continuity_epoch;
+    wave1_telem[base + 2] = meta.source_epoch;
+    wave1_telem[base + 3] = meta.source_seq;
+    wave1_telem[base + 4] = meta.t_src_us_lo;
+    wave1_telem[base + 5] = meta.t_src_us_hi;
+    wave1_telem[base + 6] = meta.age_ms_bits;
+    wave1_telem[base + 7] = meta.engine_frame_idx;
+}
+
+#[inline(always)]
+fn hold_or_invalidate_stamp(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize, cur_cont_ep: u32) {
+    if (wave1_telem[base] & STAMP_VALID) != 0 && wave1_telem[base + 1] == cur_cont_ep && cur_cont_ep != 0 {
+        wave1_telem[base] |= STAMP_HELD;
+    } else {
+        set_stamp_invalid(wave1_telem, base);
+    }
+}
+
+#[inline(always)]
+fn invalidate_all_wave1_stamps(wave1_telem: &mut [u32; WAVE1_TELEM_LEN]) {
+    let mut i = 0usize;
+    while i < 6 {
+        set_stamp_invalid(wave1_telem, WAVE1_PRODUCT_STAMPS_START + i * STAMP_STRIDE);
+        i += 1;
+    }
+    let mut m = 0usize;
+    while m < MAX_TARGETS {
+        set_stamp_invalid(wave1_telem, WAVE1_HERO_STAMPS_START + m * STAMP_STRIDE);
+        m += 1;
+    }
+}
+
+#[inline(always)]
+fn invalidate_stale_wave1_stamps(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], cur_cont_ep: u32) {
+    let mut i = 0usize;
+    while i < 6 {
+        let base = WAVE1_PRODUCT_STAMPS_START + i * STAMP_STRIDE;
+        if (wave1_telem[base] & STAMP_VALID) != 0 && wave1_telem[base + 1] != cur_cont_ep {
+            set_stamp_invalid(wave1_telem, base);
+        }
+        i += 1;
+    }
+    let mut m = 0usize;
+    while m < MAX_TARGETS {
+        let base = WAVE1_HERO_STAMPS_START + m * STAMP_STRIDE;
+        if (wave1_telem[base] & STAMP_VALID) != 0 && wave1_telem[base + 1] != cur_cont_ep {
+            set_stamp_invalid(wave1_telem, base);
+        }
+        m += 1;
+    }
+}
+
+#[inline(always)]
+fn oriented_extent(cw: u32, ch: u32, orientation: u32) -> (u32, u32) {
+    if (orientation & 1) == 0 {
+        (cw, ch)
+    } else {
+        (ch, cw)
+    }
+}
+
+#[inline(never)]
+unsafe fn compute_row_luma_means_simd128(
+    luma: &[f32],
+    out_means: &mut [f32; MAX_FRAME_H],
+    frame_w: usize,
+    frame_h: usize,
+) {
+    if frame_w == 0 || frame_h == 0 || luma.len() < frame_w * frame_h {
+        out_means.fill(0.0);
+        return;
+    }
+    let inv_fw = 1.0f32 / (frame_w as f32);
+    let base_ptr = luma.as_ptr();
+    let max_h = frame_h.min(MAX_FRAME_H);
+    for ry in 0..max_h {
+        let row_ptr = base_ptr.add(ry * frame_w);
+        let mut acc0 = f32x4_splat(0.0);
+        let mut acc1 = f32x4_splat(0.0);
+        let mut acc2 = f32x4_splat(0.0);
+        let mut acc3 = f32x4_splat(0.0);
+        let mut rx = 0usize;
+        while rx + 16 <= frame_w {
+            acc0 = f32x4_add(acc0, v128_load(row_ptr.add(rx) as *const v128));
+            acc1 = f32x4_add(acc1, v128_load(row_ptr.add(rx + 4) as *const v128));
+            acc2 = f32x4_add(acc2, v128_load(row_ptr.add(rx + 8) as *const v128));
+            acc3 = f32x4_add(acc3, v128_load(row_ptr.add(rx + 12) as *const v128));
+            rx += 16;
+        }
+        let mut sum_v = f32x4_add(f32x4_add(acc0, acc1), f32x4_add(acc2, acc3));
+        while rx + 4 <= frame_w {
+            sum_v = f32x4_add(sum_v, v128_load(row_ptr.add(rx) as *const v128));
+            rx += 4;
+        }
+        let mut rsum = f32x4_extract_lane::<0>(sum_v)
+            + f32x4_extract_lane::<1>(sum_v)
+            + f32x4_extract_lane::<2>(sum_v)
+            + f32x4_extract_lane::<3>(sum_v);
+        while rx < frame_w {
+            rsum += *row_ptr.add(rx);
+            rx += 1;
+        }
+        let mean = rsum * inv_fw;
+        out_means[ry] = if mean.is_finite() {
+            mean.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+    }
+    if max_h < MAX_FRAME_H {
+        out_means[max_h..MAX_FRAME_H].fill(0.0);
+    }
+}
+
+#[inline(always)]
+fn wave1_enabled_bits(a: &Arena) -> u32 {
+    (if a.micro_swarm.get_micro_metrology_mode() != 0 {
+        1
+    } else {
+        0
+    }) | (if a.bos.get_mode() != bos::BOS_MODE_OFF {
+        2
+    } else {
+        0
+    })
+}
+
+#[inline(never)]
+fn init_wave1_telemetry(a: &mut Arena, preserve_history: bool) {
+    let prev_commits_lo = if preserve_history { a.wave1_telem[4] } else { 0 };
+    let prev_commits_hi = if preserve_history { a.wave1_telem[5] } else { 0 };
+    let prev_epoch = if preserve_history { a.wave1_telem[6] } else { 0 };
+    let had_any = (prev_commits_lo | prev_commits_hi) != 0 || prev_epoch != 0;
+    let next_epoch = if preserve_history && had_any {
+        prev_epoch.wrapping_add(1).max(1)
+    } else {
+        0
+    };
+
+    a.pending_ingest_meta = IngestSlotMeta::zeroed();
+    for s in 0..RING_LEN {
+        a.ring_meta[s] = IngestSlotMeta::zeroed();
+        a.row_luma_means[s].fill(0.0);
+    }
+    a.ingest_ctrl.fill(0);
+    a.wave1_telem.fill(0);
+    a.wave1_telem[0] = WAVE1_ABI_VERSION;
+    a.wave1_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave1_telem[2] = u32::MAX;
+    a.wave1_telem[3] = u32::MAX;
+    a.wave1_telem[4] = prev_commits_lo;
+    a.wave1_telem[5] = prev_commits_hi;
+    a.wave1_telem[6] = next_epoch;
+    a.wave1_telem[7] = wave1_enabled_bits(a);
+    a.wave1_telem[8] = INGEST_STATUS_EMPTY;
+    a.wave1_telem[9] = 0;
+    a.wave1_telem[10] = 0;
+    a.wave1_telem[11] = INGEST_RING_STRIDE_WORDS;
+    a.wave1_telem[12] = linked_static_end_bytes();
+    a.wave1_telem[13] = 0;
+    invalidate_all_wave1_stamps(&mut a.wave1_telem);
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chronos_init() {
     let a = arena_mut();
@@ -4970,12 +5291,14 @@ pub unsafe extern "C" fn chronos_init() {
     a.clutter_db_valid = 0;
     a.micro_swarm.init_in_place();
     a.continuum.reset();
+    a.bos.init_in_place();
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
     a.swarm_mode_cached = 0;
     a.swarm_telem_zeroed = 1;
     a.telemetry[20] = core::mem::size_of::<Arena>() as f32;
+    init_wave1_telemetry(a, false);
 }
 
 #[no_mangle]
@@ -5000,7 +5323,8 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.ode_scratch.reset();
     a.lyap_scratch.reset();
     a.collision_state.reset();
-    a.telemetry[TELEM_PHYSICS_START..TELEMETRY_LEN].fill(0.0);
+    a.telemetry.fill(0.0);
+    a.telemetry[20] = core::mem::size_of::<Arena>() as f32;
     a.physics_telem_dirty_mask = 0;
     for di in 0..MAX_DORMANT {
         a.dormant[di] = core::mem::zeroed();
@@ -5033,6 +5357,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.pip_target_id = 0;
     a.pip_hold_frames = 0;
     a.frame_idx = 0;
+    a.ring_cursor = 0;
     a.last_display_slot = 0;
     a.clutter_db = 0.0;
     a.clutter_db_valid = 0;
@@ -5087,6 +5412,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.reset_base_track_id = a.next_track_id;
     a.micro_swarm.reset_active_keep_mode();
     a.continuum.reset();
+    a.bos.reset_keep_config();
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
@@ -5100,6 +5426,7 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.inspected_micro_tid_pin = 0;
     a.pre_tick_seen = 0;
     a.last_pre_tick_frame = 0;
+    init_wave1_telemetry(a, true);
 }
 
 #[no_mangle]
@@ -5125,6 +5452,13 @@ pub unsafe extern "C" fn chronos_set_focus_target(track_id: u32) {
             a.micro_swarm.inspected_body_id = 0;
             a.micro_swarm.swarm_telem[11] = 0.0;
             a.micro_swarm.swarm_telem[12] = 0.0;
+        }
+    }
+    if a.focus_target_id != 0 {
+        for m in 0..MAX_TARGETS {
+            if a.targets[m].active != 0 && a.targets[m].track_id == a.focus_target_id {
+                a.targets[m].wave1_auto_owned = 0;
+            }
         }
     }
 }
@@ -5228,7 +5562,7 @@ pub unsafe extern "C" fn chronos_trigger_stimulus() {
 #[no_mangle]
 pub unsafe extern "C" fn chronos_get_ingest_rgba_ptr() -> *mut u8 {
     let a = arena_mut();
-    let slot = (a.frame_idx as usize) % RING_LEN;
+    let slot = (a.ring_cursor % (RING_LEN as u64)) as usize;
     a.rgba_ring[slot].as_mut_ptr()
 }
 
@@ -5742,6 +6076,13 @@ pub unsafe extern "C" fn chronos_set_swarm_mode(mode: u32) {
         a.inspected_hero_tid = 0;
         a.inspected_micro_tid_pin = 0;
         a.swarm_telem_zeroed = 1;
+        set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_MICRO * STAMP_STRIDE);
+        set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE);
+        set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_FTLE * STAMP_STRIDE);
+        set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_MODAL_FIELD * STAMP_STRIDE);
+        unsafe {
+            release_wave1_owned_auto_heroes(a, a.frame_idx.saturating_sub(1), mode_dims(a.res_mode).6);
+        }
     } else {
         a.swarm_telem_zeroed = 0;
         if sanitized == 2 {
@@ -5778,6 +6119,249 @@ pub unsafe extern "C" fn chronos_get_swarm_telemetry_ptr() -> *const f32 {
 #[no_mangle]
 pub unsafe extern "C" fn chronos_get_modal_field_ptr() -> *const f32 {
     arena_mut().continuum.export_modal_field.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_ingest_meta(
+    epoch: u32,
+    seq: u32,
+    t_lo: u32,
+    t_hi: u32,
+    age_ms: f32,
+    flags: u32,
+    src_w: u32,
+    src_h: u32,
+    x0: u32,
+    y0: u32,
+    cw: u32,
+    ch: u32,
+    orientation: u32,
+    scan_dir: u32,
+    dx: u32,
+    dy: u32,
+    dw: u32,
+    dh: u32,
+    gap_mask: u32,
+    native_1to1: u32,
+) -> u32 {
+    let a = arena_mut();
+    if a.ingest_ctrl[CTRL_TICK_PHASE] != 0 {
+        a.ingest_ctrl[CTRL_PENDING_VALID] = 0;
+        a.pending_ingest_meta = IngestSlotMeta::zeroed();
+        a.wave1_telem[8] = INGEST_STATUS_PHASE_ERR;
+        return 0;
+    }
+
+    let (frame_w, frame_h, ..) = mode_dims(a.res_mode);
+    let ew = frame_w as u32;
+    let eh = frame_h as u32;
+
+    let crop_bad = x0.checked_add(cw).map_or(true, |v| v > src_w)
+        || y0.checked_add(ch).map_or(true, |v| v > src_h);
+    let dst_bad = dx.checked_add(dw).map_or(true, |v| v > ew)
+        || dy.checked_add(dh).map_or(true, |v| v > eh);
+    let flags_bad = (flags & !0x1eu32) != 0
+        || (flags & 12) == 12
+        || ((flags & 12) == 0 && age_ms != -1.0)
+        || ((flags & 12) != 0 && age_ms < 0.0);
+    let gap_mask_bad = (gap_mask & !0x3fu32) != 0;
+    let native_bad = native_1to1 == 1
+        && ((flags & INGEST_FLAG_GEOM_KNOWN) == 0
+            || dx != 0
+            || dy != 0
+            || dw != ew
+            || dh != eh
+            || oriented_extent(cw, ch, orientation) != (ew, eh));
+
+    if src_w == 0
+        || src_h == 0
+        || cw == 0
+        || ch == 0
+        || dw == 0
+        || dh == 0
+        || crop_bad
+        || dst_bad
+        || orientation > 7
+        || (scan_dir != u32::MAX && scan_dir > 3)
+        || native_1to1 > 1
+        || !age_ms.is_finite()
+        || flags_bad
+        || gap_mask_bad
+        || native_bad
+    {
+        a.ingest_ctrl[CTRL_PENDING_VALID] = 0;
+        a.pending_ingest_meta = IngestSlotMeta::zeroed();
+        a.wave1_telem[8] = INGEST_STATUS_INVALID;
+        return 0;
+    }
+
+    if a.ingest_ctrl[CTRL_DUP_GUARD_ACTIVE] != 0
+        && epoch != 0
+        && (a.wave1_telem[2] as usize) < RING_LEN
+    {
+        let prev_slot = a.wave1_telem[2] as usize;
+        let prev = &a.ring_meta[prev_slot];
+        if (prev.flags & INGEST_FLAG_COMMITTED) != 0
+            && prev.source_epoch == epoch
+            && prev.source_seq == seq
+        {
+            a.ingest_ctrl[CTRL_PENDING_VALID] = 0;
+            a.pending_ingest_meta = IngestSlotMeta::zeroed();
+            a.wave1_telem[8] = INGEST_STATUS_DUP;
+            return 0;
+        }
+    }
+
+    a.pending_ingest_meta = IngestSlotMeta {
+        flags,
+        source_epoch: epoch,
+        source_seq: seq,
+        engine_frame_idx: 0,
+        t_src_us_lo: t_lo,
+        t_src_us_hi: t_hi,
+        age_ms_bits: if (flags & 12) == 0 {
+            (-1.0f32).to_bits()
+        } else {
+            age_ms.to_bits()
+        },
+        src_w,
+        src_h,
+        crop_x0: x0,
+        crop_y0: y0,
+        crop_w: cw,
+        crop_h: ch,
+        orientation,
+        scan_dir,
+        engine_w: ew,
+        engine_h: eh,
+        dst_x: dx,
+        dst_y: dy,
+        dst_w: dw,
+        dst_h: dh,
+        frame_gap_flag: gap_mask & 0x3f,
+        native_1to1_active: native_1to1,
+        continuity_epoch: 0,
+    };
+    a.ingest_ctrl[CTRL_PENDING_VALID] = 1;
+    1
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_ring_meta_ptr() -> *const u32 {
+    arena_mut().ring_meta.as_ptr() as *const u32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_row_luma_ptr() -> *const f32 {
+    arena_mut().row_luma_means.as_ptr() as *const f32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_wave1_telemetry_ptr() -> *const u32 {
+    arena_mut().wave1_telem.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_bos_mode(mode: u32) -> u32 {
+    let a = arena_mut();
+    let ok = a.bos.set_mode(mode);
+    if a.bos.get_mode() != bos::BOS_MODE_OFF {
+        a.wave1_telem[7] |= 2;
+    } else {
+        a.wave1_telem[7] &= !2;
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_reset_bos_ref() {
+    arena_mut().bos.reset_ref();
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_bos_gauge_roi(x0: u32, y0: u32, x1: u32, y1: u32) -> u32 {
+    arena_mut().bos.set_gauge_roi(x0, y0, x1, y1)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_bos_overlay_kind(kind: u32) -> u32 {
+    arena_mut().bos.set_overlay_kind(kind)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_bos_telemetry_ptr() -> *const u32 {
+    arena_mut().bos.get_telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_bos_planes_ptr() -> *const f32 {
+    arena_mut().bos.get_planes_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_bos_valid_ptr() -> *const u8 {
+    arena_mut().bos.get_valid_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_bos_rgba_ptr() -> *const u8 {
+    arena_mut().bos.get_rgba_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_bos_solve_manufactured_test(
+    case_id: u32,
+    a: f32,
+    b: f32,
+) -> u32 {
+    let arena = arena_mut();
+    let (frame_w, frame_h, _, _, _, _, _) = mode_dims(arena.res_mode);
+    arena.bos.solve_manufactured_test(case_id, a, b, frame_w, frame_h)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_micro_metrology_mode(mode: u32) -> u32 {
+    let a = arena_mut();
+    let ok = a.micro_swarm.set_micro_metrology_mode(mode);
+    if ok != 0 {
+        if a.micro_swarm.get_micro_metrology_mode() != 0 {
+            a.wave1_telem[7] |= 1;
+        } else {
+            a.wave1_telem[7] &= !1;
+            set_stamp_invalid(
+                &mut a.wave1_telem,
+                WAVE1_PRODUCT_STAMPS_START + PROD_MICRO * STAMP_STRIDE,
+            );
+            let s = mode_dims(a.res_mode).6;
+            release_wave1_owned_auto_heroes(a, a.frame_idx.saturating_sub(1), s);
+        }
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_micro_cov_ptr() -> *const f32 {
+    arena_mut().micro_swarm.micro_cov_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_micro_residual_ptr() -> *const f32 {
+    arena_mut().micro_swarm.micro_residual_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_micro_loom_ptr() -> *const f32 {
+    arena_mut().micro_swarm.micro_loom_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_micro_quality_ptr() -> *const u32 {
+    arena_mut().micro_swarm.micro_quality_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_hero_candidates_ptr() -> *const u32 {
+    arena_mut().micro_swarm.hero_candidates_ptr()
 }
 
 #[inline(never)]
@@ -5851,7 +6435,6 @@ unsafe fn promote_or_bind_hero_slot(
                 continue;
             }
             let is_pinned = (a.focus_target_id != 0 && t.track_id == a.focus_target_id)
-                || (a.pip_target_id != 0 && t.track_id == a.pip_target_id)
                 || (a.inspected_hero_tid != 0 && t.track_id == a.inspected_hero_tid);
             let sc = t.vis_eca_ema
                 + if t.confirmed != 0 { 0.04 } else { 0.0 }
@@ -5872,9 +6455,10 @@ unsafe fn promote_or_bind_hero_slot(
     }
 
     let m = chosen.unwrap_or(0);
-    let f_last = a.frame_idx.saturating_sub(1);
-    let slot_in = (f_last as usize) % RING_LEN;
-    let arc_slot_in = (f_last as usize) & (ARC_HIST_LEN - 1);
+    let last_cursor = a.ring_cursor.saturating_sub(1);
+    let f_last = if a.ring_cursor > 0 { a.frame_idx.wrapping_sub(1) } else { 0 };
+    let slot_in = (last_cursor % (RING_LEN as u64)) as usize;
+    let arc_slot_in = (last_cursor as usize) & (ARC_HIST_LEN - 1);
     let s2 = s * s;
     let patch_dim = 16 * scale_px;
     let half_patch = 8.0 * s;
@@ -6030,6 +6614,7 @@ unsafe fn promote_or_bind_hero_slot(
         }
     }
     a.telemetry[3] = active_confirmed as f32;
+    a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] &= !(1u32 << m);
 
     hero_tid
 }
@@ -6085,6 +6670,11 @@ unsafe fn refresh_hero_pin_bridge(
             let mvy = a.micro_swarm.tracks.vel_y[ti];
             let hero_tid =
                 promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+            for m in 0..MAX_TARGETS {
+                if a.targets[m].active != 0 && a.targets[m].track_id == hero_tid {
+                    a.targets[m].wave1_auto_owned = 0;
+                }
+            }
             a.inspected_hero_tid = hero_tid;
             a.focus_target_id = hero_tid;
         }
@@ -6140,6 +6730,11 @@ pub unsafe extern "C" fn chronos_inspect_field_point(x: f32, y: f32) -> u32 {
 
     let hero_tid =
         promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 && a.targets[m].track_id == hero_tid {
+            a.targets[m].wave1_auto_owned = 0;
+        }
+    }
     a.focus_target_id = hero_tid;
     a.inspected_hero_tid = hero_tid;
     a.inspected_micro_tid_pin = micro_tid;
@@ -6160,6 +6755,11 @@ pub unsafe extern "C" fn chronos_inspect_micro_track(track_id: u32) -> u32 {
     };
     let hero_tid =
         promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 && a.targets[m].track_id == hero_tid {
+            a.targets[m].wave1_auto_owned = 0;
+        }
+    }
     a.focus_target_id = hero_tid;
     a.inspected_hero_tid = hero_tid;
     a.inspected_micro_tid_pin = track_id;
@@ -8815,7 +9415,8 @@ unsafe fn detect_camera_motion_coarse(
         a.ode_scratch.reset();
         a.lyap_scratch.reset();
         a.collision_state.reset();
-        a.telemetry[TELEM_PHYSICS_START..TELEMETRY_LEN].fill(0.0);
+        a.telemetry.fill(0.0);
+        a.telemetry[20] = core::mem::size_of::<Arena>() as f32;
         a.physics_telem_dirty_mask = 0;
         for di in 0..MAX_DORMANT {
             a.dormant[di] = core::mem::zeroed();
@@ -8992,6 +9593,58 @@ fn dense_swarm_hero_cap_active(a: &Arena) -> bool {
 }
 
 #[inline(never)]
+unsafe fn retire_target_slot_full(a: &mut Arena, m: usize, f_idx: u32, s: f32) {
+    if m >= MAX_TARGETS {
+        return;
+    }
+    if a.targets[m].active != 0 && a.targets[m].confirmed != 0 {
+        let ev_x = a.targets[m].pos_x;
+        let ev_y = a.targets[m].pos_y;
+        archive_dormant_track(a, m, f_idx, ev_x, ev_y, s);
+    }
+    core::ptr::write_bytes(
+        &mut a.targets[m] as *mut TargetTrack as *mut u8,
+        0,
+        core::mem::size_of::<TargetTrack>(),
+    );
+    retire_target_slot(a, m);
+    a.all_pip_tid[m] = 0;
+    let mbase = m * 8;
+    for q in 0..8 {
+        a.slot_meta[mbase + q] = 0.0;
+    }
+    let tbase = 32 + m * 56;
+    for j in 0..56 {
+        a.telemetry[tbase + j] = 0.0;
+    }
+    let pbase = TELEM_PHYSICS_START + m * 16;
+    for q in 0..16 {
+        a.telemetry[pbase + q] = 0.0;
+    }
+    a.physics_telem_dirty_mask &= !(1u16 << m);
+    a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] &= !(1u32 << m);
+    a.ingest_ctrl[CTRL_AUTO_HERO_MASK] &= !(1u32 << m);
+    let mut slots_packed = a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS];
+    for k in 0..DENSE_SWARM_HERO_CAP {
+        let shift = k * 8;
+        if ((slots_packed >> shift) & 0xFF) as usize == m + 1 {
+            slots_packed &= !(0xFFu32 << shift);
+            a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = 0;
+        }
+    }
+    a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] = slots_packed;
+    set_stamp_invalid(&mut a.wave1_telem, WAVE1_HERO_STAMPS_START + m * STAMP_STRIDE);
+
+    let mut active_confirmed = 0u32;
+    for k in 0..MAX_TARGETS {
+        if a.targets[k].active != 0 && a.targets[k].confirmed != 0 {
+            active_confirmed += 1;
+        }
+    }
+    a.telemetry[3] = active_confirmed as f32;
+}
+
+#[inline(never)]
 fn enforce_dense_swarm_hero_cap(a: &mut Arena, cap: usize, f_idx: u32, s: f32) {
     let mut act_cnt = 0usize;
     for m in 0..MAX_TARGETS {
@@ -9008,8 +9661,7 @@ fn enforce_dense_swarm_hero_cap(a: &mut Arena, cap: usize, f_idx: u32, s: f32) {
                 continue;
             }
             let is_pinned = (a.focus_target_id != 0 && t.track_id == a.focus_target_id)
-                || (a.inspected_hero_tid != 0 && t.track_id == a.inspected_hero_tid)
-                || (a.pip_target_id != 0 && t.track_id == a.pip_target_id);
+                || (a.inspected_hero_tid != 0 && t.track_id == a.inspected_hero_tid);
             let sc = if is_pinned { 1000.0 } else { 0.0 }
                 + if t.confirmed != 0 { 100.0 } else { 0.0 }
                 + if t.coasting == 0 { 20.0 } else { 0.0 }
@@ -9022,17 +9674,8 @@ fn enforce_dense_swarm_hero_cap(a: &mut Arena, cap: usize, f_idx: u32, s: f32) {
             }
         }
         let Some(m) = best_evict else { break };
-        if a.targets[m].confirmed != 0 {
-            let ev_x = a.targets[m].pos_x;
-            let ev_y = a.targets[m].pos_y;
-            archive_dormant_track(a, m, f_idx, ev_x, ev_y, s);
-        }
-        retire_target_slot(a, m);
-        a.telemetry[32 + m * 56] = 0.0;
-        a.all_pip_tid[m] = 0;
-        let mbase = m * 8;
-        for q in 0..8 {
-            a.slot_meta[mbase + q] = 0.0;
+        unsafe {
+            retire_target_slot_full(a, m, f_idx, s);
         }
         act_cnt -= 1;
     }
@@ -9042,6 +9685,8 @@ fn enforce_dense_swarm_hero_cap(a: &mut Arena, cap: usize, f_idx: u32, s: f32) {
 fn retire_target_slot(a: &mut Arena, m: usize) {
     a.targets[m].active = 0;
     a.targets[m].confirmed = 0;
+    a.targets[m].wave1_auto_owned = 0;
+    a.targets[m].phys_stamp_tid = 0;
     a.kalman[m].active = 0;
     a.imm[m].reset();
     a.ode_states[m].reset();
@@ -9413,19 +10058,30 @@ fn imm_update_obs(
 #[no_mangle]
 pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     let a = arena_mut();
+    if a.ingest_ctrl[CTRL_TICK_PHASE] != 0 {
+        a.wave1_telem[8] = INGEST_STATUS_PHASE_ERR;
+        return;
+    }
+    a.wave1_telem[8] = INGEST_STATUS_EMPTY;
+
     let (frame_w, frame_h, grid_w, grid_h, scale_px, _pip_dim, s) = mode_dims(a.res_mode);
     let frame_pixels = frame_w * frame_h;
     let half_patch = 8.0 * s;
     let f_idx = a.frame_idx;
+    let cursor = a.ring_cursor;
+    let prev_pre_seen = a.pre_tick_seen;
+    let prev_pre_frame = a.last_pre_tick_frame;
     let need_swarm_inval_check = a.swarm_mode_cached != 0 || a.swarm_telem_zeroed == 0;
-    let f_discont_wrap = a.pre_tick_seen != 0
+    let engine_wrapped = prev_pre_seen != 0 && f_idx == 0 && prev_pre_frame == u32::MAX;
+    let f_discont_wrap = prev_pre_seen != 0
+        && !engine_wrapped
         && ((f_idx == 0
-            && (a.last_pre_tick_frame != 0
+            && (prev_pre_frame != 0
                 || (need_swarm_inval_check
                     && (a.micro_swarm.active_count != 0
                         || a.continuum.initialized != 0))))
-            || (f_idx != a.last_pre_tick_frame
-                && f_idx != a.last_pre_tick_frame.wrapping_add(1)));
+            || (f_idx != prev_pre_frame && f_idx != prev_pre_frame.wrapping_add(1)));
+    let mut discont_any = f_discont_wrap;
     if f_discont_wrap && need_swarm_inval_check {
         continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
     }
@@ -9434,14 +10090,14 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     a.last_scene_cut = 0;
     a.last_pan_dx_f = 0.0;
     a.last_pan_dy_f = 0.0;
-    let slot_in = (f_idx as usize) % RING_LEN;
-    let slot_prev = if f_idx == 0 {
+    let slot_in = ring_slot_back_cursor(cursor, 0);
+    let slot_prev = if cursor == 0 {
         slot_in
     } else {
-        ((f_idx as usize) + RING_LEN - 1) % RING_LEN
+        ring_slot_back_cursor(cursor, 1)
     };
-    let eff_k = (a.lookahead_k.min(f_idx) as usize).min(RING_LEN - 1);
-    let slot_disp = ((f_idx as usize) + RING_LEN - eff_k) % RING_LEN;
+    let eff_k = (a.lookahead_k as u64).min(cursor).min((RING_LEN - 1) as u64) as usize;
+    let slot_disp = ring_slot_back_cursor(cursor, eff_k);
     a.last_display_slot = slot_disp as u32;
     a.active_rgba_slot = slot_in as u32;
     a.chroma_tile_mask = if (scale_px <= 1 && frame_w == 320 && frame_h == 180)
@@ -9452,32 +10108,211 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         [!0u64; 24]
     };
 
-    // 0. Update monotonic presentation timestamp ring `hist_t_sec` (`f64`)
+    // Wave-1 100% unconditional ring ingest metadata consume & continuity check (prior to downstream solvers)
+    let had_active_stream = a.ingest_ctrl[CTRL_DUP_GUARD_ACTIVE] != 0;
+    let prev_slot = a.wave1_telem[2] as usize;
+    let prev_meta = if prev_slot < RING_LEN {
+        a.ring_meta[prev_slot]
+    } else {
+        IngestSlotMeta::zeroed()
+    };
+    a.ring_meta[slot_in].flags = 0;
+
+    let staged_valid = a.ingest_ctrl[CTRL_PENDING_VALID] != 0
+        && a.pending_ingest_meta.engine_w == (frame_w as u32)
+        && a.pending_ingest_meta.engine_h == (frame_h as u32);
+    let staged_copy = if staged_valid {
+        let m = a.pending_ingest_meta;
+        a.ingest_ctrl[CTRL_PENDING_VALID] = 0;
+        a.pending_ingest_meta = IngestSlotMeta::zeroed();
+        m
+    } else {
+        if a.ingest_ctrl[CTRL_PENDING_VALID] != 0 {
+            a.ingest_ctrl[CTRL_PENDING_VALID] = 0;
+            a.pending_ingest_meta = IngestSlotMeta::zeroed();
+        }
+        IngestSlotMeta::zeroed()
+    };
+
+    // Staged IngestSlotMeta is strictly authoritative over legacy chronos_set_ingest_pts.
+    let legacy_pts_valid = !staged_valid && a.has_explicit_pts != 0;
+    let legacy_pts_sec = a.pending_pts_sec;
+    a.has_explicit_pts = 0;
+
+    let mut meta = if staged_valid {
+        staged_copy
+    } else {
+        let (flags, t_lo, t_hi) = if legacy_pts_valid {
+            let t_us = (legacy_pts_sec.max(0.0) * 1_000_000.0 + 0.5) as u64;
+            (
+                INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_GEOM_KNOWN,
+                t_us as u32,
+                (t_us >> 32) as u32,
+            )
+        } else {
+            (INGEST_FLAG_GEOM_KNOWN, 0u32, 0u32)
+        };
+        IngestSlotMeta {
+            flags,
+            source_epoch: 0,
+            source_seq: f_idx,
+            engine_frame_idx: f_idx,
+            t_src_us_lo: t_lo,
+            t_src_us_hi: t_hi,
+            age_ms_bits: (-1.0f32).to_bits(),
+            src_w: frame_w as u32,
+            src_h: frame_h as u32,
+            crop_x0: 0,
+            crop_y0: 0,
+            crop_w: frame_w as u32,
+            crop_h: frame_h as u32,
+            orientation: 0,
+            scan_dir: u32::MAX,
+            engine_w: frame_w as u32,
+            engine_h: frame_h as u32,
+            dst_x: 0,
+            dst_y: 0,
+            dst_w: frame_w as u32,
+            dst_h: frame_h as u32,
+            frame_gap_flag: 0,
+            native_1to1_active: 0,
+            continuity_epoch: 0,
+        }
+    };
+    meta.flags &= !INGEST_FLAG_COMMITTED;
+    meta.engine_frame_idx = f_idx;
+
+    let mut gap = meta.frame_gap_flag & 0x3fu32;
+    if engine_wrapped {
+        gap |= FRAME_GAP_WRAP;
+    } else if f_discont_wrap {
+        gap |= FRAME_GAP_SEEK_RESTART;
+    }
+
+    if had_active_stream && (prev_meta.flags & INGEST_FLAG_COMMITTED) != 0 {
+        if meta.source_epoch == prev_meta.source_epoch {
+            if meta.source_epoch != 0 && meta.source_seq != prev_meta.source_seq.wrapping_add(1) {
+                gap |= FRAME_GAP_SEQ;
+            }
+            if (meta.flags & INGEST_FLAG_PTS_KNOWN) != 0
+                && (prev_meta.flags & INGEST_FLAG_PTS_KNOWN) != 0
+            {
+                let cur_us = ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64);
+                let prev_us = ((prev_meta.t_src_us_hi as u64) << 32) | (prev_meta.t_src_us_lo as u64);
+                if cur_us <= prev_us {
+                    gap |= FRAME_GAP_NONINC_PTS;
+                } else {
+                    let dt_us = cur_us - prev_us;
+                    let nom = a.ingest_ctrl[CTRL_NOM_DT_US];
+                    if dt_us > 250_000
+                        || (nom > 0 && (dt_us as u128) * 2 > (nom as u128) * 3)
+                    {
+                        gap |= FRAME_GAP_EXCESS_DT;
+                    } else if (gap & (FRAME_GAP_SEQ | FRAME_GAP_SEEK_RESTART | FRAME_GAP_WRAP))
+                        == 0
+                    {
+                        let clamped_us = dt_us.clamp(1_000, 250_000) as u32;
+                        let next_nom = if nom == 0 {
+                            clamped_us
+                        } else {
+                            (((nom as u64) * 7 + (clamped_us as u64)) / 8) as u32
+                        };
+                        a.ingest_ctrl[CTRL_NOM_DT_US] = next_nom;
+                    }
+                }
+            } else if (meta.flags & INGEST_FLAG_PTS_KNOWN) == 0
+                && dt_sec.is_finite()
+                && dt_sec > 0.25
+            {
+                gap |= FRAME_GAP_EXCESS_DT;
+            }
+        } else {
+            gap |= FRAME_GAP_SEEK_RESTART;
+            a.ingest_ctrl[CTRL_NOM_DT_US] = 0;
+        }
+
+        let geom_changed = ((meta.flags & INGEST_FLAG_GEOM_KNOWN) != 0
+            && (prev_meta.flags & INGEST_FLAG_GEOM_KNOWN) != 0
+            && (meta.src_w != prev_meta.src_w
+                || meta.src_h != prev_meta.src_h
+                || meta.crop_x0 != prev_meta.crop_x0
+                || meta.crop_y0 != prev_meta.crop_y0
+                || meta.crop_w != prev_meta.crop_w
+                || meta.crop_h != prev_meta.crop_h
+                || meta.orientation != prev_meta.orientation
+                || meta.scan_dir != prev_meta.scan_dir
+                || meta.engine_w != prev_meta.engine_w
+                || meta.engine_h != prev_meta.engine_h
+                || meta.dst_x != prev_meta.dst_x
+                || meta.dst_y != prev_meta.dst_y
+                || meta.dst_w != prev_meta.dst_w
+                || meta.dst_h != prev_meta.dst_h
+                || meta.native_1to1_active != prev_meta.native_1to1_active))
+            || meta.engine_w != prev_meta.engine_w
+            || meta.engine_h != prev_meta.engine_h;
+        if geom_changed {
+            gap |= FRAME_GAP_GEOM_CHANGE;
+        }
+    }
+
+    // 0. Update rebased monotonic presentation timestamp ring `hist_t_sec` (`f64`),
+    //    differencing `u64` timestamps in integer precision before any float conversion.
     let fallback_step = if dt_sec.is_finite() && dt_sec > 1e-4 {
         (dt_sec as f64).min(0.25)
     } else {
         1.0 / 60.0
     };
     let mut step_dt_f = fallback_step as f32;
-    if f_idx == 0 {
-        if a.has_explicit_pts != 0 {
-            a.prev_raw_pts_sec = a.pending_pts_sec;
-            a.cum_time_sec = a.pending_pts_sec;
-            a.has_explicit_pts = 0;
+    let is_initial_frame = f_idx == 0 && prev_pre_seen == 0;
+    if is_initial_frame {
+        a.cum_time_sec = 0.0;
+        a.hist_t_sec[0] = 0.0;
+        if staged_valid && (meta.flags & INGEST_FLAG_PTS_KNOWN) != 0 {
+            let cur_us = ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64);
+            a.prev_raw_pts_sec = (cur_us as f64) * 1e-6;
+        } else if legacy_pts_valid {
+            a.prev_raw_pts_sec = legacy_pts_sec;
         } else {
             a.prev_raw_pts_sec = 0.0;
-            a.cum_time_sec = 0.0;
         }
-        a.hist_t_sec[0] = a.cum_time_sec;
-    } else if a.has_explicit_pts != 0 {
-        let cand_pts = a.pending_pts_sec;
-        a.has_explicit_pts = 0;
-        let raw_step = cand_pts - a.prev_raw_pts_sec;
-        a.prev_raw_pts_sec = cand_pts;
+    } else if staged_valid && (meta.flags & INGEST_FLAG_PTS_KNOWN) != 0 {
+        let cur_us = ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64);
+        a.prev_raw_pts_sec = (cur_us as f64) * 1e-6;
+        let has_prev_u64 = had_active_stream
+            && (prev_meta.flags & INGEST_FLAG_COMMITTED) != 0
+            && (prev_meta.flags & INGEST_FLAG_PTS_KNOWN) != 0;
+        let raw_step = if has_prev_u64 {
+            let prev_us = ((prev_meta.t_src_us_hi as u64) << 32) | (prev_meta.t_src_us_lo as u64);
+            if cur_us >= prev_us {
+                ((cur_us - prev_us) as f64) * 1e-6
+            } else {
+                -(((prev_us - cur_us) as f64) * 1e-6)
+            }
+        } else {
+            fallback_step
+        };
+        if has_prev_u64 && (!raw_step.is_finite() || raw_step < -0.02 || raw_step > 0.25) {
+            a.last_discont_frame = f_idx;
+            a.discont_count = a.discont_count.saturating_add(1);
+            continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+            discont_any = true;
+        }
+        let mono_step = if raw_step.is_finite() && raw_step > 5e-4 {
+            raw_step.min(1.0)
+        } else {
+            fallback_step
+        };
+        a.cum_time_sec += mono_step;
+        a.hist_t_sec[(f_idx as usize) & HIST_MASK] = a.cum_time_sec;
+        step_dt_f = (mono_step as f32).clamp(0.002, 0.25);
+    } else if !staged_valid && legacy_pts_valid {
+        let raw_step = legacy_pts_sec - a.prev_raw_pts_sec;
+        a.prev_raw_pts_sec = legacy_pts_sec;
         if !raw_step.is_finite() || raw_step < -0.02 || raw_step > 0.25 {
             a.last_discont_frame = f_idx;
             a.discont_count = a.discont_count.saturating_add(1);
             continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+            discont_any = true;
         }
         let mono_step = if raw_step.is_finite() && raw_step > 5e-4 {
             raw_step.min(1.0)
@@ -9497,10 +10332,36 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
             a.last_discont_frame = f_idx;
             a.discont_count = a.discont_count.saturating_add(1);
             continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+            discont_any = true;
         }
         a.cum_time_sec += raw_step.min(1.0);
         a.hist_t_sec[(f_idx as usize) & HIST_MASK] = a.cum_time_sec;
         step_dt_f = (raw_step as f32).clamp(0.002, 0.25);
+    }
+
+    if (gap
+        & (FRAME_GAP_SEQ
+            | FRAME_GAP_NONINC_PTS
+            | FRAME_GAP_EXCESS_DT
+            | FRAME_GAP_SEEK_RESTART
+            | FRAME_GAP_GEOM_CHANGE
+            | FRAME_GAP_SCENE_CUT))
+        != 0
+    {
+        discont_any = true;
+    }
+
+    let mut epoch_bumped = false;
+    let prev_cont_ep = a.wave1_telem[6];
+    if a.wave1_telem[6] == 0 {
+        a.wave1_telem[6] = 1;
+        epoch_bumped = true;
+    } else if discont_any {
+        a.wave1_telem[6] = a.wave1_telem[6].wrapping_add(1).max(1);
+        epoch_bumped = true;
+        continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
+        a.inspected_hero_tid = 0;
+        a.inspected_micro_tid_pin = 0;
     }
 
     // 1. Fused SIMD128 Planar Unpack + Coarse Luma/Chroma Pyramid (eliminates 3 full-frame read passes)
@@ -9516,6 +10377,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         frame_h,
         scale_px,
     );
+    compute_row_luma_means_simd128(&a.luma, &mut a.row_luma_means[slot_in], frame_w, frame_h);
     let y_cnt_sub = ((frame_pixels + 15) / 16).max(1) as f32;
     let rms_y = wasm_sqrtf(y_sq_sub / y_cnt_sub);
 
@@ -9534,17 +10396,52 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     a.last_pan_dy_f = pan.dy_f;
     a.last_scene_cut = if pan.scene_cut { 1 } else { 0 };
     if pan.scene_cut {
+        gap |= FRAME_GAP_SCENE_CUT;
         continuum_physics::invalidate_continuum_continuity(&mut a.micro_swarm, &mut a.continuum);
         a.inspected_hero_tid = 0;
         a.inspected_micro_tid_pin = 0;
+        if !epoch_bumped {
+            a.wave1_telem[6] = a.wave1_telem[6].wrapping_add(1).max(1);
+        }
     }
+
+    // Commit ring_meta[slot_in] and Wave-1 ingest counters BEFORE Rank-2 ECA / CC / Laplacian solvers.
+    let committed_flags = meta.flags | INGEST_FLAG_COMMITTED;
+    meta.flags = committed_flags;
+    meta.frame_gap_flag = gap;
+    meta.continuity_epoch = a.wave1_telem[6];
+    if prev_cont_ep != 0 && meta.continuity_epoch != prev_cont_ep {
+        invalidate_stale_wave1_stamps(&mut a.wave1_telem, meta.continuity_epoch);
+    }
+    a.ring_meta[slot_in] = meta;
+    a.wave1_telem[0] = WAVE1_ABI_VERSION;
+    a.wave1_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave1_telem[2] = slot_in as u32;
+    a.wave1_telem[3] = slot_disp as u32;
+    let prev_commits = ((a.wave1_telem[5] as u64) << 32) | (a.wave1_telem[4] as u64);
+    let next_commits = prev_commits.wrapping_add(1);
+    a.wave1_telem[4] = next_commits as u32;
+    a.wave1_telem[5] = (next_commits >> 32) as u32;
+    a.wave1_telem[7] = wave1_enabled_bits(a);
+    a.wave1_telem[8] = INGEST_STATUS_OK;
+    a.wave1_telem[9] = committed_flags;
+    a.wave1_telem[10] = frame_h as u32;
+    a.wave1_telem[11] = INGEST_RING_STRIDE_WORDS;
+    a.wave1_telem[12] = linked_static_end_bytes();
+    a.wave1_telem[13] = 1;
+    a.wave1_telem[14] = 0;
+    a.wave1_telem[15] = 0;
+    a.ingest_ctrl[CTRL_DUP_GUARD_ACTIVE] = 1;
+    a.ingest_ctrl[CTRL_TICK_PHASE] = 1;
+    a.ingest_ctrl[CTRL_HERO_PHYS_RAN] = 0;
+    a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] = 0;
 
     // 2. Construct independent stationary-clutter evaluation mask on pan-registered frames,
     //    then evaluate Rank-2 ECA `X = [b, 1]` against pan-warped `bg_luma`.
     let mut rgb_sum_cached = false;
     let mut pan_subpx_fused = false;
     if !pan.scene_cut {
-        let stat_single_pass = f_idx > 0
+        let stat_single_pass = cursor > 0
             && !is_pan_or_exp_active(
                 pan.dx,
                 pan.dy,
@@ -9580,7 +10477,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         let mut sig2 = 0.0f32;
         let mut eval_count = 0u32;
         let mut stat_fused = false;
-        let subpx_fused_ratio = if f_idx > 0
+        let subpx_fused_ratio = if cursor > 0
             && !stat_single_pass
             && frame_w == grid_w * 16
             && frame_h >= grid_h * 16
@@ -9652,7 +10549,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         if let Some(_r) = subpx_fused_ratio {
             pan_subpx_fused = true;
         } else {
-            if f_idx > 0 && !stat_single_pass {
+            if cursor > 0 && !stat_single_pass {
                 rgb_sum_cached = update_stat_streak_and_mask_pan_simd128(
                     a.rgba_ring[slot_in].as_ptr(),
                     a.rgba_ring[slot_prev].as_ptr(),
@@ -9674,7 +10571,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
                 );
             }
             stat_fused =
-                !rgb_sum_cached && f_idx > 0 && frame_w == grid_w * 16 && frame_h >= grid_h * 16;
+                !rgb_sum_cached && cursor > 0 && frame_w == grid_w * 16 && frame_h >= grid_h * 16;
             let _ratio = if rgb_sum_cached {
                 eca_and_motion_grid_pan_fused_simd128(
                     a.luma.as_ptr(),
@@ -9773,7 +10670,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
         } else if a.clutter_db_valid == 0 {
             a.clutter_db = 0.0;
         }
-        if f_idx > 0 && !rgb_sum_cached && !stat_fused && !pan_subpx_fused {
+        if cursor > 0 && !rgb_sum_cached && !stat_fused && !pan_subpx_fused {
             compute_motion_grid_and_heal_bg_simd128(
                 a.rgba_ring[slot_in].as_ptr(),
                 a.rgba_ring[slot_prev].as_ptr(),
@@ -9803,7 +10700,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     } else {
         false
     };
-    if f_idx > 0 && !pan.scene_cut && !skip_hero_cc_peaks {
+    if cursor > 0 && !pan.scene_cut && !skip_hero_cc_peaks {
         extract_connected_component_peaks(a);
     } else {
         a.num_peaks = 0;
@@ -10142,9 +11039,9 @@ fn update_physics_and_telemetry(
     fps: f32,
     eff_k: usize,
     safe_dt: f32,
-) {
+) -> bool {
     let half_patch = 8.0 * s;
-    let disp_f = f_idx.saturating_sub(eff_k as u32);
+    let disp_f = f_idx.wrapping_sub(eff_k as u32);
     let head_slot = (f_idx as usize) & HIST_MASK;
     let cam_hx = a.hist_cam_x[head_slot];
     let cam_hy = a.hist_cam_y[head_slot];
@@ -10156,7 +11053,7 @@ fn update_physics_and_telemetry(
     let t_disp_sec = a.hist_t_sec[(disp_f as usize) & HIST_MASK] as f32;
     let u_disp = (RING_LEN - 1).saturating_sub(eff_k);
     let f_at_u = |u: usize| -> u32 {
-        ((f_idx as usize) + u).saturating_sub(RING_LEN - 1) as u32
+        f_idx.wrapping_sub((RING_LEN - 1 - u) as u32)
     };
 
     if dense_swarm_hero_cap_active(a)
@@ -10164,6 +11061,7 @@ fn update_physics_and_telemetry(
         && a.focus_target_id == 0
         && (a.micro_swarm.confirmed_count >= 960 || f_idx < 21 || (f_idx & 7) != 5)
     {
+        a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] = 0;
         for m in 0..MAX_TARGETS {
             let bit = 1u16 << m;
             if a.targets[m].active != 0 {
@@ -10182,6 +11080,7 @@ fn update_physics_and_telemetry(
                 );
             } else {
                 a.lyap_cache[m] = 0.0;
+                a.targets[m].phys_stamp_tid = 0;
             }
             if a.targets[m].active == 0
                 || a.targets[m].confirmed == 0
@@ -10189,6 +11088,7 @@ fn update_physics_and_telemetry(
             {
                 if a.targets[m].confirmed == 0 {
                     a.lyap_cache[m] = 0.0;
+                    a.targets[m].phys_stamp_tid = 0;
                 }
                 if (a.physics_telem_dirty_mask & bit) != 0 {
                     let b = TELEM_PHYSICS_START + m * 16;
@@ -10207,7 +11107,7 @@ fn update_physics_and_telemetry(
         for ti in z_start..TELEMETRY_LEN {
             a.telemetry[ti] = 0.0;
         }
-        return;
+        return false;
     }
 
     let mut taubin_fits = [physics_id::TaubinFitResult::zeroed(); MAX_TARGETS];
@@ -10245,8 +11145,9 @@ fn update_physics_and_telemetry(
             (0.0, 0.0)
         } else if u_disp >= 1
             && u_disp + 1 < RING_LEN
-            && (f_idx as usize) + u_disp >= RING_LEN
-            && (a.last_discont_frame == 0 || f_at_u(u_disp - 1) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp - 1).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_2 = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp - 1), f_at_u(u_disp + 1), safe_dt);
             (
@@ -10254,8 +11155,9 @@ fn update_physics_and_telemetry(
                 (a.targets[m].fista_y[u_disp + 1] - a.targets[m].fista_y[u_disp - 1]) / dt_2,
             )
         } else if u_disp + 1 < RING_LEN
-            && (f_idx as usize) + u_disp >= (RING_LEN - 1)
-            && (a.last_discont_frame == 0 || f_at_u(u_disp) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN - 1 - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_1 = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp), f_at_u(u_disp + 1), safe_dt);
             (
@@ -11148,6 +12050,8 @@ fn update_physics_and_telemetry(
         let b = TELEM_PHYSICS_START + m * 16;
         let bit = 1u16 << m;
         if a.targets[m].active == 0 || a.targets[m].confirmed == 0 || a.telemetry[32 + m * 56] < 0.5 {
+            a.targets[m].phys_stamp_tid = 0;
+            a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] &= !(1u32 << m);
             if (a.physics_telem_dirty_mask & bit) != 0 {
                 for q in 0..16 {
                     a.telemetry[b + q] = 0.0;
@@ -11157,6 +12061,8 @@ fn update_physics_and_telemetry(
             continue;
         }
         a.physics_telem_dirty_mask |= bit;
+        a.targets[m].phys_stamp_tid = a.targets[m].track_id;
+        a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK] |= 1u32 << m;
         let mut w0 = if a.imm[m].mu[0].is_finite() { a.imm[m].mu[0].max(0.0) } else { 0.25 };
         let mut w1 = if a.imm[m].mu[1].is_finite() { a.imm[m].mu[1].max(0.0) } else { 0.25 };
         let mut w23 = if a.imm[m].mu[2].is_finite() && a.imm[m].mu[3].is_finite() {
@@ -11216,7 +12122,7 @@ fn update_physics_and_telemetry(
         a.telemetry[b + 15] = jump_code as f32;
     }
 
-    if a.lab_mode == 1 && eff_k >= 7 && (f_idx as usize) >= eff_k {
+    if a.lab_mode == 1 && eff_k >= 7 && a.ring_cursor >= (eff_k as u64) {
         let mut ode_freq_arr = [0.0f32; MAX_TARGETS];
         let mut best_pend_m: i32 = -1;
         let mut best_pend_score = -1.0f32;
@@ -11304,6 +12210,7 @@ fn update_physics_and_telemetry(
             a.telemetry[ti] = 0.0;
         }
     }
+    true
 }
 
 /// Exact sparse-compacted wrapper around `solve_jv_assign_8x32`.
@@ -11607,6 +12514,11 @@ unsafe fn update_slot_pip_scalar_fallback(
 #[no_mangle]
 pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let a = arena_mut();
+    if a.ingest_ctrl[CTRL_TICK_PHASE] == 0 {
+        a.wave1_telem[8] = INGEST_STATUS_PHASE_ERR;
+        return a.last_display_slot;
+    }
+
     let (frame_w, frame_h, grid_w, grid_h, scale_px, pip_dim, s) = mode_dims(a.res_mode);
     let s2 = s * s;
     let patch_dim = 16 * scale_px;
@@ -11614,9 +12526,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let s_i32 = scale_px as i32;
 
     let f_idx = a.frame_idx;
-    let actual_dt = if f_idx > 0 {
+    let cursor = a.ring_cursor;
+    let actual_dt = if cursor > 0 {
         let d = (a.hist_t_sec[(f_idx as usize) & HIST_MASK]
-            - a.hist_t_sec[((f_idx - 1) as usize) & HIST_MASK]) as f32;
+            - a.hist_t_sec[(f_idx.wrapping_sub(1) as usize) & HIST_MASK]) as f32;
         if d.is_finite() && d > 1e-4 {
             d
         } else if dt_sec.is_finite() {
@@ -11633,10 +12546,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let fps = (1.0 / safe_dt).clamp(8.0, 240.0);
     let dt_frames_60 = (safe_dt * 60.0).clamp(0.25, 6.5);
 
-    let slot_in = (f_idx as usize) % RING_LEN;
-    let arc_slot_in = (f_idx as usize) & (ARC_HIST_LEN - 1);
-    let eff_k = (a.lookahead_k.min(f_idx) as usize).min(RING_LEN - 1);
-    let slot_disp = ((f_idx as usize) + RING_LEN - eff_k) % RING_LEN;
+    let slot_in = ring_slot_back_cursor(cursor, 0);
+    let arc_slot_in = (cursor & ((ARC_HIST_LEN - 1) as u64)) as usize;
+    let eff_k = (a.lookahead_k as u64).min(cursor).min((RING_LEN - 1) as u64) as usize;
+    let slot_disp = ring_slot_back_cursor(cursor, eff_k);
     a.last_display_slot = slot_disp as u32;
     a.active_rgba_slot = slot_in as u32;
 
@@ -13527,7 +14440,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                     backtrack_gap_in_rgba_ring(a, m, f_idx, nb, frame_w, frame_h, scale_px, s, true);
                     backtrack_budget -= 1;
                 } else if a.targets[m].just_confirmed != 0 {
-                    let nb = (f_idx as usize).min(eff_k).min(RING_LEN - 2);
+                    let nb = (a.ring_cursor.min(eff_k as u64) as usize).min(RING_LEN - 2);
                     backtrack_gap_in_rgba_ring(a, m, f_idx, nb, frame_w, frame_h, scale_px, s, false);
                     backtrack_budget -= 1;
                 }
@@ -14519,6 +15432,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
                 a.targets[m].active = 1;
                 a.targets[m].confirmed = 0; // Tentative until M-of-N (`3` hits + real motion; Track ID allocated on confirm)
+                a.targets[m].wave1_auto_owned = 0;
+                a.targets[m].phys_stamp_tid = 0;
                 a.targets[m].just_confirmed = 0;
                 a.targets[m].hit_mask_8 = 0x01;
                 a.targets[m].static_streak = 0;
@@ -14712,7 +15627,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
 
         let s_disp = slot_disp;
-        let disp_f = f_idx.saturating_sub(eff_k as u32);
+        let disp_f = f_idx.wrapping_sub(eff_k as u32);
         let fx = a.targets[m].fista_x[u_disp];
         let fy = a.targets[m].fista_y[u_disp];
         let rx = a.targets[m].ring_raw_x[s_disp];
@@ -14728,22 +15643,26 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         for u in 0..u_disp {
             let su = (slot_in + 1 + u) % RING_LEN;
             if a.targets[m].ring_vis[su] != 0 {
-                if (f_idx as usize) + u >= (RING_LEN - 1) {
-                    let fu = ((f_idx as usize) + u - (RING_LEN - 1)) as u32;
-                    if a.last_discont_frame == 0 || fu >= a.last_discont_frame {
+                if a.ring_cursor + (u as u64) >= ((RING_LEN - 1) as u64) {
+                    let fu = f_idx.wrapping_sub((RING_LEN - 1 - u) as u32);
+                    if a.last_discont_frame == 0
+                        || (fu.wrapping_sub(a.last_discont_frame) < 0x8000_0000)
+                    {
                         has_past_vis = true;
                     }
                 }
             }
         }
-        if !has_past_vis && (f_idx as usize) >= eff_k {
+        if !has_past_vis && a.ring_cursor >= (eff_k as u64) {
+            let disp_cursor = a.ring_cursor - (eff_k as u64);
             for back in 1..=48u32 {
-                if disp_f < back {
+                if disp_cursor < (back as u64) {
                     break;
                 }
-                let pf = disp_f - back;
-                if pf < a.targets[m].birth_frame
-                    || (a.last_discont_frame > 0 && pf < a.last_discont_frame)
+                let pf = disp_f.wrapping_sub(back);
+                if pf.wrapping_sub(a.targets[m].birth_frame) >= 0x8000_0000
+                    || (a.last_discont_frame > 0
+                        && pf.wrapping_sub(a.last_discont_frame) >= 0x8000_0000)
                 {
                     break;
                 }
@@ -14756,9 +15675,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         for u in (u_disp + 1)..RING_LEN {
             let su = (slot_in + 1 + u) % RING_LEN;
             if a.targets[m].ring_vis[su] != 0 {
-                if (f_idx as usize) + u >= (RING_LEN - 1) {
-                    let fu = ((f_idx as usize) + u - (RING_LEN - 1)) as u32;
-                    if a.last_discont_frame == 0 || fu >= a.last_discont_frame {
+                if a.ring_cursor + (u as u64) >= ((RING_LEN - 1) as u64) {
+                    let fu = f_idx.wrapping_sub((RING_LEN - 1 - u) as u32);
+                    if a.last_discont_frame == 0
+                        || (fu.wrapping_sub(a.last_discont_frame) < 0x8000_0000)
+                    {
                         has_future_vis = true;
                     }
                 }
@@ -14785,11 +15706,11 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let mut raw_dv_ok = [0u8; 10];
 
         for zk in 0..10usize {
-            if (f_idx as usize) + zk < (RING_LEN - 1) {
+            if a.ring_cursor + (zk as u64) < ((RING_LEN - 1) as u64) {
                 continue;
             }
-            let f_z0 = ((f_idx as usize) + zk - (RING_LEN - 1)) as u32;
-            if a.last_discont_frame > 0 && f_z0 < a.last_discont_frame {
+            let f_z0 = f_idx.wrapping_sub((RING_LEN - 1 - zk) as u32);
+            if a.last_discont_frame > 0 && f_z0.wrapping_sub(a.last_discont_frame) >= 0x8000_0000 {
                 continue;
             }
             let su0 = (slot_in + 1 + zk) % RING_LEN;
@@ -14992,12 +15913,13 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
 
         // 6b. Timestamp-exact display-time velocity v(t - K), flight angle theta(t - K), & angular rate
         let f_at_u = |u: usize| -> u32 {
-            ((f_idx as usize) + u).saturating_sub(RING_LEN - 1) as u32
+            f_idx.wrapping_sub((RING_LEN - 1 - u) as u32)
         };
         let (fvx_sec, fvy_sec) = if u_disp >= 1
             && u_disp + 1 < RING_LEN
-            && (f_idx as usize) + u_disp >= RING_LEN
-            && (a.last_discont_frame == 0 || f_at_u(u_disp - 1) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp - 1).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_2 = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp - 1), f_at_u(u_disp + 1), safe_dt);
             (
@@ -15005,8 +15927,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
                 (a.targets[m].fista_y[u_disp + 1] - a.targets[m].fista_y[u_disp - 1]) / dt_2,
             )
         } else if u_disp + 1 < RING_LEN
-            && (f_idx as usize) + u_disp >= (RING_LEN - 1)
-            && (a.last_discont_frame == 0 || f_at_u(u_disp) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN - 1 - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_1 = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp), f_at_u(u_disp + 1), safe_dt);
             (
@@ -15027,8 +15950,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
         if u_disp >= 2
             && u_disp + 2 < RING_LEN
-            && (f_idx as usize) + u_disp >= RING_LEN + 1
-            && (a.last_discont_frame == 0 || f_at_u(u_disp - 2) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN + 1 - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp - 2).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_p = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp - 2), f_at_u(u_disp), 2.0 * safe_dt);
             let dt_n = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp), f_at_u(u_disp + 2), 2.0 * safe_dt);
@@ -15051,8 +15975,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
         } else if u_disp >= 1
             && u_disp + 1 < RING_LEN
-            && (f_idx as usize) + u_disp >= RING_LEN
-            && (a.last_discont_frame == 0 || f_at_u(u_disp - 1) >= a.last_discont_frame)
+            && a.ring_cursor >= ((RING_LEN - u_disp) as u64)
+            && (a.last_discont_frame == 0
+                || f_at_u(u_disp - 1).wrapping_sub(a.last_discont_frame) < 0x8000_0000)
         {
             let dt_p = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp - 1), f_at_u(u_disp), safe_dt);
             let dt_n = frame_dt_span_sec(&a.hist_t_sec, f_at_u(u_disp), f_at_u(u_disp + 1), safe_dt);
@@ -15101,7 +16026,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let mut pivot_updated = false;
         let recent_strike_at_disp = a.targets[m].has_struck != 0
             && disp_f <= a.targets[m].last_strike_event_frame.saturating_add(5);
-        if (f_idx as usize) >= eff_k
+        if a.ring_cursor >= (eff_k as u64)
             && !(a.micro_swarm.confirmed_count >= 960
                 && a.inspected_micro_tid_pin == 0
                 && a.focus_target_id == 0)
@@ -15448,17 +16373,17 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let slope_int_x = 0.25 * (a.targets[m].fista_x[8] - a.targets[m].fista_x[4]);
         let slope_int_y = 0.25 * (a.targets[m].fista_y[8] - a.targets[m].fista_y[4]);
         for u in rev_start..RING_LEN {
-            if (f_idx as usize) + u < (RING_LEN - 1) {
+            if a.ring_cursor + (u as u64) < ((RING_LEN - 1) as u64) {
                 continue;
             }
-            let sample_idx = (f_idx as usize) + u - (RING_LEN - 1);
-            let h_slot = sample_idx & HIST_MASK;
+            let sample_f = f_idx.wrapping_sub((RING_LEN - 1 - u) as u32);
+            let h_slot = (sample_f as usize) & HIST_MASK;
             let su = (slot_in + 1 + u) % RING_LEN;
-            let post_disc =
-                a.last_discont_frame == 0 || (sample_idx as u32) >= a.last_discont_frame;
+            let post_disc = a.last_discont_frame == 0
+                || sample_f.wrapping_sub(a.last_discont_frame) < 0x8000_0000;
             if post_disc
                 && a.targets[m].ring_vis[su] != 0
-                && sample_idx >= (a.targets[m].birth_frame as usize)
+                && sample_f.wrapping_sub(a.targets[m].birth_frame) < 0x8000_0000
             {
                 let (base_x, base_y) = if u > 8 && a.targets[m].age > 8 {
                     let du = (u - 8) as f32;
@@ -15481,8 +16406,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             }
         }
 
-        let disp_h_slot = ((f_idx as usize) + HIST_RING_LEN - eff_k) & HIST_MASK;
-        let disp_valid = (f_idx as usize) >= eff_k && a.targets[m].tremor_valid[disp_h_slot] != 0;
+        let disp_h_slot = ((f_idx as usize).wrapping_add(HIST_RING_LEN).wrapping_sub(eff_k)) & HIST_MASK;
+        let disp_valid = a.ring_cursor >= (eff_k as u64) && a.targets[m].tremor_valid[disp_h_slot] != 0;
         if disp_valid {
             let rdx = a.targets[m].tremor_hist_x[disp_h_slot];
             let rdy = a.targets[m].tremor_hist_y[disp_h_slot];
@@ -15544,7 +16469,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let macro_osc = a.targets[m].pivot_valid > 0 || bounded_bi_turn;
 
         let disp_obs_or_bridged = vis_d != 0 || a.targets[m].bridged_at_disp != 0;
-        if macro_osc && eff_k >= 7 && disp_obs_or_bridged && (f_idx as usize) >= eff_k {
+        if macro_osc && eff_k >= 7 && disp_obs_or_bridged && a.ring_cursor >= (eff_k as u64) {
             // Regime 2: Verified Macro-Excursion Harmonic Oscillator (Kasa plumb or bi-directional turnaround midpoint + >=3 exact f64 zero-crossings)
             let center_x = if bounded_bi_turn {
                 0.5 * (a.targets[m].osc_ext_min_x + a.targets[m].osc_ext_max_x)
@@ -15774,10 +16699,10 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             let no_disc_in_hilb =
                 a.last_discont_frame == 0 || disp_f >= a.last_discont_frame.saturating_add(7);
 
-            if eff_k >= 7 && disp_valid && (f_idx as usize) >= eff_k + 7 && no_disc_in_hilb {
+            if eff_k >= 7 && disp_valid && a.ring_cursor >= ((eff_k + 7) as u64) && no_disc_in_hilb {
                 let t_c = a.hist_t_sec[(disp_f as usize) & HIST_MASK];
-                let dt_core = ((a.hist_t_sec[((disp_f + 3) as usize) & HIST_MASK]
-                    - a.hist_t_sec[((disp_f - 3) as usize) & HIST_MASK])
+                let dt_core = ((a.hist_t_sec[(disp_f.wrapping_add(3) as usize) & HIST_MASK]
+                    - a.hist_t_sec[(disp_f.wrapping_sub(3) as usize) & HIST_MASK])
                     * (1.0 / 6.0)) as f32;
                 if dt_core.is_finite() && dt_core > 1e-3 && dt_core < 0.25 {
                     dt_hilb = dt_core;
@@ -16151,10 +17076,9 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     let max_pip_x = (frame_w.saturating_sub(pip_dim + 2)) as f32;
     let max_pip_y = (frame_h.saturating_sub(pip_dim + 2)) as f32;
 
-    let disp_f_slot = f_idx.saturating_sub(eff_k as u32);
     let dense_cap_odd = dense_swarm_hero_cap_active(a) && (f_idx & 1) != 0;
     let cold_dense_pip_defer =
-        a.micro_swarm.confirmed_count >= 960 && a.inspected_micro_tid_pin == 0 && f_idx < 9;
+        a.micro_swarm.confirmed_count >= 960 && a.inspected_micro_tid_pin == 0 && a.ring_cursor < 9;
     let mut conf_hero_cnt = 0u32;
     for m in 0..MAX_TARGETS {
         if a.targets[m].active != 0 && a.targets[m].confirmed != 0 {
@@ -16173,8 +17097,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
         let not_born_at_disp = !((a.telemetry[32 + m * 56] > 0.5)
             && (a.telemetry[32 + m * 56 + 1] - (a.targets[m].track_id as f32)).abs() < 0.25)
-            && (f_idx as usize) >= eff_k
-            && disp_f_slot < a.targets[m].birth_frame
+            && a.ring_cursor >= (eff_k as u64)
+            && f_idx.wrapping_sub(a.targets[m].birth_frame) < (eff_k as u32)
             && a.targets[m].dormant_reid == 0
             && a.targets[m].is_ballistic == 0
             && a.targets[m].disp_vis < 0.5
@@ -16431,8 +17355,8 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         let kbase = TELEM_KINETIC_START + m * 8;
         let not_born_at_disp = !((a.telemetry[32 + m * 56] > 0.5)
             && (a.telemetry[32 + m * 56 + 1] - (a.targets[m].track_id as f32)).abs() < 0.25)
-            && (f_idx as usize) >= eff_k
-            && disp_f_slot < a.targets[m].birth_frame
+            && a.ring_cursor >= (eff_k as u64)
+            && f_idx.wrapping_sub(a.targets[m].birth_frame) < (eff_k as u32)
             && a.targets[m].dormant_reid == 0
             && a.targets[m].is_ballistic == 0
             && a.targets[m].disp_vis < 0.5
@@ -16533,7 +17457,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
     a.telemetry[TELEM_GLOBAL_START + 6] = a.scatter_th2_deg;
     a.telemetry[TELEM_GLOBAL_START + 7] = a.scatter_event_frame as f32;
 
-    let disp_f_out = f_idx.saturating_sub(eff_k as u32);
+    let disp_f_out = f_idx.wrapping_sub(eff_k as u32);
     let disp_lag_ms = ((a.hist_t_sec[(f_idx as usize) & HIST_MASK]
         - a.hist_t_sec[(disp_f_out as usize) & HIST_MASK])
         .max(0.0)
@@ -16585,12 +17509,29 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
     }
 
-    update_physics_and_telemetry(a, f_idx, frame_w, frame_h, s, fps, eff_k, safe_dt);
+    let hero_phys_ran =
+        update_physics_and_telemetry(a, f_idx, frame_w, frame_h, s, fps, eff_k, safe_dt);
+    a.ingest_ctrl[CTRL_HERO_PHYS_RAN] = if hero_phys_ran { 1 } else { 0 };
 
     let need_px = frame_w * frame_h;
     let rgba_bytes = need_px * 4;
     let swarm_active = if a.swarm_mode_cached != 0 {
         a.swarm_telem_zeroed = 0;
+        let meta_in = a.ring_meta[slot_in];
+        if (meta_in.flags & INGEST_FLAG_PTS_KNOWN) != 0 {
+            a.micro_swarm.set_ingest_clock(
+                meta_in.t_src_us_lo,
+                meta_in.t_src_us_hi,
+                meta_in.continuity_epoch,
+            );
+        } else {
+            a.micro_swarm.ingest_clock_valid = 0;
+            a.micro_swarm.ingest_continuity_epoch = meta_in.continuity_epoch;
+            if a.micro_swarm.metrology.metrology_ctrl[1] != meta_in.continuity_epoch {
+                a.micro_swarm.invalidate_continuity();
+                a.micro_swarm.metrology.metrology_ctrl[1] = meta_in.continuity_epoch;
+            }
+        }
         soa_tracks::soa_step(
             &mut a.micro_swarm,
             &a.luma[..need_px],
@@ -16637,14 +17578,382 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         a.inspected_hero_tid = 0;
         a.inspected_micro_tid_pin = 0;
     }
+    if dense_swarm_hero_cap_active(a) {
+        enforce_dense_swarm_hero_cap(a, DENSE_SWARM_HERO_CAP, f_idx, s);
+    }
+    if a.micro_swarm.get_micro_metrology_mode() != 0
+        || a.ingest_ctrl[CTRL_AUTO_HERO_MASK] != 0
+        || a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] != 0
+    {
+        reconcile_wave1_hero_promotions(a, f_idx, frame_w, frame_h, scale_px, s, swarm_active);
+    }
 
+    let bos_ran = if a.bos.get_mode() != bos::BOS_MODE_OFF {
+        let meta = a.ring_meta[slot_in];
+        let ext_scene_cut =
+            a.last_scene_cut != 0 || (meta.frame_gap_flag & FRAME_GAP_SCENE_CUT) != 0;
+        let ext_pan_or_cut = ext_scene_cut || a.cam_motion_state != 0;
+        a.bos.step(
+            &a.luma[..need_px],
+            frame_w,
+            frame_h,
+            meta.continuity_epoch,
+            meta.source_epoch,
+            meta.source_seq,
+            meta.t_src_us_lo,
+            meta.t_src_us_hi,
+            meta.frame_gap_flag,
+            ext_pan_or_cut,
+            ext_scene_cut,
+        )
+    } else {
+        false
+    };
+
+    finalize_wave1_stamps(a, f_idx, slot_in, slot_disp, swarm_active, bos_ran);
+
+    a.ring_cursor = a.ring_cursor.wrapping_add(1);
     a.frame_idx = f_idx.wrapping_add(1);
     slot_disp as u32
+}
+
+#[inline(never)]
+unsafe fn release_wave1_owned_auto_heroes(a: &mut Arena, f_idx: u32, s: f32) {
+    let auto_mask = a.ingest_ctrl[CTRL_AUTO_HERO_MASK];
+    for m in 0..MAX_TARGETS {
+        let bit_m = 1u32 << m;
+        if ((auto_mask & bit_m) != 0 || a.targets[m].wave1_auto_owned != 0)
+            && a.targets[m].active != 0
+        {
+            let htid = a.targets[m].track_id;
+            let pinned_by_op = (a.focus_target_id != 0 && htid == a.focus_target_id)
+                || (a.inspected_hero_tid != 0 && htid == a.inspected_hero_tid);
+            if pinned_by_op {
+                a.targets[m].wave1_auto_owned = 0;
+            } else if a.targets[m].wave1_auto_owned != 0 {
+                retire_target_slot_full(a, m, f_idx, s);
+            }
+        }
+    }
+    a.ingest_ctrl[CTRL_AUTO_HERO_MASK] = 0;
+    a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] = 0;
+    for k in 0..DENSE_SWARM_HERO_CAP {
+        a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = 0;
+    }
+    a.micro_swarm.sync_bound_hero_tids(&[]);
+}
+
+#[inline(never)]
+unsafe fn reconcile_wave1_hero_promotions(
+    a: &mut Arena,
+    f_idx: u32,
+    frame_w: usize,
+    frame_h: usize,
+    scale_px: usize,
+    s: f32,
+    swarm_active: bool,
+) {
+    if !swarm_active || a.micro_swarm.get_micro_metrology_mode() == 0 {
+        release_wave1_owned_auto_heroes(a, f_idx, s);
+        return;
+    }
+
+    let cand_cnt =
+        (a.micro_swarm.hero_candidates_slice()[0] as usize).min(soa_tracks::MAX_HERO_CANDIDATES);
+    let mut bound_tids = [0u32; DENSE_SWARM_HERO_CAP];
+    let mut bound_len = 0usize;
+
+    // 1. Validate existing auto-promoted Hero bindings and release hysteresis exits
+    let mut auto_mask = a.ingest_ctrl[CTRL_AUTO_HERO_MASK];
+    let mut slots_packed = a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS];
+    for k in 0..DENSE_SWARM_HERO_CAP {
+        let shift = k * 8;
+        let raw_slot = ((slots_packed >> shift) & 0xFF) as usize;
+        let mtid = a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k];
+        if raw_slot == 0 || mtid == 0 || (raw_slot - 1) >= MAX_TARGETS {
+            a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = 0;
+            slots_packed &= !(0xFFu32 << shift);
+            continue;
+        }
+        let m = raw_slot - 1;
+        let bit_m = 1u32 << m;
+        if a.targets[m].active == 0
+            || a.targets[m].wave1_auto_owned == 0
+            || a.targets[m].track_id == 0
+            || (auto_mask & bit_m) == 0
+        {
+            a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = 0;
+            slots_packed &= !(0xFFu32 << shift);
+            auto_mask &= !bit_m;
+            if a.targets[m].active != 0 && a.targets[m].wave1_auto_owned != 0 {
+                a.targets[m].wave1_auto_owned = 0;
+            }
+            continue;
+        }
+        let htid = a.targets[m].track_id;
+        let pinned_by_op = (a.focus_target_id != 0 && htid == a.focus_target_id)
+            || (a.inspected_hero_tid != 0 && htid == a.inspected_hero_tid);
+        if pinned_by_op {
+            a.targets[m].wave1_auto_owned = 0;
+            auto_mask &= !bit_m;
+            a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = 0;
+            slots_packed &= !(0xFFu32 << shift);
+            continue;
+        }
+        let mut still_cand = false;
+        {
+            let cand_slice = a.micro_swarm.hero_candidates_slice();
+            let mut c = 0usize;
+            while c < cand_cnt {
+                let base = soa_tracks::HERO_CAND_HEADER_LEN + c * soa_tracks::HERO_CAND_STRIDE;
+                if cand_slice[base] == mtid && (cand_slice[base + 2] & 1) != 0 {
+                    still_cand = true;
+                    break;
+                }
+                c += 1;
+            }
+        }
+        if still_cand {
+            bound_tids[bound_len] = mtid;
+            bound_len += 1;
+        } else {
+            retire_target_slot_full(a, m, f_idx, s);
+            auto_mask = a.ingest_ctrl[CTRL_AUTO_HERO_MASK];
+            slots_packed = a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS];
+        }
+    }
+    a.ingest_ctrl[CTRL_AUTO_HERO_MASK] = auto_mask;
+    a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] = slots_packed;
+
+    // 2. Count current Hero slots & enforce dense cap + operator pin priority
+    let dense_cap = dense_swarm_hero_cap_active(a);
+    let eff_cap = if dense_cap { DENSE_SWARM_HERO_CAP } else { MAX_TARGETS };
+    let mut act_heroes = 0usize;
+    for m in 0..MAX_TARGETS {
+        if a.targets[m].active != 0 {
+            act_heroes += 1;
+        }
+    }
+    let skip_new_promo = dense_cap && a.inspected_micro_tid_pin != 0 && act_heroes >= eff_cap;
+    let match_r2 = (20.0 * s) * (20.0 * s);
+
+    if !skip_new_promo {
+        let mut c = 0usize;
+        while c < cand_cnt && bound_len < DENSE_SWARM_HERO_CAP {
+            let (cand_tid, ti, flags) = {
+                let cand_slice = a.micro_swarm.hero_candidates_slice();
+                let base = soa_tracks::HERO_CAND_HEADER_LEN + c * soa_tracks::HERO_CAND_STRIDE;
+                (cand_slice[base], cand_slice[base + 1] as usize, cand_slice[base + 2])
+            };
+            c += 1;
+            if cand_tid == 0 || (flags & 1) == 0 || ti >= soa_tracks::MAX_MICRO {
+                continue;
+            }
+            let mut already_bound = false;
+            for b in 0..bound_len {
+                if bound_tids[b] == cand_tid {
+                    already_bound = true;
+                    break;
+                }
+            }
+            if already_bound {
+                continue;
+            }
+            if a.micro_swarm.tracks.state[ti] == soa_tracks::MICRO_STATE_INACTIVE
+                || a.micro_swarm.tracks.track_id[ti] != cand_tid
+            {
+                continue;
+            }
+            let mx = a.micro_swarm.tracks.pos_x[ti];
+            let my = a.micro_swarm.tracks.pos_y[ti];
+            let mvx = a.micro_swarm.tracks.vel_x[ti];
+            let mvy = a.micro_swarm.tracks.vel_y[ti];
+
+            let mut existing_match = false;
+            for m in 0..MAX_TARGETS {
+                if a.targets[m].active != 0 && a.targets[m].confirmed != 0 {
+                    let dx = a.targets[m].pos_x - mx;
+                    let dy = a.targets[m].pos_y - my;
+                    let d2 = dx * dx + dy * dy;
+                    if d2.is_finite() && d2 < match_r2 {
+                        existing_match = true;
+                        break;
+                    }
+                }
+            }
+            if existing_match || act_heroes >= eff_cap {
+                continue;
+            }
+            let mut free_k: Option<usize> = None;
+            for k in 0..DENSE_SWARM_HERO_CAP {
+                if a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] == 0 {
+                    free_k = Some(k);
+                    break;
+                }
+            }
+            if let Some(k) = free_k {
+                let hero_tid =
+                    promote_or_bind_hero_slot(a, mx, my, mvx, mvy, frame_w, frame_h, scale_px, s);
+                for m in 0..MAX_TARGETS {
+                    if a.targets[m].active != 0 && a.targets[m].track_id == hero_tid {
+                        let shift = k * 8;
+                        a.targets[m].wave1_auto_owned = 1;
+                        a.targets[m].phys_stamp_tid = 0;
+                        a.ingest_ctrl[CTRL_AUTO_HERO_MASK] |= 1u32 << m;
+                        a.ingest_ctrl[CTRL_AUTO_HERO_MICRO_BASE + k] = cand_tid;
+                        a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] =
+                            (a.ingest_ctrl[CTRL_AUTO_HERO_SLOTS] & !(0xFFu32 << shift))
+                                | (((m + 1) as u32) << shift);
+                        act_heroes += 1;
+                        bound_tids[bound_len] = cand_tid;
+                        bound_len += 1;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    a.micro_swarm.sync_bound_hero_tids(&bound_tids[..bound_len]);
+}
+
+#[inline(never)]
+fn finalize_wave1_stamps(
+    a: &mut Arena,
+    _f_idx: u32,
+    slot_in: usize,
+    slot_disp: usize,
+    swarm_active: bool,
+    bos_ran: bool,
+) {
+    if a.ingest_ctrl[CTRL_TICK_PHASE] == 0 {
+        a.wave1_telem[8] = INGEST_STATUS_PHASE_ERR;
+        return;
+    }
+    a.ingest_ctrl[CTRL_TICK_PHASE] = 0;
+
+    let mut meta = a.ring_meta[slot_in];
+    let committed_flags = meta.flags | INGEST_FLAG_COMMITTED;
+    meta.flags = committed_flags;
+    a.ring_meta[slot_in].flags = committed_flags;
+
+    let met_mode = a.micro_swarm.get_micro_metrology_mode();
+    let cont_ep = meta.continuity_epoch;
+    a.wave1_telem[0] = WAVE1_ABI_VERSION;
+    a.wave1_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave1_telem[2] = slot_in as u32;
+    a.wave1_telem[3] = slot_disp as u32;
+    a.wave1_telem[6] = cont_ep;
+    a.wave1_telem[7] = wave1_enabled_bits(a);
+    a.wave1_telem[8] = INGEST_STATUS_OK;
+    a.wave1_telem[9] = committed_flags;
+    a.wave1_telem[10] = mode_dims(a.res_mode).1 as u32;
+    a.wave1_telem[11] = INGEST_RING_STRIDE_WORDS;
+    a.wave1_telem[12] = linked_static_end_bytes();
+    a.wave1_telem[13] = 0;
+    a.wave1_telem[14] = 0;
+    a.wave1_telem[15] = 0;
+
+    // 0: micro metrology diagnostics (valid only when swarm active AND metrology mode != 0)
+    let micro_base = WAVE1_PRODUCT_STAMPS_START + PROD_MICRO * STAMP_STRIDE;
+    if swarm_active && met_mode != 0 {
+        set_stamp_fresh(&mut a.wave1_telem, micro_base, &meta);
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, micro_base);
+    }
+
+    // 1: grad
+    let grad_base = WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE;
+    let (grad_valid, grad_held, _) = a.continuum.grad_product_status();
+    if swarm_active && grad_valid {
+        if !grad_held {
+            set_stamp_fresh(&mut a.wave1_telem, grad_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave1_telem, grad_base, cont_ep);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, grad_base);
+    }
+
+    // 2: FTLE
+    let ftle_base = WAVE1_PRODUCT_STAMPS_START + PROD_FTLE * STAMP_STRIDE;
+    let (ftle_valid, ftle_held, _) = a.continuum.ftle_product_status();
+    if swarm_active && ftle_valid {
+        if !ftle_held {
+            set_stamp_fresh(&mut a.wave1_telem, ftle_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave1_telem, ftle_base, cont_ep);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, ftle_base);
+    }
+
+    // 3: modal_field
+    let modal_base = WAVE1_PRODUCT_STAMPS_START + PROD_MODAL_FIELD * STAMP_STRIDE;
+    let (modal_valid, modal_held, _) = a.continuum.modal_product_status();
+    if swarm_active && modal_valid {
+        if !modal_held {
+            set_stamp_fresh(&mut a.wave1_telem, modal_base, &meta);
+        } else if a.continuum.export_modal_dirty != 0 {
+            hold_or_invalidate_stamp(&mut a.wave1_telem, modal_base, cont_ep);
+        } else {
+            set_stamp_invalid(&mut a.wave1_telem, modal_base);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, modal_base);
+    }
+
+    // 4: hero_physics
+    let hp_base = WAVE1_PRODUCT_STAMPS_START + PROD_HERO_PHYSICS * STAMP_STRIDE;
+    if a.telemetry[3] >= 0.5 {
+        if a.ingest_ctrl[CTRL_HERO_PHYS_RAN] != 0 {
+            set_stamp_fresh(&mut a.wave1_telem, hp_base, &meta);
+        } else if a.physics_telem_dirty_mask != 0 {
+            hold_or_invalidate_stamp(&mut a.wave1_telem, hp_base, cont_ep);
+        } else {
+            set_stamp_invalid(&mut a.wave1_telem, hp_base);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, hp_base);
+    }
+
+    // 5: BOS
+    let bos_base = WAVE1_PRODUCT_STAMPS_START + PROD_BOS * STAMP_STRIDE;
+    if bos_ran && a.bos.get_state() == bos::BOS_STATE_READY {
+        set_stamp_fresh(&mut a.wave1_telem, bos_base, &meta);
+    } else {
+        set_stamp_invalid(&mut a.wave1_telem, bos_base);
+    }
+
+    // Hero slot stamps (16 slots): strictly driven by per-slot Hero physics computation + track_id continuity
+    let fresh_phys_mask = a.ingest_ctrl[CTRL_HERO_PHYS_SLOT_MASK];
+    for m in 0..MAX_TARGETS {
+        let h_base = WAVE1_HERO_STAMPS_START + m * STAMP_STRIDE;
+        let slot_active = a.targets[m].active != 0
+            && a.targets[m].confirmed != 0
+            && a.telemetry[32 + m * 56] > 0.5;
+        if !slot_active {
+            set_stamp_invalid(&mut a.wave1_telem, h_base);
+        } else if (fresh_phys_mask & (1u32 << m)) != 0 {
+            set_stamp_fresh(&mut a.wave1_telem, h_base, &meta);
+        } else if a.targets[m].phys_stamp_tid != 0
+            && a.targets[m].phys_stamp_tid == a.targets[m].track_id
+        {
+            hold_or_invalidate_stamp(&mut a.wave1_telem, h_base, cont_ep);
+        } else {
+            set_stamp_invalid(&mut a.wave1_telem, h_base);
+        }
+    }
 }
 
 /// Complete single-call Wasm frame tick (runs pre_tick -> certified internal Jacobi Fiedler solve -> post_tick).
 #[no_mangle]
 pub unsafe extern "C" fn chronos_tick(dt_sec: f32) -> u32 {
+    let a = arena_mut();
+    if a.ingest_ctrl[CTRL_TICK_PHASE] != 0 {
+        a.wave1_telem[8] = INGEST_STATUS_PHASE_ERR;
+        return INGEST_STATUS_PHASE_ERR;
+    }
     chronos_pre_tick(dt_sec);
     solve_fiedler_jacobi_16x16(arena_mut());
     chronos_post_tick(dt_sec)

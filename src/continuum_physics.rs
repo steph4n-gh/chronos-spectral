@@ -11,8 +11,11 @@
 //! raw finite values (`0.0` when undefined) and clears the matching `diagnostic_validity_mask` bit.
 
 use crate::soa_tracks::{
-    MicroSwarmState, FTLE_INVALID_FRAME, MAX_MICRO, MICRO_CELL_H, MICRO_CELL_W,
-    MICRO_EXPORT_STRIDE, MICRO_STATE_CONFIRMED, MICRO_STATE_INACTIVE, SWARM_TELEM_LEN,
+    inv_2x2_quad_f64, update_hero_candidates_hysteresis, MicroSwarmState, FTLE_INVALID_FRAME,
+    MAX_MICRO, METROLOGY_OFF, MICRO_CELL_H, MICRO_CELL_W, MICRO_EXPORT_STRIDE,
+    MICRO_STATE_CONFIRMED, MICRO_STATE_INACTIVE, QUAL_BENCH_RES_USABLE,
+    QUAL_BENCH_TRANSLATION_ONLY, QUAL_COV_USABLE, QUAL_NEIGHBOR_MASK, QUAL_NEIGHBOR_SHIFT,
+    SWARM_TELEM_LEN,
 };
 use crate::{
     fast_atan2f, fast_cosf, fast_expf, fast_lnf, fast_sinf, wasm_floorf, wasm_sqrt_f64,
@@ -587,6 +590,42 @@ impl ContinuumState {
         }
         (false, 0.0)
     }
+
+    #[inline(always)]
+    pub fn grad_product_status(&self) -> (bool, bool, u32) {
+        let valid = (self.diagnostic_validity_mask & VALIDITY_BIT_GRAD) != 0
+            && self.cached_grad_ftle_frame != u32::MAX;
+        if !valid {
+            return (false, false, u32::MAX);
+        }
+        let held = self.last_frame_idx != u32::MAX
+            && self.cached_grad_ftle_frame != self.last_frame_idx;
+        (true, held, self.cached_grad_ftle_frame)
+    }
+
+    #[inline(always)]
+    pub fn ftle_product_status(&self) -> (bool, bool, u32) {
+        let valid = (self.diagnostic_validity_mask & VALIDITY_BIT_FTLE) != 0
+            && self.cached_ftle_frame != u32::MAX;
+        if !valid {
+            return (false, false, u32::MAX);
+        }
+        let held = self.last_frame_idx != u32::MAX && self.cached_ftle_frame != self.last_frame_idx;
+        (true, held, self.cached_ftle_frame)
+    }
+
+    #[inline(always)]
+    pub fn modal_product_status(&self) -> (bool, bool, u32) {
+        let valid = (self.diagnostic_validity_mask & VALIDITY_BIT_MODAL) != 0
+            && self.cached_modal_frame != u32::MAX
+            && self.cached_modal_cells > 0;
+        if !valid {
+            return (false, false, u32::MAX);
+        }
+        let held =
+            self.last_frame_idx != u32::MAX && self.cached_modal_frame != self.last_frame_idx;
+        (true, held, self.cached_modal_frame)
+    }
 }
 
 #[inline(always)]
@@ -725,6 +764,7 @@ fn reset_on_frame_discontinuity(
         i += 1;
     }
     cs.reset();
+    ms.invalidate_metrology_temporal();
     if ms.swarm_active != 0 {
         apply_active_export_sentinels(cs);
     }
@@ -1139,7 +1179,7 @@ fn sync_knn_and_build_csr(
             if st != MICRO_STATE_INACTIVE {
                 ms.tracks.ftle_val[i] = -999.0;
             }
-            if cs.prev_slot_tid[i] != 0 {
+            if cs.prev_slot_tid[i] != 0 || cs.slot_dtheta_valid[i] != 0 {
                 reset_slot_knn(cs, i);
                 reset_slot_modal(ms, cs, i, false);
                 cs.prev_slot_tid[i] = 0;
@@ -1209,7 +1249,7 @@ fn sync_knn_and_build_csr(
                 } else {
                     dtv_n &= !16u8;
                 }
-                cs.slot_dtheta_valid[i] = dtv_n;
+                cs.slot_dtheta_valid[i] = dtv_n | 32u8;
                 let cx = clamped_grid_coord(ms.tracks.pos_x[i], inv_mw, MICRO_CELL_W - 1);
                 let cy = clamped_grid_coord(ms.tracks.pos_y[i], inv_mh, MICRO_CELL_H - 1);
                 let cell = cy * MICRO_CELL_W + cx;
@@ -1292,40 +1332,49 @@ fn visit_knn_slice_full_noskip(
     #[cfg(target_arch = "wasm32")]
     if e - p >= 4 {
         use core::arch::wasm32::*;
-        let s_init = p;
+        let xs_p = xs.as_ptr();
+        let ys_p = ys.as_ptr();
+        let tis_p = tis.as_ptr();
         let vxi = f32x4_splat(xi);
         let vyi = f32x4_splat(yi);
         let mut vlim = f32x4_splat(top.lim);
-        for ((xc, yc), tc) in xs[s_init..e]
-            .chunks_exact(4)
-            .zip(ys[s_init..e].chunks_exact(4))
-            .zip(tis[s_init..e].chunks_exact(4))
-        {
-            if let (&[x0, x1, x2, x3], &[y0, y1, y2, y3], &[t0, t1, t2, t3]) = (xc, yc, tc) {
-                let vdx = f32x4_sub(f32x4(x0, x1, x2, x3), vxi);
-                let vdy = f32x4_sub(f32x4(y0, y1, y2, y3), vyi);
-                let vd2 = f32x4_add(f32x4_mul(vdx, vdx), f32x4_mul(vdy, vdy));
-                let cmp = f32x4_lt(vd2, vlim);
-                if v128_any_true(cmp) {
-                    let mut mask = i32x4_bitmask(cmp) as u32;
-                    while mask != 0 {
-                        let lane = mask.trailing_zeros();
-                        mask &= mask - 1;
-                        let (d_lane, t_lane) = match lane {
-                            0 => (f32x4_extract_lane::<0>(vd2), t0),
-                            1 => (f32x4_extract_lane::<1>(vd2), t1),
-                            2 => (f32x4_extract_lane::<2>(vd2), t2),
-                            _ => (f32x4_extract_lane::<3>(vd2), t3),
-                        };
-                        if d_lane < top.lim {
-                            top.push_full(d_lane, t_lane as i16);
-                        }
+        while p + 4 <= e {
+            let vx = unsafe { core::ptr::read_unaligned(xs_p.add(p) as *const v128) };
+            let vy = unsafe { core::ptr::read_unaligned(ys_p.add(p) as *const v128) };
+            let vdx = f32x4_sub(vx, vxi);
+            let vdy = f32x4_sub(vy, vyi);
+            let vd2 = f32x4_add(f32x4_mul(vdx, vdx), f32x4_mul(vdy, vdy));
+            let cmp = f32x4_lt(vd2, vlim);
+            if v128_any_true(cmp) {
+                let mask = (i32x4_bitmask(cmp) as u32) & 0xF;
+                if (mask & 1) != 0 {
+                    let d = f32x4_extract_lane::<0>(vd2);
+                    if d < top.lim {
+                        top.push_full(d, unsafe { *tis_p.add(p) } as i16);
                     }
-                    vlim = f32x4_splat(top.lim);
                 }
+                if (mask & 2) != 0 {
+                    let d = f32x4_extract_lane::<1>(vd2);
+                    if d < top.lim {
+                        top.push_full(d, unsafe { *tis_p.add(p + 1) } as i16);
+                    }
+                }
+                if (mask & 4) != 0 {
+                    let d = f32x4_extract_lane::<2>(vd2);
+                    if d < top.lim {
+                        top.push_full(d, unsafe { *tis_p.add(p + 2) } as i16);
+                    }
+                }
+                if (mask & 8) != 0 {
+                    let d = f32x4_extract_lane::<3>(vd2);
+                    if d < top.lim {
+                        top.push_full(d, unsafe { *tis_p.add(p + 3) } as i16);
+                    }
+                }
+                vlim = f32x4_splat(top.lim);
             }
+            p += 4;
         }
-        p = s_init + ((e - s_init) & !3);
     }
     while p < e {
         let dx = xs[p] - xi;
@@ -1350,20 +1399,19 @@ fn visit_knn_slice_noskip(
 ) -> KnnTop6 {
     let e = e.min(MAX_MICRO);
     let mut p = s.min(e);
-    if top.cnt == MICRO_KNN_K as u8 {
-        return visit_knn_slice_full_noskip(cs, p, e, xi, yi, top);
-    }
-    let xs = &cs.field_grid_x[..MAX_MICRO];
-    let ys = &cs.field_grid_y[..MAX_MICRO];
-    let tis = &cs.field_grid_ti[..MAX_MICRO];
-    while p < e && top.cnt < MICRO_KNN_K as u8 {
-        let dx = xs[p] - xi;
-        let dy = ys[p] - yi;
-        let d2 = dx * dx + dy * dy;
-        if d2 <= top.lim {
-            top.push_lt6(d2, tis[p] as i16);
+    if top.cnt < MICRO_KNN_K as u8 {
+        let xs = &cs.field_grid_x[..MAX_MICRO];
+        let ys = &cs.field_grid_y[..MAX_MICRO];
+        let tis = &cs.field_grid_ti[..MAX_MICRO];
+        while p < e && top.cnt < MICRO_KNN_K as u8 {
+            let dx = xs[p] - xi;
+            let dy = ys[p] - yi;
+            let d2 = dx * dx + dy * dy;
+            if d2 <= top.lim {
+                top.push_lt6(d2, tis[p] as i16);
+            }
+            p += 1;
         }
-        p += 1;
     }
     if p < e {
         return visit_knn_slice_full_noskip(cs, p, e, xi, yi, top);
@@ -1520,7 +1568,6 @@ pub fn build_sparse_knn_graph(
         cs.cached_knn_frame = u32::MAX;
         return;
     }
-    let min_age = min_continuum_age(ms);
     let reuse_knn_cached = dense_knn
         && frame_idx >= 8
         && (frame_idx & 1) == 0
@@ -1627,43 +1674,27 @@ pub fn build_sparse_knn_graph(
                 if reuse_knn_cached && cs.knn[i].count == MICRO_KNN_K as u8 {
                     let idx6 = cs.knn[i].idx;
                     let tid6 = cs.knn[i].tid;
-                    if idx6[0] >= 0
-                        && idx6[1] >= 0
-                        && idx6[2] >= 0
-                        && idx6[3] >= 0
-                        && idx6[4] >= 0
-                        && idx6[5] >= 0
-                        && tid6[0] != 0
-                        && tid6[1] != 0
-                        && tid6[2] != 0
-                        && tid6[3] != 0
-                        && tid6[4] != 0
-                        && tid6[5] != 0
-                    {
+                    if (idx6[0] | idx6[1] | idx6[2] | idx6[3] | idx6[4] | idx6[5]) >= 0 {
                         let j0 = (idx6[0] as usize).min(MAX_MICRO - 1);
                         let j1 = (idx6[1] as usize).min(MAX_MICRO - 1);
                         let j2 = (idx6[2] as usize).min(MAX_MICRO - 1);
                         let j3 = (idx6[3] as usize).min(MAX_MICRO - 1);
                         let j4 = (idx6[4] as usize).min(MAX_MICRO - 1);
                         let j5 = (idx6[5] as usize).min(MAX_MICRO - 1);
-                        if ms.tracks.track_id[j0] == tid6[0]
-                            && is_clean_confirmed(ms, j0)
-                            && ms.tracks.age[j0] >= min_age
-                            && ms.tracks.track_id[j1] == tid6[1]
-                            && is_clean_confirmed(ms, j1)
-                            && ms.tracks.age[j1] >= min_age
-                            && ms.tracks.track_id[j2] == tid6[2]
-                            && is_clean_confirmed(ms, j2)
-                            && ms.tracks.age[j2] >= min_age
-                            && ms.tracks.track_id[j3] == tid6[3]
-                            && is_clean_confirmed(ms, j3)
-                            && ms.tracks.age[j3] >= min_age
-                            && ms.tracks.track_id[j4] == tid6[4]
-                            && is_clean_confirmed(ms, j4)
-                            && ms.tracks.age[j4] >= min_age
-                            && ms.tracks.track_id[j5] == tid6[5]
-                            && is_clean_confirmed(ms, j5)
-                            && ms.tracks.age[j5] >= min_age
+                        let dtv_all = cs.slot_dtheta_valid[j0]
+                            & cs.slot_dtheta_valid[j1]
+                            & cs.slot_dtheta_valid[j2]
+                            & cs.slot_dtheta_valid[j3]
+                            & cs.slot_dtheta_valid[j4]
+                            & cs.slot_dtheta_valid[j5];
+                        if (dtv_all & 32u8) != 0
+                            && ((ms.tracks.track_id[j0] ^ tid6[0])
+                                | (ms.tracks.track_id[j1] ^ tid6[1])
+                                | (ms.tracks.track_id[j2] ^ tid6[2])
+                                | (ms.tracks.track_id[j3] ^ tid6[3])
+                                | (ms.tracks.track_id[j4] ^ tid6[4])
+                                | (ms.tracks.track_id[j5] ^ tid6[5]))
+                                == 0
                         {
                             let dx0 = ms.tracks.pos_x[j0] - xi;
                             let dy0 = ms.tracks.pos_y[j0] - yi;
@@ -1683,13 +1714,38 @@ pub fn build_sparse_knn_graph(
                             let dx5 = ms.tracks.pos_x[j5] - xi;
                             let dy5 = ms.tracks.pos_y[j5] - yi;
                             let d2_5 = dx5 * dx5 + dy5 * dy5;
-                            if d2_0 <= r_max2
-                                && d2_1 <= r_max2
-                                && d2_2 <= r_max2
-                                && d2_3 <= r_max2
-                                && d2_4 <= r_max2
-                                && d2_5 <= r_max2
+                            if ((d2_0 <= r_max2) as u8
+                                & (d2_1 <= r_max2) as u8
+                                & (d2_2 <= r_max2) as u8
+                                & (d2_3 <= r_max2) as u8
+                                & (d2_4 <= r_max2) as u8
+                                & (d2_5 <= r_max2) as u8)
+                                != 0
                             {
+                                #[cfg(target_arch = "wasm32")]
+                                let (obs_inc, strain_inc, persist_fwd) =
+                                    update_knn_slot_edges_same6_wasm(
+                                        ms,
+                                        cs,
+                                        i,
+                                        xi,
+                                        yi,
+                                        j0,
+                                        j1,
+                                        j2,
+                                        j3,
+                                        j4,
+                                        j5,
+                                        d2_0,
+                                        d2_1,
+                                        d2_2,
+                                        d2_3,
+                                        d2_4,
+                                        d2_5,
+                                        q,
+                                        min_ref_dist,
+                                    );
+                                #[cfg(not(target_arch = "wasm32"))]
                                 let (obs_inc, strain_inc, persist_fwd) = update_knn_slot_edges(
                                     ms,
                                     cs,
@@ -2291,7 +2347,6 @@ fn eval_knn_edges_6_wasm(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 #[inline(never)]
 fn update_knn_slot_reordered_slow(
     ms: &MicroSwarmState,
@@ -2736,6 +2791,95 @@ fn update_knn_slot_slow(
         has_persist_fwd,
     );
     (best_cnt as u32, slot_strain as f64, has_persist_fwd)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn update_knn_slot_edges_same6_wasm(
+    ms: &MicroSwarmState,
+    cs: &mut ContinuumState,
+    i: usize,
+    xi: f32,
+    yi: f32,
+    j0: usize,
+    j1: usize,
+    j2: usize,
+    j3: usize,
+    j4: usize,
+    j5: usize,
+    d2_0: f32,
+    d2_1: f32,
+    d2_2: f32,
+    d2_3: f32,
+    d2_4: f32,
+    d2_5: f32,
+    q: f32,
+    min_ref_dist: f32,
+) -> (u32, f64, bool) {
+    let dtv = cs.slot_dtheta_valid[i];
+    let need_a = (dtv & 8u8) != 0;
+    let need_b = (dtv & 16u8) != 0;
+    let need_dtheta = need_a || need_b;
+    let (pxi, pyi) = if need_dtheta {
+        (ms.tracks.prev_x[i], ms.tracks.prev_y[i])
+    } else {
+        (0.0, 0.0)
+    };
+    let (slot_strain, star_mask, has_persist_fwd) = {
+        use core::arch::wasm32::f32x4;
+        let dst = &mut cs.knn[i];
+        let vref0_cur =
+            f32x4(dst.ref_dist[0], dst.ref_dist[1], dst.ref_dist[2], dst.ref_dist[3]);
+        let vref1_cur = f32x4(dst.ref_dist[4], dst.ref_dist[5], 1.0, 1.0);
+        let prev_strain = dst.strain_q15;
+        let prev_streak = dst.rigid_streak;
+        let (ss, sm, pm, hpf) = eval_knn_edges_6_wasm(
+            ms,
+            dst,
+            i,
+            d2_0,
+            d2_1,
+            d2_2,
+            d2_3,
+            d2_4,
+            d2_5,
+            j0,
+            j1,
+            j2,
+            j3,
+            j4,
+            j5,
+            min_ref_dist,
+            q,
+            need_dtheta,
+            pxi,
+            pyi,
+            0x3Fu8,
+            vref0_cur,
+            vref1_cur,
+            prev_strain,
+            prev_streak,
+        );
+        dst.persist_mask = pm;
+        (ss, sm, hpf)
+    };
+    finalize_knn_slot_dtheta(
+        ms,
+        cs,
+        i,
+        xi,
+        yi,
+        q,
+        dtv,
+        need_a,
+        need_b,
+        star_mask,
+        pxi,
+        pyi,
+        has_persist_fwd,
+    );
+    (MICRO_KNN_K as u32, slot_strain as f64, has_persist_fwd)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -11386,6 +11530,370 @@ fn write_continuum_telemetry(ms: &mut MicroSwarmState, cs: &ContinuumState) {
     }
 }
 
+#[inline(never)]
+fn clear_bench_residual_slot(ms: &mut MicroSwarmState, ti: usize, neighbor_cnt: usize) {
+    ms.metrology.export_micro_residual[ti] = 0.0;
+    ms.metrology.export_micro_residual[MAX_MICRO + ti] = 0.0;
+    ms.metrology.export_micro_residual[2 * MAX_MICRO + ti] = 0.0;
+    let n_bits = ((neighbor_cnt.min(255) as u32) << QUAL_NEIGHBOR_SHIFT) & QUAL_NEIGHBOR_MASK;
+    ms.metrology.export_micro_quality[ti] = (ms.metrology.export_micro_quality[ti]
+        & !(QUAL_BENCH_RES_USABLE | QUAL_BENCH_TRANSLATION_ONLY | QUAL_NEIGHBOR_MASK))
+        | n_bits;
+}
+
+/// Strictly Leave-One-Out (`LOO`) weighted local affine flow residual (`rx, ry, d2_bench`) in
+/// current ROI `(px/s)` using the 40x22 spatial grid. Excludes `(slot_i, tid_i)` before fitting.
+#[inline(never)]
+pub fn solve_bench_loo_residuals(
+    ms: &mut MicroSwarmState,
+    cs: &mut ContinuumState,
+    frame_w: usize,
+    frame_h: usize,
+    q: f32,
+) {
+    const BENCH_MAX_NB: usize = FIELD_CAND_CAP; // 24
+    const BENCH_SIGMA_DISC2: f64 = 0.5;
+    if ms.swarm_active == 0 || ms.metrology.mode() == METROLOGY_OFF || frame_w < 32 || frame_h < 32
+    {
+        ms.metrology.export_micro_residual.fill(0.0);
+        let mut ti = 0usize;
+        while ti < MAX_MICRO {
+            ms.metrology.export_micro_quality[ti] &=
+                !(QUAL_BENCH_RES_USABLE | QUAL_BENCH_TRANSLATION_ONLY | QUAL_NEIGHBOR_MASK);
+            ti += 1;
+        }
+        return;
+    }
+
+    // Step 1: Count & index clean velocity-eligible neighbors into 40x22 CSR grid (zero heap/stack arrays)
+    cs.field_cell_start.fill(0);
+    let inv_fw = (FIELD_GRID_W as f32) / (frame_w as f32);
+    let inv_fh = (FIELD_GRID_H as f32) / (frame_h as f32);
+    let mut nb_n = 0usize;
+    let mut ti = 0usize;
+    while ti < MAX_MICRO {
+        let eligible = is_clean_confirmed(ms, ti)
+            && (ms.metrology.export_micro_quality[ti] & QUAL_COV_USABLE) != 0
+            && ms.metrology.obs_vel_cov[4 * MAX_MICRO + ti] > 0.0
+            && ms.tracks.pos_x[ti].is_finite()
+            && ms.tracks.pos_y[ti].is_finite()
+            && ms.metrology.obs_vel_cov[ti].is_finite()
+            && ms.metrology.obs_vel_cov[MAX_MICRO + ti].is_finite()
+            && ms.metrology.obs_vel_cov[2 * MAX_MICRO + ti].is_finite()
+            && ms.metrology.obs_vel_cov[3 * MAX_MICRO + ti].is_finite()
+            && ms.metrology.obs_vel_cov[4 * MAX_MICRO + ti].is_finite();
+        if eligible {
+            let gx = clamped_grid_coord(ms.tracks.pos_x[ti], inv_fw, FIELD_GRID_W - 1);
+            let gy = clamped_grid_coord(ms.tracks.pos_y[ti], inv_fh, FIELD_GRID_H - 1);
+            let cell = gy * FIELD_GRID_W + gx;
+            cs.field_cell_start[cell + 1] += 1;
+            cs.uf_parent[nb_n] = cell as i16;
+            cs.comp_next[nb_n] = ti as i16;
+            nb_n += 1;
+        } else {
+            clear_bench_residual_slot(ms, ti, 0);
+        }
+        ti += 1;
+    }
+
+    if nb_n < 4 {
+        // With < 4 total tracks, LOO excluding self leaves <= 2 neighbors, always insufficient (< 3).
+        let mut i = 0usize;
+        while i < nb_n {
+            let slot_i = cs.comp_next[i] as usize;
+            clear_bench_residual_slot(ms, slot_i, nb_n.saturating_sub(1));
+            i += 1;
+        }
+        return;
+    }
+
+    let mut acc = 0u16;
+    let mut c = 0usize;
+    while c < FIELD_CELLS {
+        cs.comp_head[c] = acc as i16;
+        acc += cs.field_cell_start[c + 1];
+        cs.field_cell_start[c + 1] = acc;
+        c += 1;
+    }
+    let mut k = 0usize;
+    while k < nb_n {
+        let cell = cs.uf_parent[k] as usize;
+        let dst = cs.comp_head[cell] as usize;
+        cs.comp_head[cell] = (dst + 1) as i16;
+        let slot = cs.comp_next[k] as usize;
+        cs.field_grid_ti[dst] = slot as u16;
+        cs.field_grid_x[dst] = ms.tracks.pos_x[slot];
+        cs.field_grid_y[dst] = ms.tracks.pos_y[slot];
+        cs.field_grid_aux[dst][0] = ms.metrology.obs_vel_cov[slot];
+        cs.field_grid_aux[dst][1] = ms.metrology.obs_vel_cov[MAX_MICRO + slot];
+        k += 1;
+    }
+
+    let cell_w = (frame_w as f32) / (FIELD_GRID_W as f32);
+    let cell_h = (frame_h as f32) / (FIELD_GRID_H as f32);
+    let r_tight = 64.0 * q;
+    let r_wide = 128.0 * q;
+    let r_tight2 = r_tight * r_tight;
+    let r_wide2 = r_wide * r_wide;
+    let max_dx_tight = ((r_tight / cell_w.max(1e-3)) as isize).saturating_add(1);
+    let max_dy_tight = ((r_tight / cell_h.max(1e-3)) as isize).saturating_add(1);
+    let max_dx_wide = ((r_wide / cell_w.max(1e-3)) as isize).saturating_add(1);
+    let max_dy_wide = ((r_wide / cell_h.max(1e-3)) as isize).saturating_add(1);
+
+    // Step 2: Evaluate strictly Leave-One-Out residual on each velocity-eligible track
+    let mut idx = 0usize;
+    while idx < nb_n {
+        let ti = cs.comp_next[idx] as usize;
+        let tid_i = ms.tracks.track_id[ti];
+        let xi = ms.tracks.pos_x[ti];
+        let yi = ms.tracks.pos_y[ti];
+        let gxi = clamped_grid_coord(xi, inv_fw, FIELD_GRID_W - 1) as isize;
+        let gyi = clamped_grid_coord(yi, inv_fh, FIELD_GRID_H - 1) as isize;
+
+        let mut cand_cnt = 0usize;
+        let mut pass = 0usize;
+        while pass < 2 {
+            let (dx_cells, dy_cells, r2_lim) = if pass == 0 {
+                (max_dx_tight, max_dy_tight, r_tight2)
+            } else {
+                (max_dx_wide, max_dy_wide, r_wide2)
+            };
+            cand_cnt = 0;
+            let ry_lo = (gyi - dy_cells).max(0) as usize;
+            let ry_hi = (gyi + dy_cells).min((FIELD_GRID_H - 1) as isize) as usize;
+            let rx_lo = (gxi - dx_cells).max(0) as usize;
+            let rx_hi = (gxi + dx_cells).min((FIELD_GRID_W - 1) as isize) as usize;
+            let mut cy = ry_lo;
+            while cy <= ry_hi {
+                let s_off = cs.field_cell_start[cy * FIELD_GRID_W + rx_lo] as usize;
+                let e_off = cs.field_cell_start[cy * FIELD_GRID_W + rx_hi + 1] as usize;
+                let mut p = s_off;
+                while p < e_off {
+                    let tj = cs.field_grid_ti[p] as usize;
+                    // Strict LOO exclusion of (slot_i, tid_i) BEFORE fitting or neighbor selection
+                    if tj != ti && ms.tracks.track_id[tj] != tid_i {
+                        let dx = cs.field_grid_x[p] - xi;
+                        let dy = cs.field_grid_y[p] - yi;
+                        let d2 = dx * dx + dy * dy;
+                        if d2 <= r2_lim
+                            && (cand_cnt < BENCH_MAX_NB || d2 < cs.cand_buf_d2[BENCH_MAX_NB - 1])
+                        {
+                            let mut ins = if cand_cnt < BENCH_MAX_NB {
+                                cand_cnt
+                            } else {
+                                BENCH_MAX_NB - 1
+                            };
+                            while ins > 0 && d2 < cs.cand_buf_d2[ins - 1] {
+                                cs.cand_buf_ti[ins] = cs.cand_buf_ti[ins - 1];
+                                cs.cand_buf_d2[ins] = cs.cand_buf_d2[ins - 1];
+                                cs.cand_buf_dx[ins] = cs.cand_buf_dx[ins - 1];
+                                cs.cand_buf_dy[ins] = cs.cand_buf_dy[ins - 1];
+                                cs.ftle_cands_w[ins] = cs.ftle_cands_w[ins - 1];
+                                cs.cand_du[ins] = cs.cand_du[ins - 1];
+                                ins -= 1;
+                            }
+                            cs.cand_buf_ti[ins] = tj as u16;
+                            cs.cand_buf_d2[ins] = d2;
+                            cs.cand_buf_dx[ins] = dx;
+                            cs.cand_buf_dy[ins] = dy;
+                            cs.ftle_cands_w[ins] = cs.field_grid_aux[p][0];
+                            cs.cand_du[ins] = cs.field_grid_aux[p][1];
+                            if cand_cnt < BENCH_MAX_NB {
+                                cand_cnt += 1;
+                            }
+                        }
+                    }
+                    p += 1;
+                }
+                cy += 1;
+            }
+            if cand_cnt >= 6 {
+                break;
+            }
+            pass += 1;
+        }
+
+        if cand_cnt < 3 {
+            clear_bench_residual_slot(ms, ti, cand_cnt);
+            idx += 1;
+            continue;
+        }
+
+        let max_d2 = cs.cand_buf_d2[cand_cnt - 1] as f64;
+        let h_bw = (0.55 * wasm_sqrt_f64(max_d2.max(0.0))).max((20.0 * q) as f64);
+        let inv_h = 1.0 / h_bw;
+        let inv_2h2 = 0.5 * inv_h * inv_h;
+
+        let mut w_sum = 0.0f64;
+        let mut j = 0usize;
+        while j < cand_cnt {
+            let tj = cs.cand_buf_ti[j] as usize;
+            let tr_cvj = ((ms.metrology.obs_vel_cov[2 * MAX_MICRO + tj]
+                + ms.metrology.obs_vel_cov[4 * MAX_MICRO + tj]) as f64)
+                .max(1.0);
+            let exp_arg = (-(cs.cand_buf_d2[j] as f64) * inv_2h2).clamp(-30.0, 0.0);
+            let wj = (fast_expf(exp_arg as f32) as f64) / tr_cvj;
+            cs.ftle_cands_res[j] = wj as f32;
+            w_sum += wj;
+            j += 1;
+        }
+        if !w_sum.is_finite() || w_sum <= 1.0e-18 {
+            clear_bench_residual_slot(ms, ti, cand_cnt);
+            idx += 1;
+            continue;
+        }
+
+        let mut vx_hat = 0.0f64;
+        let mut vy_hat = 0.0f64;
+        let mut sv_xx = (ms.metrology.obs_vel_cov[2 * MAX_MICRO + ti] as f64) + BENCH_SIGMA_DISC2;
+        let mut sv_xy = ms.metrology.obs_vel_cov[3 * MAX_MICRO + ti] as f64;
+        let mut sv_yy = (ms.metrology.obs_vel_cov[4 * MAX_MICRO + ti] as f64) + BENCH_SIGMA_DISC2;
+        let mut translation_only = false;
+
+        if cand_cnt < 6 {
+            translation_only = true;
+            let inv_wsum = 1.0 / w_sum;
+            let mut m = 0usize;
+            while m < cand_cnt {
+                let tj = cs.cand_buf_ti[m] as usize;
+                let a = (cs.ftle_cands_res[m] as f64) * inv_wsum;
+                let a2 = a * a;
+                vx_hat += a * (cs.ftle_cands_w[m] as f64);
+                vy_hat += a * (cs.cand_du[m] as f64);
+                sv_xx += a2 * (ms.metrology.obs_vel_cov[2 * MAX_MICRO + tj] as f64);
+                sv_xy += a2 * (ms.metrology.obs_vel_cov[3 * MAX_MICRO + tj] as f64);
+                sv_yy += a2 * (ms.metrology.obs_vel_cov[4 * MAX_MICRO + tj] as f64);
+                m += 1;
+            }
+        } else {
+            let mut m00 = 0.0f64;
+            let mut m01 = 0.0f64;
+            let mut m02 = 0.0f64;
+            let mut m11 = 0.0f64;
+            let mut m12 = 0.0f64;
+            let mut m22 = 0.0f64;
+            let mut m = 0usize;
+            while m < cand_cnt {
+                let wj = cs.ftle_cands_res[m] as f64;
+                let ux = (cs.cand_buf_dx[m] as f64) * inv_h;
+                let uy = (cs.cand_buf_dy[m] as f64) * inv_h;
+                m00 += wj;
+                m01 += wj * ux;
+                m02 += wj * uy;
+                m11 += wj * ux * ux;
+                m12 += wj * ux * uy;
+                m22 += wj * uy * uy;
+                m += 1;
+            }
+            if !(m00.is_finite()
+                && m11.is_finite()
+                && m22.is_finite()
+                && m01.is_finite()
+                && m02.is_finite()
+                && m12.is_finite()
+                && m00 > 1.0e-18)
+            {
+                clear_bench_residual_slot(ms, ti, cand_cnt);
+                idx += 1;
+                continue;
+            }
+            // Scale-normalize `N = M / m00` (`N_00 = 1`) and explicitly bound `lambda_min(N)`
+            // and `kappa(N) = lambda_max / lambda_min` (`tr(N^-1) = cof_tr / det_n`).
+            let inv_m00 = 1.0 / m00;
+            let n01 = m01 * inv_m00;
+            let n02 = m02 * inv_m00;
+            let n11 = m11 * inv_m00;
+            let n12 = m12 * inv_m00;
+            let n22 = m22 * inv_m00;
+            let nc00 = n11 * n22 - n12 * n12;
+            let nc01 = -(n01 * n22 - n02 * n12);
+            let nc02 = n01 * n12 - n02 * n11;
+            let nc11 = n22 - n02 * n02;
+            let nc22 = n11 - n01 * n01;
+            let det_n = nc00 + n01 * nc01 + n02 * nc02;
+            let cof_tr = nc00 + nc11 + nc22;
+            let frob2 = 1.0
+                + n11 * n11
+                + n22 * n22
+                + 2.0 * (n01 * n01 + n02 * n02 + n12 * n12);
+            let frob = wasm_sqrt_f64(frob2.max(0.0));
+            if !(det_n.is_finite()
+                && det_n > 1.0e-12
+                && n11 >= 1.0e-4
+                && n22 >= 1.0e-4
+                && nc00 > 1.0e-12
+                && nc11 > 1.0e-12
+                && nc22 > 1.0e-12
+                && cof_tr.is_finite()
+                && cof_tr > 0.0
+                && frob.is_finite()
+                && (det_n / cof_tr) >= 1.0e-4
+                && frob * (cof_tr / det_n) <= 500.0)
+            {
+                clear_bench_residual_slot(ms, ti, cand_cnt);
+                idx += 1;
+                continue;
+            }
+            let inv_det = 1.0 / det_n;
+            let inv00 = nc00 * inv_det * inv_m00;
+            let inv01 = nc01 * inv_det * inv_m00;
+            let inv02 = nc02 * inv_det * inv_m00;
+            let mut sum_a = 0.0f64;
+            let mut sum_a2 = 0.0f64;
+            m = 0;
+            while m < cand_cnt {
+                let tj = cs.cand_buf_ti[m] as usize;
+                let wj = cs.ftle_cands_res[m] as f64;
+                let ux = (cs.cand_buf_dx[m] as f64) * inv_h;
+                let uy = (cs.cand_buf_dy[m] as f64) * inv_h;
+                let a = wj * (inv00 + inv01 * ux + inv02 * uy);
+                let a2 = a * a;
+                sum_a += a;
+                sum_a2 += a2;
+                vx_hat += a * (cs.ftle_cands_w[m] as f64);
+                vy_hat += a * (cs.cand_du[m] as f64);
+                sv_xx += a2 * (ms.metrology.obs_vel_cov[2 * MAX_MICRO + tj] as f64);
+                sv_xy += a2 * (ms.metrology.obs_vel_cov[3 * MAX_MICRO + tj] as f64);
+                sv_yy += a2 * (ms.metrology.obs_vel_cov[4 * MAX_MICRO + tj] as f64);
+                m += 1;
+            }
+            if !sum_a.is_finite() || !sum_a2.is_finite() || (sum_a - 1.0).abs() > 1.0e-3 || sum_a2 > 4.0
+            {
+                clear_bench_residual_slot(ms, ti, cand_cnt);
+                idx += 1;
+                continue;
+            }
+        }
+
+        let rx = (ms.metrology.obs_vel_cov[ti] as f64) - vx_hat;
+        let ry = (ms.metrology.obs_vel_cov[MAX_MICRO + ti] as f64) - vy_hat;
+        match inv_2x2_quad_f64(sv_xx, sv_xy, sv_yy, rx, ry) {
+            Some(d2) if rx.is_finite() && ry.is_finite() => {
+                ms.metrology.export_micro_residual[ti] = rx as f32;
+                ms.metrology.export_micro_residual[MAX_MICRO + ti] = ry as f32;
+                ms.metrology.export_micro_residual[2 * MAX_MICRO + ti] = d2 as f32;
+                let n_bits =
+                    ((cand_cnt.min(255) as u32) << QUAL_NEIGHBOR_SHIFT) & QUAL_NEIGHBOR_MASK;
+                ms.metrology.export_micro_quality[ti] = (ms.metrology.export_micro_quality[ti]
+                    & !(QUAL_BENCH_RES_USABLE
+                        | QUAL_BENCH_TRANSLATION_ONLY
+                        | QUAL_NEIGHBOR_MASK))
+                    | QUAL_BENCH_RES_USABLE
+                    | (if translation_only {
+                        QUAL_BENCH_TRANSLATION_ONLY
+                    } else {
+                        0
+                    })
+                    | n_bits;
+            }
+            _ => {
+                clear_bench_residual_slot(ms, ti, cand_cnt);
+            }
+        }
+        idx += 1;
+    }
+}
+
 /// Refreshes strictly per-track continuum export columns `6` (`body_id`) and `7` (`ftle_val`)
 /// without altering `export_micro[..+0..+6]` or tracker-owned telemetry `swarm_telem[0..=15]` (`F5`).
 #[inline(never)]
@@ -11479,6 +11987,10 @@ pub fn continuum_step(
     }
     solve_eulerian_grad_and_ftle(ms, cs, frame_idx, frame_w, frame_h, dt_sec);
     solve_modal_and_swarm_kuramoto(ms, cs, frame_w, frame_h, dt_sec);
+    if ms.get_micro_metrology_mode() != 0 {
+        solve_bench_loo_residuals(ms, cs, frame_w, frame_h, q);
+        update_hero_candidates_hysteresis(ms);
+    }
     sync_micro_physics_exports(ms, cs);
     write_continuum_telemetry(ms, cs);
 }
