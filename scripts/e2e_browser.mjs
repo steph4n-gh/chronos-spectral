@@ -4953,8 +4953,42 @@ async function main() {
               sampleRateHz: 48000.0,
               estSkewUs: NaN,
             });
+            const f32InfSampleAck = await w2p.submitAudioBlock({
+              samples: [1e40],
+              tEndUs: 5_100_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            const u64WrapTimeAck = await w2p.submitAudioBlock({
+              samples: [0.1, 0.2, 0.3, 0.4],
+              tEndUs: 2 ** 64,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
             await new Promise((r) => setTimeout(r, 30));
             const postNanVibro = w2p.getLastWave2();
+
+            // Delayed-ring fault isolation at lookaheadK=4: rejected 44100 Hz block must show DISTURBED (4), NOT OFF (0)
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 4 });
+            await pumpRsSession({
+              epoch: 912,
+              totalFrames: 30,
+              t0Us: 7_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 200.0,
+              audioRateHz: 48000.0,
+              fTone: 421.875,
+              taps: 5,
+            });
+            await w2p.submitAudioBlock({
+              samples: new Array(1600).fill(0.1),
+              tEndUs: 8_050_000,
+              sampleRateHz: 44100.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 40));
+            const delayedFaultVibro = w2p.getLastWave2();
 
             return {
               readyVibro: snapReady?.vibro || null,
@@ -4964,8 +4998,13 @@ async function main() {
               nullTxt,
               chunkAck,
               nanSkewAck,
+              f32InfSampleAck,
+              u64WrapTimeAck,
               postNanState: postNanVibro?.vibro?.state ?? -1,
               postNanStampValid: Boolean(postNanVibro?.stamps?.vibro?.valid),
+              delayedFaultState: delayedFaultVibro?.vibro?.state ?? -1,
+              delayedFaultReason: delayedFaultVibro?.vibro?.reasonMask ?? 0,
+              delayedFaultStampValid: Boolean(delayedFaultVibro?.stamps?.vibro?.valid),
             };
           })()`
         );
@@ -4981,9 +5020,18 @@ async function main() {
           !rsWelchReport.nanSkewAck ||
           rsWelchReport.nanSkewAck.accepted !== 0 ||
           rsWelchReport.postNanState !== 4 ||
-          rsWelchReport.postNanStampValid
+          rsWelchReport.postNanStampValid ||
+          !rsWelchReport.f32InfSampleAck ||
+          rsWelchReport.f32InfSampleAck.accepted !== 0 ||
+          rsWelchReport.f32InfSampleAck.count !== 0 ||
+          !rsWelchReport.u64WrapTimeAck ||
+          rsWelchReport.u64WrapTimeAck.accepted !== 0 ||
+          rsWelchReport.u64WrapTimeAck.count !== 0 ||
+          rsWelchReport.delayedFaultState !== 4 ||
+          (rsWelchReport.delayedFaultReason & 1) === 0 ||
+          rsWelchReport.delayedFaultStampValid
         ) {
-          throw new Error('Step 10b NaN estSkewUs rejection gate failed: ' + JSON.stringify(rsWelchReport));
+          throw new Error('Step 10b audio boundary & K=4 fault propagation gate failed: ' + JSON.stringify(rsWelchReport));
         }
 
         const rv = rsWelchReport.readyVibro;

@@ -4775,7 +4775,7 @@ struct AssignConservationEval {
     h1_chi2: f64,
     h1_imp_resid: f64,
     h1_tau: f64,
-    h1_e_clamped: f64,
+    h1_e: f64,
     finite_ok: bool,
 }
 
@@ -5071,23 +5071,56 @@ fn eval_occluded_assignment(
         d_lz_h1.abs() / l_scale
     };
 
-    // Normal approach, separation, and restitution
+    // Normal approach, separation, and joint velocity + position-chord restitution
     let vn_pre = vrel_pre_x * nx + vrel_pre_y * ny;
     let vn_post = vrel_out_x * nx + vrel_out_y * ny;
-    let v_close = -vn_pre;
+    let v_close_vel = -vn_pre;
     let v_close_min = (2.0 * sigma_vel).max(1.0e-3);
-    let e_raw = if v_close > 1.0e-6 {
-        vn_post / v_close
+    let dv_rel_tol = 3.0 * sqrt2 * sigma_vel + 0.5 * (a_env_1 + a_env_2) * dt + num_eps_vel;
+
+    let dr_end_x = x1_out - x2_out;
+    let dr_end_y = y1_out - y2_out;
+    let dr0_n = dr0_x * nx + dr0_y * ny;
+    let dr_end_n = dr_end_x * nx + dr_end_y * ny;
+    let end_sep_tol = 3.0 * sqrt2 * sigma_pos + num_eps_pos;
+    let end_side_ok = dr0_n >= r_sum - end_sep_tol && dr_end_n >= r_sum - end_sep_tol;
+
+    let a_env_sum = a_env_1 + a_env_2;
+    let var_vel = 2.0 * sigma_vel * sigma_vel + 0.25 * a_env_sum * a_env_sum * dt * dt + 1.0e-12;
+    let w_vel = 1.0 / var_vel;
+
+    let v_close_fit = if tau > 1.0e-4 {
+        let vc_chord = (dr0_n - r_sum) / tau;
+        let var_c_pre = (4.0 * sigma_pos * sigma_pos) / (tau * tau)
+            + 0.25 * a_env_sum * a_env_sum * tau * tau
+            + 1.0e-12;
+        let w_c = 1.0 / var_c_pre;
+        (w_vel * v_close_vel + w_c * vc_chord) / (w_vel + w_c)
+    } else {
+        v_close_vel
+    };
+
+    let vn_post_fit = if dt_rem > 1.0e-4 {
+        let vp_chord = (dr_end_n - r_sum) / dt_rem;
+        let var_c_post = (4.0 * sigma_pos * sigma_pos) / (dt_rem * dt_rem)
+            + 0.25 * a_env_sum * a_env_sum * dt_rem * dt_rem
+            + 1.0e-12;
+        let w_c = 1.0 / var_c_post;
+        (w_vel * vn_post + w_c * vp_chord) / (w_vel + w_c)
+    } else {
+        vn_post
+    };
+
+    let e_fit = if v_close_fit > 1.0e-6 {
+        vn_post_fit / v_close_fit
     } else {
         -1.0
     };
-    let dv_rel_tol = 3.0 * sqrt2 * sigma_vel + 0.5 * (a_env_1 + a_env_2) * dt + num_eps_vel;
-    let e_tol = ((1.5 * dv_rel_tol) / v_close.max(1.0e-3)).min(0.35);
-    let e_clamped = e_raw.clamp(0.0, 1.0);
 
     let mu = (m1 * m2) / (m1 + m2);
-    let vc_pos = v_close.max(0.0);
-    let dk_expected = -0.5 * mu * (1.0 - e_clamped * e_clamped) * vc_pos * vc_pos;
+    let vc_pos = v_close_fit.max(0.0);
+    let e_phys = e_fit.clamp(0.0, 1.0);
+    let dk_expected = -0.5 * mu * (1.0 - e_phys * e_phys) * vc_pos * vc_pos;
     let w_drag_max =
         drag_beta_max * dt * (m1 * v_drag_1 * v_drag_1 + m2 * v_drag_2 * v_drag_2);
     let dk_consistent = dk <= eps_k && dk >= dk_expected - w_drag_max - 1.5 * eps_k;
@@ -5108,13 +5141,16 @@ fn eval_occluded_assignment(
         && sep_mid_ok
         && sep_pre_ok
         && sep_post_ok
+        && end_side_ok
         && norm_side_ok;
 
     let h1_dyn_ok = j12_mag > j12_min
-        && v_close > v_close_min
-        && vn_post >= -dv_rel_tol
-        && e_raw >= -e_tol
-        && e_raw <= 1.0 + e_tol;
+        && v_close_fit > v_close_min
+        && vn_post_fit >= 0.0
+        && e_fit >= 0.0
+        && e_fit <= 1.0
+        && (v_close_vel - v_close_fit).abs() <= dv_rel_tol
+        && (vn_post - vn_post_fit).abs() <= dv_rel_tol;
     let h1_ok = j_net_mag <= j_env_max
         && d_lz_h1.abs() <= l_env_max
         && dk_consistent
@@ -5130,7 +5166,7 @@ fn eval_occluded_assignment(
     let mut h1_chi2 = 9.0
         * (r_j * r_j + r_lh1 * r_lh1 + r_k1 * r_k1 + r_k2 * r_k2 + r_sep * r_sep + r_dk * r_dk);
     if !h1_ok {
-        if !h1_dyn_ok || !norm_side_ok || !dk_consistent {
+        if !h1_dyn_ok || !norm_side_ok || !end_side_ok || !dk_consistent {
             h1_chi2 += 16.0;
         }
         if !sep_pre_ok || !sep_post_ok {
@@ -5147,7 +5183,7 @@ fn eval_occluded_assignment(
         && f64_fits_f32(h0_imp_resid)
         && f64_fits_f32(h1_chi2)
         && f64_fits_f32(tau)
-        && f64_fits_f32(e_clamped)
+        && f64_fits_f32(e_fit)
         && f64_fits_f32(eps_k)
         && f64_fits_f32(l_env_max)
         && f64_fits_f32(l_scale);
@@ -5170,7 +5206,7 @@ fn eval_occluded_assignment(
         h1_chi2,
         h1_imp_resid: j_net_mag,
         h1_tau: tau,
-        h1_e_clamped: e_clamped,
+        h1_e: e_fit,
         finite_ok,
     }
 }
@@ -5358,14 +5394,14 @@ fn eval_occluded_pair_core(
 
     let (est_tau_sec, est_restitution_e) = if keep.h1_ok && swap.h1_ok {
         if swap.h1_chi2 < keep.h1_chi2 {
-            (swap.h1_tau, swap.h1_e_clamped)
+            (swap.h1_tau, swap.h1_e)
         } else {
-            (keep.h1_tau, keep.h1_e_clamped)
+            (keep.h1_tau, keep.h1_e)
         }
     } else if keep.h1_ok {
-        (keep.h1_tau, keep.h1_e_clamped)
+        (keep.h1_tau, keep.h1_e)
     } else if swap.h1_ok {
-        (swap.h1_tau, swap.h1_e_clamped)
+        (swap.h1_tau, swap.h1_e)
     } else {
         (0.0, 0.0)
     };

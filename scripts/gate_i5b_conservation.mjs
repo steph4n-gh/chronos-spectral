@@ -313,6 +313,50 @@ assertNear(case1Point.tau, 0.20, 1e-3, 'Case 1 tau');
   assert.equal(stillClosing.status, OCCL_STATUS_VIOLATED, 'Negative restitution e=-0.01 must be VIOLATED');
   assert.equal(stillClosing.mask & (HYP_COLLISION_KEEP | HYP_COLLISION_SWAP), 0, 'Still-closing exit must reject H1');
 
+  // Strict [0, 1] restitution even with sigmaVel=0.1 and r1=r2=5 contact separation
+  const slightNegE = stageEval(
+    makeInput({
+      p1: [-30, 0, 30, 0, 1.0, 5.0],
+      p2: [20, 0, -10, 0, 3.0, 5.0],
+      a: [0.25, 0, 0.25, 0],
+      b: [10.0 - 0.25 / 3.0, 0, -0.25 / 3.0, 0],
+      dt: 2.0,
+      sigmaVel: 0.1,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(slightNegE.status, OCCL_STATUS_VIOLATED, 'e=-0.00833 under sigmaVel=0.1 must be VIOLATED');
+  assert.equal(slightNegE.mask & (HYP_COLLISION_KEEP | HYP_COLLISION_SWAP), 0, 'Negative fitted e=-0.00833 must reject H1');
+
+  const slightSuperE = stageEval(
+    makeInput({
+      p1: [-30, 0, 30, 0, 1.0, 5.0],
+      p2: [20, 0, -10, 0, 3.0, 5.0],
+      a: [-30.25, 0, -30.25, 0],
+      b: [10.0 + 30.25 / 3.0, 0, 30.25 / 3.0, 0],
+      dt: 2.0,
+      sigmaVel: 0.1,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(slightSuperE.status, OCCL_STATUS_VIOLATED, 'e=1.00833 under sigmaVel=0.1 must be VIOLATED');
+  assert.equal(slightSuperE.mask & (HYP_COLLISION_KEEP | HYP_COLLISION_SWAP), 0, 'Super-elastic fitted e=1.00833 must reject H1');
+
+  const lowValidE = stageEval(
+    makeInput({
+      p1: [-30, 0, 30, 0, 1.0, 5.0],
+      p2: [20, 0, -10, 0, 3.0, 5.0],
+      a: [-0.25, 0, -0.25, 0],
+      b: [10.0 + 0.25 / 3.0, 0, 0.25 / 3.0, 0],
+      dt: 2.0,
+      sigmaVel: 0.1,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(lowValidE.status, OCCL_STATUS_UNIQUE, 'Valid tiny e=0.00833 must remain UNIQUE');
+  assert.equal(lowValidE.mask, HYP_COLLISION_KEEP, 'Valid tiny e=0.00833 must select HYP_COLLISION_KEEP');
+  assertNear(lowValidE.e, 0.25 / 30.0, 1e-4, 'Valid tiny restitution must be published accurately');
+
   const extremeMass = stageEval(
     makeInput({
       p1: [10, 10, 0, 0, 1e-37, 0.0],
@@ -630,6 +674,8 @@ function runLiveCoOcclusionScene({
   boostB = 1.0,
   barY0 = 14,
   barY1 = 166,
+  x0Init = 40.0,
+  x1Init = 280.0,
   y0 = 90.0,
   y1 = 90.0,
   noBounce = false,
@@ -653,8 +699,8 @@ function runLiveCoOcclusionScene({
     ptsUs += dtUs;
   }
 
-  let x0 = 40.0;
-  let x1 = 280.0;
+  let x0 = x0Init;
+  let x1 = x1Init;
   let vx0 = 2.6;
   let vx1 = -2.6;
   let bounced = false;
@@ -797,6 +843,14 @@ runLiveCoOcclusionScene({
   barY1: 102,
   y0: 90.0,
   y1: 111.0,
+  noBounce: true,
+  expectNoValidStamp: true,
+});
+
+// Sequential non-overlapping coasting (disc 0 clears bar before disc 1 enters) must NOT trigger co-occlusion
+runLiveCoOcclusionScene({
+  x0Init: 95.0,
+  x1Init: 298.0,
   noBounce: true,
   expectNoValidStamp: true,
 });

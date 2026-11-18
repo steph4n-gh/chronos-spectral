@@ -524,64 +524,30 @@ impl HodgeState {
             return false;
         }
 
-        let (exact_ok, exact_iters, exact_res) = self.solve_exact_pcg(comp_cnt);
-        let (coexact_ok, coexact_iters, coexact_res) = self.solve_coexact_pcg();
-
-        if !exact_ok
-            || !coexact_ok
-            || !exact_res.is_finite()
-            || !coexact_res.is_finite()
-            || exact_res > HODGE_PCG_HARD_FAIL
-            || coexact_res > HODGE_PCG_HARD_FAIL
-        {
-            self.fail_unconverged(true);
-            return false;
-        }
-
-        let Some(exact_res_bits) = pack_f32_checked(exact_res) else {
-            self.fail_unconverged(true);
-            return false;
-        };
-        let Some(coexact_res_bits) = pack_f32_checked(coexact_res) else {
-            self.fail_unconverged(true);
-            return false;
-        };
-
-        let mut e_tot = 0.0f64;
-        let mut e_ex = 0.0f64;
-        let mut e_co = 0.0f64;
-        let mut e_h = 0.0f64;
-        let mut dot_ec = 0.0f64;
-        let mut dot_eh = 0.0f64;
-        let mut dot_ch = 0.0f64;
-
+        let mut omega_scale = 0.0f64;
         let mut e = 0usize;
         while e < HODGE_E {
             if self.e_act[e] != 0 {
-                let oe = self.omega_exact[e];
-                let oc = self.omega_coexact[e];
-                let oh = self.omega[e] - oe - oc;
-                if !oh.is_finite() {
+                let wmag = abs_f64(self.omega[e]);
+                if !wmag.is_finite() {
                     self.fail_unconverged(true);
                     return false;
                 }
-                self.omega_harm[e] = oh;
-                let w = self.w1_edge[e];
-                let om = self.omega[e];
-                e_tot += w * om * om;
-                e_ex += w * oe * oe;
-                e_co += w * oc * oc;
-                e_h += w * oh * oh;
-                dot_ec += w * oe * oc;
-                dot_eh += w * oe * oh;
-                dot_ch += w * oc * oh;
+                if wmag > omega_scale {
+                    omega_scale = wmag;
+                }
             } else {
-                self.omega_harm[e] = 0.0;
+                self.omega[e] = 0.0;
             }
             e += 1;
         }
 
         let (
+            exact_iters,
+            coexact_iters,
+            exact_res_bits,
+            coexact_res_bits,
+            e_tot,
             exact_frac,
             coexact_frac,
             harm_frac,
@@ -589,18 +555,132 @@ impl HodgeState {
             orth_eh_rel,
             orth_ch_rel,
             energy_part_err,
-        ) = if e_tot <= 1.0e-300 {
-            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        ) = if omega_scale <= 0.0 {
+            self.phi_0.fill(0.0);
+            self.psi_2.fill(0.0);
+            self.omega_exact.fill(0.0);
+            self.omega_coexact.fill(0.0);
+            self.omega_harm.fill(0.0);
+            (0u32, 0u32, 0u32, 0u32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
         } else {
-            let denom = e_tot;
+            let inv_scale = 1.0 / omega_scale;
+            if !inv_scale.is_finite() {
+                self.fail_unconverged(true);
+                return false;
+            }
+            e = 0;
+            while e < HODGE_E {
+                if self.e_act[e] != 0 {
+                    self.omega[e] *= inv_scale;
+                }
+                e += 1;
+            }
+
+            let (exact_ok, exact_iters, exact_res) = self.solve_exact_pcg(comp_cnt);
+            let (coexact_ok, coexact_iters, coexact_res) = self.solve_coexact_pcg();
+
+            if !exact_ok
+                || !coexact_ok
+                || !exact_res.is_finite()
+                || !coexact_res.is_finite()
+                || exact_res > HODGE_PCG_HARD_FAIL
+                || coexact_res > HODGE_PCG_HARD_FAIL
+            {
+                self.fail_unconverged(true);
+                return false;
+            }
+
+            let Some(exact_res_bits) = pack_f32_checked(exact_res) else {
+                self.fail_unconverged(true);
+                return false;
+            };
+            let Some(coexact_res_bits) = pack_f32_checked(coexact_res) else {
+                self.fail_unconverged(true);
+                return false;
+            };
+
+            let mut e_tot_u = 0.0f64;
+            let mut e_ex_u = 0.0f64;
+            let mut e_co_u = 0.0f64;
+            let mut e_h_u = 0.0f64;
+            let mut dot_ec_u = 0.0f64;
+            let mut dot_eh_u = 0.0f64;
+            let mut dot_ch_u = 0.0f64;
+
+            e = 0;
+            while e < HODGE_E {
+                if self.e_act[e] != 0 {
+                    let oe = self.omega_exact[e];
+                    let oc = self.omega_coexact[e];
+                    let oh = self.omega[e] - oe - oc;
+                    if !oh.is_finite() {
+                        self.fail_unconverged(true);
+                        return false;
+                    }
+                    self.omega_harm[e] = oh;
+                    let w = self.w1_edge[e];
+                    let om = self.omega[e];
+                    e_tot_u += w * om * om;
+                    e_ex_u += w * oe * oe;
+                    e_co_u += w * oc * oc;
+                    e_h_u += w * oh * oh;
+                    dot_ec_u += w * oe * oc;
+                    dot_eh_u += w * oe * oh;
+                    dot_ch_u += w * oc * oh;
+                } else {
+                    self.omega_harm[e] = 0.0;
+                }
+                e += 1;
+            }
+
+            let (ef, cf, hf, oec, oeh, och, epe) = if e_tot_u <= 1.0e-300 {
+                (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            } else {
+                let denom = e_tot_u;
+                (
+                    e_ex_u / denom,
+                    e_co_u / denom,
+                    e_h_u / denom,
+                    abs_f64(dot_ec_u) / denom,
+                    abs_f64(dot_eh_u) / denom,
+                    abs_f64(dot_ch_u) / denom,
+                    abs_f64((e_ex_u + e_co_u + e_h_u) - e_tot_u) / denom,
+                )
+            };
+
+            let mut v = 0usize;
+            while v < HODGE_V {
+                if self.v_act[v] != 0 {
+                    self.phi_0[v] *= omega_scale;
+                } else {
+                    self.phi_0[v] = 0.0;
+                }
+                v += 1;
+            }
+            e = 0;
+            while e < HODGE_E {
+                if self.e_act[e] != 0 {
+                    self.omega[e] *= omega_scale;
+                    self.omega_exact[e] *= omega_scale;
+                    self.omega_coexact[e] *= omega_scale;
+                    self.omega_harm[e] *= omega_scale;
+                }
+                e += 1;
+            }
+            let e_tot_phys = e_tot_u * omega_scale * omega_scale;
             (
-                e_ex / denom,
-                e_co / denom,
-                e_h / denom,
-                abs_f64(dot_ec) / denom,
-                abs_f64(dot_eh) / denom,
-                abs_f64(dot_ch) / denom,
-                abs_f64((e_ex + e_co + e_h) - e_tot) / denom,
+                exact_iters,
+                coexact_iters,
+                exact_res_bits,
+                coexact_res_bits,
+                e_tot_phys,
+                ef,
+                cf,
+                hf,
+                oec,
+                oeh,
+                och,
+                epe,
             )
         };
 

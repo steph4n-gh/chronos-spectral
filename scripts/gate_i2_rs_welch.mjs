@@ -666,6 +666,11 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   assert(sawWarmSuppression, 'Expected to observe K < 8 warming gate');
   assert(trap.state === RS_STATE_READY && trap.kSegs >= 8, `Trap final state=${trap.state}, K=${trap.kSegs}`);
   assert(trap.k1Coh > 0.95, `Expected K=1 raw coherence > 0.95, got ${trap.k1Coh}`);
+  const expectedBonfCrit = 1.0 - Math.pow(0.01 / (16 * 63), 1.0 / (0.95 * trap.kSegs - 1.0));
+  assert(
+    Math.abs(trap.gamma2Crit - expectedBonfCrit) < 1e-5,
+    `Expected Bonferroni gamma2Crit=${expectedBonfCrit.toFixed(6)} for 16x63 tests, got ${trap.gamma2Crit}`
+  );
   assert(trap.maxCoh < trap.gamma2Crit, `Expected averaged coherence ${trap.maxCoh} < gamma2_crit ${trap.gamma2Crit}`);
   assert(trap.validCells === 0 && trap.coupledCells === 0, `Expected 0 coupled/valid cells, got ${trap.validCells}/${trap.coupledCells}`);
   console.log(
@@ -724,12 +729,15 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
 // Suite 5: Fail-Closed Matrix & Continuity Resets
 // ============================================================================
 {
-  // 5a. Bad calibration rejected
+  // 5a. Bad calibration rejected (including non-finite audio_rate_hz in RS_ONLY mode)
   exp.chronos_init();
   exp.chronos_set_resolution(1);
   assert(exp.chronos_set_rs_calib(RS_MODE_RS_WELCH, 0.0, 200.0, 48000.0, 500.0) === 0, 'dt_row=0 must fail');
   let t = readTelem();
   assert(t.state === RS_STATE_UNCALIBRATED && (t.reason & RS_REASON_BAD_CALIB) !== 0, 'Bad calib state');
+  assert(exp.chronos_set_rs_calib(RS_MODE_RS_ONLY, 25.0, 200.0, Infinity, 500.0) === 0, 'Infinity audio_rate_hz in RS_ONLY must fail');
+  t = readTelem();
+  assert(t.state === RS_STATE_UNCALIBRATED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && t.calibAudioRateHz === 0.0, 'Non-finite audio rate must fail cleanly with zeroed word 16');
 
   // 5b. scan_dir = 0xffffffff -> RS_REASON_NO_SCAN_DIR
   initSession({ mode: RS_MODE_RS_ONLY, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 0.0, maxSkewUs: 500.0 });
@@ -860,7 +868,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     'Single 1,600-sample audio gap must reset Welch count and invalidate stamp'
   );
 
-  // Sample-rate mismatch block resets Welch interval & keeps DISTURBED across next video frame
+  // Sample-rate mismatch and non-finite PCM sample rejection keep DISTURBED across video gap + clean frames
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
   sampleCursor = 0;
   for (let f = 0; f < 30; f++) {
@@ -871,6 +879,21 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
   }
   assert(readTelem().state === RS_STATE_READY && readTelem().stampValid, 'Expected READY before 44.1 kHz mismatch check');
+  audioStaging[0] = Infinity;
+  const [infLo, infHi] = splitU64(BigInt(t0 + 1_020_000));
+  assert(exp.chronos_push_audio_block(1, infLo, infHi, 48000.0, 0.0) === 0, 'Non-finite PCM sample in audio staging must fail closed');
+  t = readTelem();
+  assert(t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid, 'Non-finite PCM sample must trigger DISTURBED|BAD_CALIB');
+
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
+  sampleCursor = 0;
+  for (let f = 0; f < 30; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    const nextEnd = Math.round(((f + 1) / 30) * 48000);
+    pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+    sampleCursor = nextEnd;
+    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+  }
   const badRateRes = pushAudioSamples({
     startSampleIdx: sampleCursor,
     numSamples: 1600,
@@ -884,14 +907,20 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid && t.kSegs === 0,
     'Sample-rate mismatch must immediately clear Welch interval, enter DISTURBED|BAD_CALIB, and invalidate stamp'
   );
-  pushFrame({ seq: 30, tSrcUs: t0 + 1_000_000, dispFn: sigOpt });
+  pushFrame({ seq: 35, tSrcUs: t0 + 1_000_000, gapMask: 1, dispFn: sigOpt });
   t = readTelem();
   assert(
     t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid,
-    'Subsequent video frame after rate rejection must stay DISTURBED until valid matching audio resumes'
+    'Video continuity gap after rate rejection must retain DISTURBED|BAD_CALIB until valid audio resumes'
+  );
+  pushFrame({ seq: 36, tSrcUs: t0 + 1_033_333, dispFn: sigOpt });
+  t = readTelem();
+  assert(
+    t.state === RS_STATE_DISTURBED && (t.reason & RS_REASON_BAD_CALIB) !== 0 && !t.stampValid,
+    'Subsequent clean video frame after rate rejection+gap must still stay DISTURBED|BAD_CALIB'
   );
 
-  // Stopping audio after READY holds original stamp transiently, then expires to WARMING|AUDIO_UNDERRUN
+  // Stopping audio holds original stamp only while covered, then expires IMMEDIATELY on first uncovered frame
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
   sampleCursor = 0;
   for (let f = 0; f < 30; f++) {
@@ -903,29 +932,26 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   }
   assert(readTelem().state === RS_STATE_READY && readTelem().stampValid && (wave2U32[16] & 2) === 0, 'Expected fresh READY before audio stop');
   const seqAtAudioStop = wave2U32[19] >>> 0;
-  let sawHeldOriginSeq = false;
-  let sawAdvancedFresh = false;
+
+  // Sub-hop frame whose scan start is still inside audio_last_t_end_us (t0 + 1_000_000) holds original stamp
+  pushFrame({ seq: 30, tSrcUs: t0 + 972_000, dispFn: sigOpt });
+  {
+    const vh = readTelem();
+    assert(
+      vh.state === RS_STATE_READY && (wave2U32[16] & 3) === 3 && (wave2U32[19] >>> 0) === seqAtAudioStop,
+      `Covered no-new-segment frame should hold original Welch seq=${seqAtAudioStop}, got state=${vh.state} flags=${wave2U32[16]} seq=${wave2U32[19]}`
+    );
+  }
+  // Very first uncovered frame (opt_cur_min_us = t0 + 1_000_100 > audio_last_t_end_us) expires immediately
   for (let f = 30; f < 66; f++) {
     const tSrcUs = t0 + Math.round((f * 1e6) / 30);
-    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+    pushFrame({ seq: f + 1, tSrcUs, dispFn: sigOpt });
     const v = readTelem();
-    const stFlags = wave2U32[16] >>> 0;
-    const stSeq = wave2U32[19] >>> 0;
-    if ((stFlags & 1) !== 0 && (stFlags & 2) !== 0 && stSeq === seqAtAudioStop) {
-      sawHeldOriginSeq = true;
-    }
-    if ((stFlags & 1) !== 0 && (stFlags & 2) === 0 && stSeq > seqAtAudioStop) {
-      sawAdvancedFresh = true;
-    }
-    if (f === 65) {
-      assert(
-        v.state === RS_STATE_WARMING && (v.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !v.stampValid,
-        `Expected expired WARMING|AUDIO_UNDERRUN after 36 audio-less frames, got state=${v.state} reason=${v.reason} valid=${v.stampValid}`
-      );
-    }
+    assert(
+      v.state === RS_STATE_WARMING && (v.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !v.stampValid,
+      `Uncovered frame f=${f} must immediately expire to WARMING|AUDIO_UNDERRUN without stamp, got state=${v.state} reason=${v.reason} valid=${v.stampValid}`
+    );
   }
-  assert(sawHeldOriginSeq, 'First frame(s) after audio stop should hold original Welch source_seq');
-  assert(!sawAdvancedFresh, 'Stopped audio must never advance Welch stamp source_seq as fresh');
 
   // Optical alias guard: 4375 Hz optical motion vs 5625 Hz audio tone @ dtRow=100us (10 kHz row lattice) must not couple
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 100.0, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
@@ -940,9 +966,10 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: optAlias });
   }
   t = readTelem();
+  const expectedAliasCrit = 1.0 - Math.pow(0.01 / (16 * 51), 1.0 / (0.95 * t.kSegs - 1.0));
   assert(
-    t.coupledCells === 0 && t.maxCoh < t.gamma2Crit,
-    `Aliased 5625 Hz audio must be excluded above optical Nyquist, got coupled=${t.coupledCells} g2=${t.maxCoh} dom=${t.domFreqHz}`
+    t.coupledCells === 0 && t.maxCoh < t.gamma2Crit && Math.abs(t.gamma2Crit - expectedAliasCrit) < 1e-5,
+    `Aliased 5625 Hz audio must be excluded above optical Nyquist with 16*51 Bonferroni crit, got coupled=${t.coupledCells} g2=${t.maxCoh} crit=${t.gamma2Crit}`
   );
 
   // SD 320x180 transposed column scan (o=0, scanDir=2) fits 320 <= 360 and reaches READY without AXIS_TRANSPOSED

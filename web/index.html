@@ -4670,6 +4670,7 @@
     let rsAudioCaptureRateHz = 48000.0;
     let rsAudioCaptureBaseUs = 0;
     let rsAudioCaptureCursor = 0;
+    let rsAudioCaptureAnchored = false;
 
     function stopRsLiveAudioCapture() {
       if (rsAudioCaptureProc) {
@@ -4699,6 +4700,7 @@
       }
       rsAudioCaptureBaseUs = 0;
       rsAudioCaptureCursor = 0;
+      rsAudioCaptureAnchored = false;
     }
 
     function syncRsLiveAudioCapture() {
@@ -4722,8 +4724,9 @@
         const gain = ctx.createGain();
         gain.gain.value = 0.0;
         rsAudioCaptureRateHz = ctx.sampleRate || 48000.0;
-        rsAudioCaptureBaseUs = Math.round(performance.now() * 1000.0);
+        rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
+        rsAudioCaptureAnchored = false;
         const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 40.0;
         const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 200.0;
         worker.postMessage({
@@ -4741,15 +4744,28 @@
           if (!ch || ch.length === 0) return;
           const samples = new Float32Array(ch.length);
           samples.set(ch);
+          const nowPerf = performance.now();
+          const blockDurUs = Math.round((samples.length * 1_000_000.0) / rsAudioCaptureRateHz);
+          const hasPumpRef = lastMediaTime >= 0 && lastPumpPerfMs > 0;
+          const mediaNowUs = hasPumpRef
+            ? Math.max(0, Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0))
+            : (Number.isFinite(videoEl.currentTime) && videoEl.currentTime >= 0
+                ? Math.round(videoEl.currentTime * 1_000_000.0)
+                : 0);
+          if (!rsAudioCaptureAnchored) {
+            rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - blockDurUs);
+            rsAudioCaptureAnchored = true;
+          }
           rsAudioCaptureCursor += samples.length;
           const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
+          const estSkewUs = hasPumpRef ? (tEndUs - mediaNowUs) : 0.0;
           worker.postMessage(
             {
               type: 'push_audio_pcm',
               samples,
               tEndUs,
               sampleRateHz: rsAudioCaptureRateHz,
-              estSkewUs: 0.0,
+              estSkewUs,
             },
             [samples.buffer]
           );

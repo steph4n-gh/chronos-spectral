@@ -479,8 +479,6 @@ impl VibrometryState {
         self.band_coh.fill(0.0);
         self.planes.fill(0.0);
         self.reset_audio_welch_interval();
-        self.skew_disturbed = 0;
-        self.rate_disturbed = 0;
         self.scan_along_ey = 1;
         self.fresh_solve = 0;
 
@@ -499,14 +497,23 @@ impl VibrometryState {
         self.telem[16] = self.calib_audio_rate_hz.to_bits();
         self.telem[17] = self.max_skew_us.to_bits();
         self.telem[18] = self.audio_total_samples as u32;
+        let mut eff_reasons = reason_bits;
+        if keep_mode == RS_MODE_RS_WELCH {
+            if self.skew_disturbed != 0 {
+                eff_reasons |= RS_REASON_CLOCK_SKEW;
+            }
+            if self.rate_disturbed != 0 {
+                eff_reasons |= RS_REASON_BAD_CALIB;
+            }
+        }
         if keep_mode == RS_MODE_OFF {
             self.telem[0] = RS_STATE_OFF;
         } else if keep_calib_valid == 0 {
             self.telem[0] = RS_STATE_UNCALIBRATED;
-            self.telem[2] = reason_bits | RS_REASON_BAD_CALIB;
-        } else if reason_bits != 0 {
+            self.telem[2] = eff_reasons | RS_REASON_BAD_CALIB;
+        } else if eff_reasons != 0 {
             self.telem[0] = RS_STATE_DISTURBED;
-            self.telem[2] = reason_bits;
+            self.telem[2] = eff_reasons;
         } else {
             self.telem[0] = RS_STATE_WARMING;
         }
@@ -524,6 +531,12 @@ impl VibrometryState {
         if sanitized_mode == RS_MODE_OFF {
             self.mode = RS_MODE_OFF;
             self.calib_valid = 0;
+            self.dt_row_us = 0.0;
+            self.exposure_us = 0.0;
+            self.calib_audio_rate_hz = 0.0;
+            self.max_skew_us = 0.0;
+            self.skew_disturbed = 0;
+            self.rate_disturbed = 0;
             self.reset_continuity(0);
             return 1;
         }
@@ -536,12 +549,18 @@ impl VibrometryState {
             && exposure_us <= 200_000.0
             && max_skew_us.is_finite()
             && max_skew_us >= 0.0
-            && (sanitized_mode == RS_MODE_RS_ONLY
-                || (audio_rate_hz.is_finite()
+            && ((sanitized_mode == RS_MODE_RS_ONLY
+                && audio_rate_hz.is_finite()
+                && audio_rate_hz >= 0.0
+                && audio_rate_hz <= 192_000.0)
+                || (sanitized_mode == RS_MODE_RS_WELCH
+                    && audio_rate_hz.is_finite()
                     && audio_rate_hz >= 4000.0
                     && audio_rate_hz <= 192_000.0));
 
         self.mode = sanitized_mode;
+        self.skew_disturbed = 0;
+        self.rate_disturbed = 0;
         if !calib_ok {
             self.calib_valid = 0;
             self.dt_row_us = 0.0;
@@ -554,7 +573,11 @@ impl VibrometryState {
 
         self.dt_row_us = dt_row_us;
         self.exposure_us = exposure_us;
-        self.calib_audio_rate_hz = audio_rate_hz;
+        self.calib_audio_rate_hz = if sanitized_mode == RS_MODE_RS_ONLY {
+            0.0
+        } else {
+            audio_rate_hz
+        };
         self.max_skew_us = max_skew_us;
         self.calib_valid = 1;
         self.reset_continuity(0);
@@ -655,6 +678,26 @@ impl VibrometryState {
                 self.telem[2] |= RS_REASON_CLOCK_SKEW;
             }
             return 0;
+        }
+
+        let mut chk = 0usize;
+        while chk < n {
+            if !self.audio_staging[chk].is_finite() {
+                self.rate_disturbed = 1;
+                self.reset_audio_welch_interval();
+                self.planes.fill(0.0);
+                self.fresh_solve = 0;
+                self.telem[3] = 0;
+                self.telem[4] = 0;
+                self.telem[6] = 0;
+                self.telem[21] = 0;
+                if self.mode != RS_MODE_OFF {
+                    self.telem[0] = RS_STATE_DISTURBED;
+                    self.telem[2] |= RS_REASON_BAD_CALIB;
+                }
+                return 0;
+            }
+            chk += 1;
         }
 
         if self.audio_has_prev_t != 0 {
@@ -1832,9 +1875,8 @@ impl VibrometryState {
             let opt_t_max_us =
                 (self.t_src_hist_us[newest_hist] as f64) + cur_q_max * dt_row + half_exp;
             audio_covers_newest = (self.audio_last_t_end_us as f64) + dt_row >= opt_t_max_us;
-            let t_win_us = (AUDIO_FFT_N as f64) * 1_000_000.0 / (self.audio_ring_rate_hz as f64);
             if opt_t_min_us > (self.audio_last_t_end_us as f64)
-                || (opt_cur_min_us - (self.audio_last_t_end_us as f64)) > 4.0 * t_win_us
+                || opt_cur_min_us > (self.audio_last_t_end_us as f64)
             {
                 self.welch_count = 0;
                 self.welch_cursor = 0;

@@ -699,19 +699,34 @@ assert(
   'chronos_set_swarm_mode(0) must invalidate live Hodge stamp, clear planes, and leave READY for STANDBY'
 );
 
-// Small finite exact field (u = 1e-11, v = 0, unit spacing) must keep normalized exactFrac ~= 1.0
-stageField(1.0, 1.0, () => [1e-11, 0.0, 1.0]);
-assert(exp.chronos_hodge_solve_injected(1.0, 1.0) === 1, 'Small finite injected field solve must succeed');
-{
+// Small finite exact fields (u = 1e-11 and u = 1e-20, v = 0, unit spacing) must keep normalized exactFrac ~= 1.0
+for (const tinyU of [1e-11, 1e-20]) {
+  stageField(1.0, 1.0, () => [tinyU, 0.0, 1.0]);
+  assert(exp.chronos_hodge_solve_injected(1.0, 1.0) === 1, `Small finite injected field u=${tinyU} solve must succeed`);
   const tTiny = readTelem();
   assert(
     tTiny.state === HODGE_STATE_READY &&
       tTiny.converged === 1 &&
       Math.abs(tTiny.exactFrac - 1.0) < 1e-5 &&
+      tTiny.harmFrac < 1e-10 &&
       tTiny.energyPartErr < 1e-6,
-    `Expected exactFrac~=1.0 on u=1e-11 field, got ${JSON.stringify(tTiny)}`
+    `Expected exactFrac~=1.0 on u=${tinyU} field, got ${JSON.stringify(tTiny)}`
   );
-  checkFiniteTelemAndPlanes('TinyExact1e-11');
+  checkFiniteTelemAndPlanes(`TinyExact_${tinyU}`);
+}
+stageField(1.0, 1.0, () => [0.0, 0.0, 1.0]);
+assert(exp.chronos_hodge_solve_injected(1.0, 1.0) === 1, 'Exact zero field solve must succeed');
+{
+  const tZero = readTelem();
+  assert(
+    tZero.state === HODGE_STATE_READY &&
+      tZero.converged === 1 &&
+      tZero.exactFrac === 0.0 &&
+      tZero.coexactFrac === 0.0 &&
+      tZero.harmFrac === 0.0,
+    `Zero field expected 0/0/0 fractions, got ${JSON.stringify(tZero)}`
+  );
+  checkFiniteTelemAndPlanes('ZeroField');
 }
 
 // Live SD 320x180 Hodge must use 40x22 spacing (voidCx <= 320, voidCy <= 180)
