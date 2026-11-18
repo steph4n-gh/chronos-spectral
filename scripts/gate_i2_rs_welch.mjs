@@ -992,6 +992,45 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     );
   }
 
+  // Valid near-cutoff straddle (4850 Hz <= f_opt_max=4873.10 Hz @ dtRow=98.5us) & weak in-band + strong distant OOB (7500 Hz)
+  {
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 98.5, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    sampleCursor = 0;
+    const opt4850 = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * 4850.0 * tSec + 0.3), 0.0];
+    const aud4850 = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * 4850.0 * tSec + 0.1);
+    for (let f = 0; f < 29; f++) {
+      const tSrcUs = t0 + f * 41_000;
+      const nextEnd = Math.round((f + 1) * 0.041 * 96000.0);
+      pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: aud4850 });
+      sampleCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 98.5, exposureUs: 20.0, dispFn: opt4850 });
+    }
+    const ts = readTelem();
+    assert(
+      ts.state === RS_STATE_READY && ts.coupledCells === 880 && ts.maxCoh > 0.90,
+      `Valid 4850 Hz near-cutoff straddle (< 4873.1 Hz) must couple all 880 cells, got state=${ts.state} coupled=${ts.coupledCells} g2=${ts.maxCoh}`
+    );
+
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 100.0, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    sampleCursor = 0;
+    const optWeak = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * 4687.5 * tSec + 0.3), 0.0];
+    const audTwoTone = (tSec) =>
+      0.025 * Math.cos(2.0 * Math.PI * 4687.5 * tSec + 0.1) +
+      0.5 * Math.cos(2.0 * Math.PI * 7500.0 * tSec + 0.4);
+    for (let f = 0; f < 29; f++) {
+      const tSrcUs = t0 + f * 41_000;
+      const nextEnd = Math.round((f + 1) * 0.041 * 96000.0);
+      pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: audTwoTone });
+      sampleCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: optWeak });
+    }
+    const tw = readTelem();
+    assert(
+      tw.state === RS_STATE_READY && tw.coupledCells === 880 && tw.maxCoh > 0.90,
+      `Weak in-band 4687.5 Hz + strong 7500 Hz OOB tone must couple all 880 cells, got state=${tw.state} coupled=${tw.coupledCells} g2=${tw.maxCoh}`
+    );
+  }
+
   // High-epoch sub-microsecond expiry guard (near 2^53 us): exposureUs=201 -> T + 0.5 us must expire immediately
   {
     const tAudioStopBig = (1n << 53n) - 100_000n;

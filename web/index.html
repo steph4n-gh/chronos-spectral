@@ -4675,6 +4675,15 @@
     let rsAudioCaptureBaseUs = 0;
     let rsAudioCaptureCursor = 0;
     let rsAudioCaptureAnchored = false;
+    let rsAudioAnchorRefineLeft = 0;
+    let rsAudioTrackPollId = 0;
+
+    function clearRsAudioTrackPoll() {
+      if (rsAudioTrackPollId) {
+        clearInterval(rsAudioTrackPollId);
+        rsAudioTrackPollId = 0;
+      }
+    }
 
     function getLiveAudioTrack(stream) {
       if (!stream || typeof stream.getAudioTracks !== 'function') return null;
@@ -4690,6 +4699,9 @@
     }
 
     function stopRsLiveAudioCapture(unwatchStream = true) {
+      if (unwatchStream) {
+        clearRsAudioTrackPoll();
+      }
       if (rsAudioCaptureTrackCleanup) {
         try {
           rsAudioCaptureTrackCleanup();
@@ -4732,6 +4744,7 @@
       rsAudioCaptureBaseUs = 0;
       rsAudioCaptureCursor = 0;
       rsAudioCaptureAnchored = false;
+      rsAudioAnchorRefineLeft = 0;
     }
 
     function bindRsAudioStreamWatcher(stream) {
@@ -4743,31 +4756,63 @@
         rsAudioCaptureStreamCleanup = null;
       }
       rsAudioCaptureStream = stream || null;
-      if (stream && typeof stream.addEventListener === 'function') {
-        const onStreamTrackChanged = () => syncRsLiveAudioCapture();
+      if (!stream) return;
+      const onStreamTrackChanged = () => syncRsLiveAudioCapture();
+      const hasEv = typeof stream.addEventListener === 'function';
+      if (hasEv) {
         stream.addEventListener('addtrack', onStreamTrackChanged);
         stream.addEventListener('removetrack', onStreamTrackChanged);
-        rsAudioCaptureStreamCleanup = () => {
-          if (typeof stream.removeEventListener === 'function') {
-            stream.removeEventListener('addtrack', onStreamTrackChanged);
-            stream.removeEventListener('removetrack', onStreamTrackChanged);
-          }
+      }
+      const hadOwnAdd = Object.prototype.hasOwnProperty.call(stream, 'addTrack');
+      const hadOwnRemove = Object.prototype.hasOwnProperty.call(stream, 'removeTrack');
+      const origAdd = typeof stream.addTrack === 'function' ? stream.addTrack : null;
+      const origRemove = typeof stream.removeTrack === 'function' ? stream.removeTrack : null;
+      if (origAdd) {
+        stream.addTrack = function (...args) {
+          const r = origAdd.apply(this, args);
+          syncRsLiveAudioCapture();
+          return r;
         };
       }
+      if (origRemove) {
+        stream.removeTrack = function (...args) {
+          const r = origRemove.apply(this, args);
+          syncRsLiveAudioCapture();
+          return r;
+        };
+      }
+      rsAudioCaptureStreamCleanup = () => {
+        if (hasEv && typeof stream.removeEventListener === 'function') {
+          stream.removeEventListener('addtrack', onStreamTrackChanged);
+          stream.removeEventListener('removetrack', onStreamTrackChanged);
+        }
+        if (origAdd) {
+          if (hadOwnAdd) stream.addTrack = origAdd;
+          else delete stream.addTrack;
+        }
+        if (origRemove) {
+          if (hadOwnRemove) stream.removeTrack = origRemove;
+          else delete stream.removeTrack;
+        }
+      };
     }
 
     function syncRsLiveAudioCapture() {
       const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
-      if (!activeMediaStream) {
+      if (!activeMediaStream || rm !== 2) {
         stopRsLiveAudioCapture(true);
         return;
       }
       bindRsAudioStreamWatcher(activeMediaStream);
       const curTrack = getLiveAudioTrack(activeMediaStream);
-      if (rm !== 2 || !curTrack) {
+      if (!curTrack) {
         stopRsLiveAudioCapture(false);
+        if (!rsAudioTrackPollId) {
+          rsAudioTrackPollId = setInterval(syncRsLiveAudioCapture, 40);
+        }
         return;
       }
+      clearRsAudioTrackPoll();
       if (rsAudioCaptureCtx && rsAudioCaptureStream === activeMediaStream && rsAudioCaptureTrack === curTrack) {
         return;
       }
@@ -4778,7 +4823,24 @@
       if (!AC) return;
       try {
         const ctx = new AC();
-        const src = ctx.createMediaStreamSource(activeMediaStream);
+        let sourceStream = null;
+        if (typeof MediaStream === 'function') {
+          try {
+            sourceStream = new MediaStream([curTrack]);
+          } catch (_msErr) {
+            sourceStream = null;
+          }
+        }
+        if (!sourceStream) {
+          sourceStream = {
+            id: 'chronos-live-audio',
+            active: true,
+            getAudioTracks: () => [curTrack],
+            getVideoTracks: () => [],
+            getTracks: () => [curTrack],
+          };
+        }
+        const src = ctx.createMediaStreamSource(sourceStream);
         const proc = ctx.createScriptProcessor(2048, 1, 1);
         const gain = ctx.createGain();
         gain.gain.value = 0.0;
@@ -4788,6 +4850,7 @@
         rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
         rsAudioCaptureAnchored = false;
+        rsAudioAnchorRefineLeft = 0;
         const onTrackChanged = () => syncRsLiveAudioCapture();
         if (typeof curTrack.addEventListener === 'function') {
           curTrack.addEventListener('ended', onTrackChanged);
@@ -4837,6 +4900,24 @@
             rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - outDurUs);
             rsAudioCaptureCursor = 0;
             rsAudioCaptureAnchored = true;
+            rsAudioAnchorRefineLeft = 4;
+          } else if (rsAudioAnchorRefineLeft > 0) {
+            rsAudioAnchorRefineLeft--;
+            const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
+            const estNextEndUs = rsAudioCaptureBaseUs + Math.round(((rsAudioCaptureCursor + outSamples.length) * 1_000_000.0) / rsAudioCaptureRateHz);
+            const tentativeSkewUs = estNextEndUs - mediaNowUs;
+            if (tentativeSkewUs > 200.0 && availSamples > 0) {
+              if (tentativeSkewUs <= 800.0 && rsAudioCaptureBaseUs >= tentativeSkewUs) {
+                rsAudioCaptureBaseUs -= Math.round(tentativeSkewUs);
+              } else {
+                if (availSamples < outSamples.length) {
+                  outSamples = outSamples.slice(outSamples.length - availSamples);
+                }
+                const outDurUs = Math.round((outSamples.length * 1_000_000.0) / rsAudioCaptureRateHz);
+                rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - outDurUs);
+                rsAudioCaptureCursor = 0;
+              }
+            }
           }
           rsAudioCaptureCursor += outSamples.length;
           const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
@@ -5121,6 +5202,9 @@
         gapMask |= 1; // FRAME_GAP_SEQ
       }
 
+      if (activeMediaStream) {
+        syncRsLiveAudioCapture();
+      }
       // Detect <video loop> wrap-around or any backward seek (> 1 ms reversal) so tracks and PTS clocks reset cleanly
       if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 1e-3 < lastMediaTime) {
         gapMask |= 8; // FRAME_GAP_SEEK_RESTART
@@ -5132,6 +5216,7 @@
         rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
         rsAudioCaptureAnchored = false;
+        rsAudioAnchorRefineLeft = 0;
       }
 
       const nomDt = 1.0 / Math.max(8.0, activeVideoFps);

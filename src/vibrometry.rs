@@ -372,8 +372,7 @@ pub struct VibrometryState {
     pub welch_pyy: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
     pub welch_pxy_re: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
     pub welch_pxy_im: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
-    pub welch_full_max_pxx: [f64; VIBRO_WELCH_SLOTS],
-    pub welch_bin64_pxx: [f64; VIBRO_WELCH_SLOTS],
+    pub welch_full_pxx: [f32; (AUDIO_FFT_N / 2 + 1) * VIBRO_WELCH_SLOTS],
     pub welch_cursor: u32,
     pub welch_count: u32,
     pub last_audio_seg_end_sample: u64,
@@ -404,6 +403,8 @@ pub struct VibrometryState {
     seg_y_re: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS],
     seg_y_im: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS],
     mean_pxx: [f64; VIBRO_SPEC_BINS],
+    mean_full_pxx: [f64; AUDIO_FFT_N / 2 + 1],
+    oob_leak_pxx: [f64; VIBRO_SPEC_BINS],
     band_mean_pyy: [f64; VIBRO_SPEC_BINS],
     band_mean_pxy_re: [f64; VIBRO_SPEC_BINS],
     band_mean_pxy_im: [f64; VIBRO_SPEC_BINS],
@@ -440,7 +441,7 @@ pub struct VibrometryState {
     pub fresh_solve: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_750_000);
+const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_780_000);
 
 impl VibrometryState {
     pub fn reset_all(&mut self) {
@@ -456,8 +457,7 @@ impl VibrometryState {
         self.welch_pyy.fill(0.0);
         self.welch_pxy_re.fill(0.0);
         self.welch_pxy_im.fill(0.0);
-        self.welch_full_max_pxx.fill(0.0);
-        self.welch_bin64_pxx.fill(0.0);
+        self.welch_full_pxx.fill(0.0);
         self.welch_cursor = 0;
         self.welch_count = 0;
         self.single_seg_k1_coh = 0.0;
@@ -1726,11 +1726,11 @@ impl VibrometryState {
             const SCALE_X: f64 = 2.0 / 512.0;
             let w_slot = (self.welch_cursor as usize) % VIBRO_WELCH_SLOTS;
             let pxx_base = w_slot * VIBRO_SPEC_BINS;
+            let full_pxx_base = w_slot * (AUDIO_FFT_N / 2 + 1);
             self.welch_pxx[pxx_base..pxx_base + VIBRO_SPEC_BINS].fill(0.0);
+            self.welch_full_pxx[full_pxx_base] = 0.0;
             let mut k_aud = 1usize;
             let mut max_pxx_seg = -1.0f64;
-            let mut seg_full_max_pxx = 0.0f64;
-            let mut bin64_pxx = 0.0f64;
             let mut k = 1usize;
             while k <= AUDIO_FFT_N / 2 {
                 let sc = if k == AUDIO_FFT_N / 2 {
@@ -1741,9 +1741,7 @@ impl VibrometryState {
                 let xr = self.fft_re[k] * sc;
                 let xi = self.fft_im[k] * sc;
                 let pxx = xr * xr + xi * xi;
-                if pxx > seg_full_max_pxx {
-                    seg_full_max_pxx = pxx;
-                }
+                self.welch_full_pxx[full_pxx_base + k] = pxx as f32;
                 if k < VIBRO_SPEC_BINS {
                     self.seg_x_re[k] = xr;
                     self.seg_x_im[k] = xi;
@@ -1752,13 +1750,9 @@ impl VibrometryState {
                         max_pxx_seg = pxx;
                         k_aud = k;
                     }
-                } else if k == VIBRO_SPEC_BINS {
-                    bin64_pxx = pxx;
                 }
                 k += 1;
             }
-            self.welch_full_max_pxx[w_slot] = seg_full_max_pxx;
-            self.welch_bin64_pxx[w_slot] = bin64_pxx;
 
             self.eval_segment_optical_quadrature(obs_count, w_sum, df_hz, k_end);
 
@@ -1810,7 +1804,7 @@ impl VibrometryState {
                 }
                 b += 1;
             }
-            if max_pxx_seg < 3.0e-3 * seg_full_max_pxx {
+            if max_pxx_seg <= 1.0e-12 {
                 best_k1_coh = 0.0;
             }
             self.single_seg_k1_coh = best_k1_coh as f32;
@@ -1947,65 +1941,107 @@ impl VibrometryState {
         let gamma2_crit = 1.0 - exp_neg_f64(ln_alpha / (k_eff - 1.0));
         let gamma2_crit_f32 = gamma2_crit as f32;
 
-        let mut sum_full_max = 0.0f64;
-        let mut sum_bin64 = 0.0f64;
         self.mean_pxx.fill(0.0);
+        self.mean_full_pxx.fill(0.0);
         let mut s = 0usize;
         while s < (k_segs as usize) {
             let pxx_base = s * VIBRO_SPEC_BINS;
+            let full_base = s * (AUDIO_FFT_N / 2 + 1);
             let mut k = 1usize;
             while k < VIBRO_SPEC_BINS {
                 self.mean_pxx[k] += self.welch_pxx[pxx_base + k];
                 k += 1;
             }
-            sum_full_max += self.welch_full_max_pxx[s];
-            sum_bin64 += self.welch_bin64_pxx[s];
+            k = 1;
+            while k <= AUDIO_FFT_N / 2 {
+                self.mean_full_pxx[k] += self.welch_full_pxx[full_base + k] as f64;
+                k += 1;
+            }
             s += 1;
         }
 
-        let mean_full_max_pxx = sum_full_max * inv_k;
-        let mean_bin64_pxx = sum_bin64 * inv_k;
-        let mut max_pxx = 0.0f64;
         let mut k = 1usize;
         while k < VIBRO_SPEC_BINS {
-            let v = self.mean_pxx[k] * inv_k;
-            self.mean_pxx[k] = v;
-            if k < k_end && v > max_pxx {
-                max_pxx = v;
-            }
+            self.mean_pxx[k] *= inv_k;
             k += 1;
         }
-        let full_max_pxx = max_pxx.max(mean_full_max_pxx);
-        let edge_pxx = if k_end < VIBRO_SPEC_BINS {
-            self.mean_pxx[k_end]
-        } else {
-            mean_bin64_pxx
-        };
+        k = 1;
+        while k <= AUDIO_FFT_N / 2 {
+            self.mean_full_pxx[k] *= inv_k;
+            k += 1;
+        }
+
         let f_opt_max = 0.48 * (1_000_000.0 / (self.dt_row_us as f64));
-        let mut subbin_oob_edge = false;
+        let p_edge = if k_end <= AUDIO_FFT_N / 2 {
+            if k_end < VIBRO_SPEC_BINS {
+                self.mean_pxx[k_end]
+            } else {
+                self.mean_full_pxx[k_end]
+            }
+        } else {
+            0.0
+        };
+        let p_edge_next = if k_end + 1 <= AUDIO_FFT_N / 2 {
+            if k_end + 1 < VIBRO_SPEC_BINS {
+                self.mean_pxx[k_end + 1]
+            } else {
+                self.mean_full_pxx[k_end + 1]
+            }
+        } else {
+            0.0
+        };
+        let mut inband_straddle_ok = false;
         if k_end >= 2 {
             let p_top = self.mean_pxx[k_end - 1];
-            if p_top > 0.0 && edge_pxx > 0.25 * p_top {
+            if p_top >= 1.0e-12 && p_edge <= p_top * 4.5 && p_edge_next < p_edge {
                 let a0 = crate::wasm_sqrt_f64(p_top);
-                let a1 = crate::wasm_sqrt_f64(edge_pxx);
+                let a1 = crate::wasm_sqrt_f64(p_edge.max(0.0));
                 if a0 + a1 > 0.0 {
-                    let delta = (2.0 * a1 - a0) / (a0 + a1);
-                    if (((k_end - 1) as f64) + delta) * df_hz > f_opt_max {
-                        subbin_oob_edge = true;
+                    let delta = ((2.0 * a1 - a0) / (a0 + a1)).clamp(0.0, 1.0);
+                    if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max {
+                        inband_straddle_ok = true;
                     }
                 }
             }
         }
+        let m_oob_start = if inband_straddle_ok {
+            (k_end + 2).min(AUDIO_FFT_N / 2 + 1)
+        } else {
+            k_end
+        };
+
+        self.oob_leak_pxx.fill(0.0);
         let mut k_audio_peak = 1usize;
         let mut max_elig_pxx = -1.0f64;
         let mut audio_bin_ok = [false; VIBRO_SPEC_BINS];
         k = 1;
         while k < k_end {
+            let mut leak = 0.0f64;
+            let mut m = m_oob_start;
+            while m <= AUDIO_FFT_N / 2 {
+                let pm = if m < VIBRO_SPEC_BINS {
+                    self.mean_pxx[m]
+                } else {
+                    self.mean_full_pxx[m]
+                };
+                if pm > 0.0 {
+                    let d = m - k;
+                    let w_leak = if d <= 1 {
+                        1.05
+                    } else if d == 2 {
+                        0.045
+                    } else {
+                        let u = (d as f64) - 0.5;
+                        let denom_u = PI_64 * u * (u * u - 1.0);
+                        1.40 / (denom_u * denom_u)
+                    };
+                    leak += pm * w_leak;
+                }
+                m += 1;
+            }
+            self.oob_leak_pxx[k] = leak;
             let p = self.mean_pxx[k];
-            let ok = full_max_pxx > 0.0
-                && p >= 3.0e-3 * full_max_pxx
-                && !(k + 2 >= k_end && edge_pxx > p)
-                && !(subbin_oob_edge && (k + 1 == k_end || (k + 2 == k_end && p < self.mean_pxx[k_end - 1])));
+            let ok = p > 8.0 * leak + 1.0e-12;
             audio_bin_ok[k] = ok;
             if ok && p > max_elig_pxx {
                 max_elig_pxx = p;
@@ -2013,7 +2049,6 @@ impl VibrometryState {
             }
             k += 1;
         }
-        let eps_xx = (1.0e-5 * full_max_pxx).max(1.0e-12);
 
         self.planes[VIBRO_PLANE_SPECTRUM..VIBRO_PLANE_SPECTRUM + VIBRO_SPEC_BINS].fill(0.0);
         let mut max_coh_gamma2 = -1.0f64;
@@ -2060,7 +2095,10 @@ impl VibrometryState {
                 let g2 = if audio_bin_ok[k2] {
                     let cr = self.band_mean_pxy_re[k2];
                     let ci = self.band_mean_pxy_im[k2];
-                    let denom = (self.mean_pxx[k2] + eps_xx) * (self.band_mean_pyy[k2] + eps_yy_b);
+                    let eps_xx_k = (1.0e-5 * self.mean_pxx[k2])
+                        .max(8.0 * self.oob_leak_pxx[k2])
+                        .max(1.0e-12);
+                    let denom = (self.mean_pxx[k2] + eps_xx_k) * (self.band_mean_pyy[k2] + eps_yy_b);
                     ((cr * cr + ci * ci) / denom).clamp(0.0, 1.0)
                 } else {
                     0.0
@@ -2099,7 +2137,10 @@ impl VibrometryState {
 
         let mut dom_raw_amp_null = 0.0f32;
         let mut dom_raw_phase_null = 0.0f32;
-        let m_pxx_dom = self.mean_pxx[dom_k] + eps_xx;
+        let eps_xx_dom = (1.0e-5 * self.mean_pxx[dom_k])
+            .max(8.0 * self.oob_leak_pxx[dom_k])
+            .max(1.0e-12);
+        let m_pxx_dom = self.mean_pxx[dom_k] + eps_xx_dom;
 
         b = 0;
         while b < VIBRO_BANDS {

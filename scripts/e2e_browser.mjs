@@ -5003,23 +5003,7 @@ async function main() {
               fTone: 421.875,
               taps: 5,
             });
-            await new Promise((r) => setTimeout(r, 30));
-            const dropGapAck = await w2p.submitAudioBlock({
-              samples: new Array(1600).fill(0.15),
-              tEndUs: 11_066_667, // skip 33,333 us (1600 samples) after 11_000_000 -> accepted new interval WARMING|AUDIO_UNDERRUN
-              sampleRateHz: 48000.0,
-              estSkewUs: 0.0,
-            });
-            await new Promise((r) => setTimeout(r, 40));
-            const dropGapSnap = w2p.getLastWave2();
-
-            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
-            await new Promise((r) => setTimeout(r, 30));
-            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 1 });
-            await new Promise((r) => setTimeout(r, 40));
-            const pausedHodgeEnableSnap = w2p.getLastWave2();
-            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
-            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0 });
+            await new Promise((r) => setTimeout(r, 110));
 
             return {
               readyVibro: snapReady?.vibro || null,
@@ -5036,15 +5020,65 @@ async function main() {
               delayedFaultState: delayedFaultVibro?.vibro?.state ?? -1,
               delayedFaultReason: delayedFaultVibro?.vibro?.reasonMask ?? 0,
               delayedFaultStampValid: Boolean(delayedFaultVibro?.stamps?.vibro?.valid),
+            };
+          })()`
+        );
+
+        const hudBeforeDropShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const dropGapAndHodge = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            const dropGapAck = await w2p.submitAudioBlock({
+              samples: new Array(1600).fill(0.15),
+              tEndUs: 11_066_667, // skip 33,333 us (1600 samples) after 11_000_000 -> accepted new interval WARMING|AUDIO_UNDERRUN
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 150));
+            const dropGapSnap = w2p.getLastWave2();
+            return {
               dropGapAccepted: dropGapAck?.accepted ?? -1,
               dropGapState: dropGapSnap?.vibro?.state ?? -1,
               dropGapReason: dropGapSnap?.vibro?.reasonMask ?? 0,
               dropGapStampValid: Boolean(dropGapSnap?.stamps?.vibro?.valid),
+            };
+          })()`
+        );
+        const hudAfterDropShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const hudBeforeDropBuf = Buffer.from(hudBeforeDropShot?.data || '', 'base64');
+        const hudAfterDropBuf = Buffer.from(hudAfterDropShot?.data || '', 'base64');
+        if (hudBeforeDropBuf.length < 1000 || hudBeforeDropBuf.equals(hudAfterDropBuf)) {
+          throw new Error('Step 10b dropped PCM block while running=true did not redraw paused #hudCanvas from READY to WARMING');
+        }
+        const pausedHodgeEnableReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            await new Promise((r) => setTimeout(r, 30));
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 1 });
+            await new Promise((r) => setTimeout(r, 50));
+            const pausedHodgeEnableSnap = w2p.getLastWave2();
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0 });
+            return {
               pausedHodgeReqMode: pausedHodgeEnableSnap?.hodge?.reqMode ?? -1,
               pausedHodgeState: pausedHodgeEnableSnap?.hodge?.state ?? -1,
             };
           })()`
         );
+        Object.assign(rsWelchReport, dropGapAndHodge, pausedHodgeEnableReport);
 
         if (
           !rsWelchReport.chunkAck ||
@@ -5161,8 +5195,10 @@ async function main() {
             const realAc = new origAudioCtx();
             const d1 = realAc.createMediaStreamDestination();
             const d2 = realAc.createMediaStreamDestination();
+            const d3 = realAc.createMediaStreamDestination();
             const trackA = d1.stream.getAudioTracks()[0];
             const trackB = d2.stream.getAudioTracks()[0];
+            const trackC = d3.stream.getAudioTracks()[0];
             const stream = canvas.captureStream(30);
             stream.addTrack(trackA);
             try {
@@ -5172,6 +5208,7 @@ async function main() {
                   this.sampleRate = 48000;
                   this.state = 'running';
                   this.closed = false;
+                  this.boundTrackIds = [];
                   this.proc = {
                     onaudioprocess: null,
                     connect: () => {},
@@ -5179,7 +5216,10 @@ async function main() {
                   };
                   ctxSpies.push(this);
                 }
-                createMediaStreamSource() {
+                createMediaStreamSource(srcStream) {
+                  this.boundTrackIds = srcStream && typeof srcStream.getAudioTracks === 'function'
+                    ? srcStream.getAudioTracks().map((tr) => tr.id)
+                    : [];
                   return { connect: () => {}, disconnect: () => {} };
                 }
                 createScriptProcessor() {
@@ -5235,35 +5275,59 @@ async function main() {
               fireAudioCb(c1);
               const prePumpCount = pushedAudioMsgs.length;
 
-              // Pump frames on canvas until rVFC has initialized pump ref & mediaNowUs > 0
+              // Pump frames until rVFC initializes pump ref; dispatch first post-pump callback 5.0 ms late
               for (let f = 0; f < 30 && pushedAudioMsgs.length === 0; f++) {
                 cctx.fillStyle = 'rgb(' + (30 + ((f * 7) % 200)) + ',' + ((60 + f * 5) % 220) + ',160)';
                 cctx.fillRect(20 + (f % 10) * 6, 20, 48, 48);
-                await new Promise((r) => setTimeout(r, 35));
-                frozenNowMs = origPerfNow();
-                fireAudioCb(c1);
-                if (pushedAudioMsgs.length === 0) {
-                  frozenNowMs = null;
+                await new Promise((r) => setTimeout(r, 40));
+                if (f >= 2) {
+                  frozenNowMs = origPerfNow();
+                  virtOffsetMs = 5.0;
+                  fireAudioCb(c1);
+                  if (pushedAudioMsgs.length === 0) {
+                    virtOffsetMs = 0.0;
+                    frozenNowMs = null;
+                  }
                 }
               }
               if (pushedAudioMsgs.length === 1) {
-                virtOffsetMs += 2048.0 / 48.0;
+                virtOffsetMs = 2048.0 / 48.0;
                 fireAudioCb(c1);
-                virtOffsetMs += 2048.0 / 48.0;
+                virtOffsetMs = (2.0 * 2048.0) / 48.0;
+                fireAudioCb(c1);
+                virtOffsetMs = (3.0 * 2048.0) / 48.0;
                 fireAudioCb(c1);
               }
               frozenNowMs = null;
               await new Promise((r) => setTimeout(r, 25));
               const postAudioReason = window.__chronosWave2Probe?.getLastWave2()?.vibro?.reasonMask ?? 0;
 
+              // Empty-gap track swap: remove trackA -> callback closes c1 -> addTrack(trackB) restarts capture with zero extra callbacks
               stream.removeTrack(trackA);
-              stream.addTrack(trackB);
               fireAudioCb(c1);
+              const ctxCountDuringGap = ctxSpies.length;
+              const c1ClosedDuringGap = Boolean(c1 && c1.closed);
+              stream.addTrack(trackB);
               await new Promise((r) => setTimeout(r, 25));
+              const c2 = ctxSpies[1] || null;
+              const ctxCountAfterGapAdd = ctxSpies.length;
+
+              // Ended track kept in stream alongside live trackC: createMediaStreamSource receives ONLY [trackC.id]
+              trackB.stop();
+              stream.addTrack(trackC);
+              await new Promise((r) => setTimeout(r, 25));
+              const cLast = ctxSpies[ctxSpies.length - 1] || null;
 
               return {
-                ctxCount: ctxSpies.length,
-                c1Closed: Boolean(c1 && c1.closed),
+                ctxCountDuringGap,
+                c1ClosedDuringGap,
+                ctxCountAfterGapAdd,
+                c2Closed: Boolean(c2 && c2.closed),
+                ctxCountFinal: ctxSpies.length,
+                c2BoundTrackIds: c2 ? c2.boundTrackIds : [],
+                cLastBoundTrackIds: cLast ? cLast.boundTrackIds : [],
+                trackBId: trackB.id,
+                trackCId: trackC.id,
                 prePumpCount,
                 pushedCount: pushedAudioMsgs.length,
                 pushedSkews: pushedAudioMsgs.map((m) => m.estSkewUs),
@@ -5291,11 +5355,18 @@ async function main() {
         if (
           !webcamAudioCheck ||
           webcamAudioCheck.prePumpCount !== 0 ||
-          webcamAudioCheck.pushedCount !== 3 ||
+          webcamAudioCheck.pushedCount !== 4 ||
           webcamAudioCheck.pushedSkews.some((s) => !Number.isFinite(s) || Math.abs(s) > 250.0) ||
           (webcamAudioCheck.postAudioReason & 32) !== 0 ||
-          !webcamAudioCheck.c1Closed ||
-          webcamAudioCheck.ctxCount < 2
+          !webcamAudioCheck.c1ClosedDuringGap ||
+          webcamAudioCheck.ctxCountDuringGap !== 1 ||
+          webcamAudioCheck.ctxCountAfterGapAdd < 2 ||
+          !webcamAudioCheck.c2Closed ||
+          webcamAudioCheck.ctxCountFinal < 3 ||
+          webcamAudioCheck.c2BoundTrackIds.length !== 1 ||
+          webcamAudioCheck.c2BoundTrackIds[0] !== webcamAudioCheck.trackBId ||
+          webcamAudioCheck.cLastBoundTrackIds.length !== 1 ||
+          webcamAudioCheck.cLastBoundTrackIds[0] !== webcamAudioCheck.trackCId
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }

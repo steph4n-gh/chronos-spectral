@@ -10038,7 +10038,7 @@ self.onmessage = async (ev) => {
         totalSamples: vibroTelemView ? (vibroTelemView[18] >>> 0) : 0,
       });
     }
-    if (ringFaulted && !running && hasAnyRenderedFrame()) {
+    if (ringFaulted && hasAnyRenderedFrame()) {
       redrawPausedHudIfReady();
     } else if (msg.wantAck || ringFaulted || !telemView || !hasAnyRenderedFrame()) {
       emitTelemetrySnapshot();
