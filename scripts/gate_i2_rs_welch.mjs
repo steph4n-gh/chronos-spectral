@@ -972,6 +972,79 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     `Aliased 5625 Hz audio must be excluded above optical Nyquist with 16*51 Bonferroni crit, got coupled=${t.coupledCells} g2=${t.maxCoh} crit=${t.gamma2Crit}`
   );
 
+  // Off-bin out-of-band spectral leakage guard: 4718.75 Hz optical vs 5281.25 / 4875 / 4820 Hz audio @ 96 kHz
+  for (const [fOptLeak, fAudLeak] of [[4718.75, 5281.25], [4718.75, 4875.0], [4718.75, 4820.0]]) {
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 100.0, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    sampleCursor = 0;
+    const optLeakFn = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * fOptLeak * tSec + 0.3), 0.0];
+    const audLeakFn = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * fAudLeak * tSec + 0.1);
+    for (let f = 0; f < 29; f++) {
+      const tSrcUs = t0 + f * 41_000;
+      const nextEnd = Math.round((f + 1) * 0.041 * 96000.0);
+      pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: audLeakFn });
+      sampleCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: optLeakFn });
+    }
+    const tl = readTelem();
+    assert(
+      tl.state === RS_STATE_READY && tl.coupledCells === 0 && tl.maxCoh < tl.gamma2Crit,
+      `Out-of-band ${fAudLeak} Hz skirt vs ${fOptLeak} Hz optical must stay READY without coupling, got state=${tl.state} coupled=${tl.coupledCells} g2=${tl.maxCoh} crit=${tl.gamma2Crit}`
+    );
+  }
+
+  // High-epoch sub-microsecond expiry guard (near 2^53 us): exposureUs=201 -> T + 0.5 us must expire immediately
+  {
+    const tAudioStopBig = (1n << 53n) - 100_000n;
+    const t0Big = tAudioStopBig - 1_000_000n;
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 201.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
+    let curBig = 0;
+    const pushFrameBig = (seq, tSrcBig) => {
+      for (let ey = 0; ey < FRAME_H; ey++) {
+        const tMidSec = (Number(tSrcBig - t0Big) + ey * 25.0 + 100.5) * 1e-6;
+        const [ux] = sigOpt(0, ey, 0, ey, tMidSec);
+        const rowBase = ey * FRAME_W * 4;
+        for (let ex = 0; ex < FRAME_W; ex++) {
+          const v = Math.max(0, Math.min(255, Math.round(sampleTexLuma(ex - ux, ey))));
+          const o = rowBase + ex * 4;
+          scratchRgba[o] = v; scratchRgba[o + 1] = v; scratchRgba[o + 2] = v; scratchRgba[o + 3] = 255;
+        }
+      }
+      const [lo, hi] = splitU64(tSrcBig);
+      assert(
+        exp.chronos_set_ingest_meta(
+          1, seq, lo, hi, -1.0, INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_GEOM_KNOWN,
+          640, 360, 0, 0, 640, 360, 0, 0, 0, 0, 640, 360, 0, 1
+        ) === 1,
+        `High-epoch frame reject seq=${seq}`
+      );
+      new Uint8Array(mem.buffer, exp.chronos_get_ingest_rgba_ptr(), FRAME_BYTES).set(scratchRgba);
+      exp.chronos_pre_tick(1 / 30);
+      exp.chronos_post_tick(1 / 30);
+    };
+    for (let f = 0; f < 30; f++) {
+      const tSrcBig = t0Big + BigInt(Math.round((f * 1e6) / 30));
+      const nextEnd = Math.round(((f + 1) / 30) * 48000);
+      const nBlk = nextEnd - curBig;
+      for (let i = 0; i < nBlk; i++) {
+        audioStaging[i] = sigAud((curBig + i) / 48000.0);
+      }
+      const tEndBig = t0Big + BigInt(Math.round((nextEnd * 1e6) / 48000));
+      const [aLo, aHi] = splitU64(tEndBig);
+      assert(exp.chronos_push_audio_block(nBlk, aLo, aHi, 48000.0, 0.0) === 1, `High-epoch audio f=${f}`);
+      curBig = nextEnd;
+      pushFrameBig(f, tSrcBig);
+    }
+    assert(readTelem().state === RS_STATE_READY && readTelem().stampValid, 'High-epoch session must reach READY');
+    pushFrameBig(30, t0Big + 972_000n);
+    assert(readTelem().state === RS_STATE_READY && (wave2U32[16] & 3) === 3, 'High-epoch covered sub-hop frame must hold stamp');
+    pushFrameBig(31, tAudioStopBig - 100n);
+    const vExp = readTelem();
+    assert(
+      vExp.state === RS_STATE_WARMING && (vExp.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !vExp.stampValid,
+      `High-epoch T+0.5us uncovered frame must expire immediately, got state=${vExp.state} reason=${vExp.reason} valid=${vExp.stampValid}`
+    );
+  }
+
   // SD 320x180 transposed column scan (o=0, scanDir=2) fits 320 <= 360 and reaches READY without AXIS_TRANSPOSED
   {
     const sdW = 320, sdH = 180, sdBytes = sdW * sdH * 4;

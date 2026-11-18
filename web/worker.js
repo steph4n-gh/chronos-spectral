@@ -4225,6 +4225,16 @@ function propagateWave2FaultToRing(ringValid, ringTelem, ringPlanes, liveTelem) 
   }
 }
 
+function syncWave2RingEnabledBits() {
+  if (!wave2CoreAbiValid || !wave2TelemView) return;
+  const bits = wave2TelemView[2] >>> 0;
+  for (let s = 0; s < RING_LEN; s++) {
+    if (w2CoreRingValid[s] === 1) {
+      w2CoreRing[s][2] = bits;
+    }
+  }
+}
+
 function resolveWave2RingOrLive(dispSlot, effK, ringValid, ringTelem, ringPlanes, liveOk, liveTelem, livePlanes) {
   const delayedRing = hasAnyRenderedFrame() && effK > 0;
   if (dispSlot >= 0 && dispSlot < RING_LEN && ringValid[dispSlot] === 1) {
@@ -4287,7 +4297,8 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
       hodgeTelemView,
       hodgePlanesView
     );
-    const ht = src ? src.t : null;
+    const liveHodgeNonReady = hodgeReqMode > 0 && wave2HodgeAbiValid && hodgeTelemView && hodgeTelemView[0] !== 2;
+    const ht = src ? src.t : (liveHodgeNonReady ? hodgeTelemView : null);
     const hp = src ? src.p : null;
     const hState = ht ? (ht[0] >>> 0) : 0;
 
@@ -4378,7 +4389,8 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
       vibroTelemView,
       vibroPlanesView
     );
-    const vt = src ? src.t : null;
+    const liveVibroNonReady = rsCalibConfig.mode > 0 && wave2VibroAbiValid && vibroTelemView && vibroTelemView[0] !== 3;
+    const vt = src ? src.t : (liveVibroNonReady ? vibroTelemView : null);
     const vp = src ? src.p : null;
     const vState = vt ? (vt[0] >>> 0) : 0;
     const vReason = vt ? (vt[2] >>> 0) : 0;
@@ -8229,26 +8241,20 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   } else {
     w2CoreRingValid[slotIdx] = 0;
   }
-  if (wave2VibroAbiValid && vibroTelemView && vibroPlanesView) {
+  if (wave2VibroAbiValid && vibroTelemView && vibroPlanesView && vibroTelemView[0] > 0) {
     vibroRingTelem[slotIdx].set(vibroTelemView);
-    if (vibroTelemView[0] > 0) {
-      vibroRingPlanes[slotIdx].set(vibroPlanesView);
-    } else {
-      vibroRingPlanes[slotIdx].fill(0.0);
-    }
+    vibroRingPlanes[slotIdx].set(vibroPlanesView);
     vibroRingValid[slotIdx] = 1;
   } else {
+    vibroRingPlanes[slotIdx].fill(0.0);
     vibroRingValid[slotIdx] = 0;
   }
-  if (wave2HodgeAbiValid && hodgeTelemView && hodgePlanesView) {
+  if (wave2HodgeAbiValid && hodgeTelemView && hodgePlanesView && hodgeTelemView[0] > 0) {
     hodgeRingTelem[slotIdx].set(hodgeTelemView);
-    if (hodgeTelemView[0] > 0) {
-      hodgeRingPlanes[slotIdx].set(hodgePlanesView);
-    } else {
-      hodgeRingPlanes[slotIdx].fill(0.0);
-    }
+    hodgeRingPlanes[slotIdx].set(hodgePlanesView);
     hodgeRingValid[slotIdx] = 1;
   } else {
+    hodgeRingPlanes[slotIdx].fill(0.0);
     hodgeRingValid[slotIdx] = 0;
   }
   const liveConsStamp = wave2CoreAbiValid ? decodeWave2Stamp(32) : null;
@@ -9760,6 +9766,7 @@ self.onmessage = async (ev) => {
     if (hasChronos1000Exports()) {
       wasmExports.chronos_set_swarm_mode(nextMode);
     }
+    syncWave2RingEnabledBits();
     if (nextMode === 0) {
       swarmRingValid.fill(0);
       if (hodgeReqMode === 0 || !hodgeTelemView) {
@@ -9933,6 +9940,7 @@ self.onmessage = async (ev) => {
         skewArg
       );
     }
+    syncWave2RingEnabledBits();
     if (rsCalibConfig.mode === 0) {
       vibroRingValid.fill(0);
       invalidateWave2RingStamp(0);
@@ -9951,6 +9959,7 @@ self.onmessage = async (ev) => {
   } else if (msg.type === 'push_audio_pcm') {
     let accepted = 0;
     let pushed = 0;
+    let ringFaulted = false;
     if (wave2VibroAbiValid && audioStagingView && typeof wasmExports.chronos_push_audio_block === 'function') {
       const hasExplicitRate = msg.sampleRateHz !== undefined && msg.sampleRateHz !== null;
       const sRate = Math.fround(hasExplicitRate ? Number(msg.sampleRateHz) : (rsCalibConfig.audioRateHz || 48000.0));
@@ -9962,6 +9971,7 @@ self.onmessage = async (ev) => {
       const totalLen = src && typeof src.length === 'number' ? Math.trunc(src.length) : 0;
 
       const clearOrFaultVibroRing = () => {
+        ringFaulted = true;
         if (rsCalibConfig.mode === 0) {
           vibroRingValid.fill(0);
           invalidateWave2RingStamp(0);
@@ -10013,7 +10023,7 @@ self.onmessage = async (ev) => {
             offset += chunkLen;
           }
           accepted = allOk && pushed === totalLen ? 1 : 0;
-          if (!accepted || (vibroTelemView && vibroTelemView[0] !== 3 && (vibroTelemView[0] === 1 || vibroTelemView[0] === 4))) {
+          if (!accepted || (vibroTelemView && vibroTelemView[0] !== 3)) {
             clearOrFaultVibroRing();
           }
         }
@@ -10028,7 +10038,9 @@ self.onmessage = async (ev) => {
         totalSamples: vibroTelemView ? (vibroTelemView[18] >>> 0) : 0,
       });
     }
-    if (msg.wantAck || !telemView || !hasAnyRenderedFrame()) {
+    if (ringFaulted && !running && hasAnyRenderedFrame()) {
+      redrawPausedHudIfReady();
+    } else if (msg.wantAck || ringFaulted || !telemView || !hasAnyRenderedFrame()) {
       emitTelemetrySnapshot();
     }
   } else if (msg.type === 'set_hodge_config') {
@@ -10037,9 +10049,23 @@ self.onmessage = async (ev) => {
       if (wave2HodgeAbiValid && typeof wasmExports.chronos_set_hodge_mode === 'function') {
         wasmExports.chronos_set_hodge_mode(hodgeReqMode);
       }
+      syncWave2RingEnabledBits();
       if (hodgeReqMode === 0) {
         hodgeRingValid.fill(0);
         invalidateWave2RingStamp(8);
+      } else if (!hodgeTelemView || hodgeTelemView[0] !== 2) {
+        if (hodgeTelemView) {
+          propagateWave2FaultToRing(hodgeRingValid, hodgeRingTelem, hodgeRingPlanes, hodgeTelemView);
+        } else {
+          hodgeRingValid.fill(0);
+        }
+        invalidateWave2RingStamp(8);
+      } else {
+        for (let s = 0; s < RING_LEN; s++) {
+          if (hodgeRingValid[s] === 1) {
+            hodgeRingTelem[s][1] = hodgeReqMode;
+          }
+        }
       }
     }
     redrawPausedHudIfReady();

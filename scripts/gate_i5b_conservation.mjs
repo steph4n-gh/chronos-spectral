@@ -357,6 +357,26 @@ assertNear(case1Point.tau, 0.20, 1e-3, 'Case 1 tau');
   assert.equal(lowValidE.mask, HYP_COLLISION_KEEP, 'Valid tiny e=0.00833 must select HYP_COLLISION_KEEP');
   assertNear(lowValidE.e, 0.25 / 30.0, 1e-4, 'Valid tiny restitution must be published accurately');
 
+  // Exact elastic regression (both velocity & position chord equal 14 -> e = 1.0 without f64 weight-rounding rejection)
+  const exactElastic1 = stageEval(
+    makeInput({
+      p1: [98.5625, 100, 7, 0, 1.0, 1.0],
+      p2: [101.4375, 100, -7, 0, 1.0, 1.0],
+      a: [98.125, 100, -7, 0],
+      b: [101.875, 100, 7, 0],
+      dt: 0.1875,
+      gY: 0.0,
+      sigmaPos: 0.001,
+      sigmaVel: 0.05,
+      fMax: 0.0,
+      dragMax: 0.0,
+      massKnown: 1.0,
+    })
+  );
+  assert.equal(exactElastic1.status, OCCL_STATUS_UNIQUE, 'Exact elastic e=1.0 collision must stay UNIQUE');
+  assert.equal(exactElastic1.mask, HYP_COLLISION_KEEP, 'Exact elastic e=1.0 collision must select HYP_COLLISION_KEEP');
+  assertNear(exactElastic1.e, 1.0, 1e-6, 'Exact elastic restitution must be 1.0');
+
   const extremeMass = stageEval(
     makeInput({
       p1: [10, 10, 0, 0, 1e-37, 0.0],

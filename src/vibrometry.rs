@@ -195,6 +195,15 @@ fn ln_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
+fn rel_us_f64(t_us: u64, anchor_us: u64) -> f64 {
+    if t_us >= anchor_us {
+        (t_us - anchor_us) as f64
+    } else {
+        -((anchor_us - t_us) as f64)
+    }
+}
+
+#[inline(always)]
 fn unambiguous_welch_k_end(dt_row_us: f32, df_hz: f64) -> usize {
     if !dt_row_us.is_finite() || dt_row_us <= 0.0 || !df_hz.is_finite() || df_hz <= 0.0 {
         return 1;
@@ -363,6 +372,8 @@ pub struct VibrometryState {
     pub welch_pyy: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
     pub welch_pxy_re: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
     pub welch_pxy_im: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
+    pub welch_full_max_pxx: [f64; VIBRO_WELCH_SLOTS],
+    pub welch_bin64_pxx: [f64; VIBRO_WELCH_SLOTS],
     pub welch_cursor: u32,
     pub welch_count: u32,
     pub last_audio_seg_end_sample: u64,
@@ -445,6 +456,8 @@ impl VibrometryState {
         self.welch_pyy.fill(0.0);
         self.welch_pxy_re.fill(0.0);
         self.welch_pxy_im.fill(0.0);
+        self.welch_full_max_pxx.fill(0.0);
+        self.welch_bin64_pxx.fill(0.0);
         self.welch_cursor = 0;
         self.welch_count = 0;
         self.single_seg_k1_coh = 0.0;
@@ -1558,6 +1571,7 @@ impl VibrometryState {
         let oldest_hist = ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - h_cnt) % VIBRO_HIST_FRAMES;
         let newest_hist = ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - 1) % VIBRO_HIST_FRAMES;
 
+        let t_anchor_us = self.audio_last_t_end_us;
         let dt_row = self.dt_row_us as f64;
         let half_exp = 0.5 * (self.exposure_us as f64);
 
@@ -1567,7 +1581,8 @@ impl VibrometryState {
         } else {
             (self.q_start_hist[oldest_hist] as i64 + (old_rows - 1) * (self.q_step_hist[oldest_hist] as i64)) as f64
         };
-        let opt_t_min_us = (self.t_src_hist_us[oldest_hist] as f64) + old_q_end * dt_row + half_exp;
+        let opt_t_min_rel =
+            rel_us_f64(self.t_src_hist_us[oldest_hist], t_anchor_us) + old_q_end * dt_row + half_exp;
 
         let new_rows = self.frame_rows_hist[newest_hist] as i64;
         let new_q_max = if self.q_step_hist[newest_hist] >= 0 {
@@ -1575,7 +1590,8 @@ impl VibrometryState {
         } else {
             self.q_start_hist[newest_hist] as f64
         };
-        let opt_t_max_us = (self.t_src_hist_us[newest_hist] as f64) + new_q_max * dt_row + half_exp;
+        let opt_t_max_rel =
+            rel_us_f64(self.t_src_hist_us[newest_hist], t_anchor_us) + new_q_max * dt_row + half_exp;
 
         let fs = self.audio_ring_rate_hz as f64;
         let dt_audio_us = 1_000_000.0 / fs;
@@ -1599,11 +1615,10 @@ impl VibrometryState {
 
         let mut added_segs = 0u32;
         while s0 + (AUDIO_FFT_N as u64) <= self.audio_total_samples {
-            let t_seg_start_us = (self.audio_last_t_end_us as f64)
-                - ((self.audio_total_samples - s0) as f64) * dt_audio_us;
-            let t_seg_end_us = t_seg_start_us + t_win_us;
+            let t_seg_start_rel = -((self.audio_total_samples - s0) as f64) * dt_audio_us;
+            let t_seg_end_rel = t_seg_start_rel + t_win_us;
 
-            if t_seg_end_us > opt_t_max_us + dt_row {
+            if t_seg_end_rel > opt_t_max_rel + dt_row {
                 if self.audio_total_samples - s0 > ((AUDIO_RING_LEN - AUDIO_FFT_N) as u64) {
                     self.last_audio_seg_end_sample = s0 + (AUDIO_FFT_N as u64);
                     s0 += AUDIO_HOP as u64;
@@ -1611,7 +1626,7 @@ impl VibrometryState {
                 }
                 break;
             }
-            if t_seg_end_us <= opt_t_min_us {
+            if t_seg_end_rel <= opt_t_min_rel {
                 self.last_audio_seg_end_sample = s0 + (AUDIO_FFT_N as u64);
                 s0 += AUDIO_HOP as u64;
                 continue;
@@ -1623,16 +1638,16 @@ impl VibrometryState {
                 let slot = (oldest_hist + m) % VIBRO_HIST_FRAMES;
                 let rows = self.frame_rows_hist[slot] as usize;
                 if rows > 0 {
-                    let t_src = self.t_src_hist_us[slot] as f64;
+                    let t_src_rel = rel_us_f64(self.t_src_hist_us[slot], t_anchor_us);
                     let qs = self.q_start_hist[slot] as i64;
                     let qstep = self.q_step_hist[slot] as i64;
                     let mut k = 0usize;
                     while k < rows && obs_count < MAX_SEG_OBS {
                         let ey = if qstep >= 0 { k } else { rows - 1 - k };
                         let q = (qs + (ey as i64) * qstep) as f64;
-                        let t_row = t_src + q * dt_row + half_exp;
-                        if t_row >= t_seg_start_us && t_row <= t_seg_end_us {
-                            self.obs_t_rel_us[obs_count] = t_row - t_seg_start_us;
+                        let t_row_rel = t_src_rel + q * dt_row + half_exp;
+                        if t_row_rel >= t_seg_start_rel && t_row_rel <= t_seg_end_rel {
+                            self.obs_t_rel_us[obs_count] = t_row_rel - t_seg_start_rel;
                             self.obs_slot[obs_count] = slot as u16;
                             self.obs_ey[obs_count] = ey as u16;
                             obs_count += 1;
@@ -1709,32 +1724,43 @@ impl VibrometryState {
             self.fft1024_inplace();
 
             const SCALE_X: f64 = 2.0 / 512.0;
-            let mut k = 1usize;
-            while k < VIBRO_SPEC_BINS {
-                self.seg_x_re[k] = self.fft_re[k] * SCALE_X;
-                self.seg_x_im[k] = self.fft_im[k] * SCALE_X;
-                k += 1;
-            }
-
-            self.eval_segment_optical_quadrature(obs_count, w_sum, df_hz, k_end);
-
             let w_slot = (self.welch_cursor as usize) % VIBRO_WELCH_SLOTS;
             let pxx_base = w_slot * VIBRO_SPEC_BINS;
             self.welch_pxx[pxx_base..pxx_base + VIBRO_SPEC_BINS].fill(0.0);
             let mut k_aud = 1usize;
             let mut max_pxx_seg = -1.0f64;
-            k = 1;
-            while k < k_end {
-                let xr = self.seg_x_re[k];
-                let xi = self.seg_x_im[k];
+            let mut seg_full_max_pxx = 0.0f64;
+            let mut bin64_pxx = 0.0f64;
+            let mut k = 1usize;
+            while k <= AUDIO_FFT_N / 2 {
+                let sc = if k == AUDIO_FFT_N / 2 {
+                    1.0 / 512.0
+                } else {
+                    SCALE_X
+                };
+                let xr = self.fft_re[k] * sc;
+                let xi = self.fft_im[k] * sc;
                 let pxx = xr * xr + xi * xi;
-                self.welch_pxx[pxx_base + k] = pxx;
-                if pxx > max_pxx_seg {
-                    max_pxx_seg = pxx;
-                    k_aud = k;
+                if pxx > seg_full_max_pxx {
+                    seg_full_max_pxx = pxx;
+                }
+                if k < VIBRO_SPEC_BINS {
+                    self.seg_x_re[k] = xr;
+                    self.seg_x_im[k] = xi;
+                    self.welch_pxx[pxx_base + k] = pxx;
+                    if k < k_end && pxx > max_pxx_seg {
+                        max_pxx_seg = pxx;
+                        k_aud = k;
+                    }
+                } else if k == VIBRO_SPEC_BINS {
+                    bin64_pxx = pxx;
                 }
                 k += 1;
             }
+            self.welch_full_max_pxx[w_slot] = seg_full_max_pxx;
+            self.welch_bin64_pxx[w_slot] = bin64_pxx;
+
+            self.eval_segment_optical_quadrature(obs_count, w_sum, df_hz, k_end);
 
             let mut max_pyy_aud = -1.0f64;
             let mut best_k1_coh = 0.0f64;
@@ -1783,6 +1809,9 @@ impl VibrometryState {
                     }
                 }
                 b += 1;
+            }
+            if max_pxx_seg < 3.0e-3 * seg_full_max_pxx {
+                best_k1_coh = 0.0;
             }
             self.single_seg_k1_coh = best_k1_coh as f32;
 
@@ -1839,6 +1868,7 @@ impl VibrometryState {
         let h_cnt = self.hist_count as usize;
         let mut audio_covers_newest = true;
         if h_cnt > 0 {
+            let t_anchor_us = self.audio_last_t_end_us;
             let oldest_hist =
                 ((self.hist_cursor as usize) + VIBRO_HIST_FRAMES - h_cnt) % VIBRO_HIST_FRAMES;
             let newest_hist =
@@ -1853,8 +1883,8 @@ impl VibrometryState {
                     + (old_rows - 1) * (self.q_step_hist[oldest_hist] as i64))
                     as f64
             };
-            let opt_t_min_us =
-                (self.t_src_hist_us[oldest_hist] as f64) + old_q_end * dt_row + half_exp;
+            let opt_t_min_rel =
+                rel_us_f64(self.t_src_hist_us[oldest_hist], t_anchor_us) + old_q_end * dt_row + half_exp;
             let cur_rows = self.frame_rows_hist[newest_hist] as i64;
             let cur_q_min = if self.q_step_hist[newest_hist] >= 0 {
                 self.q_start_hist[newest_hist] as f64
@@ -1863,8 +1893,8 @@ impl VibrometryState {
                     + (cur_rows - 1) * (self.q_step_hist[newest_hist] as i64))
                     as f64
             };
-            let opt_cur_min_us =
-                (self.t_src_hist_us[newest_hist] as f64) + cur_q_min * dt_row + half_exp;
+            let opt_cur_min_rel =
+                rel_us_f64(self.t_src_hist_us[newest_hist], t_anchor_us) + cur_q_min * dt_row + half_exp;
             let cur_q_max = if self.q_step_hist[newest_hist] >= 0 {
                 (self.q_start_hist[newest_hist] as i64
                     + (cur_rows - 1) * (self.q_step_hist[newest_hist] as i64))
@@ -1872,12 +1902,10 @@ impl VibrometryState {
             } else {
                 self.q_start_hist[newest_hist] as f64
             };
-            let opt_t_max_us =
-                (self.t_src_hist_us[newest_hist] as f64) + cur_q_max * dt_row + half_exp;
-            audio_covers_newest = (self.audio_last_t_end_us as f64) + dt_row >= opt_t_max_us;
-            if opt_t_min_us > (self.audio_last_t_end_us as f64)
-                || opt_cur_min_us > (self.audio_last_t_end_us as f64)
-            {
+            let opt_t_max_rel =
+                rel_us_f64(self.t_src_hist_us[newest_hist], t_anchor_us) + cur_q_max * dt_row + half_exp;
+            audio_covers_newest = dt_row >= opt_t_max_rel;
+            if opt_t_min_rel > 0.0 || opt_cur_min_rel > 0.0 {
                 self.welch_count = 0;
                 self.welch_cursor = 0;
                 self.planes.fill(0.0);
@@ -1919,31 +1947,73 @@ impl VibrometryState {
         let gamma2_crit = 1.0 - exp_neg_f64(ln_alpha / (k_eff - 1.0));
         let gamma2_crit_f32 = gamma2_crit as f32;
 
+        let mut sum_full_max = 0.0f64;
+        let mut sum_bin64 = 0.0f64;
         self.mean_pxx.fill(0.0);
         let mut s = 0usize;
         while s < (k_segs as usize) {
             let pxx_base = s * VIBRO_SPEC_BINS;
             let mut k = 1usize;
-            while k < k_end {
+            while k < VIBRO_SPEC_BINS {
                 self.mean_pxx[k] += self.welch_pxx[pxx_base + k];
                 k += 1;
             }
+            sum_full_max += self.welch_full_max_pxx[s];
+            sum_bin64 += self.welch_bin64_pxx[s];
             s += 1;
         }
 
+        let mean_full_max_pxx = sum_full_max * inv_k;
+        let mean_bin64_pxx = sum_bin64 * inv_k;
         let mut max_pxx = 0.0f64;
-        let mut k_audio_peak = 1usize;
         let mut k = 1usize;
-        while k < k_end {
+        while k < VIBRO_SPEC_BINS {
             let v = self.mean_pxx[k] * inv_k;
             self.mean_pxx[k] = v;
-            if v > max_pxx {
+            if k < k_end && v > max_pxx {
                 max_pxx = v;
+            }
+            k += 1;
+        }
+        let full_max_pxx = max_pxx.max(mean_full_max_pxx);
+        let edge_pxx = if k_end < VIBRO_SPEC_BINS {
+            self.mean_pxx[k_end]
+        } else {
+            mean_bin64_pxx
+        };
+        let f_opt_max = 0.48 * (1_000_000.0 / (self.dt_row_us as f64));
+        let mut subbin_oob_edge = false;
+        if k_end >= 2 {
+            let p_top = self.mean_pxx[k_end - 1];
+            if p_top > 0.0 && edge_pxx > 0.25 * p_top {
+                let a0 = crate::wasm_sqrt_f64(p_top);
+                let a1 = crate::wasm_sqrt_f64(edge_pxx);
+                if a0 + a1 > 0.0 {
+                    let delta = (2.0 * a1 - a0) / (a0 + a1);
+                    if (((k_end - 1) as f64) + delta) * df_hz > f_opt_max {
+                        subbin_oob_edge = true;
+                    }
+                }
+            }
+        }
+        let mut k_audio_peak = 1usize;
+        let mut max_elig_pxx = -1.0f64;
+        let mut audio_bin_ok = [false; VIBRO_SPEC_BINS];
+        k = 1;
+        while k < k_end {
+            let p = self.mean_pxx[k];
+            let ok = full_max_pxx > 0.0
+                && p >= 3.0e-3 * full_max_pxx
+                && !(k + 2 >= k_end && edge_pxx > p)
+                && !(subbin_oob_edge && (k + 1 == k_end || (k + 2 == k_end && p < self.mean_pxx[k_end - 1])));
+            audio_bin_ok[k] = ok;
+            if ok && p > max_elig_pxx {
+                max_elig_pxx = p;
                 k_audio_peak = k;
             }
             k += 1;
         }
-        let eps_xx = (1.0e-5 * max_pxx).max(1.0e-12);
+        let eps_xx = (1.0e-5 * full_max_pxx).max(1.0e-12);
 
         self.planes[VIBRO_PLANE_SPECTRUM..VIBRO_PLANE_SPECTRUM + VIBRO_SPEC_BINS].fill(0.0);
         let mut max_coh_gamma2 = -1.0f64;
@@ -1987,10 +2057,14 @@ impl VibrometryState {
 
             k2 = 1;
             while k2 < k_end {
-                let cr = self.band_mean_pxy_re[k2];
-                let ci = self.band_mean_pxy_im[k2];
-                let denom = (self.mean_pxx[k2] + eps_xx) * (self.band_mean_pyy[k2] + eps_yy_b);
-                let g2 = ((cr * cr + ci * ci) / denom).clamp(0.0, 1.0);
+                let g2 = if audio_bin_ok[k2] {
+                    let cr = self.band_mean_pxy_re[k2];
+                    let ci = self.band_mean_pxy_im[k2];
+                    let denom = (self.mean_pxx[k2] + eps_xx) * (self.band_mean_pyy[k2] + eps_yy_b);
+                    ((cr * cr + ci * ci) / denom).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let prev_spec = self.planes[VIBRO_PLANE_SPECTRUM + k2];
                 if (g2 as f32) > prev_spec {
                     self.planes[VIBRO_PLANE_SPECTRUM + k2] = g2 as f32;
@@ -2008,7 +2082,7 @@ impl VibrometryState {
             max_coh_gamma2 = 0.0;
         }
 
-        if max_coh_gamma2 < gamma2_crit && max_pxx > 1.0e-6 {
+        if max_coh_gamma2 < gamma2_crit && max_elig_pxx > 1.0e-6 {
             let h_aud = sinc_exposure_h((k_audio_peak as f64) * df_hz, self.exposure_us as f64);
             if abs_f64(h_aud) < 0.05 {
                 dom_k = k_audio_peak;
@@ -2069,7 +2143,11 @@ impl VibrometryState {
             let cr_d = sum_cr_d * inv_k;
             let ci_d = sum_ci_d * inv_k;
             let c2_d = cr_d * cr_d + ci_d * ci_d;
-            let g2_b = (c2_d / (m_pxx_dom * (m_pyy_d + eps_yy_b))).clamp(0.0, 1.0);
+            let g2_b = if audio_bin_ok[dom_k] {
+                (c2_d / (m_pxx_dom * (m_pyy_d + eps_yy_b))).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             let coh_b = g2_b as f32;
             self.band_coh[b] = coh_b;
 
@@ -2157,7 +2235,7 @@ impl VibrometryState {
                     let inv_w = 1.0 / w_sum;
                     let mean_y = y_wsum * inv_w;
                     let t_src = self.t_src_hist_us[slot];
-                    let t_base_sec = ((t_src - self.run_t0_us) as f64) * 1.0e-6;
+                    let t_base_sec = rel_us_f64(t_src, self.run_t0_us) * 1.0e-6;
                     let qs = self.q_start_hist[slot] as i64;
                     let qstep = self.q_step_hist[slot] as i64;
                     let mut re = 0.0f64;
@@ -2244,7 +2322,7 @@ impl VibrometryState {
         let slot_base = slot * VIBRO_BANDS * VIBRO_MAX_ROWS;
         let denom = (frame_h.saturating_sub(1)).max(1) as f64;
         let t_src = self.t_src_hist_us[slot];
-        let t_base_sec = ((t_src - self.run_t0_us) as f64) * 1.0e-6;
+        let t_base_sec = rel_us_f64(t_src, self.run_t0_us) * 1.0e-6;
         let qs = self.q_start_hist[slot] as i64;
         let qstep = self.q_step_hist[slot] as i64;
 
@@ -2445,7 +2523,7 @@ impl VibrometryState {
                     }
                     self.rs_tmp_re.fill(0.0);
                     self.rs_tmp_im.fill(0.0);
-                    let t_b_sec = ((self.t_src_hist_us[cur_slot] - self.run_t0_us) as f64) * 1.0e-6;
+                    let t_b_sec = rel_us_f64(self.t_src_hist_us[cur_slot], self.run_t0_us) * 1.0e-6;
                     let qs_m = self.q_start_hist[cur_slot] as i64;
                     let qstep_m = self.q_step_hist[cur_slot] as i64;
                     ey2 = 0;

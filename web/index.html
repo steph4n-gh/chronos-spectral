@@ -4667,12 +4667,43 @@
     let rsAudioCaptureSource = null;
     let rsAudioCaptureProc = null;
     let rsAudioCaptureGain = null;
+    let rsAudioCaptureStream = null;
+    let rsAudioCaptureTrack = null;
+    let rsAudioCaptureStreamCleanup = null;
+    let rsAudioCaptureTrackCleanup = null;
     let rsAudioCaptureRateHz = 48000.0;
     let rsAudioCaptureBaseUs = 0;
     let rsAudioCaptureCursor = 0;
     let rsAudioCaptureAnchored = false;
 
-    function stopRsLiveAudioCapture() {
+    function getLiveAudioTrack(stream) {
+      if (!stream || typeof stream.getAudioTracks !== 'function') return null;
+      const tracks = stream.getAudioTracks();
+      if (!tracks || tracks.length === 0) return null;
+      for (let i = 0; i < tracks.length; i++) {
+        const t = tracks[i];
+        if (t && (!t.readyState || t.readyState === 'live')) {
+          return t;
+        }
+      }
+      return null;
+    }
+
+    function stopRsLiveAudioCapture(unwatchStream = true) {
+      if (rsAudioCaptureTrackCleanup) {
+        try {
+          rsAudioCaptureTrackCleanup();
+        } catch (_e) {}
+        rsAudioCaptureTrackCleanup = null;
+      }
+      if (unwatchStream && rsAudioCaptureStreamCleanup) {
+        try {
+          rsAudioCaptureStreamCleanup();
+        } catch (_e) {}
+        rsAudioCaptureStreamCleanup = null;
+        rsAudioCaptureStream = null;
+      }
+      rsAudioCaptureTrack = null;
       if (rsAudioCaptureProc) {
         try {
           rsAudioCaptureProc.onaudioprocess = null;
@@ -4703,18 +4734,46 @@
       rsAudioCaptureAnchored = false;
     }
 
+    function bindRsAudioStreamWatcher(stream) {
+      if (rsAudioCaptureStream === stream) return;
+      if (rsAudioCaptureStreamCleanup) {
+        try {
+          rsAudioCaptureStreamCleanup();
+        } catch (_e) {}
+        rsAudioCaptureStreamCleanup = null;
+      }
+      rsAudioCaptureStream = stream || null;
+      if (stream && typeof stream.addEventListener === 'function') {
+        const onStreamTrackChanged = () => syncRsLiveAudioCapture();
+        stream.addEventListener('addtrack', onStreamTrackChanged);
+        stream.addEventListener('removetrack', onStreamTrackChanged);
+        rsAudioCaptureStreamCleanup = () => {
+          if (typeof stream.removeEventListener === 'function') {
+            stream.removeEventListener('addtrack', onStreamTrackChanged);
+            stream.removeEventListener('removetrack', onStreamTrackChanged);
+          }
+        };
+      }
+    }
+
     function syncRsLiveAudioCapture() {
       const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
-      const hasAudioTrack = Boolean(
-        activeMediaStream &&
-        typeof activeMediaStream.getAudioTracks === 'function' &&
-        activeMediaStream.getAudioTracks().length > 0
-      );
-      if (rm !== 2 || !hasAudioTrack) {
-        stopRsLiveAudioCapture();
+      if (!activeMediaStream) {
+        stopRsLiveAudioCapture(true);
         return;
       }
-      if (rsAudioCaptureCtx) return;
+      bindRsAudioStreamWatcher(activeMediaStream);
+      const curTrack = getLiveAudioTrack(activeMediaStream);
+      if (rm !== 2 || !curTrack) {
+        stopRsLiveAudioCapture(false);
+        return;
+      }
+      if (rsAudioCaptureCtx && rsAudioCaptureStream === activeMediaStream && rsAudioCaptureTrack === curTrack) {
+        return;
+      }
+      if (rsAudioCaptureCtx) {
+        stopRsLiveAudioCapture(false);
+      }
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       try {
@@ -4724,9 +4783,20 @@
         const gain = ctx.createGain();
         gain.gain.value = 0.0;
         rsAudioCaptureRateHz = ctx.sampleRate || 48000.0;
+        rsAudioCaptureStream = activeMediaStream;
+        rsAudioCaptureTrack = curTrack;
         rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
         rsAudioCaptureAnchored = false;
+        const onTrackChanged = () => syncRsLiveAudioCapture();
+        if (typeof curTrack.addEventListener === 'function') {
+          curTrack.addEventListener('ended', onTrackChanged);
+          rsAudioCaptureTrackCleanup = () => {
+            if (typeof curTrack.removeEventListener === 'function') {
+              curTrack.removeEventListener('ended', onTrackChanged);
+            }
+          };
+        }
         const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 40.0;
         const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 200.0;
         worker.postMessage({
@@ -4738,36 +4808,48 @@
           maxSkewUs: 500.0,
         });
         proc.onaudioprocess = (ev) => {
+          const activeTrackNow = activeMediaStream ? getLiveAudioTrack(activeMediaStream) : null;
+          if (activeMediaStream !== rsAudioCaptureStream || activeTrackNow !== rsAudioCaptureTrack) {
+            syncRsLiveAudioCapture();
+            return;
+          }
           const ch = ev.inputBuffer && ev.inputBuffer.numberOfChannels > 0
             ? ev.inputBuffer.getChannelData(0)
             : null;
           if (!ch || ch.length === 0) return;
+          const hasPumpRef = lastMediaTime >= 0 && lastPumpPerfMs > 0;
+          if (!hasPumpRef) return;
+          const nowPerf = performance.now();
+          const mediaNowUs = Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0);
+          if (!Number.isFinite(mediaNowUs) || mediaNowUs < 0) return;
           const samples = new Float32Array(ch.length);
           samples.set(ch);
-          const nowPerf = performance.now();
-          const blockDurUs = Math.round((samples.length * 1_000_000.0) / rsAudioCaptureRateHz);
-          const hasPumpRef = lastMediaTime >= 0 && lastPumpPerfMs > 0;
-          const mediaNowUs = hasPumpRef
-            ? Math.max(0, Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0))
-            : (Number.isFinite(videoEl.currentTime) && videoEl.currentTime >= 0
-                ? Math.round(videoEl.currentTime * 1_000_000.0)
-                : 0);
+          let outSamples = samples;
           if (!rsAudioCaptureAnchored) {
-            rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - blockDurUs);
+            const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
+            if (availSamples <= 0) {
+              return;
+            }
+            if (availSamples < samples.length) {
+              outSamples = samples.slice(samples.length - availSamples);
+            }
+            const outDurUs = Math.round((outSamples.length * 1_000_000.0) / rsAudioCaptureRateHz);
+            rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - outDurUs);
+            rsAudioCaptureCursor = 0;
             rsAudioCaptureAnchored = true;
           }
-          rsAudioCaptureCursor += samples.length;
+          rsAudioCaptureCursor += outSamples.length;
           const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
-          const estSkewUs = hasPumpRef ? (tEndUs - mediaNowUs) : 0.0;
+          const estSkewUs = tEndUs - mediaNowUs;
           worker.postMessage(
             {
               type: 'push_audio_pcm',
-              samples,
+              samples: outSamples,
               tEndUs,
               sampleRateHz: rsAudioCaptureRateHz,
               estSkewUs,
             },
-            [samples.buffer]
+            [outSamples.buffer]
           );
         };
         src.connect(proc);
@@ -5047,6 +5129,9 @@
         lastPresentedFrames = -1;
         pendingVideoGapMask = 0;
         lastPumpPerfMs = 0;
+        rsAudioCaptureBaseUs = 0;
+        rsAudioCaptureCursor = 0;
+        rsAudioCaptureAnchored = false;
       }
 
       const nomDt = 1.0 / Math.max(8.0, activeVideoFps);

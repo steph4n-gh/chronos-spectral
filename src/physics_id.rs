@@ -5089,32 +5089,62 @@ fn eval_occluded_assignment(
     let var_vel = 2.0 * sigma_vel * sigma_vel + 0.25 * a_env_sum * a_env_sum * dt * dt + 1.0e-12;
     let w_vel = 1.0 / var_vel;
 
-    let v_close_fit = if tau > 1.0e-4 {
+    let (v_close_fit, alpha_pre) = if tau > 1.0e-4 {
         let vc_chord = (dr0_n - r_sum) / tau;
         let var_c_pre = (4.0 * sigma_pos * sigma_pos) / (tau * tau)
             + 0.25 * a_env_sum * a_env_sum * tau * tau
             + 1.0e-12;
         let w_c = 1.0 / var_c_pre;
-        (w_vel * v_close_vel + w_c * vc_chord) / (w_vel + w_c)
+        let a_p = w_c / (w_vel + w_c);
+        (v_close_vel + a_p * (vc_chord - v_close_vel), a_p)
     } else {
-        v_close_vel
+        (v_close_vel, 0.0)
     };
 
-    let vn_post_fit = if dt_rem > 1.0e-4 {
+    let (vn_post_fit, alpha_post) = if dt_rem > 1.0e-4 {
         let vp_chord = (dr_end_n - r_sum) / dt_rem;
         let var_c_post = (4.0 * sigma_pos * sigma_pos) / (dt_rem * dt_rem)
             + 0.25 * a_env_sum * a_env_sum * dt_rem * dt_rem
             + 1.0e-12;
         let w_c = 1.0 / var_c_post;
-        (w_vel * vn_post + w_c * vp_chord) / (w_vel + w_c)
+        let a_p = w_c / (w_vel + w_c);
+        (vn_post + a_p * (vp_chord - vn_post), a_p)
     } else {
-        vn_post
+        (vn_post, 0.0)
     };
 
     let e_fit = if v_close_fit > 1.0e-6 {
         vn_post_fit / v_close_fit
     } else {
         -1.0
+    };
+
+    // Scale-aware f32 input quantization slack (4 half-ULPs of f32; never widens noisy fits)
+    const F32_HALF_ULP: f64 = 0.5 * (f32::EPSILON as f64);
+    let pos_mag = x1_pre
+        .abs()
+        .max(y1_pre.abs())
+        .max(x2_pre.abs())
+        .max(y2_pre.abs())
+        .max(x1_out.abs())
+        .max(y1_out.abs())
+        .max(x2_out.abs())
+        .max(y2_out.abs())
+        .max(r_sum)
+        .max(1.0);
+    let vel_mag = v1_pre_mag
+        .max(v2_pre_mag)
+        .max(v1_out_mag)
+        .max(v2_out_mag)
+        .max(1.0);
+    let ulp_pos = 4.0 * F32_HALF_ULP * pos_mag;
+    let ulp_vel = 4.0 * F32_HALF_ULP * vel_mag;
+    let dv_ulp_pre = ulp_vel + if tau > 1.0e-4 { alpha_pre * (ulp_pos / tau) } else { 0.0 };
+    let dv_ulp_post = ulp_vel + if dt_rem > 1.0e-4 { alpha_post * (ulp_pos / dt_rem) } else { 0.0 };
+    let e_ulp_tol = if v_close_fit > 1.0e-6 {
+        ((dv_ulp_post + dv_ulp_pre) / v_close_fit).min(5.0e-5) + 1.0e-12
+    } else {
+        1.0e-12
     };
 
     let mu = (m1 * m2) / (m1 + m2);
@@ -5146,9 +5176,9 @@ fn eval_occluded_assignment(
 
     let h1_dyn_ok = j12_mag > j12_min
         && v_close_fit > v_close_min
-        && vn_post_fit >= 0.0
-        && e_fit >= 0.0
-        && e_fit <= 1.0
+        && vn_post_fit >= -dv_ulp_post
+        && e_fit >= -e_ulp_tol
+        && e_fit <= 1.0 + e_ulp_tol
         && (v_close_vel - v_close_fit).abs() <= dv_rel_tol
         && (vn_post - vn_post_fit).abs() <= dv_rel_tol;
     let h1_ok = j_net_mag <= j_env_max
@@ -5174,6 +5204,7 @@ fn eval_occluded_assignment(
         }
     }
 
+    let e_out = if h1_ok { e_fit.clamp(0.0, 1.0) } else { e_fit };
     let finite_ok = f64_fits_f32(j_net_mag)
         && f64_fits_f32(mom_resid_norm)
         && f64_fits_f32(ang_mom_resid_norm_trap)
@@ -5183,7 +5214,7 @@ fn eval_occluded_assignment(
         && f64_fits_f32(h0_imp_resid)
         && f64_fits_f32(h1_chi2)
         && f64_fits_f32(tau)
-        && f64_fits_f32(e_fit)
+        && f64_fits_f32(e_out)
         && f64_fits_f32(eps_k)
         && f64_fits_f32(l_env_max)
         && f64_fits_f32(l_scale);
@@ -5206,7 +5237,7 @@ fn eval_occluded_assignment(
         h1_chi2,
         h1_imp_resid: j_net_mag,
         h1_tau: tau,
-        h1_e: e_fit,
+        h1_e: e_out,
         finite_ok,
     }
 }

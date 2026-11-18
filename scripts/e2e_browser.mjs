@@ -4990,6 +4990,37 @@ async function main() {
             await new Promise((r) => setTimeout(r, 40));
             const delayedFaultVibro = w2p.getLastWave2();
 
+            // Delayed-ring dropped-block underrun + paused Hodge STANDBY transitions (lookaheadK=4)
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 4 });
+            await pumpRsSession({
+              epoch: 913,
+              totalFrames: 30,
+              t0Us: 10_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 200.0,
+              audioRateHz: 48000.0,
+              fTone: 421.875,
+              taps: 5,
+            });
+            await new Promise((r) => setTimeout(r, 30));
+            const dropGapAck = await w2p.submitAudioBlock({
+              samples: new Array(1600).fill(0.15),
+              tEndUs: 11_066_667, // skip 33,333 us (1600 samples) after 11_000_000 -> accepted new interval WARMING|AUDIO_UNDERRUN
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 40));
+            const dropGapSnap = w2p.getLastWave2();
+
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            await new Promise((r) => setTimeout(r, 30));
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 1 });
+            await new Promise((r) => setTimeout(r, 40));
+            const pausedHodgeEnableSnap = w2p.getLastWave2();
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0 });
+
             return {
               readyVibro: snapReady?.vibro || null,
               diagReady,
@@ -5005,6 +5036,12 @@ async function main() {
               delayedFaultState: delayedFaultVibro?.vibro?.state ?? -1,
               delayedFaultReason: delayedFaultVibro?.vibro?.reasonMask ?? 0,
               delayedFaultStampValid: Boolean(delayedFaultVibro?.stamps?.vibro?.valid),
+              dropGapAccepted: dropGapAck?.accepted ?? -1,
+              dropGapState: dropGapSnap?.vibro?.state ?? -1,
+              dropGapReason: dropGapSnap?.vibro?.reasonMask ?? 0,
+              dropGapStampValid: Boolean(dropGapSnap?.stamps?.vibro?.valid),
+              pausedHodgeReqMode: pausedHodgeEnableSnap?.hodge?.reqMode ?? -1,
+              pausedHodgeState: pausedHodgeEnableSnap?.hodge?.state ?? -1,
             };
           })()`
         );
@@ -5029,9 +5066,15 @@ async function main() {
           rsWelchReport.u64WrapTimeAck.count !== 0 ||
           rsWelchReport.delayedFaultState !== 4 ||
           (rsWelchReport.delayedFaultReason & 1) === 0 ||
-          rsWelchReport.delayedFaultStampValid
+          rsWelchReport.delayedFaultStampValid ||
+          rsWelchReport.dropGapAccepted !== 1 ||
+          rsWelchReport.dropGapState !== 2 ||
+          (rsWelchReport.dropGapReason & 0x100) === 0 ||
+          rsWelchReport.dropGapStampValid ||
+          rsWelchReport.pausedHodgeReqMode !== 1 ||
+          rsWelchReport.pausedHodgeState !== 1
         ) {
-          throw new Error('Step 10b audio boundary & K=4 fault propagation gate failed: ' + JSON.stringify(rsWelchReport));
+          throw new Error('Step 10b audio boundary, K=4 fault/drop propagation & paused Hodge STANDBY gate failed: ' + JSON.stringify(rsWelchReport));
         }
 
         const rv = rsWelchReport.readyVibro;
@@ -5098,6 +5141,163 @@ async function main() {
         );
         if (w2DeckCls >= 0.000001) {
           throw new Error(`Step 10d: Expected 0.000000 CLS across Wave-2 Deck flows, got ${w2DeckCls}`);
+        }
+
+        // 10e. Webcam Live Audio Anchoring & Track Replacement Lifecycle (Zero Startup Skew)
+        const webcamAudioCheck = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const origMediaDevicesDesc = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+            const origAudioCtx = window.AudioContext;
+            const origWebkitAudioCtx = window.webkitAudioContext;
+            const origPostMessage = Worker.prototype.postMessage;
+            const origPerfNow = performance.now.bind(performance);
+            const canvas = document.createElement('canvas');
+            canvas.width = 320;
+            canvas.height = 180;
+            const cctx = canvas.getContext('2d');
+            cctx.fillStyle = '#204060';
+            cctx.fillRect(0, 0, 320, 180);
+            const realAc = new origAudioCtx();
+            const d1 = realAc.createMediaStreamDestination();
+            const d2 = realAc.createMediaStreamDestination();
+            const trackA = d1.stream.getAudioTracks()[0];
+            const trackB = d2.stream.getAudioTracks()[0];
+            const stream = canvas.captureStream(30);
+            stream.addTrack(trackA);
+            try {
+              const ctxSpies = [];
+              class MockAudioContext {
+                constructor() {
+                  this.sampleRate = 48000;
+                  this.state = 'running';
+                  this.closed = false;
+                  this.proc = {
+                    onaudioprocess: null,
+                    connect: () => {},
+                    disconnect: () => {},
+                  };
+                  ctxSpies.push(this);
+                }
+                createMediaStreamSource() {
+                  return { connect: () => {}, disconnect: () => {} };
+                }
+                createScriptProcessor() {
+                  return this.proc;
+                }
+                createGain() {
+                  return { gain: { value: 0 }, connect: () => {}, disconnect: () => {} };
+                }
+                resume() {}
+                close() {
+                  this.closed = true;
+                }
+              }
+              window.AudioContext = MockAudioContext;
+              window.webkitAudioContext = MockAudioContext;
+
+              const pushedAudioMsgs = [];
+              let virtOffsetMs = 0.0;
+              let frozenNowMs = null;
+              performance.now = () => (frozenNowMs !== null ? frozenNowMs : origPerfNow()) + virtOffsetMs;
+              Worker.prototype.postMessage = function (data) {
+                if (data && data.type === 'push_audio_pcm') {
+                  pushedAudioMsgs.push({
+                    tEndUs: data.tEndUs,
+                    estSkewUs: data.estSkewUs,
+                    len: data.samples ? data.samples.length : 0,
+                  });
+                }
+                return origPostMessage.apply(this, arguments);
+              };
+              Object.defineProperty(navigator, 'mediaDevices', {
+                configurable: true,
+                value: { getUserMedia: async () => stream },
+              });
+
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) rmSel.value = '2';
+              document.getElementById('btnSrcWebcam')?.click();
+              for (let i = 0; i < 40 && ctxSpies.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              const c1 = ctxSpies[0];
+              const fireAudioCb = (ctxObj) => {
+                if (ctxObj && ctxObj.proc && typeof ctxObj.proc.onaudioprocess === 'function') {
+                  const arr = new Float32Array(2048);
+                  ctxObj.proc.onaudioprocess({
+                    inputBuffer: { numberOfChannels: 1, getChannelData: () => arr },
+                  });
+                }
+              };
+
+              // Pre-pump callback (videoEl.currentTime === 0) must NOT lock in 42667 us skew
+              fireAudioCb(c1);
+              const prePumpCount = pushedAudioMsgs.length;
+
+              // Pump frames on canvas until rVFC has initialized pump ref & mediaNowUs > 0
+              for (let f = 0; f < 30 && pushedAudioMsgs.length === 0; f++) {
+                cctx.fillStyle = 'rgb(' + (30 + ((f * 7) % 200)) + ',' + ((60 + f * 5) % 220) + ',160)';
+                cctx.fillRect(20 + (f % 10) * 6, 20, 48, 48);
+                await new Promise((r) => setTimeout(r, 35));
+                frozenNowMs = origPerfNow();
+                fireAudioCb(c1);
+                if (pushedAudioMsgs.length === 0) {
+                  frozenNowMs = null;
+                }
+              }
+              if (pushedAudioMsgs.length === 1) {
+                virtOffsetMs += 2048.0 / 48.0;
+                fireAudioCb(c1);
+                virtOffsetMs += 2048.0 / 48.0;
+                fireAudioCb(c1);
+              }
+              frozenNowMs = null;
+              await new Promise((r) => setTimeout(r, 25));
+              const postAudioReason = window.__chronosWave2Probe?.getLastWave2()?.vibro?.reasonMask ?? 0;
+
+              stream.removeTrack(trackA);
+              stream.addTrack(trackB);
+              fireAudioCb(c1);
+              await new Promise((r) => setTimeout(r, 25));
+
+              return {
+                ctxCount: ctxSpies.length,
+                c1Closed: Boolean(c1 && c1.closed),
+                prePumpCount,
+                pushedCount: pushedAudioMsgs.length,
+                pushedSkews: pushedAudioMsgs.map((m) => m.estSkewUs),
+                postAudioReason,
+              };
+            } finally {
+              performance.now = origPerfNow;
+              Worker.prototype.postMessage = origPostMessage;
+              window.AudioContext = origAudioCtx;
+              window.webkitAudioContext = origWebkitAudioCtx;
+              if (origMediaDevicesDesc) {
+                Object.defineProperty(navigator, 'mediaDevices', origMediaDevicesDesc);
+              } else {
+                delete navigator.mediaDevices;
+              }
+              stream.getTracks().forEach((tr) => tr.stop());
+              await realAc.close().catch(() => {});
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 40));
+            }
+          })()`
+        );
+        if (
+          !webcamAudioCheck ||
+          webcamAudioCheck.prePumpCount !== 0 ||
+          webcamAudioCheck.pushedCount !== 3 ||
+          webcamAudioCheck.pushedSkews.some((s) => !Number.isFinite(s) || Math.abs(s) > 250.0) ||
+          (webcamAudioCheck.postAudioReason & 32) !== 0 ||
+          !webcamAudioCheck.c1Closed ||
+          webcamAudioCheck.ctxCount < 2
+        ) {
+          throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
 
         console.log(
