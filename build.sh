@@ -99,8 +99,8 @@ for m in re.finditer(r"segment\[\d+\][^\n]*?size=(\d+)[^\n]*?(?:init\s+i32=|i32\
 if max_data_end <= 0 or max_data_end > 29294592:
     print(f"FAIL static data segment end={max_data_end} outside (0, 29294592]")
     sys.exit(0)
-if max_data_end > 20833312:
-    print(f"FAIL Wave-1 static data segment end={max_data_end} exceeds 20833312")
+if max_data_end > 24248320:
+    print(f"FAIL Wave-2 static data segment end={max_data_end} exceeds 24248320")
     sys.exit(0)
 
 fn_re = re.compile(r"^[0-9a-f]+\s+func\[(\d+)\]\s+<([^>]+)>:")
@@ -173,7 +173,7 @@ if [ "$STACK_INDIRECT" -ne 0 ] || [ "$STACK_CYCLE" -ne 0 ] || [ "$STACK_MAX_PATH
   echo "FAIL: Wasm call-graph stack check failed (max_path=${STACK_MAX_PATH} B, indirect=${STACK_INDIRECT}, cycle=${STACK_CYCLE}, budget=14336/16384 B)!" >&2
   exit 1
 fi
-echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 20833312 <= 29294592 B)"
+echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 24248320 <= 29294592 B)"
 echo "  [PASS] Wasm call-graph max live shadow stack: ${STACK_MAX_PATH} / 16384 B (indirect=${STACK_INDIRECT}, cycles=${STACK_CYCLE})"
 
 V128_COUNT="$(echo "$DISASM" | grep -cE "v128\.|f32x4\.|u32x4\.|i32x4\.")"
@@ -2241,8 +2241,8 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
       throw new Error(`Gate P1 (${label}): Wasm memory bytes=${mem.buffer.byteLength} != ${448 * 65536}`);
     }
     const arenaBytes = telem[20];
-    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 20_702_240) {
-      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 20_702_240`);
+    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 24_117_248) {
+      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 24_117_248`);
     }
     const w1TelemPtr = typeof exp.chronos_get_wave1_telemetry_ptr === 'function' ? exp.chronos_get_wave1_telemetry_ptr() : 0;
     const w1LinkedEnd = w1TelemPtr > 0 ? (new Uint32Array(mem.buffer, w1TelemPtr, 192)[12] >>> 0) : 0;
@@ -2250,8 +2250,8 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
     if (!Number.isFinite(staticDataEnd) || staticDataEnd > 29_294_592) {
       throw new Error(`Gate P1 (${label}): Static data end=${staticDataEnd} exceeds 29_294_592 (< 65536 B reserve)`);
     }
-    if (staticDataEnd > 20_833_312) {
-      throw new Error(`Gate P1 (${label}): Wave-1 static end=${staticDataEnd} exceeds 20_833_312 (headroom breach)`);
+    if (staticDataEnd > 24_248_320) {
+      throw new Error(`Gate P1 (${label}): Wave-2 static end=${staticDataEnd} exceeds 24_248_320 (headroom breach)`);
     }
     for (let k = 0; k < TELEMETRY_LEN; k++) {
       if (!Number.isFinite(telem[k])) {

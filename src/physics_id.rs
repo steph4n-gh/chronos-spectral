@@ -4564,6 +4564,86 @@ impl TargetCollisionOut {
     }
 }
 
+pub const CONSERVATION_TELEM_LEN: usize = 32;
+pub const CONSERVATION_INPUT_LEN: usize = 32;
+
+pub const OCCL_STATUS_NONE: u32 = 0;
+pub const OCCL_STATUS_UNIQUE: u32 = 1;
+pub const OCCL_STATUS_AMBIGUOUS: u32 = 2;
+pub const OCCL_STATUS_VIOLATED: u32 = 3;
+
+pub const HYP_PASSTHROUGH_KEEP: u32 = 1 << 0;
+pub const HYP_PASSTHROUGH_SWAP: u32 = 1 << 1;
+pub const HYP_COLLISION_KEEP: u32 = 1 << 2;
+pub const HYP_COLLISION_SWAP: u32 = 1 << 3;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OcclPairTrackState {
+    pub tid_a: u32,
+    pub tid_b: u32,
+    pub start_frame: u32,
+    pub pre_x1: f32,
+    pub pre_y1: f32,
+    pub pre_vx1: f32,
+    pub pre_vy1: f32,
+    pub pre_x2: f32,
+    pub pre_y2: f32,
+    pub pre_vx2: f32,
+    pub pre_vy2: f32,
+    pub pre_t_sec: f32,
+    pub active: u8,
+    pub both_occluded: u8,
+    pub _pad: [u8; 2],
+}
+
+impl OcclPairTrackState {
+    pub const fn zeroed() -> Self {
+        Self {
+            tid_a: 0,
+            tid_b: 0,
+            start_frame: 0,
+            pre_x1: 0.0,
+            pre_y1: 0.0,
+            pre_vx1: 0.0,
+            pre_vy1: 0.0,
+            pre_x2: 0.0,
+            pre_y2: 0.0,
+            pre_vx2: 0.0,
+            pre_vy2: 0.0,
+            pre_t_sec: 0.0,
+            active: 0,
+            both_occluded: 0,
+            _pad: [0; 2],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OccludedConservationState {
+    pub telem: [f32; CONSERVATION_TELEM_LEN],
+    pub input: [f32; CONSERVATION_INPUT_LEN],
+    pub track_pairs: [OcclPairTrackState; 8],
+}
+
+const _: () = assert!(core::mem::size_of::<OccludedConservationState>() <= 8_192);
+
+impl OccludedConservationState {
+    pub const fn zeroed() -> Self {
+        Self {
+            telem: [0.0; CONSERVATION_TELEM_LEN],
+            input: [0.0; CONSERVATION_INPUT_LEN],
+            track_pairs: [OcclPairTrackState::zeroed(); 8],
+        }
+    }
+
+    pub fn eval_staged(&mut self) -> u32 {
+        self.telem[0] = OCCL_STATUS_NONE as f32;
+        OCCL_STATUS_NONE
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CollisionAnalyzerState {
@@ -4576,6 +4656,7 @@ pub struct CollisionAnalyzerState {
     pub recent_pairs: [RecentCollisionPair; 8],
     pub recent_cursor: u8,
     pub _pad: [u8; 3],
+    pub conservation: OccludedConservationState,
 }
 
 #[repr(C)]
@@ -4608,6 +4689,7 @@ impl CollisionAnalyzerState {
             recent_pairs: [RecentCollisionPair::zeroed(); 8],
             recent_cursor: 0,
             _pad: [0; 3],
+            conservation: OccludedConservationState::zeroed(),
         }
     }
 
@@ -4625,6 +4707,22 @@ impl CollisionAnalyzerState {
         self.recent_pairs.fill(RecentCollisionPair::zeroed());
         self.recent_cursor = 0;
         self._pad = [0; 3];
+        self.conservation = OccludedConservationState::zeroed();
+    }
+
+    #[inline(always)]
+    pub fn conservation_telemetry_ptr(&self) -> *const f32 {
+        self.conservation.telem.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn conservation_input_mut_ptr(&mut self) -> *mut f32 {
+        self.conservation.input.as_mut_ptr()
+    }
+
+    #[inline(never)]
+    pub fn eval_staged_occluded_pair(&mut self) -> u32 {
+        self.conservation.eval_staged()
     }
 }
 

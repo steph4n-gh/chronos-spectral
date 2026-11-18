@@ -23,8 +23,8 @@ const WORKER_PATH = path.join(ROOT, 'web', 'worker.js');
 const PAGE_BYTES = 65536;
 const EXPECTED_PAGES = 448;
 const EXPECTED_MEM_BYTES = EXPECTED_PAGES * PAGE_BYTES; // 29,360,128
-const MAX_ARENA_BYTES = 20_702_240;
-const WAVE1_MAX_STATIC_END = 20_833_312;
+const MAX_ARENA_BYTES = 24_117_248;
+const WAVE1_MAX_STATIC_END = 24_248_320;
 const FULL_RING_SLOT_BYTES = 640 * 360 * 4; // 921,600 B
 const RING_LEN = 12;
 const RING_META_STRIDE = 24;
@@ -1203,11 +1203,27 @@ async function main() {
     'chronos_get_row_luma_ptr',
     'chronos_get_wave1_telemetry_ptr',
   ];
+  const requiredWave2 = [
+    'chronos_get_wave2_telemetry_ptr',
+    'chronos_set_rs_calib',
+    'chronos_get_audio_staging_ptr',
+    'chronos_push_audio_block',
+    'chronos_get_vibro_telemetry_ptr',
+    'chronos_get_vibro_planes_ptr',
+    'chronos_set_hodge_mode',
+    'chronos_get_hodge_telemetry_ptr',
+    'chronos_get_hodge_planes_ptr',
+    'chronos_get_hodge_inject_ptr',
+    'chronos_hodge_solve_injected',
+    'chronos_get_conservation_telemetry_ptr',
+    'chronos_get_conservation_input_ptr',
+    'chronos_eval_occluded_pair',
+  ];
   const exportNames = Object.keys(exp);
-  assert(exportNames.length === 61, `Expected exact pinned Wasm export count 61, got ${exportNames.length}`);
+  assert(exportNames.length === 75, `Expected exact pinned Wasm export count 75, got ${exportNames.length}`);
   assert(typeof exp.chronos_get_micro_metrology_mode === 'undefined', 'Unpinned export chronos_get_micro_metrology_mode must not exist');
-  for (const name of requiredWave1) {
-    assert(typeof exp[name] === 'function', `Missing required Wave-1 export: ${name}`);
+  for (const name of [...requiredWave1, ...requiredWave2]) {
+    assert(typeof exp[name] === 'function', `Missing required export: ${name}`);
   }
 
   // Run Gate I4 Workload FIRST before multi-instance Wasm allocations to eliminate munmap/GC jitter spikes

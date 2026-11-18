@@ -6,6 +6,10 @@ pub(crate) mod physics_id;
 pub(crate) mod soa_tracks;
 pub(crate) mod continuum_physics;
 pub(crate) mod bos;
+#[allow(dead_code)]
+pub(crate) mod vibrometry;
+#[allow(dead_code)]
+pub(crate) mod hodge;
 
 use core::arch::wasm32::{
     f32x4_abs, f32x4_add, f32x4_div, f32x4_extract_lane, f32x4_floor, f32x4_ge, f32x4_gt,
@@ -754,6 +758,13 @@ pub const PROD_MODAL_FIELD: usize = 3;
 pub const PROD_HERO_PHYSICS: usize = 4;
 pub const PROD_BOS: usize = 5;
 
+pub const WAVE2_ABI_VERSION: u32 = 1;
+pub const WAVE2_TELEM_LEN: usize = 64;
+pub const WAVE2_PRODUCT_STAMPS_START: usize = 16;
+pub const PROD_W2_VIBRO: usize = 0;
+pub const PROD_W2_HODGE: usize = 1;
+pub const PROD_W2_CONSERVATION: usize = 2;
+
 const CTRL_PENDING_VALID: usize = 0;
 const CTRL_TICK_PHASE: usize = 1;
 const CTRL_NOM_DT_US: usize = 2;
@@ -907,10 +918,13 @@ pub struct Arena {
     pub ic_lk_cache: [TplIcLkCache; MAX_TARGETS],
     pub micro_swarm: soa_tracks::MicroSwarmState,
     pub bos: bos::BosState,
+    pub vibro: vibrometry::VibrometryState,
+    pub hodge: hodge::HodgeState,
     pub ring_meta: [IngestSlotMeta; RING_LEN],
     pub pending_ingest_meta: IngestSlotMeta,
     pub row_luma_means: [[f32; MAX_FRAME_H]; RING_LEN],
     pub wave1_telem: [u32; WAVE1_TELEM_LEN],
+    pub wave2_telem: [u32; WAVE2_TELEM_LEN],
     pub ingest_ctrl: [u32; INGEST_CTRL_LEN],
     pub continuum: continuum_physics::ContinuumState,
     pub lanczos_scratch: LanczosScratch,
@@ -997,9 +1011,8 @@ pub struct Arena {
     pub pre_tick_seen: u8,
 }
 
-// Compile-time structural bound: Arena + MetrologyState + BosState <= 20,702,240 B within 448 pages (29,360,128 B)
-// Compile-time structural bound: Arena + MetrologyState + BosState <= 20,702,240 B within 448 pages (29,360,128 B)
-const _: () = assert!(core::mem::size_of::<Arena>() <= 20_702_240);
+// Compile-time structural bound: Arena + Wave1 + Wave2 state <= 24,117,248 B (23.00 MiB) within 448 pages (29,360,128 B)
+const _: () = assert!(core::mem::size_of::<Arena>() <= 24_117_248);
 
 static mut ARENA: Arena = unsafe { core::mem::zeroed() };
 
@@ -5094,36 +5107,36 @@ fn solve_noncausal_fista_target(
 // ============================================================================
 
 #[inline(always)]
-fn set_stamp_invalid(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize) {
-    wave1_telem[base] = 0;
-    wave1_telem[base + 1] = 0;
-    wave1_telem[base + 2] = 0;
-    wave1_telem[base + 3] = 0;
-    wave1_telem[base + 4] = 0;
-    wave1_telem[base + 5] = 0;
-    wave1_telem[base + 6] = (-1.0f32).to_bits();
-    wave1_telem[base + 7] = 0;
+fn set_stamp_invalid(telem_stamps: &mut [u32], base: usize) {
+    telem_stamps[base] = 0;
+    telem_stamps[base + 1] = 0;
+    telem_stamps[base + 2] = 0;
+    telem_stamps[base + 3] = 0;
+    telem_stamps[base + 4] = 0;
+    telem_stamps[base + 5] = 0;
+    telem_stamps[base + 6] = (-1.0f32).to_bits();
+    telem_stamps[base + 7] = 0;
 }
 
 #[inline(always)]
-fn set_stamp_fresh(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize, meta: &IngestSlotMeta) {
+fn set_stamp_fresh(telem_stamps: &mut [u32], base: usize, meta: &IngestSlotMeta) {
     let time_bits = (meta.flags & (INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_CAPTURE_AGE | INGEST_FLAG_HANDOFF_AGE)) << 1;
-    wave1_telem[base] = STAMP_VALID | time_bits;
-    wave1_telem[base + 1] = meta.continuity_epoch;
-    wave1_telem[base + 2] = meta.source_epoch;
-    wave1_telem[base + 3] = meta.source_seq;
-    wave1_telem[base + 4] = meta.t_src_us_lo;
-    wave1_telem[base + 5] = meta.t_src_us_hi;
-    wave1_telem[base + 6] = meta.age_ms_bits;
-    wave1_telem[base + 7] = meta.engine_frame_idx;
+    telem_stamps[base] = STAMP_VALID | time_bits;
+    telem_stamps[base + 1] = meta.continuity_epoch;
+    telem_stamps[base + 2] = meta.source_epoch;
+    telem_stamps[base + 3] = meta.source_seq;
+    telem_stamps[base + 4] = meta.t_src_us_lo;
+    telem_stamps[base + 5] = meta.t_src_us_hi;
+    telem_stamps[base + 6] = meta.age_ms_bits;
+    telem_stamps[base + 7] = meta.engine_frame_idx;
 }
 
 #[inline(always)]
-fn hold_or_invalidate_stamp(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], base: usize, cur_cont_ep: u32) {
-    if (wave1_telem[base] & STAMP_VALID) != 0 && wave1_telem[base + 1] == cur_cont_ep && cur_cont_ep != 0 {
-        wave1_telem[base] |= STAMP_HELD;
+fn hold_or_invalidate_stamp(telem_stamps: &mut [u32], base: usize, cur_cont_ep: u32) {
+    if (telem_stamps[base] & STAMP_VALID) != 0 && telem_stamps[base + 1] == cur_cont_ep && cur_cont_ep != 0 {
+        telem_stamps[base] |= STAMP_HELD;
     } else {
-        set_stamp_invalid(wave1_telem, base);
+        set_stamp_invalid(telem_stamps, base);
     }
 }
 
@@ -5236,6 +5249,42 @@ fn wave1_enabled_bits(a: &Arena) -> u32 {
     })
 }
 
+#[inline(always)]
+fn wave2_enabled_bits(a: &Arena) -> u32 {
+    (if a.vibro.get_mode() != vibrometry::RS_MODE_OFF {
+        1
+    } else {
+        0
+    }) | (if a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
+        2
+    } else {
+        0
+    }) | (if a.lab_mode == 2 {
+        4
+    } else {
+        0
+    })
+}
+
+#[inline(always)]
+fn invalidate_all_wave2_stamps(wave2_telem: &mut [u32; WAVE2_TELEM_LEN]) {
+    let mut i = 0usize;
+    while i < 3 {
+        set_stamp_invalid(wave2_telem, WAVE2_PRODUCT_STAMPS_START + i * STAMP_STRIDE);
+        i += 1;
+    }
+}
+
+#[inline(never)]
+fn init_wave2_telemetry(a: &mut Arena) {
+    a.wave2_telem.fill(0);
+    a.wave2_telem[0] = WAVE2_ABI_VERSION;
+    a.wave2_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave2_telem[2] = wave2_enabled_bits(a);
+    a.wave2_telem[3] = a.wave1_telem[6];
+    invalidate_all_wave2_stamps(&mut a.wave2_telem);
+}
+
 #[inline(never)]
 fn init_wave1_telemetry(a: &mut Arena, preserve_history: bool) {
     let prev_commits_lo = if preserve_history { a.wave1_telem[4] } else { 0 };
@@ -5270,6 +5319,7 @@ fn init_wave1_telemetry(a: &mut Arena, preserve_history: bool) {
     a.wave1_telem[12] = linked_static_end_bytes();
     a.wave1_telem[13] = 0;
     invalidate_all_wave1_stamps(&mut a.wave1_telem);
+    init_wave2_telemetry(a);
 }
 
 #[no_mangle]
@@ -5292,6 +5342,8 @@ pub unsafe extern "C" fn chronos_init() {
     a.micro_swarm.init_in_place();
     a.continuum.reset();
     a.bos.init_in_place();
+    a.vibro.reset_all();
+    a.hodge.reset();
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
@@ -5413,6 +5465,8 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     a.micro_swarm.reset_active_keep_mode();
     a.continuum.reset();
     a.bos.reset_keep_config();
+    a.vibro.reset_continuity(0);
+    a.hodge.reset_keep_mode();
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
@@ -5528,6 +5582,7 @@ pub unsafe extern "C" fn chronos_set_params(
         a.phase_offset_rad = wrap_pi(phase_offset_rad);
     }
     a.lab_mode = lab_mode.min(2);
+    a.wave2_telem[2] = wave2_enabled_bits(a);
 }
 
 #[no_mangle]
@@ -6362,6 +6417,111 @@ pub unsafe extern "C" fn chronos_get_micro_quality_ptr() -> *const u32 {
 #[no_mangle]
 pub unsafe extern "C" fn chronos_get_hero_candidates_ptr() -> *const u32 {
     arena_mut().micro_swarm.hero_candidates_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_wave2_telemetry_ptr() -> *const u32 {
+    arena_mut().wave2_telem.as_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_rs_calib(
+    mode: u32,
+    dt_row_us: f32,
+    exposure_us: f32,
+    audio_rate_hz: f32,
+    max_skew_us: f32,
+) -> u32 {
+    let a = arena_mut();
+    let ok = a
+        .vibro
+        .set_calib(mode, dt_row_us, exposure_us, audio_rate_hz, max_skew_us);
+    a.wave2_telem[2] = wave2_enabled_bits(a);
+    if a.vibro.get_mode() == vibrometry::RS_MODE_OFF {
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE,
+        );
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_audio_staging_ptr() -> *mut f32 {
+    arena_mut().vibro.audio_staging_mut_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_push_audio_block(
+    num_samples: u32,
+    t_end_us_lo: u32,
+    t_end_us_hi: u32,
+    sample_rate_hz: f32,
+    est_skew_us: f32,
+) -> u32 {
+    let t_end_us = ((t_end_us_hi as u64) << 32) | (t_end_us_lo as u64);
+    arena_mut()
+        .vibro
+        .push_audio_block(num_samples, t_end_us, sample_rate_hz, est_skew_us)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_vibro_telemetry_ptr() -> *const u32 {
+    arena_mut().vibro.telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_vibro_planes_ptr() -> *const f32 {
+    arena_mut().vibro.planes_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_hodge_mode(mode: u32) -> u32 {
+    let a = arena_mut();
+    let ok = a.hodge.set_mode(mode);
+    a.wave2_telem[2] = wave2_enabled_bits(a);
+    if a.hodge.get_mode() == hodge::HODGE_MODE_OFF {
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE,
+        );
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_hodge_telemetry_ptr() -> *const u32 {
+    arena_mut().hodge.telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_hodge_planes_ptr() -> *const f32 {
+    arena_mut().hodge.planes_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_hodge_inject_ptr() -> *mut f32 {
+    arena_mut().hodge.inject_mut_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_hodge_solve_injected(grid_dx: f32, grid_dy: f32) -> u32 {
+    arena_mut().hodge.solve_injected(grid_dx, grid_dy)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_conservation_telemetry_ptr() -> *const f32 {
+    arena_mut().collision_state.conservation_telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_conservation_input_ptr() -> *mut f32 {
+    arena_mut().collision_state.conservation_input_mut_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_eval_occluded_pair() -> u32 {
+    arena_mut().collision_state.eval_staged_occluded_pair()
 }
 
 #[inline(never)]
@@ -17944,6 +18104,11 @@ fn finalize_wave1_stamps(
             set_stamp_invalid(&mut a.wave1_telem, h_base);
         }
     }
+
+    a.wave2_telem[0] = WAVE2_ABI_VERSION;
+    a.wave2_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave2_telem[2] = wave2_enabled_bits(a);
+    a.wave2_telem[3] = cont_ep;
 }
 
 /// Complete single-call Wasm frame tick (runs pre_tick -> certified internal Jacobi Fiedler solve -> post_tick).

@@ -37,8 +37,8 @@ const TELEM_RESERVED_TAIL_START = 1550;
 const WASM_PAGE_BYTES = 65536;
 const EXPECTED_WASM_PAGES = 448;
 const EXPECTED_WASM_MEM_BYTES = EXPECTED_WASM_PAGES * WASM_PAGE_BYTES; // 29,360,128 B
-const MAX_ARENA_BYTES = 20_702_240;
-const WAVE1_MAX_STATIC_END = 20_833_312;
+const MAX_ARENA_BYTES = 24_117_248;
+const WAVE1_MAX_STATIC_END = 24_248_320;
 const FULL_RING_SLOT_BYTES = HD_W * HD_H * 4; // 921,600 B backing size even in SD
 const MAX_MICRO = 1536;
 const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
@@ -2808,6 +2808,33 @@ function setupHdSession(exp, mem, swarmMode = 2, resMode = 1, staticDataEnd = 0)
   }
   if (typeof exp.chronos_get_bos_rgba_ptr === 'function') {
     ptrRanges.push({ name: 'bos_rgba', ptr: exp.chronos_get_bos_rgba_ptr(), bytes: 4 * 8192, align: 4 });
+  }
+  if (typeof exp.chronos_get_wave2_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'wave2_telem', ptr: exp.chronos_get_wave2_telemetry_ptr(), bytes: 64 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_audio_staging_ptr === 'function') {
+    ptrRanges.push({ name: 'audio_staging', ptr: exp.chronos_get_audio_staging_ptr(), bytes: 4096 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_vibro_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'vibro_telem', ptr: exp.chronos_get_vibro_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_vibro_planes_ptr === 'function') {
+    ptrRanges.push({ name: 'vibro_planes', ptr: exp.chronos_get_vibro_planes_ptr(), bytes: (3 * 880 + 64) * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_telem', ptr: exp.chronos_get_hodge_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_planes_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_planes', ptr: exp.chronos_get_hodge_planes_ptr(), bytes: 7 * 880 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_inject_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_inject', ptr: exp.chronos_get_hodge_inject_ptr(), bytes: 3 * 880 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_conservation_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'conservation_telem', ptr: exp.chronos_get_conservation_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_conservation_input_ptr === 'function') {
+    ptrRanges.push({ name: 'conservation_input', ptr: exp.chronos_get_conservation_input_ptr(), bytes: 32 * 4, align: 4 });
   }
 
   const ptrErrors = validatePointerLayout(mem.buffer.byteLength, ptrRanges, staticDataEnd);
