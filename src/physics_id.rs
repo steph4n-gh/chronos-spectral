@@ -4625,6 +4625,7 @@ pub struct OccludedConservationState {
     pub telem: [f32; CONSERVATION_TELEM_LEN],
     pub input: [f32; CONSERVATION_INPUT_LEN],
     pub track_pairs: [OcclPairTrackState; 8],
+    pub live_event_seq: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<OccludedConservationState>() <= 8_192);
@@ -4635,6 +4636,7 @@ impl OccludedConservationState {
             telem: [0.0; CONSERVATION_TELEM_LEN],
             input: [0.0; CONSERVATION_INPUT_LEN],
             track_pairs: [OcclPairTrackState::zeroed(); 8],
+            live_event_seq: 0,
         }
     }
 
@@ -4724,6 +4726,11 @@ impl CollisionAnalyzerState {
     pub fn eval_staged_occluded_pair(&mut self) -> u32 {
         self.conservation.eval_staged()
     }
+
+    #[inline(always)]
+    pub fn conservation_live_event_seq(&self) -> u32 {
+        self.conservation.live_event_seq
+    }
 }
 
 #[repr(C)]
@@ -4808,8 +4815,10 @@ pub struct CollisionTrackView<'a> {
     pub confirmed: u8,
     pub is_ballistic: u8,
     pub pivot_valid: u8,
+    pub coasting: u8,
     pub track_id: u32,
     pub birth_frame: u32,
+    pub orig_birth_frame: u32,
     pub last_discont_frame: u32,
     pub disp_world_x: f32,
     pub disp_world_y: f32,
@@ -4823,11 +4832,22 @@ pub struct CollisionTrackView<'a> {
 #[inline(always)]
 pub fn reset_collision_slot(st: &mut CollisionAnalyzerState, slot_m: usize) {
     if slot_m < MAX_TARGETS {
+        let old_tid = st.target_last_tid[slot_m];
         st.target_last_e[slot_m] = 0.0;
         st.target_last_frame[slot_m] = 0;
         st.target_detect_frame[slot_m] = 0;
         st.target_last_tid[slot_m] = 0;
         st.target_partner_tid[slot_m] = 0;
+        if old_tid != 0 {
+            for p in 0..8 {
+                if st.conservation.track_pairs[p].active != 0
+                    && (st.conservation.track_pairs[p].tid_a == old_tid
+                        || st.conservation.track_pairs[p].tid_b == old_tid)
+                {
+                    st.conservation.track_pairs[p] = OcclPairTrackState::zeroed();
+                }
+            }
+        }
     }
 }
 

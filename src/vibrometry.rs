@@ -4,9 +4,10 @@
 
 pub const VIBRO_BANDS: usize = 16;
 pub const VIBRO_MAX_ROWS: usize = 360;
+pub const VIBRO_MAX_PIXELS: usize = 640 * 360; // 230,400
 pub const VIBRO_HIST_FRAMES: usize = 32;
 pub const VIBRO_SPEC_BINS: usize = 64;
-pub const VIBRO_WELCH_SLOTS: usize = 16;
+pub const VIBRO_WELCH_SLOTS: usize = 12;
 pub const AUDIO_STAGING_LEN: usize = 4096;
 pub const AUDIO_RING_LEN: usize = 32768;
 pub const VIBRO_TELEM_LEN: usize = 32;
@@ -39,8 +40,29 @@ pub const RS_REASON_CLOCK_SKEW: u32 = 1 << 5;
 pub const RS_REASON_EXPOSURE_NULL: u32 = 1 << 6;
 pub const RS_REASON_LOW_GRAD: u32 = 1 << 7;
 pub const RS_REASON_AUDIO_UNDERRUN: u32 = 1 << 8;
+pub const RS_REASON_AXIS_TRANSPOSED: u32 = 1 << 9;
+pub const RS_REASON_NO_PTS: u32 = 1 << 10;
 
 pub const AUDIO_FFT_N: usize = 1024;
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct VibroFrameMeta {
+    pub flags: u32,
+    pub continuity_epoch: u32,
+    pub t_src_us: u64,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub crop_x0: u32,
+    pub crop_y0: u32,
+    pub crop_w: u32,
+    pub crop_h: u32,
+    pub orientation: u32,
+    pub scan_dir: u32,
+    pub native_1to1: u32,
+    pub gap_flag: u32,
+    pub cam_motion_state: u32,
+}
 
 #[repr(C, align(16))]
 pub struct VibrometryState {
@@ -57,9 +79,8 @@ pub struct VibrometryState {
     pub audio_last_skew_us: f32,
     pub audio_ring_rate_hz: f32,
 
-    // Row-resolved 16-band x 360-row reference & displacement history
-    pub ref_band_luma: [f32; VIBRO_BANDS * VIBRO_MAX_ROWS],
-    pub ref_band_gx2: [f32; VIBRO_BANDS * VIBRO_MAX_ROWS],
+    // Full-frame stationary reference luma (u16 q16) & row-resolved signed displacement history
+    pub ref_luma_q16: [u16; VIBRO_MAX_PIXELS],
     pub disp_hist: [f32; VIBRO_HIST_FRAMES * VIBRO_BANDS * VIBRO_MAX_ROWS],
     pub t_src_hist_us: [u64; VIBRO_HIST_FRAMES],
     pub frame_rows_hist: [u16; VIBRO_HIST_FRAMES],
@@ -93,7 +114,7 @@ pub struct VibrometryState {
     pub last_crop_y0: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_450_000);
+const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_750_000);
 
 impl VibrometryState {
     pub fn reset_all(&mut self) {
@@ -104,8 +125,7 @@ impl VibrometryState {
     }
 
     pub fn reset_continuity(&mut self, reason_bits: u32) {
-        self.ref_band_luma.fill(0.0);
-        self.ref_band_gx2.fill(0.0);
+        self.ref_luma_q16.fill(0);
         self.disp_hist.fill(0.0);
         self.t_src_hist_us.fill(0);
         self.frame_rows_hist.fill(0);
@@ -248,19 +268,13 @@ impl VibrometryState {
         _row_luma: &[f32; VIBRO_MAX_ROWS],
         frame_w: usize,
         frame_h: usize,
-        _t_src_us: u64,
-        scan_dir: u32,
-        orientation: u32,
-        crop_y0: u32,
-        _native_1to1: u32,
-        _gap_flag: u32,
-        _cam_motion_state: u32,
+        meta: &VibroFrameMeta,
     ) {
         self.last_frame_w = frame_w as u16;
         self.last_frame_h = frame_h as u16;
-        self.last_scan_dir = scan_dir;
-        self.last_orientation = orientation;
-        self.last_crop_y0 = crop_y0;
+        self.last_scan_dir = meta.scan_dir;
+        self.last_orientation = meta.orientation;
+        self.last_crop_y0 = meta.crop_y0;
         if self.mode == RS_MODE_OFF {
             self.telem[0] = RS_STATE_OFF;
             return;

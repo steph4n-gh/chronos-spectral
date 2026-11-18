@@ -69,6 +69,8 @@ pub struct HodgeState {
     // Scalar config
     pub mode: u32,
     pub last_solve_frame: u32,
+    pub live_ready: u8,
+    pub _pad: [u8; 3],
 }
 
 // Budget: export buffers (35.3 KiB) + unaliased f64 2-complex PCG solver (<= 256 KiB total inside 448-page Arena).
@@ -86,6 +88,7 @@ impl HodgeState {
         let keep_mode = self.mode;
         self.reset();
         self.mode = keep_mode;
+        self.live_ready = 0;
         self.telem[1] = keep_mode;
         self.telem[0] = if keep_mode == HODGE_MODE_OFF {
             HODGE_STATE_OFF

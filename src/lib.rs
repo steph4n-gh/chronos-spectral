@@ -5155,6 +5155,18 @@ fn invalidate_all_wave1_stamps(wave1_telem: &mut [u32; WAVE1_TELEM_LEN]) {
 }
 
 #[inline(always)]
+fn invalidate_stale_wave2_stamps(wave2_telem: &mut [u32; WAVE2_TELEM_LEN], cur_cont_ep: u32) {
+    let mut i = 0usize;
+    while i < 3 {
+        let base = WAVE2_PRODUCT_STAMPS_START + i * STAMP_STRIDE;
+        if (wave2_telem[base] & STAMP_VALID) != 0 && wave2_telem[base + 1] != cur_cont_ep {
+            set_stamp_invalid(wave2_telem, base);
+        }
+        i += 1;
+    }
+}
+
+#[inline(always)]
 fn invalidate_stale_wave1_stamps(wave1_telem: &mut [u32; WAVE1_TELEM_LEN], cur_cont_ep: u32) {
     let mut i = 0usize;
     while i < 6 {
@@ -5583,6 +5595,12 @@ pub unsafe extern "C" fn chronos_set_params(
     }
     a.lab_mode = lab_mode.min(2);
     a.wave2_telem[2] = wave2_enabled_bits(a);
+    if a.lab_mode != 2 {
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_CONSERVATION * STAMP_STRIDE,
+        );
+    }
 }
 
 #[no_mangle]
@@ -6437,12 +6455,10 @@ pub unsafe extern "C" fn chronos_set_rs_calib(
         .vibro
         .set_calib(mode, dt_row_us, exposure_us, audio_rate_hz, max_skew_us);
     a.wave2_telem[2] = wave2_enabled_bits(a);
-    if a.vibro.get_mode() == vibrometry::RS_MODE_OFF {
-        set_stamp_invalid(
-            &mut a.wave2_telem,
-            WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE,
-        );
-    }
+    set_stamp_invalid(
+        &mut a.wave2_telem,
+        WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE,
+    );
     ok
 }
 
@@ -6506,7 +6522,13 @@ pub unsafe extern "C" fn chronos_get_hodge_inject_ptr() -> *mut f32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn chronos_hodge_solve_injected(grid_dx: f32, grid_dy: f32) -> u32 {
-    arena_mut().hodge.solve_injected(grid_dx, grid_dy)
+    let a = arena_mut();
+    a.hodge.live_ready = 0;
+    set_stamp_invalid(
+        &mut a.wave2_telem,
+        WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE,
+    );
+    a.hodge.solve_injected(grid_dx, grid_dy)
 }
 
 #[no_mangle]
@@ -6521,7 +6543,12 @@ pub unsafe extern "C" fn chronos_get_conservation_input_ptr() -> *mut f32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn chronos_eval_occluded_pair() -> u32 {
-    arena_mut().collision_state.eval_staged_occluded_pair()
+    let a = arena_mut();
+    set_stamp_invalid(
+        &mut a.wave2_telem,
+        WAVE2_PRODUCT_STAMPS_START + PROD_W2_CONSERVATION * STAMP_STRIDE,
+    );
+    a.collision_state.eval_staged_occluded_pair()
 }
 
 #[inline(never)]
@@ -10572,7 +10599,15 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
     meta.continuity_epoch = a.wave1_telem[6];
     if prev_cont_ep != 0 && meta.continuity_epoch != prev_cont_ep {
         invalidate_stale_wave1_stamps(&mut a.wave1_telem, meta.continuity_epoch);
+        invalidate_stale_wave2_stamps(&mut a.wave2_telem, meta.continuity_epoch);
+        a.vibro.reset_continuity(if pan.scene_cut {
+            vibrometry::RS_REASON_FRAME_GAP
+        } else {
+            0
+        });
+        a.hodge.reset_keep_mode();
     }
+    a.wave2_telem[3] = meta.continuity_epoch;
     a.ring_meta[slot_in] = meta;
     a.wave1_telem[0] = WAVE1_ABI_VERSION;
     a.wave1_telem[1] = core::mem::size_of::<Arena>() as u32;
@@ -12103,8 +12138,10 @@ fn update_physics_and_telemetry(
         confirmed: 0,
         is_ballistic: 0,
         pivot_valid: 0,
+        coasting: 0,
         track_id: 0,
         birth_frame: 0,
+        orig_birth_frame: 0,
         last_discont_frame: 0,
         disp_world_x: 0.0,
         disp_world_y: 0.0,
@@ -12127,8 +12164,10 @@ fn update_physics_and_telemetry(
                 confirmed: a.targets[m].confirmed,
                 is_ballistic: a.targets[m].is_ballistic,
                 pivot_valid: piv_arr[m],
+                coasting: a.targets[m].coasting.min(255) as u8,
                 track_id: a.targets[m].track_id,
                 birth_frame: a.targets[m].birth_frame,
+                orig_birth_frame: a.targets[m].orig_birth_frame,
                 last_discont_frame: a.last_discont_frame,
                 disp_world_x: a.targets[m].disp_fista_x,
                 disp_world_y: a.targets[m].disp_fista_y,
@@ -17669,9 +17708,12 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         }
     }
 
+    let prev_cons_seq = a.collision_state.conservation_live_event_seq();
     let hero_phys_ran =
         update_physics_and_telemetry(a, f_idx, frame_w, frame_h, s, fps, eff_k, safe_dt);
     a.ingest_ctrl[CTRL_HERO_PHYS_RAN] = if hero_phys_ran { 1 } else { 0 };
+    let new_cons_seq = a.collision_state.conservation_live_event_seq();
+    let cons_fresh = new_cons_seq != prev_cons_seq && new_cons_seq != 0;
 
     let need_px = frame_w * frame_h;
     let rgba_bytes = need_px * 4;
@@ -17770,11 +17812,165 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
         false
     };
 
+    let (hodge_ran, hodge_grad_held) = run_wave2_post_tick(
+        a,
+        f_idx,
+        slot_in,
+        frame_w,
+        frame_h,
+        grid_w,
+        grid_h,
+        swarm_active,
+    );
+
     finalize_wave1_stamps(a, f_idx, slot_in, slot_disp, swarm_active, bos_ran);
+    finalize_wave2_stamps(a, slot_in, swarm_active, hodge_ran, hodge_grad_held, cons_fresh, new_cons_seq);
 
     a.ring_cursor = a.ring_cursor.wrapping_add(1);
     a.frame_idx = f_idx.wrapping_add(1);
     slot_disp as u32
+}
+
+#[inline(never)]
+fn run_wave2_post_tick(
+    a: &mut Arena,
+    f_idx: u32,
+    slot_in: usize,
+    frame_w: usize,
+    frame_h: usize,
+    grid_w: usize,
+    grid_h: usize,
+    swarm_active: bool,
+) -> (bool, bool) {
+    let need_px = frame_w * frame_h;
+    if a.vibro.get_mode() != vibrometry::RS_MODE_OFF {
+        let meta = a.ring_meta[slot_in];
+        let vmeta = vibrometry::VibroFrameMeta {
+            flags: meta.flags,
+            continuity_epoch: meta.continuity_epoch,
+            t_src_us: ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64),
+            src_w: meta.src_w,
+            src_h: meta.src_h,
+            crop_x0: meta.crop_x0,
+            crop_y0: meta.crop_y0,
+            crop_w: meta.crop_w,
+            crop_h: meta.crop_h,
+            orientation: meta.orientation,
+            scan_dir: meta.scan_dir,
+            native_1to1: meta.native_1to1_active,
+            gap_flag: meta.frame_gap_flag,
+            cam_motion_state: a.cam_motion_state,
+        };
+        a.vibro.ingest_and_solve_frame(
+            &a.luma[..need_px],
+            &a.row_luma_means[slot_in],
+            frame_w,
+            frame_h,
+            &vmeta,
+        );
+    }
+
+    let (grad_valid, grad_held, _) = a.continuum.grad_product_status();
+    let hodge_ran = if swarm_active && a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
+        if grad_valid && !grad_held {
+            let gdx = (frame_w as f32) / (grid_w as f32);
+            let gdy = (frame_h as f32) / (grid_h as f32);
+            a.hodge.solve_from_continuum(
+                &a.continuum.export_field,
+                &a.continuum.cell_valid_mask,
+                gdx,
+                gdy,
+                f_idx,
+            )
+        } else if !grad_valid {
+            a.hodge.reset_keep_mode();
+            false
+        } else {
+            false
+        }
+    } else {
+        if a.hodge.get_mode() != hodge::HODGE_MODE_OFF && !swarm_active {
+            a.hodge.reset_keep_mode();
+        }
+        false
+    };
+    (hodge_ran, grad_held)
+}
+
+#[inline(never)]
+fn finalize_wave2_stamps(
+    a: &mut Arena,
+    slot_in: usize,
+    swarm_active: bool,
+    hodge_ran: bool,
+    hodge_grad_held: bool,
+    cons_fresh: bool,
+    cons_seq: u32,
+) {
+    let meta = a.ring_meta[slot_in];
+    let cont_ep = meta.continuity_epoch;
+    a.wave2_telem[0] = WAVE2_ABI_VERSION;
+    a.wave2_telem[1] = core::mem::size_of::<Arena>() as u32;
+    a.wave2_telem[2] = wave2_enabled_bits(a);
+    a.wave2_telem[3] = cont_ep;
+
+    // 0 (word 16): RS Vibrometry & Welch Coherence
+    let vibro_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE;
+    if a.vibro.get_mode() != vibrometry::RS_MODE_OFF
+        && a.vibro.get_state() == vibrometry::RS_STATE_READY
+    {
+        set_stamp_fresh(&mut a.wave2_telem, vibro_base, &meta);
+    } else {
+        set_stamp_invalid(&mut a.wave2_telem, vibro_base);
+    }
+
+    // 1 (word 24): 40x22 Hodge Decomposition (live_ready only; never spoofed by injected test solves)
+    let hodge_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE;
+    let (grad_valid, _, _) = a.continuum.grad_product_status();
+    if swarm_active
+        && a.hodge.get_mode() != hodge::HODGE_MODE_OFF
+        && a.hodge.live_ready != 0
+        && a.hodge.get_state() == hodge::HODGE_STATE_READY
+    {
+        if hodge_ran && !hodge_grad_held {
+            set_stamp_fresh(&mut a.wave2_telem, hodge_base, &meta);
+        } else if grad_valid && hodge_grad_held {
+            if (a.wave2_telem[hodge_base] & STAMP_VALID) != 0
+                && a.wave2_telem[hodge_base + 1] == cont_ep
+            {
+                hold_or_invalidate_stamp(&mut a.wave2_telem, hodge_base, cont_ep);
+            } else {
+                // Mirror originating observation from PROD_GRAD if Hodge solved from held gradient
+                let grad_base = WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE;
+                if (a.wave1_telem[grad_base] & STAMP_VALID) != 0
+                    && a.wave1_telem[grad_base + 1] == cont_ep
+                {
+                    for k in 0..STAMP_STRIDE {
+                        a.wave2_telem[hodge_base + k] = a.wave1_telem[grad_base + k];
+                    }
+                    a.wave2_telem[hodge_base] |= STAMP_HELD;
+                } else {
+                    set_stamp_invalid(&mut a.wave2_telem, hodge_base);
+                }
+            }
+        } else {
+            set_stamp_invalid(&mut a.wave2_telem, hodge_base);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave2_telem, hodge_base);
+    }
+
+    // 2 (word 32): Organ 5 Live Occluded-Pair Conservation (never spoofed by staged test calls)
+    let cons_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_CONSERVATION * STAMP_STRIDE;
+    if a.lab_mode == 2 && cons_seq != 0 {
+        if cons_fresh {
+            set_stamp_fresh(&mut a.wave2_telem, cons_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave2_telem, cons_base, cont_ep);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave2_telem, cons_base);
+    }
 }
 
 #[inline(never)]
@@ -18105,10 +18301,7 @@ fn finalize_wave1_stamps(
         }
     }
 
-    a.wave2_telem[0] = WAVE2_ABI_VERSION;
-    a.wave2_telem[1] = core::mem::size_of::<Arena>() as u32;
-    a.wave2_telem[2] = wave2_enabled_bits(a);
-    a.wave2_telem[3] = cont_ep;
+    // Wave-2 header & stamps are finalized in finalize_wave2_stamps() right after finalize_wave1_stamps().
 }
 
 /// Complete single-call Wasm frame tick (runs pre_tick -> certified internal Jacobi Fiedler solve -> post_tick).

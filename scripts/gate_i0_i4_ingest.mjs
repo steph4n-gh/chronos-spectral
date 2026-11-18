@@ -1263,6 +1263,15 @@ async function main() {
   if (typeof exp.chronos_get_micro_cov_ptr === 'function') {
     ranges.push({ name: 'micro_cov', start: exp.chronos_get_micro_cov_ptr(), end: exp.chronos_get_micro_cov_ptr() + 3 * 1536 * 4 });
   }
+  ranges.push({ name: 'wave2_telem', start: exp.chronos_get_wave2_telemetry_ptr(), end: exp.chronos_get_wave2_telemetry_ptr() + 64 * 4 });
+  ranges.push({ name: 'audio_staging', start: exp.chronos_get_audio_staging_ptr(), end: exp.chronos_get_audio_staging_ptr() + 4096 * 4 });
+  ranges.push({ name: 'vibro_telem', start: exp.chronos_get_vibro_telemetry_ptr(), end: exp.chronos_get_vibro_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'vibro_planes', start: exp.chronos_get_vibro_planes_ptr(), end: exp.chronos_get_vibro_planes_ptr() + (3 * 880 + 64) * 4 });
+  ranges.push({ name: 'hodge_telem', start: exp.chronos_get_hodge_telemetry_ptr(), end: exp.chronos_get_hodge_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'hodge_planes', start: exp.chronos_get_hodge_planes_ptr(), end: exp.chronos_get_hodge_planes_ptr() + 7 * 880 * 4 });
+  ranges.push({ name: 'hodge_inject', start: exp.chronos_get_hodge_inject_ptr(), end: exp.chronos_get_hodge_inject_ptr() + 3 * 880 * 4 });
+  ranges.push({ name: 'conservation_telem', start: exp.chronos_get_conservation_telemetry_ptr(), end: exp.chronos_get_conservation_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'conservation_input', start: exp.chronos_get_conservation_input_ptr(), end: exp.chronos_get_conservation_input_ptr() + 32 * 4 });
   ranges.sort((a, b) => a.start - b.start);
   for (let i = 1; i < ranges.length; i++) {
     assert(ranges[i - 1].end <= ranges[i].start, `Overlap ${ranges[i - 1].name} vs ${ranges[i].name}`);
