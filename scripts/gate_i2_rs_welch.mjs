@@ -868,6 +868,39 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     'Single 1,600-sample audio gap must reset Welch count and invalidate stamp'
   );
 
+  // Short 36-sample (750 us) PCM gap must also immediately invalidate READY stamp & trigger AUDIO_UNDERRUN
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
+  sampleCursor = 0;
+  for (let f = 0; f < 30; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    const nextEnd = Math.round(((f + 1) / 30) * 48000);
+    pushAudioSamples({ startSampleIdx: sampleCursor, numSamples: nextEnd - sampleCursor, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+    sampleCursor = nextEnd;
+    pushFrame({ seq: f, tSrcUs, dispFn: sigOpt });
+  }
+  assert(readTelem().state === RS_STATE_READY && readTelem().kSegs >= 8 && readTelem().stampValid, 'Expected READY before 36-sample short gap check');
+  assert(
+    pushAudioSamples({
+      startSampleIdx: sampleCursor + 36,
+      numSamples: 1600,
+      t0Us: t0,
+      sampleRateHz: 48000.0,
+      audioFn: sigAud,
+    }) === 1,
+    'Post short-gap block starts fresh interval'
+  );
+  t = readTelem();
+  assert(
+    t.kSegs === 0 && t.state === RS_STATE_WARMING && (t.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !t.stampValid,
+    `Short 36-sample (750 us) PCM gap must immediately invalidate READY stamp and reset Welch interval, got state=${t.state} k=${t.kSegs} reason=${t.reason} valid=${t.stampValid}`
+  );
+  pushFrame({ seq: 30, tSrcUs: t0 + 1_000_000, dispFn: sigOpt });
+  t = readTelem();
+  assert(
+    t.state === RS_STATE_WARMING && !t.stampValid,
+    `Next video frame after 36-sample PCM gap must remain WARMING with invalid stamp, got state=${t.state} valid=${t.stampValid}`
+  );
+
   // Sample-rate mismatch and non-finite PCM sample rejection keep DISTURBED across video gap + clean frames
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
   sampleCursor = 0;
@@ -1009,6 +1042,44 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     assert(
       tsExact.state === RS_STATE_READY && tsExact.coupledCells === 880 && tsExact.maxCoh > 0.90,
       `Exact-cutoff 4800.0 Hz tone (<= 4800.0 Hz) must couple all 880 cells, got state=${tsExact.state} coupled=${tsExact.coupledCells} g2=${tsExact.maxCoh}`
+    );
+  }
+
+  // Just-below-bin cutoff (dtRowUs=102.4f32 @ 96 kHz -> f_opt_max=4687.49993 Hz < bin 50 = 4687.5 Hz):
+  // f_opt_max + 2.0 Hz audio must be rejected, while matched f_opt_max must couple all 880 cells.
+  {
+    const fCutoffJustBelow = 0.48 * 1_000_000.0 / Math.fround(102.4);
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 102.4, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    let subCursor = 0;
+    const optCut = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * fCutoffJustBelow * tSec + 0.3), 0.0];
+    const audAboveCut = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * (fCutoffJustBelow + 2.0) * tSec + 0.1);
+    for (let f = 0; f < 25; f++) {
+      const tSrcUs = t0 + f * 42_000;
+      const nextEnd = Math.round((f + 1) * 0.042 * 96000.0);
+      pushAudioSamples({ startSampleIdx: subCursor, numSamples: nextEnd - subCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: audAboveCut });
+      subCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.042, dtRowUs: 102.4, exposureUs: 20.0, dispFn: optCut });
+    }
+    const tsRejAbove = readTelem();
+    assert(
+      tsRejAbove.state === RS_STATE_READY && tsRejAbove.coupledCells === 0,
+      `Out-of-band +2 Hz audio above 4687.49993 Hz cutoff must not couple, got state=${tsRejAbove.state} coupled=${tsRejAbove.coupledCells} g2=${tsRejAbove.maxCoh}`
+    );
+
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 102.4, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    subCursor = 0;
+    const audAtCut = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * fCutoffJustBelow * tSec + 0.1);
+    for (let f = 0; f < 25; f++) {
+      const tSrcUs = t0 + f * 42_000;
+      const nextEnd = Math.round((f + 1) * 0.042 * 96000.0);
+      pushAudioSamples({ startSampleIdx: subCursor, numSamples: nextEnd - subCursor, t0Us: t0, sampleRateHz: 96000.0, audioFn: audAtCut });
+      subCursor = nextEnd;
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.042, dtRowUs: 102.4, exposureUs: 20.0, dispFn: optCut });
+    }
+    const tsAccCut = readTelem();
+    assert(
+      tsAccCut.state === RS_STATE_READY && tsAccCut.coupledCells === 880 && tsAccCut.maxCoh > tsAccCut.gamma2Crit && tsAccCut.maxCoh > 0.75,
+      `Matched 4687.49993 Hz exact cutoff tone must couple all 880 cells, got state=${tsAccCut.state} coupled=${tsAccCut.coupledCells} g2=${tsAccCut.maxCoh}`
     );
   }
 

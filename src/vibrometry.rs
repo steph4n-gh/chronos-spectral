@@ -732,7 +732,8 @@ impl VibrometryState {
                 return 0;
             }
             let step_us = (t_end_us - self.audio_last_t_end_us) as f64;
-            let gap_tol_us = (0.15 * dt_audio_us).clamp(25.0, 1000.0);
+            let dt_sample_us = 1_000_000.0 / (sample_rate_hz as f64);
+            let gap_tol_us = (0.5 * dt_sample_us + 2.0).max(3.0);
             if abs_f64(step_us - dt_audio_us) > gap_tol_us
                 || abs_f32(sample_rate_hz - self.audio_ring_rate_hz) > 1.0
             {
@@ -1997,11 +1998,12 @@ impl VibrometryState {
                 let a0 = crate::wasm_sqrt_f64(p_top);
                 let a1 = crate::wasm_sqrt_f64(p_edge.max(0.0));
                 if a0 + a1 > 0.0 {
-                    let delta = ((2.0 * a1 - a0) / (a0 + a1)).clamp(0.0, 1.0);
-                    // Allow tiny discrete-N/f32-quantization bias in Grandke's Hann estimator right at f_opt_max.
+                    let delta = ((2.0 * a1 - a0) / (a0 + a1)).max(0.0);
+                    // Allow tiny discrete-N/f32-quantization bias in Grandke's Hann estimator right at f_opt_max
+                    // without clamping above-bin-k_end tones back down to k_end * df_hz.
                     let k_end_f = k_end as f64;
                     let k_cube = (k_end_f * k_end_f * k_end_f).max(1.0);
-                    let cutoff_tol_bins = 2.0e-4 + 0.05 / k_cube;
+                    let cutoff_tol_bins = 2.0e-5 + 0.06 / k_cube;
                     if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max + cutoff_tol_bins * df_hz {
                         inband_straddle_ok = true;
                     }

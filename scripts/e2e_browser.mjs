@@ -5207,7 +5207,8 @@ async function main() {
             const trackB = d2.stream.getAudioTracks()[0];
             const trackC = d3.stream.getAudioTracks()[0];
             const stream = canvas.captureStream(30);
-            stream.addTrack(trackA);
+            const micOnlyStream = new MediaStream([trackA]);
+            const gumCalls = [];
             try {
               const ctxSpies = [];
               class MockAudioContext {
@@ -5259,15 +5260,40 @@ async function main() {
               };
               Object.defineProperty(navigator, 'mediaDevices', {
                 configurable: true,
-                value: { getUserMedia: async () => stream },
+                value: {
+                  getUserMedia: async (constraints) => {
+                    gumCalls.push({
+                      video: Boolean(constraints && constraints.video),
+                      audio: Boolean(constraints && constraints.audio),
+                    });
+                    return constraints && constraints.audio && !constraints.video ? micOnlyStream : stream;
+                  },
+                },
               });
 
               const rmSel = document.getElementById('rsVibroModeSelect');
-              if (rmSel) rmSel.value = '2';
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
               document.getElementById('btnSrcWebcam')?.click();
+              for (let i = 0; i < 40 && gumCalls.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              await new Promise((r) => setTimeout(r, 60));
+              const initialGumCount = gumCalls.length;
+              const initialGumAudio = Boolean(gumCalls[0] && gumCalls[0].audio);
+              const ctxBeforeWelch = ctxSpies.length;
+
+              if (rmSel) {
+                rmSel.value = '2';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
               for (let i = 0; i < 40 && ctxSpies.length === 0; i++) {
                 await new Promise((r) => setTimeout(r, 25));
               }
+              const lateGumCount = gumCalls.length;
+              const lateGumAudioOnly = Boolean(gumCalls[1] && gumCalls[1].audio && !gumCalls[1].video);
               const c1 = ctxSpies[0];
               const fireAudioCb = (ctxObj) => {
                 if (ctxObj && ctxObj.proc && typeof ctxObj.proc.onaudioprocess === 'function') {
@@ -5326,6 +5352,12 @@ async function main() {
               const cLast = ctxSpies[ctxSpies.length - 1] || null;
 
               return {
+                initialGumCount,
+                initialGumAudio,
+                ctxBeforeWelch,
+                lateGumCount,
+                lateGumAudioOnly,
+                gumCountFinal: gumCalls.length,
                 ctxCountDuringGap,
                 c1ClosedDuringGap,
                 ctxCountAfterGapAdd,
@@ -5361,6 +5393,12 @@ async function main() {
         );
         if (
           !webcamAudioCheck ||
+          webcamAudioCheck.initialGumCount !== 1 ||
+          webcamAudioCheck.initialGumAudio ||
+          webcamAudioCheck.ctxBeforeWelch !== 0 ||
+          webcamAudioCheck.lateGumCount !== 2 ||
+          !webcamAudioCheck.lateGumAudioOnly ||
+          webcamAudioCheck.gumCountFinal !== 2 ||
           webcamAudioCheck.prePumpCount !== 0 ||
           webcamAudioCheck.pushedCount !== 4 ||
           webcamAudioCheck.pushedSkews.some((s) => !Number.isFinite(s) || Math.abs(s) > 250.0) ||

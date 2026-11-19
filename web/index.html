@@ -4677,6 +4677,10 @@
     let rsAudioCaptureAnchored = false;
     let rsAudioAnchorRefineLeft = 0;
     let rsAudioTrackPollId = 0;
+    let rsAudioMicReqStream = null;
+    let rsAudioMicReqInFlight = false;
+    let rsSupplementalFallbackTrack = null;
+    let rsSupplementalOwnedTracks = [];
 
     function clearRsAudioTrackPoll() {
       if (rsAudioTrackPollId) {
@@ -4685,15 +4689,41 @@
       }
     }
 
+    function stopRsSupplementalMic(streamForDetach = null) {
+      const owned = rsSupplementalOwnedTracks;
+      rsSupplementalOwnedTracks = [];
+      rsSupplementalFallbackTrack = null;
+      for (let i = 0; i < owned.length; i++) {
+        const trk = owned[i];
+        if (!trk) continue;
+        if (streamForDetach && typeof streamForDetach.removeTrack === 'function') {
+          try {
+            streamForDetach.removeTrack(trk);
+          } catch (_e) {}
+        }
+        try {
+          if (typeof trk.stop === 'function') trk.stop();
+        } catch (_e) {}
+      }
+    }
+
     function getLiveAudioTrack(stream) {
       if (!stream || typeof stream.getAudioTracks !== 'function') return null;
       const tracks = stream.getAudioTracks();
-      if (!tracks || tracks.length === 0) return null;
-      for (let i = 0; i < tracks.length; i++) {
-        const t = tracks[i];
-        if (t && (!t.readyState || t.readyState === 'live')) {
-          return t;
+      if (tracks && tracks.length > 0) {
+        for (let i = 0; i < tracks.length; i++) {
+          const t = tracks[i];
+          if (t && (!t.readyState || t.readyState === 'live')) {
+            return t;
+          }
         }
+      }
+      if (
+        stream === activeMediaStream &&
+        rsSupplementalFallbackTrack &&
+        (!rsSupplementalFallbackTrack.readyState || rsSupplementalFallbackTrack.readyState === 'live')
+      ) {
+        return rsSupplementalFallbackTrack;
       }
       return null;
     }
@@ -4745,6 +4775,20 @@
       rsAudioCaptureCursor = 0;
       rsAudioCaptureAnchored = false;
       rsAudioAnchorRefineLeft = 0;
+      if (unwatchStream) {
+        if (rsSupplementalOwnedTracks.length > 0 || rsSupplementalFallbackTrack) {
+          stopRsSupplementalMic(activeMediaStream);
+          if (rsAudioMicReqStream === activeMediaStream) {
+            rsAudioMicReqStream = null;
+          }
+        } else if (
+          !rsAudioMicReqInFlight &&
+          rsAudioMicReqStream === activeMediaStream &&
+          !getLiveAudioTrack(activeMediaStream)
+        ) {
+          rsAudioMicReqStream = null;
+        }
+      }
     }
 
     function bindRsAudioStreamWatcher(stream) {
@@ -4797,6 +4841,81 @@
       };
     }
 
+    function requestRsLiveMicrophone(targetStream, reqEpoch) {
+      if (
+        !targetStream ||
+        rsAudioMicReqInFlight ||
+        rsAudioMicReqStream === targetStream ||
+        activeSourceMode !== 'webcam' ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getUserMedia !== 'function'
+      ) {
+        return;
+      }
+      rsAudioMicReqStream = targetStream;
+      rsAudioMicReqInFlight = true;
+      Promise.resolve()
+        .then(() => navigator.mediaDevices.getUserMedia({ audio: true, video: false }))
+        .then((micStream) => {
+          rsAudioMicReqInFlight = false;
+          const rmNow = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+          const stillValid =
+            reqEpoch === sourceEpoch &&
+            activeMediaStream === targetStream &&
+            activeSourceMode === 'webcam' &&
+            rmNow === 2;
+          if (!stillValid) {
+            if (micStream && micStream !== targetStream && typeof micStream.getTracks === 'function') {
+              micStream.getTracks().forEach((t) => {
+                if (t && typeof t.stop === 'function') t.stop();
+              });
+            }
+            if (rsAudioMicReqStream === targetStream) {
+              rsAudioMicReqStream = null;
+            }
+            return;
+          }
+          if (!micStream) return;
+          if (micStream !== targetStream && typeof micStream.getVideoTracks === 'function') {
+            const existingVid = typeof targetStream.getVideoTracks === 'function' ? targetStream.getVideoTracks() : [];
+            micStream.getVideoTracks().forEach((vt) => {
+              if (vt && !existingVid.includes(vt) && typeof vt.stop === 'function') vt.stop();
+            });
+          }
+          let micTrack = getLiveAudioTrack(micStream);
+          if (!micTrack && typeof micStream.getTracks === 'function') {
+            const all = micStream.getTracks();
+            for (let i = 0; i < all.length; i++) {
+              const t = all[i];
+              if (t && t.kind === 'audio' && (!t.readyState || t.readyState === 'live')) {
+                micTrack = t;
+                break;
+              }
+            }
+          }
+          if (!micTrack) return;
+          if (micStream !== targetStream) {
+            rsSupplementalOwnedTracks.push(micTrack);
+          }
+          let inStream = false;
+          if (typeof targetStream.getAudioTracks === 'function' && targetStream.getAudioTracks().includes(micTrack)) {
+            inStream = true;
+          } else if (micStream !== targetStream && typeof targetStream.addTrack === 'function') {
+            try {
+              targetStream.addTrack(micTrack);
+            } catch (_e) {}
+            inStream =
+              typeof targetStream.getAudioTracks === 'function' &&
+              targetStream.getAudioTracks().includes(micTrack);
+          }
+          rsSupplementalFallbackTrack = inStream ? null : micTrack;
+          syncRsLiveAudioCapture();
+        })
+        .catch(() => {
+          rsAudioMicReqInFlight = false;
+        });
+    }
+
     function syncRsLiveAudioCapture() {
       const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
       if (!activeMediaStream || rm !== 2) {
@@ -4807,6 +4926,7 @@
       const curTrack = getLiveAudioTrack(activeMediaStream);
       if (!curTrack) {
         stopRsLiveAudioCapture(false);
+        requestRsLiveMicrophone(activeMediaStream, sourceEpoch);
         if (!rsAudioTrackPollId) {
           rsAudioTrackPollId = setInterval(syncRsLiveAudioCapture, 40);
         }
@@ -4948,6 +5068,9 @@
 
     function stopMediaCapture(preserveLiveRetry = false) {
       stopRsLiveAudioCapture();
+      stopRsSupplementalMic(activeMediaStream);
+      rsAudioMicReqStream = null;
+      rsAudioMicReqInFlight = false;
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
@@ -7269,6 +7392,7 @@
         const myEpoch = sourceEpoch;
         sampleVideoSelect.value = '';
         activeMediaStream = stream;
+        rsAudioMicReqStream = wantAudio ? stream : null;
         activeVideoFps = 60.0;
         videoEl.srcObject = stream;
         await videoEl.play();
