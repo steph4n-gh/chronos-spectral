@@ -4700,6 +4700,12 @@
       r3: 0.0,
       r4: 0.0,
       rCount: 0,
+      t0: 0.0,
+      t1: 0.0,
+      t2: 0.0,
+      t3: 0.0,
+      t4: 0.0,
+      tCount: 0,
       prevM: 0.0,
       prevM0: 0.0,
       uAt6: 0.0,
@@ -4729,6 +4735,23 @@
       vRing: new Float64Array(272),
       vIdx: 0,
       vCount: 0,
+      zRing: new Float64Array(320),
+      zIdx: 0,
+      zCount: 0,
+      runMinT: 0.0,
+      runMaxT: 0.0,
+      p64: new Float64Array(64),
+      p64Idx: 0,
+      p64Count: 0,
+      p64Sum: 0.0,
+      pFirst: 0.0,
+      baseP: 0.0,
+      basePCount: 0,
+      stripY: new Float64Array(313),
+      stripPreMin: new Float64Array(313),
+      stripPreMax: new Float64Array(313),
+      stripSufMin: new Float64Array(313),
+      stripSufMax: new Float64Array(313),
       uFirst: 0.0,
       baseU: 0.0,
       baseCount: 0,
@@ -4753,6 +4776,12 @@
       rsAudioSkewState.r3 = 0.0;
       rsAudioSkewState.r4 = 0.0;
       rsAudioSkewState.rCount = 0;
+      rsAudioSkewState.t0 = 0.0;
+      rsAudioSkewState.t1 = 0.0;
+      rsAudioSkewState.t2 = 0.0;
+      rsAudioSkewState.t3 = 0.0;
+      rsAudioSkewState.t4 = 0.0;
+      rsAudioSkewState.tCount = 0;
       rsAudioSkewState.prevM = 0.0;
       rsAudioSkewState.prevM0 = 0.0;
       rsAudioSkewState.uAt6 = 0.0;
@@ -4782,6 +4811,18 @@
       rsAudioSkewState.vRing.fill(0.0);
       rsAudioSkewState.vIdx = 0;
       rsAudioSkewState.vCount = 0;
+      rsAudioSkewState.zRing.fill(0.0);
+      rsAudioSkewState.zIdx = 0;
+      rsAudioSkewState.zCount = 0;
+      rsAudioSkewState.runMinT = 0.0;
+      rsAudioSkewState.runMaxT = 0.0;
+      rsAudioSkewState.p64.fill(0.0);
+      rsAudioSkewState.p64Idx = 0;
+      rsAudioSkewState.p64Count = 0;
+      rsAudioSkewState.p64Sum = 0.0;
+      rsAudioSkewState.pFirst = 0.0;
+      rsAudioSkewState.baseP = 0.0;
+      rsAudioSkewState.basePCount = 0;
       rsAudioSkewState.uFirst = 0.0;
       rsAudioSkewState.baseU = 0.0;
       rsAudioSkewState.baseCount = 0;
@@ -5335,11 +5376,46 @@
             }
             const u = s.b16Sum / s.b16Count;
 
+            s.t0 = s.t1;
+            s.t1 = s.t2;
+            s.t2 = s.t3;
+            s.t3 = s.t4;
+            s.t4 = trendInputUs;
+            if (s.tCount < 5) s.tCount++;
+            let rawMedT;
+            if (s.tCount < 5) {
+              const slT = [s.t0, s.t1, s.t2, s.t3, s.t4].slice(5 - s.tCount).sort((x, y) => x - y);
+              rawMedT = slT[slT.length >> 1];
+            } else {
+              rawMedT = med5Skew(s.t0, s.t1, s.t2, s.t3, s.t4);
+            }
+            const despikedT = Math.abs(trendInputUs - rawMedT) > 1.5 * pull512Us ? rawMedT : trendInputUs;
             const mTrend =
               s.warm <= 5
-                ? trendInputUs
-                : s.prevM0 + Math.max(-stepClamp, Math.min(stepClamp, trendInputUs - s.prevM0));
+                ? despikedT
+                : s.prevM0 + Math.max(-stepClamp, Math.min(stepClamp, despikedT - s.prevM0));
             s.prevM0 = mTrend;
+            if (s.warm === 1) {
+              s.runMinT = mTrend;
+              s.runMaxT = mTrend;
+            } else {
+              if (mTrend < s.runMinT) s.runMinT = mTrend;
+              if (mTrend > s.runMaxT) s.runMaxT = mTrend;
+            }
+            s.zRing[s.zIdx] = mTrend;
+            s.zIdx = (s.zIdx + 1) % 320;
+            if (s.zCount < 320) s.zCount++;
+
+            const pullStepUs = !hasTs && hasCt ? alignedUs - aligned0 : 0.0;
+            if (s.p64Count < 64) {
+              s.p64[s.p64Count++] = pullStepUs;
+              s.p64Sum += pullStepUs;
+            } else {
+              s.p64Sum += pullStepUs - s.p64[s.p64Idx];
+              s.p64[s.p64Idx] = pullStepUs;
+              s.p64Idx = (s.p64Idx + 1) & 63;
+            }
+            const pAvg64 = s.p64Sum / s.p64Count;
 
             if (s.t12Count < 12) {
               s.t12[s.t12Count++] = mTrend;
@@ -5380,11 +5456,11 @@
             if (s.vCount < 272) s.vCount++;
 
             const baseGate = Math.max(2200.0, 0.85 * quantumUs);
-            if (s.warm === 20) {
+            if (s.warm === 8) {
               s.uFirst = u;
               s.baseU = u;
               s.baseCount = 1;
-            } else if (s.warm > 20 && s.baseCount < 48 && Math.abs(u - s.uFirst) <= baseGate) {
+            } else if (s.warm > 8 && s.baseCount < 24 && Math.abs(u - s.uFirst) <= 900.0) {
               s.baseCount++;
               s.baseU += (u - s.baseU) / s.baseCount;
             }
@@ -5393,9 +5469,18 @@
               s.wFirst = w36;
               s.baseW = w36;
               s.baseWCount = 1;
-            } else if (s.warm > 36 && s.baseWCount < 72 && Math.abs(w36 - s.wFirst) <= baseGate) {
-              s.baseWCount++;
-              s.baseW += (w36 - s.baseW) / s.baseWCount;
+              s.pFirst = pAvg64;
+              s.baseP = pAvg64;
+              s.basePCount = 1;
+            } else if (s.warm > 36) {
+              if (s.baseWCount < 72 && Math.abs(w36 - s.wFirst) <= baseGate) {
+                s.baseWCount++;
+                s.baseW += (w36 - s.baseW) / s.baseWCount;
+              }
+              if (s.basePCount < 72 && Math.abs(pAvg64 - s.pFirst) <= baseGate) {
+                s.basePCount++;
+                s.baseP += (pAvg64 - s.baseP) / s.basePCount;
+              }
             }
 
             if (s.warm >= 10 && s.warm < 24) {
@@ -5404,17 +5489,18 @@
               const cushionUs =
                 s.tsCleanRun >= 32
                   ? 1250.0
-                  : Math.max(9200.0, Math.min(34000.0, pull512Us + 450.0));
+                  : Math.max(9200.0, Math.min(36000.0, pull512Us + quantumUs + 450.0));
               const devU = u - s.baseU;
               const devW = w36 - s.baseW;
               const offSkew = softThreshSkew(devU, cushionUs);
 
+              const devP = pAvg64 - s.baseP;
               const multiPullDispOnly =
                 !hasTs &&
                 hasCt &&
                 Math.abs(devU) < cushionUs &&
-                Math.abs(devW) > 1.08 * pull512Us &&
-                Math.abs(devW - devU) > 0.75 * pull512Us;
+                ((Math.abs(devW) > 1.08 * pull512Us && Math.abs(devW - devU) > 0.75 * pull512Us) ||
+                  (devW * devP < 0.0 && Math.abs(devP) > 0.22 * pull512Us));
 
               let trendSkew = 0.0;
               if (!multiPullDispOnly) {
@@ -5441,38 +5527,6 @@
                   return softThreshSkew(totSpan, 2500.0);
                 };
 
-                const evalChordAt = (atFn, qStep, minTotUs, minBaseUs, cDev, cChord, minLin) => {
-                  const W = 4 * qStep;
-                  const y0 = atFn(0);
-                  const y1 = atFn(qStep);
-                  const y2 = atFn(2 * qStep);
-                  const y3 = atFn(3 * qStep);
-                  const y4 = atFn(W);
-                  const dTot = y0 - y4;
-                  const sgn = dTot >= 0.0 ? 1 : -1;
-                  const tot = sgn * dTot;
-                  if (tot < minTotUs || sgn * (y0 - s.baseW) < minBaseUs) return 0.0;
-                  const q1 = sgn * (y0 - y1);
-                  const q2 = sgn * (y1 - y2);
-                  const q3 = sgn * (y2 - y3);
-                  const q4 = sgn * (y3 - y4);
-                  if (q1 <= 240.0 || q2 <= 240.0 || q3 <= 240.0 || q4 <= 240.0) return 0.0;
-                  const avg = 0.25 * tot;
-                  const maxDev = Math.max(
-                    Math.abs(q1 - avg),
-                    Math.abs(q2 - avg),
-                    Math.abs(q3 - avg),
-                    Math.abs(q4 - avg)
-                  );
-                  let maxChord = 0.0;
-                  for (let m = 16; m < W; m += 16) {
-                    const err = Math.abs(atFn(m) - (y0 - dTot * (m / W)));
-                    if (err > maxChord) maxChord = err;
-                  }
-                  if (tot - cDev * maxDev - cChord * maxChord <= minLin) return 0.0;
-                  return sgn * softThreshSkew(tot, 2500.0);
-                };
-
                 const wAt = (lag) => s.wRing[(s.wIdx + 296 - 1 - lag) % 296];
                 const vAt = (lag) => s.vRing[(s.vIdx + 272 - 1 - lag) % 272];
 
@@ -5483,29 +5537,98 @@
                   const t60 = evalGridAt(wAt, 60, 4, 920.0, 1.2);
                   if (Math.abs(t60) > Math.abs(trendSkew)) trendSkew = t60;
                 }
-                if (s.wCount >= 293) {
-                  const tCW = evalChordAt(
-                    wAt,
-                    73,
-                    Math.max(4000.0, 1.05 * quantumUs),
-                    Math.max(4400.0, 1.15 * quantumUs),
-                    2.55,
-                    2.25,
-                    260.0
-                  );
-                  if (Math.abs(tCW) > Math.abs(trendSkew)) trendSkew = tCW;
-                }
-                if (s.vCount >= 269) {
-                  const tCV = evalChordAt(
-                    vAt,
-                    67,
-                    Math.max(3800.0, 1.05 * quantumUs),
-                    Math.max(4100.0, 1.1 * quantumUs),
-                    2.9,
-                    2.6,
-                    320.0
-                  );
-                  if (Math.abs(tCV) > Math.abs(trendSkew)) trendSkew = tCV;
+                if (s.zCount >= 313) {
+                  const W = 312;
+                  const zEnd = s.zRing[(s.zIdx + 319) % 320];
+                  const zStart = s.zRing[(s.zIdx + 319 - W) % 320];
+                  const spanZ = zEnd - zStart;
+                  const sgnZ = spanZ >= 0.0 ? 1 : -1;
+                  const runSpan = s.runMaxT - s.runMinT;
+                  if (
+                    runSpan >= 5950.0 &&
+                    sgnZ * devW >= 4350.0 &&
+                    sgnZ * spanZ >= W * 19.7 - quantumUs - 12.0
+                  ) {
+                    const y = s.stripY;
+                    for (let m = 0; m <= W; m++) {
+                      y[m] = s.zRing[(s.zIdx + 319 - (W - m)) % 320];
+                    }
+                    const evalW = (bt, step) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W; m += step) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      const rLast = y[W] - bt * W;
+                      if (rLast < mn) mn = rLast;
+                      if (rLast > mx) mx = rLast;
+                      return mx - mn;
+                    };
+                    const stripCap = quantumUs + 12.0;
+                    let stripHitSpan = 0.0;
+
+                    let lo1 = 19.7;
+                    let hi1 = 22.5;
+                    for (let it = 0; it < 11; it++) {
+                      const m1 = lo1 + (hi1 - lo1) / 3.0;
+                      const m2 = hi1 - (hi1 - lo1) / 3.0;
+                      if (evalW(sgnZ * m1, 4) <= evalW(sgnZ * m2, 4)) hi1 = m2;
+                      else lo1 = m1;
+                    }
+                    const mag1 = 0.5 * (lo1 + hi1);
+                    if (evalW(sgnZ * mag1, 1) <= stripCap) {
+                      stripHitSpan = sgnZ * mag1 * W;
+                    } else if (runSpan >= 6600.0 && sgnZ * devW >= 5200.0) {
+                      let lo2 = 22.5;
+                      let hi2 = Math.max(23.0, (Math.abs(spanZ) + quantumUs) / W + 0.5);
+                      if (hi2 > 22.5) {
+                        for (let it = 0; it < 12; it++) {
+                          const m1 = lo2 + (hi2 - lo2) / 3.0;
+                          const m2 = hi2 - (hi2 - lo2) / 3.0;
+                          if (evalW(sgnZ * m1, 4) <= evalW(sgnZ * m2, 4)) hi2 = m2;
+                          else lo2 = m1;
+                        }
+                        const mag2 = 0.5 * (lo2 + hi2);
+                        if (evalW(sgnZ * mag2, 1) <= stripCap) {
+                          const preMin = s.stripPreMin;
+                          const preMax = s.stripPreMax;
+                          const sufMin = s.stripSufMin;
+                          const sufMax = s.stripSufMax;
+                          preMin[0] = y[0];
+                          preMax[0] = y[0];
+                          for (let m = 1; m <= W; m++) {
+                            preMin[m] = Math.min(preMin[m - 1], y[m]);
+                            preMax[m] = Math.max(preMax[m - 1], y[m]);
+                          }
+                          sufMin[W] = y[W];
+                          sufMax[W] = y[W];
+                          for (let m = W - 1; m >= 0; m--) {
+                            sufMin[m] = Math.min(sufMin[m + 1], y[m]);
+                            sufMax[m] = Math.max(sufMax[m + 1], y[m]);
+                          }
+                          const Lr = 88;
+                          const pCap = quantumUs + 15.0;
+                          let isShift =
+                            sufMax[Lr] - sufMin[Lr] <= pCap ||
+                            preMax[W - Lr] - preMin[W - Lr] <= pCap;
+                          for (let m0 = 0; !isShift && m0 + Lr <= W; m0 += 2) {
+                            if (preMax[m0] - preMin[m0] <= pCap && sufMax[m0 + Lr] - sufMin[m0 + Lr] <= pCap) {
+                              isShift = true;
+                            }
+                          }
+                          if (!isShift) {
+                            stripHitSpan = sgnZ * mag2 * W;
+                          }
+                        }
+                      }
+                    }
+                    if (stripHitSpan !== 0.0) {
+                      const tStrip = softThreshSkew(stripHitSpan, 2500.0);
+                      if (Math.abs(tStrip) > Math.abs(trendSkew)) trendSkew = tStrip;
+                    }
+                  }
                 }
 
                 if (trendSkew > 500.0) s.driftSign = 1;

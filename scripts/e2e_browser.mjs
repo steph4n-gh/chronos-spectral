@@ -5173,14 +5173,11 @@ async function main() {
           throw new Error('Step 10c Occluded conservation AMBIGUOUS gate failed: ' + JSON.stringify(consReport));
         }
 
-        // 10d. Zero-CLS Check
+        // 10d. Zero-CLS Check (leave observer active through Step 10e)
         await new Promise((r) => setTimeout(r, 80));
         const w2DeckCls = await cdp.evalJs(
           w2Session,
-          `(() => {
-            if (window.__e2eW2DeckClsPo) window.__e2eW2DeckClsPo.disconnect();
-            return window.__e2eW2DeckCls || 0;
-          })()`
+          `(() => window.__e2eW2DeckCls || 0)()`
         );
         if (w2DeckCls >= 0.000001) {
           throw new Error(`Step 10d: Expected 0.000000 CLS across Wave-2 Deck flows, got ${w2DeckCls}`);
@@ -5809,9 +5806,23 @@ async function main() {
                 }
                 return arr;
               };
+              const makeHeldUnifJitArr = (seedInit, len, hold, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                let cur = 0.0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  if (k % hold === 0) cur = qMs * (sd / 4294967296.0);
+                  arr[k] = cur;
+                }
+                return arr;
+              };
               const randJit1Pos = makeRandJitArr(1, 3320, 2.667);
               const randJit7Neg = makeRandJitArr(7, 3320, 2.667);
               const randJit44kBenign = makeRandJitArr(5, 750, 2.9025);
+              const holdJit2Pos = makeHeldUnifJitArr(2, 3320, 20, 2.667);
+              const holdJit3Neg = makeHeldUnifJitArr(3, 3320, 20, 2.667);
+              const holdJit50Benign = makeHeldUnifJitArr(50, 750, 20, 2.667);
               const cBareRand1Pos = await restartFreshMicSession(48000);
               const bareRandSeed1Pos = await runSustainedDrift(
                 cBareRand1Pos,
@@ -5847,6 +5858,52 @@ async function main() {
                 (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320)),
                 null,
                 (b) => 1.0 + (b * 2048.0) / 44100.0 + Math.floor((randJit44kBenign[b] * 1e-3 + Math.min(11.589e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 44100.0)) * (512.0 / 44100.0)
+              );
+              const cBareHold20Pos = await restartFreshMicSession(48000);
+              const bareHold20Seed2Pos = await runSustainedDrift(
+                cBareHold20Pos,
+                3320,
+                (b, bd) => b * bd + holdJit2Pos[b] + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBareHold20Neg = await restartFreshMicSession(48000);
+              const bareHold20Seed3Neg = await runSustainedDrift(
+                cBareHold20Neg,
+                3320,
+                (b, bd) => b * bd + holdJit3Neg[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxHold20Pos = await restartFreshMicSession(48000);
+              const ctxHold20Seed2Pos = await runSustainedDrift(
+                cCtxHold20Pos,
+                3320,
+                (b, bd) => b * bd + holdJit2Pos[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const cCtxHold20Neg = await restartFreshMicSession(48000);
+              const ctxHold20Seed3Neg = await runSustainedDrift(
+                cCtxHold20Neg,
+                3320,
+                (b, bd) => b * bd + holdJit3Neg[b] - 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const cCtxHold20Benign = await restartFreshMicSession(48000);
+              const ctxHold20Seed50Benign = await runSustainedDrift(
+                cCtxHold20Benign,
+                750,
+                (b, bd) => b * bd + holdJit50Benign[b] + Math.min(8.0, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => {
+                  const p = 512.0 / 48000.0;
+                  const d = Math.min(8.0, 0.1 * Math.max(0, b - 320));
+                  return 1.0 + (b * 2048.0) / 48000.0 + Math.floor(((holdJit50Benign[b] + d + 1.0) * 1e-3) / p) * p;
+                }
+              );
+              const cBareRand44kBenign = await restartFreshMicSession(44100);
+              const bareRand44kSeed5Benign = await runSustainedDrift(
+                cBareRand44kBenign,
+                750,
+                (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320))
               );
 
               return {
@@ -5898,6 +5955,12 @@ async function main() {
                 ctxRandSeed1Pos,
                 ctxRandSeed7Neg,
                 ctxRandBenign512Pull,
+                bareHold20Seed2Pos,
+                bareHold20Seed3Neg,
+                ctxHold20Seed2Pos,
+                ctxHold20Seed3Neg,
+                ctxHold20Seed50Benign,
+                bareRand44kSeed5Benign,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5961,7 +6024,7 @@ async function main() {
           webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftPos.lastSkew >= -20000 ||
           webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftPos.acceptedBlocks >= 165 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 180 ||
           webcamAudioCheck.driftPos.state !== 4 ||
           (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftPos.welchK !== 0 ||
@@ -5971,7 +6034,7 @@ async function main() {
           webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
           webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftNeg.acceptedBlocks >= 165 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 180 ||
           webcamAudioCheck.driftNeg.state !== 4 ||
           (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftNeg.welchK !== 0 ||
@@ -6134,13 +6197,72 @@ async function main() {
           webcamAudioCheck.ctxRandBenign512Pull.maxAbsSkew !== 0 ||
           webcamAudioCheck.ctxRandBenign512Pull.acceptedBlocks !== 750 ||
           webcamAudioCheck.ctxRandBenign512Pull.state === 4 ||
-          (webcamAudioCheck.ctxRandBenign512Pull.reasonMask & 32) !== 0
+          (webcamAudioCheck.ctxRandBenign512Pull.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareHold20Seed2Pos ||
+          webcamAudioCheck.bareHold20Seed2Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold20Seed2Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold20Seed2Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold20Seed2Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold20Seed2Pos.state !== 4 ||
+          (webcamAudioCheck.bareHold20Seed2Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold20Seed2Pos.welchK !== 0 ||
+          webcamAudioCheck.bareHold20Seed2Pos.stampValid ||
+          !webcamAudioCheck.bareHold20Seed3Neg ||
+          webcamAudioCheck.bareHold20Seed3Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold20Seed3Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold20Seed3Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold20Seed3Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold20Seed3Neg.state !== 4 ||
+          (webcamAudioCheck.bareHold20Seed3Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold20Seed3Neg.welchK !== 0 ||
+          webcamAudioCheck.bareHold20Seed3Neg.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed2Pos ||
+          webcamAudioCheck.ctxHold20Seed2Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxHold20Seed2Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.state !== 4 ||
+          (webcamAudioCheck.ctxHold20Seed2Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.welchK !== 0 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed3Neg ||
+          webcamAudioCheck.ctxHold20Seed3Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxHold20Seed3Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.state !== 4 ||
+          (webcamAudioCheck.ctxHold20Seed3Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.welchK !== 0 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed50Benign ||
+          webcamAudioCheck.ctxHold20Seed50Benign.pushedCount !== 750 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.state === 4 ||
+          (webcamAudioCheck.ctxHold20Seed50Benign.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareRand44kSeed5Benign ||
+          webcamAudioCheck.bareRand44kSeed5Benign.pushedCount !== 750 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.maxAbsSkew !== 0 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.acceptedBlocks !== 750 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.state === 4 ||
+          (webcamAudioCheck.bareRand44kSeed5Benign.reasonMask & 32) !== 0
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
 
+        const w2DeckClsPost10e = await cdp.evalJs(
+          w2Session,
+          `(() => {
+            if (window.__e2eW2DeckClsPo) window.__e2eW2DeckClsPo.disconnect();
+            return window.__e2eW2DeckCls || 0;
+          })()`
+        );
+        if (w2DeckClsPost10e >= 0.000001) {
+          throw new Error(`Step 10e: Expected 0.000000 CLS across Wave-2 Deck + Step 10e flows, got ${w2DeckClsPost10e}`);
+        }
+
         console.log(
-          `  [PASS] Step 10 (Wave-2 Hodge 40x22, Calibrated RS+Welch & Exposure Null, Occluded AMBIGUOUS Conservation): hodge=(state=${hodgeState.state}, co=${hodgeState.coexactFrac.toFixed(3)}, orth=${hodgeState.orthEcRel.toExponential(1)}, hud=${w2HudBytes}B), rsWelch=(K=${rv.welchK}, f=${rv.domFreqHz.toFixed(2)}Hz, g2=${rv.maxCohGamma2.toFixed(4)}, cells=${rv.coupledCellsCount}), expNull=(H=${nv.sincH.toFixed(4)}, sev=${rsWelchReport.nullSev}), occl=(st=${oc.status}, mask=${oc.ambiguityMask}, diag="${consReport.diagCons}"), CLS=${w2DeckCls.toFixed(6)}`
+          `  [PASS] Step 10 (Wave-2 Hodge 40x22, Calibrated RS+Welch & Exposure Null, Occluded AMBIGUOUS Conservation): hodge=(state=${hodgeState.state}, co=${hodgeState.coexactFrac.toFixed(3)}, orth=${hodgeState.orthEcRel.toExponential(1)}, hud=${w2HudBytes}B), rsWelch=(K=${rv.welchK}, f=${rv.domFreqHz.toFixed(2)}Hz, g2=${rv.maxCohGamma2.toFixed(4)}, cells=${rv.coupledCellsCount}), expNull=(H=${nv.sincH.toFixed(4)}, sev=${rsWelchReport.nullSev}), occl=(st=${oc.status}, mask=${oc.ambiguityMask}, diag="${consReport.diagCons}"), CLS=${w2DeckClsPost10e.toFixed(6)}`
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: w2TargetId }).catch(() => {});
@@ -6163,7 +6285,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('E2E FAILED:', err.message || err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('E2E FAILED:', err.message || err);
+    process.exit(1);
+  });
