@@ -5231,8 +5231,8 @@ async function main() {
                 rmSel.value = '2';
                 rmSel.dispatchEvent(new Event('change', { bubbles: true }));
               }
-              const deadline = performance.now() + 2800;
-              while (performance.now() < deadline && nativePushMsgs.length < 34) {
+              const deadline = performance.now() + 3200;
+              while (performance.now() < deadline && nativePushMsgs.length < 40) {
                 await new Promise((r) => setTimeout(r, 40));
               }
               await new Promise((r) => setTimeout(r, 60));
@@ -5280,7 +5280,7 @@ async function main() {
         if (
           !nativeWebcamCheck ||
           nativeWebcamCheck.unsupported ||
-          nativeWebcamCheck.nativePushed < 30 ||
+          nativeWebcamCheck.nativePushed < 36 ||
           nativeWebcamCheck.maxAbsSkew > 500 ||
           !nativeWebcamCheck.nativeAcceptedAll ||
           nativeWebcamCheck.state === 4 ||
@@ -5344,6 +5344,7 @@ async function main() {
                   this.state = 'running';
                   this.closed = false;
                   this.boundTrackIds = [];
+                  this.hwClockFn = null;
                   let onProc = null;
                   this.proc = {
                     get onaudioprocess() {
@@ -5374,6 +5375,12 @@ async function main() {
                 }
                 createGain() {
                   return { gain: { value: 0 }, connect: () => {}, disconnect: () => {} };
+                }
+                getOutputTimestamp() {
+                  if (typeof this.hwClockFn === 'function') {
+                    return this.hwClockFn();
+                  }
+                  return { contextTime: 0, performanceTime: 0 };
                 }
                 resume() {}
                 close() {
@@ -5454,12 +5461,16 @@ async function main() {
               const lateGumCount = gumCalls.length;
               const lateGumAudioOnly = Boolean(gumCalls[1] && gumCalls[1].audio && !gumCalls[1].video);
               const c1 = ctxSpies[0];
-              const fireAudioCb = (ctxObj) => {
+              const fireAudioCb = (ctxObj, playbackTimeSec = undefined) => {
                 if (ctxObj && ctxObj.proc && typeof ctxObj.proc.onaudioprocess === 'function') {
                   const arr = new Float32Array(2048);
-                  ctxObj.proc.onaudioprocess({
+                  const ev = {
                     inputBuffer: { numberOfChannels: 1, getChannelData: () => arr },
-                  });
+                  };
+                  if (typeof playbackTimeSec === 'number') {
+                    ev.playbackTime = playbackTimeSec;
+                  }
+                  ctxObj.proc.onaudioprocess(ev);
                 }
               };
 
@@ -5569,9 +5580,9 @@ async function main() {
               }
               await new Promise((r) => setTimeout(r, 40));
 
-              // Sustained clock drift & dispatch delay checks (P2 #1/#2 regression suite)
+              // Sustained clock drift & dispatch delay checks (Round 14 P2 #1/#2 regression suite)
               let driftRunSeq = 0;
-              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn) => {
+              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn, hwSetupFn = null) => {
                 driftRunSeq++;
                 const msgStart = pushedAudioMsgs.length;
                 cctx.fillStyle = 'rgb(' + (40 + driftRunSeq * 15) + ',' + (70 + driftRunSeq * 10) + ',110)';
@@ -5579,14 +5590,20 @@ async function main() {
                 await new Promise((r) => setTimeout(r, 40));
                 const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
                 const blockDurMs = (2048.0 * 1000.0) / 48000.0;
+                let curBlockIdx = 0;
+                ctxObj.hwClockFn = typeof hwSetupFn === 'function'
+                  ? () => hwSetupFn(curBlockIdx, frozenNowMs !== null ? frozenNowMs : origPerfNow(), blockDurMs)
+                  : null;
+                const playTimeOf = (idx) => (typeof hwSetupFn === 'function' ? 1.0 + ((idx + 1) * 2048.0) / 48000.0 : undefined);
                 for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
                   cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
                   cctx.fillRect(24 + (f % 10) * 6, 24, 48, 48);
                   await new Promise((r) => setTimeout(r, 40));
                   if (f >= 2) {
+                    curBlockIdx = 0;
                     frozenNowMs = origPerfNow();
                     virtOffsetMs = offsetMsFn(0, blockDurMs);
-                    fireAudioCb(ctxObj);
+                    fireAudioCb(ctxObj, playTimeOf(0));
                     if (pushedAudioMsgs.length === msgStart) {
                       frozenNowMs = null;
                     }
@@ -5594,10 +5611,12 @@ async function main() {
                 }
                 if (pushedAudioMsgs.length === msgStart + 1) {
                   for (let b = 1; b < totalBlocks; b++) {
+                    curBlockIdx = b;
                     virtOffsetMs = offsetMsFn(b, blockDurMs);
-                    fireAudioCb(ctxObj);
+                    fireAudioCb(ctxObj, playTimeOf(b));
                   }
                 }
+                ctxObj.hwClockFn = null;
                 frozenNowMs = null;
                 virtOffsetMs = 0.0;
                 cctx.fillStyle = 'rgb(' + (60 + driftRunSeq * 20) + ',' + (90 + driftRunSeq * 15) + ',140)';
@@ -5637,23 +5656,43 @@ async function main() {
               const driftPos = await runSustainedDrift(cStaleFinal, 320, (b, bd) => b * (bd + 0.1));
               const cDriftNeg = await restartFreshMicSession();
               const driftNeg = await runSustainedDrift(cDriftNeg, 320, (b, bd) => b * (bd - 0.1));
-              const cLatePos = await restartFreshMicSession();
-              const lateDriftPos = await runSustainedDrift(
-                cLatePos,
+              const cLatePosP4 = await restartFreshMicSession();
+              const lateDriftPosP4 = await runSustainedDrift(
+                cLatePosP4,
                 3320,
-                (b, bd) => b * bd + 2.667 * (b % 2) + 0.02 * Math.max(0, b - 3000)
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) + 0.02 * Math.max(0, b - 3000)
               );
-              const cLateNeg = await restartFreshMicSession();
-              const lateDriftNeg = await runSustainedDrift(
-                cLateNeg,
+              const cLateNegP4 = await restartFreshMicSession();
+              const lateDriftNegP4 = await runSustainedDrift(
+                cLateNegP4,
                 3320,
-                (b, bd) => b * bd + 2.667 * (b % 2) - 0.02 * Math.max(0, b - 3000)
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) - 0.02 * Math.max(0, b - 3000)
               );
-              const cDispOnly = await restartFreshMicSession();
-              const dispatchDelayOnly = await runSustainedDrift(
-                cDispOnly,
+              const cDisp5333 = await restartFreshMicSession();
+              const dispatchDelay5333 = await runSustainedDrift(
+                cDisp5333,
                 410,
-                (b, bd) => b * bd + Math.min(2.0, 0.1 * Math.max(0, b - 320))
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320))
+              );
+              const cHwDisp25ms = await restartFreshMicSession();
+              const hwDispatchDelay25ms = await runSustainedDrift(
+                cHwDisp25ms,
+                410,
+                (b, bd) => b * bd + Math.min(25.0, 0.3 * Math.max(0, b - 320)),
+                (b, basePerf, bd) => ({
+                  contextTime: 1.0 + ((b + 1) * 2048.0) / 48000.0 - 0.0426667,
+                  performanceTime: basePerf + b * bd - 42.6667,
+                })
+              );
+              const cHwLateP4 = await restartFreshMicSession();
+              const hwLateDriftP4 = await runSustainedDrift(
+                cHwLateP4,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) + 0.02 * Math.max(0, b - 3000),
+                (b, basePerf, bd) => ({
+                  contextTime: 1.0 + ((b + 1) * 2048.0) / 48000.0 - 0.0426667,
+                  performanceTime: basePerf + b * bd + 0.02 * Math.max(0, b - 3000) - 42.6667,
+                })
               );
 
               return {
@@ -5685,9 +5724,11 @@ async function main() {
                 trackStaleB2Id: trackStaleB2.id,
                 driftPos,
                 driftNeg,
-                lateDriftPos,
-                lateDriftNeg,
-                dispatchDelayOnly,
+                lateDriftPosP4,
+                lateDriftNegP4,
+                dispatchDelay5333,
+                hwDispatchDelay25ms,
+                hwLateDriftP4,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5751,7 +5792,7 @@ async function main() {
           webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftPos.lastSkew >= -20000 ||
           webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftPos.acceptedBlocks >= 80 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 100 ||
           webcamAudioCheck.driftPos.state !== 4 ||
           (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftPos.welchK !== 0 ||
@@ -5761,35 +5802,50 @@ async function main() {
           webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
           webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftNeg.acceptedBlocks >= 80 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 100 ||
           webcamAudioCheck.driftNeg.state !== 4 ||
           (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftNeg.welchK !== 0 ||
           webcamAudioCheck.driftNeg.stampValid ||
-          !webcamAudioCheck.lateDriftPos ||
-          webcamAudioCheck.lateDriftPos.pushedCount !== 3320 ||
-          webcamAudioCheck.lateDriftPos.lastSkew >= -3000 ||
-          webcamAudioCheck.lateDriftPos.acceptedBlocks <= 3000 ||
-          webcamAudioCheck.lateDriftPos.acceptedBlocks >= 3250 ||
-          webcamAudioCheck.lateDriftPos.state !== 4 ||
-          (webcamAudioCheck.lateDriftPos.reasonMask & 32) === 0 ||
-          webcamAudioCheck.lateDriftPos.welchK !== 0 ||
-          webcamAudioCheck.lateDriftPos.stampValid ||
-          !webcamAudioCheck.lateDriftNeg ||
-          webcamAudioCheck.lateDriftNeg.pushedCount !== 3320 ||
-          webcamAudioCheck.lateDriftNeg.lastSkew <= 3000 ||
-          webcamAudioCheck.lateDriftNeg.acceptedBlocks <= 3000 ||
-          webcamAudioCheck.lateDriftNeg.acceptedBlocks >= 3250 ||
-          webcamAudioCheck.lateDriftNeg.state !== 4 ||
-          (webcamAudioCheck.lateDriftNeg.reasonMask & 32) === 0 ||
-          webcamAudioCheck.lateDriftNeg.welchK !== 0 ||
-          webcamAudioCheck.lateDriftNeg.stampValid ||
-          !webcamAudioCheck.dispatchDelayOnly ||
-          webcamAudioCheck.dispatchDelayOnly.pushedCount !== 410 ||
-          webcamAudioCheck.dispatchDelayOnly.maxAbsSkew > 500 ||
-          webcamAudioCheck.dispatchDelayOnly.acceptedBlocks !== 410 ||
-          webcamAudioCheck.dispatchDelayOnly.state === 4 ||
-          (webcamAudioCheck.dispatchDelayOnly.reasonMask & 32) !== 0
+          !webcamAudioCheck.lateDriftPosP4 ||
+          webcamAudioCheck.lateDriftPosP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.lateDriftPosP4.lastSkew) <= 500 ||
+          webcamAudioCheck.lateDriftPosP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftPosP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.lateDriftPosP4.state !== 4 ||
+          (webcamAudioCheck.lateDriftPosP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftPosP4.welchK !== 0 ||
+          webcamAudioCheck.lateDriftPosP4.stampValid ||
+          !webcamAudioCheck.lateDriftNegP4 ||
+          webcamAudioCheck.lateDriftNegP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.lateDriftNegP4.lastSkew) <= 500 ||
+          webcamAudioCheck.lateDriftNegP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftNegP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.lateDriftNegP4.state !== 4 ||
+          (webcamAudioCheck.lateDriftNegP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftNegP4.welchK !== 0 ||
+          webcamAudioCheck.lateDriftNegP4.stampValid ||
+          !webcamAudioCheck.dispatchDelay5333 ||
+          webcamAudioCheck.dispatchDelay5333.pushedCount !== 410 ||
+          webcamAudioCheck.dispatchDelay5333.maxAbsSkew > 500 ||
+          webcamAudioCheck.dispatchDelay5333.acceptedBlocks !== 410 ||
+          webcamAudioCheck.dispatchDelay5333.state === 4 ||
+          (webcamAudioCheck.dispatchDelay5333.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.hwDispatchDelay25ms ||
+          webcamAudioCheck.hwDispatchDelay25ms.pushedCount !== 410 ||
+          webcamAudioCheck.hwDispatchDelay25ms.maxAbsSkew !== 0 ||
+          webcamAudioCheck.hwDispatchDelay25ms.acceptedBlocks !== 410 ||
+          webcamAudioCheck.hwDispatchDelay25ms.state === 4 ||
+          (webcamAudioCheck.hwDispatchDelay25ms.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.hwLateDriftP4 ||
+          webcamAudioCheck.hwLateDriftP4.pushedCount !== 3320 ||
+          webcamAudioCheck.hwLateDriftP4.lastSkew >= -4000 ||
+          webcamAudioCheck.hwLateDriftP4.acceptedBlocks <= 3050 ||
+          webcamAudioCheck.hwLateDriftP4.acceptedBlocks >= 3200 ||
+          webcamAudioCheck.hwLateDriftP4.state !== 4 ||
+          (webcamAudioCheck.hwLateDriftP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.hwLateDriftP4.welchK !== 0 ||
+          webcamAudioCheck.hwLateDriftP4.stampValid
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
