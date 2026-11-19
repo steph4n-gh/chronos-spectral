@@ -57,6 +57,8 @@ function launchHeadlessChrome(chromeBin, userDataDir) {
     '--no-default-browser-check',
     '--autoplay-policy=no-user-gesture-required',
     '--mute-audio',
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--disable-backgrounding-occluded-windows',
@@ -5184,7 +5186,110 @@ async function main() {
           throw new Error(`Step 10d: Expected 0.000000 CLS across Wave-2 Deck flows, got ${w2DeckCls}`);
         }
 
-        // 10e. Webcam Live Audio Anchoring & Track Replacement Lifecycle (Zero Startup Skew)
+        // 10e. Webcam Live Audio Anchoring (Native Fake Webcam + Mock Lifecycle Edge Cases)
+        const nativeWebcamCheck = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const origPostMessage = Worker.prototype.postMessage;
+            const origGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+              ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+              : null;
+            const nativePushMsgs = [];
+            const capturedStreams = [];
+            try {
+              if (!origGetUserMedia) {
+                return { unsupported: true };
+              }
+              navigator.mediaDevices.getUserMedia = async (constraints) => {
+                const st = await origGetUserMedia(constraints);
+                capturedStreams.push(st);
+                return st;
+              };
+              Worker.prototype.postMessage = function (data) {
+                if (data && data.type === 'push_audio_pcm') {
+                  nativePushMsgs.push({
+                    tEndUs: data.tEndUs,
+                    estSkewUs: data.estSkewUs,
+                    len: data.samples ? data.samples.length : 0,
+                  });
+                }
+                return origPostMessage.apply(this, arguments);
+              };
+
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              await new Promise((r) => setTimeout(r, 40));
+              document.getElementById('btnSrcWebcam')?.click();
+              await new Promise((r) => setTimeout(r, 220));
+              const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
+              nativePushMsgs.length = 0;
+
+              if (rmSel) {
+                rmSel.value = '2';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              const deadline = performance.now() + 2500;
+              while (performance.now() < deadline && nativePushMsgs.length < 26) {
+                await new Promise((r) => setTimeout(r, 40));
+              }
+              await new Promise((r) => setTimeout(r, 60));
+              const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              await new Promise((r) => setTimeout(r, 80));
+              const nativePushed = nativePushMsgs.length;
+              const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
+              const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
+              const postOffVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
+              const acceptedDelta = ((postOffVibro?.audioTotalSamples ?? 0) - samplesBefore) >>> 0;
+              const liveAudioAfterOff = capturedStreams.reduce(
+                (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
+                0
+              );
+              return {
+                unsupported: false,
+                nativePushed,
+                pushedSamplesSum,
+                acceptedDelta,
+                nativeAcceptedAll: acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
+                state: nativeVibro?.state ?? -1,
+                reasonMask: nativeVibro?.reasonMask ?? -1,
+                liveAudioAfterOff,
+                maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
+              };
+            } finally {
+              Worker.prototype.postMessage = origPostMessage;
+              if (origGetUserMedia) {
+                navigator.mediaDevices.getUserMedia = origGetUserMedia;
+              }
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+            }
+          })()`
+        );
+        if (
+          !nativeWebcamCheck ||
+          nativeWebcamCheck.unsupported ||
+          nativeWebcamCheck.nativePushed < 24 ||
+          nativeWebcamCheck.maxAbsSkew > 500 ||
+          !nativeWebcamCheck.nativeAcceptedAll ||
+          nativeWebcamCheck.state === 4 ||
+          (nativeWebcamCheck.reasonMask & 32) !== 0 ||
+          nativeWebcamCheck.liveAudioAfterOff !== 0
+        ) {
+          throw new Error('Step 10e native Chrome webcam + Web Audio live gate failed: ' + JSON.stringify(nativeWebcamCheck));
+        }
+
         const webcamAudioCheck = await cdp.evalJs(
           w2Session,
           `(async () => {
@@ -5203,22 +5308,52 @@ async function main() {
             const d1 = realAc.createMediaStreamDestination();
             const d2 = realAc.createMediaStreamDestination();
             const d3 = realAc.createMediaStreamDestination();
+            const dComb = realAc.createMediaStreamDestination();
+            const dStaleA = realAc.createMediaStreamDestination();
+            const dStaleB1 = realAc.createMediaStreamDestination();
+            const dStaleB2 = realAc.createMediaStreamDestination();
             const trackA = d1.stream.getAudioTracks()[0];
             const trackB = d2.stream.getAudioTracks()[0];
             const trackC = d3.stream.getAudioTracks()[0];
+            const trackComb = dComb.stream.getAudioTracks()[0];
+            const trackStaleA = dStaleA.stream.getAudioTracks()[0];
+            const trackStaleB1 = dStaleB1.stream.getAudioTracks()[0];
+            const trackStaleB2 = dStaleB2.stream.getAudioTracks()[0];
             const stream = canvas.captureStream(30);
             const micOnlyStream = new MediaStream([trackA]);
+            const combStream = canvas.captureStream(30);
+            combStream.addTrack(trackComb);
+            const streamStaleA = canvas.captureStream(30);
+            const streamStaleB = canvas.captureStream(30);
+            let pendingResolveA = null;
+            let pendingResolveB1 = null;
+            let gumMode = 'normal';
             const gumCalls = [];
             try {
               const ctxSpies = [];
+              let firePrePumpOnNextAssign = false;
+              let prePumpCount = -1;
+              let msgsBeforeComb = 0;
               class MockAudioContext {
                 constructor() {
                   this.sampleRate = 48000;
                   this.state = 'running';
                   this.closed = false;
                   this.boundTrackIds = [];
+                  let onProc = null;
                   this.proc = {
-                    onaudioprocess: null,
+                    get onaudioprocess() {
+                      return onProc;
+                    },
+                    set onaudioprocess(fn) {
+                      onProc = fn;
+                      if (typeof fn === 'function' && firePrePumpOnNextAssign) {
+                        firePrePumpOnNextAssign = false;
+                        const arr = new Float32Array(2048);
+                        fn({ inputBuffer: { numberOfChannels: 1, getChannelData: () => arr } });
+                        prePumpCount = pushedAudioMsgs.length - msgsBeforeComb;
+                      }
+                    },
                     connect: () => {},
                     disconnect: () => {},
                   };
@@ -5266,6 +5401,20 @@ async function main() {
                       video: Boolean(constraints && constraints.video),
                       audio: Boolean(constraints && constraints.audio),
                     });
+                    if (gumMode === 'combined') {
+                      return combStream;
+                    }
+                    if (gumMode === 'stale_a_vid') return streamStaleA;
+                    if (gumMode === 'stale_a_mic') {
+                      return new Promise((res) => { pendingResolveA = res; });
+                    }
+                    if (gumMode === 'stale_b_vid') return streamStaleB;
+                    if (gumMode === 'stale_b1_mic') {
+                      return new Promise((res) => { pendingResolveB1 = res; });
+                    }
+                    if (gumMode === 'stale_b2_mic') {
+                      return new MediaStream([trackStaleB2]);
+                    }
                     return constraints && constraints.audio && !constraints.video ? micOnlyStream : stream;
                   },
                 },
@@ -5303,10 +5452,6 @@ async function main() {
                   });
                 }
               };
-
-              // Pre-pump callback (videoEl.currentTime === 0) must NOT lock in 42667 us skew
-              fireAudioCb(c1);
-              const prePumpCount = pushedAudioMsgs.length;
 
               // Pump frames until rVFC initializes pump ref; dispatch first post-pump callback 5.0 ms late
               for (let f = 0; f < 30 && pushedAudioMsgs.length === 0; f++) {
@@ -5351,18 +5496,71 @@ async function main() {
               await new Promise((r) => setTimeout(r, 25));
               const cLast = ctxSpies[ctxSpies.length - 1] || null;
 
+              const gumCountAfterNormal = gumCalls.length;
+              const ctxCountBeforeExtra = ctxSpies.length;
+
+              // Combined webcam+mic start -> trigger synchronous pre-pump callback -> selecting RS Off stops/detaches audio track
+              gumMode = 'combined';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              msgsBeforeComb = pushedAudioMsgs.length;
+              firePrePumpOnNextAssign = true;
+              document.getElementById('btnSrcWebcam')?.click();
+              for (let i = 0; i < 40 && ctxSpies.length === ctxCountBeforeExtra; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              await new Promise((r) => setTimeout(r, 40));
+              const combAudioEndedAfterOff = trackComb.readyState === 'ended';
+              const combTracksLeftAfterOff = combStream.getAudioTracks().length;
+
+              // Stale pending mic A resolving while request B1 is pending + Off->Welch B2 stops A & B1 and attaches only B2
+              gumMode = 'stale_a_vid';
+              document.getElementById('btnSrcWebcam')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+              gumMode = 'stale_a_mic';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 20 && !pendingResolveA; i++) {
+                await new Promise((r) => setTimeout(r, 15));
+              }
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 25));
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              gumMode = 'stale_b_vid';
+              document.getElementById('btnSrcWebcam')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+              gumMode = 'stale_b1_mic';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 20 && !pendingResolveB1; i++) {
+                await new Promise((r) => setTimeout(r, 15));
+              }
+              if (pendingResolveA) pendingResolveA(new MediaStream([trackStaleA]));
+              await new Promise((r) => setTimeout(r, 20));
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              gumMode = 'stale_b2_mic';
+              const ctxBeforeB2 = ctxSpies.length;
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 40 && ctxSpies.length === ctxBeforeB2; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              if (pendingResolveB1) pendingResolveB1(new MediaStream([trackStaleB1]));
+              await new Promise((r) => setTimeout(r, 40));
+              const cStaleFinal = ctxSpies[ctxSpies.length - 1] || null;
+              const staleATracksEnded = trackStaleA.readyState === 'ended';
+              const staleB1TracksEnded = trackStaleB1.readyState === 'ended';
+              const staleBTracksIds = streamStaleB.getAudioTracks().map((tr) => tr.id);
+
               return {
                 initialGumCount,
                 initialGumAudio,
                 ctxBeforeWelch,
                 lateGumCount,
                 lateGumAudioOnly,
-                gumCountFinal: gumCalls.length,
+                gumCountFinal: gumCountAfterNormal,
                 ctxCountDuringGap,
                 c1ClosedDuringGap,
                 ctxCountAfterGapAdd,
                 c2Closed: Boolean(c2 && c2.closed),
-                ctxCountFinal: ctxSpies.length,
+                ctxCountFinal: ctxCountBeforeExtra,
                 c2BoundTrackIds: c2 ? c2.boundTrackIds : [],
                 cLastBoundTrackIds: cLast ? cLast.boundTrackIds : [],
                 trackBId: trackB.id,
@@ -5371,6 +5569,13 @@ async function main() {
                 pushedCount: pushedAudioMsgs.length,
                 pushedSkews: pushedAudioMsgs.map((m) => m.estSkewUs),
                 postAudioReason,
+                combAudioEndedAfterOff,
+                combTracksLeftAfterOff,
+                staleATracksEnded,
+                staleB1TracksEnded,
+                staleBTracksIds,
+                staleFinalBoundIds: cStaleFinal ? cStaleFinal.boundTrackIds : [],
+                trackStaleB2Id: trackStaleB2.id,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5383,6 +5588,12 @@ async function main() {
                 delete navigator.mediaDevices;
               }
               stream.getTracks().forEach((tr) => tr.stop());
+              combStream.getTracks().forEach((tr) => tr.stop());
+              streamStaleA.getTracks().forEach((tr) => tr.stop());
+              streamStaleB.getTracks().forEach((tr) => tr.stop());
+              trackStaleA.stop();
+              trackStaleB1.stop();
+              trackStaleB2.stop();
               await realAc.close().catch(() => {});
               const rmSel = document.getElementById('rsVibroModeSelect');
               if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -5411,7 +5622,15 @@ async function main() {
           webcamAudioCheck.c2BoundTrackIds.length !== 1 ||
           webcamAudioCheck.c2BoundTrackIds[0] !== webcamAudioCheck.trackBId ||
           webcamAudioCheck.cLastBoundTrackIds.length !== 1 ||
-          webcamAudioCheck.cLastBoundTrackIds[0] !== webcamAudioCheck.trackCId
+          webcamAudioCheck.cLastBoundTrackIds[0] !== webcamAudioCheck.trackCId ||
+          !webcamAudioCheck.combAudioEndedAfterOff ||
+          webcamAudioCheck.combTracksLeftAfterOff !== 0 ||
+          !webcamAudioCheck.staleATracksEnded ||
+          !webcamAudioCheck.staleB1TracksEnded ||
+          webcamAudioCheck.staleBTracksIds.length !== 1 ||
+          webcamAudioCheck.staleBTracksIds[0] !== webcamAudioCheck.trackStaleB2Id ||
+          webcamAudioCheck.staleFinalBoundIds.length !== 1 ||
+          webcamAudioCheck.staleFinalBoundIds[0] !== webcamAudioCheck.trackStaleB2Id
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }

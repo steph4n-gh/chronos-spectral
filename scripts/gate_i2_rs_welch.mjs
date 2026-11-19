@@ -901,6 +901,78 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     `Next video frame after 36-sample PCM gap must remain WARMING with invalid stamp, got state=${t.state} valid=${t.stampValid}`
   );
 
+  // 1-sample gap at 192 kHz (4.333 us < previous 4.604 us tolerance) must immediately invalidate READY stamp
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 20.0, audioRateHz: 192000.0, maxSkewUs: 500.0 });
+  const t192 = 2_000_000;
+  let c192 = 0;
+  for (let f = 0; f < 30; f++) {
+    const tSrcUs = t192 + Math.round((f * 1e6) / 60);
+    const nextEnd = Math.round(((f + 1) / 60) * 192000);
+    while (c192 < nextEnd) {
+      const nChunk = Math.min(4096, nextEnd - c192);
+      pushAudioSamples({ startSampleIdx: c192, numSamples: nChunk, t0Us: t192, sampleRateHz: 192000.0, audioFn: sigAud });
+      c192 += nChunk;
+    }
+    pushFrame({ seq: f, tSrcUs, dtSec: 1 / 60, exposureUs: 20.0, dispFn: sigOpt });
+  }
+  assert(readTelem().state === RS_STATE_READY && readTelem().stampValid, '192 kHz must reach READY before 1-sample gap');
+  // Re-anchor exact 2933339 us block end then skip 1 sample and end next 128-sample block at 2934010 us (measured diff = 4.333 us)
+  initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 20.0, audioRateHz: 192000.0, maxSkewUs: 500.0 });
+  c192 = 0;
+  const sigOpt5625 = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * 562.5 * tSec + 0.3), 0.0];
+  const sigAud5625 = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * 562.5 * tSec + 0.1);
+  for (let f = 0; f < 28; f++) {
+    const tSrcUs = t192 + Math.round((f * 1e6) / 30);
+    const nextEnd = Math.round(((f + 1) / 30) * 192000);
+    while (c192 < nextEnd) {
+      const nChunk = Math.min(4096, nextEnd - c192);
+      pushAudioSamples({ startSampleIdx: c192, numSamples: nChunk, t0Us: t192, sampleRateHz: 192000.0, audioFn: sigAud5625 });
+      c192 += nChunk;
+    }
+    pushFrame({ seq: f, tSrcUs, dtSec: 1 / 30, exposureUs: 20.0, dispFn: sigOpt5625 });
+  }
+  assert(readTelem().state === RS_STATE_READY && readTelem().kSegs >= 8 && readTelem().stampValid, '192 kHz @ 30fps must be READY before 2933339->2934010 check');
+  for (let i = 0; i < 128; i++) audioStaging[i] = sigAud5625(i / 192000.0);
+  const [b1Lo, b1Hi] = splitU64(2_933_339n);
+  assert(exp.chronos_push_audio_block(128, b1Lo, b1Hi, 192000.0, 0.0) === 1, '192 kHz pre-gap block push failed');
+  const [b2Lo, b2Hi] = splitU64(2_934_010n);
+  assert(exp.chronos_push_audio_block(128, b2Lo, b2Hi, 192000.0, 0.0) === 1, '192 kHz post-gap block push failed');
+  t = readTelem();
+  assert(
+    t.state === RS_STATE_WARMING && t.kSegs === 0 && (t.reason & RS_REASON_AUDIO_UNDERRUN) !== 0 && !t.stampValid,
+    `1-sample gap at 192 kHz (4.333 us) must reset Welch and invalidate stamp, got state=${t.state} k=${t.kSegs} reason=${t.reason} valid=${t.stampValid}`
+  );
+
+  // RS_MODE_RS_ONLY must be completely isolated from audio gaps and audio faults
+  initSession({ mode: RS_MODE_RS_ONLY, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 0.0, maxSkewUs: 500.0 });
+  for (let f = 0; f < 26; f++) {
+    const tSrcUs = t0 + Math.round((f * 1e6) / 30);
+    pushFrame({
+      seq: f,
+      tSrcUs,
+      dispFn: (_sx, _sy, _ex, _ey, tSec) =>
+        tSec >= t0 * 1e-6 + 15.5 / 30.0 ? [0.45 * Math.cos(2.0 * Math.PI * 240.0 * tSec + 0.5), 0.0] : [0.0, 0.0],
+    });
+  }
+  const rsOnlyBefore = readTelem();
+  const rsOnlyAmpCopy = Float32Array.from(planesF32.subarray(VIBRO_PLANE_AMP, VIBRO_PLANE_AMP + VIBRO_CELLS));
+  assert(rsOnlyBefore.state === RS_STATE_READY && rsOnlyBefore.validCells === 880 && rsOnlyBefore.stampValid, 'Expected READY RS_ONLY before audio stress');
+  pushAudioSamples({ startSampleIdx: 0, numSamples: 1600, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+  pushAudioSamples({ startSampleIdx: 1601, numSamples: 1600, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
+  pushAudioSamples({ startSampleIdx: 3201, numSamples: 1600, t0Us: t0, sampleRateHz: 44100.0, audioFn: sigAud });
+  exp.chronos_push_audio_block(1600, 1_500_000, 0, 48000.0, NaN);
+  const rsOnlyAfter = readTelem();
+  assert(
+    rsOnlyAfter.state === RS_STATE_READY &&
+      rsOnlyAfter.validCells === 880 &&
+      rsOnlyAfter.stampValid &&
+      Math.abs(rsOnlyAfter.domFreqHz - rsOnlyBefore.domFreqHz) < 1e-3,
+    `RS_ONLY must stay READY with 880 validCells & valid stamp across audio gap/faults, got ${JSON.stringify(rsOnlyAfter)}`
+  );
+  for (let i = 0; i < VIBRO_CELLS; i++) {
+    assert(planesF32[VIBRO_PLANE_AMP + i] === rsOnlyAmpCopy[i], `RS_ONLY amplitude cell ${i} mutated by audio push`);
+  }
+
   // Sample-rate mismatch and non-finite PCM sample rejection keep DISTURBED across video gap + clean frames
   initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 25.0, exposureUs: 200.0, audioRateHz: 48000.0, maxSkewUs: 500.0 });
   sampleCursor = 0;
@@ -1080,6 +1152,90 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     assert(
       tsAccCut.state === RS_STATE_READY && tsAccCut.coupledCells === 880 && tsAccCut.maxCoh > tsAccCut.gamma2Crit && tsAccCut.maxCoh > 0.75,
       `Matched 4687.49993 Hz exact cutoff tone must couple all 880 cells, got state=${tsAccCut.state} coupled=${tsAccCut.coupledCells} g2=${tsAccCut.maxCoh}`
+    );
+
+    // Sub-bin OOB leakage through k_end - 2 when f_opt_max aligns with (k_end - 1) * df_hz:
+    // 1) 96 kHz, dtRowUs = 182.857131958 -> f_opt_max = 2625 Hz (bin 28), 2627 Hz audio must not couple at bin 27 (2531.25 Hz)
+    const dt96 = 182.857131958;
+    const fCut96 = 0.48 * 1_000_000.0 / Math.fround(dt96);
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: dt96, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    subCursor = 0;
+    const opt96 = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * fCut96 * tSec + 0.3), 0.0];
+    const aud96Oob = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * (fCut96 + 2.0) * tSec + 0.1);
+    for (let f = 0; f < 34; f++) {
+      const tSrcUs = t0 + f * 69_829;
+      const nextEnd = Math.round((f + 1) * 0.069829 * 96000.0);
+      while (subCursor < nextEnd) {
+        const nBlk = Math.min(4096, nextEnd - subCursor);
+        pushAudioSamples({ startSampleIdx: subCursor, numSamples: nBlk, t0Us: t0, sampleRateHz: 96000.0, audioFn: aud96Oob });
+        subCursor += nBlk;
+      }
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.069829, dtRowUs: dt96, exposureUs: 20.0, dispFn: opt96 });
+    }
+    const tsRej96 = readTelem();
+    assert(
+      tsRej96.state === RS_STATE_READY && tsRej96.coupledCells === 0,
+      `96 kHz 2627 Hz OOB tone must not couple at 2531.25 Hz, got state=${tsRej96.state} coupled=${tsRej96.coupledCells} f=${tsRej96.domFreqHz} g2=${tsRej96.maxCoh}`
+    );
+
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: dt96, exposureUs: 20.0, audioRateHz: 96000.0, maxSkewUs: 500.0 });
+    subCursor = 0;
+    const aud96Match = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * fCut96 * tSec + 0.1);
+    for (let f = 0; f < 34; f++) {
+      const tSrcUs = t0 + f * 69_829;
+      const nextEnd = Math.round((f + 1) * 0.069829 * 96000.0);
+      while (subCursor < nextEnd) {
+        const nBlk = Math.min(4096, nextEnd - subCursor);
+        pushAudioSamples({ startSampleIdx: subCursor, numSamples: nBlk, t0Us: t0, sampleRateHz: 96000.0, audioFn: aud96Match });
+        subCursor += nBlk;
+      }
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.069829, dtRowUs: dt96, exposureUs: 20.0, dispFn: opt96 });
+    }
+    const tsAcc96 = readTelem();
+    assert(
+      tsAcc96.state === RS_STATE_READY && tsAcc96.coupledCells === 880 && tsAcc96.maxCoh > 0.90,
+      `96 kHz matched 2625 Hz cutoff tone must couple all 880 cells, got state=${tsAcc96.state} coupled=${tsAcc96.coupledCells} g2=${tsAcc96.maxCoh}`
+    );
+
+    // 2) 192 kHz, dtRowUs = 64.0 -> f_opt_max = 7500 Hz (bin 40), 7502 Hz audio must not couple at bin 39 (7312.5 Hz)
+    const fCut192 = 0.48 * 1_000_000.0 / 64.0;
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 64.0, exposureUs: 20.0, audioRateHz: 192000.0, maxSkewUs: 500.0 });
+    subCursor = 0;
+    const opt192 = (_sx, _sy, _ex, _ey, tSec) => [0.15 * Math.cos(2.0 * Math.PI * fCut192 * tSec + 0.3), 0.0];
+    const aud192Oob = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * (fCut192 + 2.0) * tSec + 0.1);
+    for (let f = 0; f < 34; f++) {
+      const tSrcUs = t0 + f * 27_040;
+      const nextEnd = Math.round((f + 1) * 0.02704 * 192000.0);
+      while (subCursor < nextEnd) {
+        const nBlk = Math.min(4096, nextEnd - subCursor);
+        pushAudioSamples({ startSampleIdx: subCursor, numSamples: nBlk, t0Us: t0, sampleRateHz: 192000.0, audioFn: aud192Oob });
+        subCursor += nBlk;
+      }
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.02704, dtRowUs: 64.0, exposureUs: 20.0, dispFn: opt192 });
+    }
+    const tsRej192 = readTelem();
+    assert(
+      tsRej192.state === RS_STATE_READY && tsRej192.coupledCells === 0,
+      `192 kHz 7502 Hz OOB tone must not couple at 7312.5 Hz, got state=${tsRej192.state} coupled=${tsRej192.coupledCells} f=${tsRej192.domFreqHz} g2=${tsRej192.maxCoh}`
+    );
+
+    initSession({ mode: RS_MODE_RS_WELCH, dtRowUs: 64.0, exposureUs: 20.0, audioRateHz: 192000.0, maxSkewUs: 500.0 });
+    subCursor = 0;
+    const aud192Match = (tSec) => 0.5 * Math.cos(2.0 * Math.PI * fCut192 * tSec + 0.1);
+    for (let f = 0; f < 34; f++) {
+      const tSrcUs = t0 + f * 27_040;
+      const nextEnd = Math.round((f + 1) * 0.02704 * 192000.0);
+      while (subCursor < nextEnd) {
+        const nBlk = Math.min(4096, nextEnd - subCursor);
+        pushAudioSamples({ startSampleIdx: subCursor, numSamples: nBlk, t0Us: t0, sampleRateHz: 192000.0, audioFn: aud192Match });
+        subCursor += nBlk;
+      }
+      pushFrame({ seq: f, tSrcUs, dtSec: 0.02704, dtRowUs: 64.0, exposureUs: 20.0, dispFn: opt192 });
+    }
+    const tsAcc192 = readTelem();
+    assert(
+      tsAcc192.state === RS_STATE_READY && tsAcc192.coupledCells === 880 && tsAcc192.maxCoh > 0.90,
+      `192 kHz matched 7500 Hz cutoff tone must couple all 880 cells, got state=${tsAcc192.state} coupled=${tsAcc192.coupledCells} g2=${tsAcc192.maxCoh}`
     );
   }
 

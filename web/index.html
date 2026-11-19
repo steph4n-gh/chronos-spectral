@@ -4678,9 +4678,16 @@
     let rsAudioAnchorRefineLeft = 0;
     let rsAudioTrackPollId = 0;
     let rsAudioMicReqStream = null;
-    let rsAudioMicReqInFlight = false;
+    let rsAudioMicReqSeq = 0;
+    let rsAudioMicInFlightSeq = 0;
     let rsSupplementalFallbackTrack = null;
-    let rsSupplementalOwnedTracks = [];
+    let rsOwnedWebcamAudioTracks = [];
+    let rsVidClockOffsetUs = 0.0;
+    let rsVidClockValid = false;
+    let rsAudioLastSentTEndUs = 0;
+    let rsAudioBaselineDiffUs = 0.0;
+    let rsAudioFilteredDiffUs = 0.0;
+    let rsAudioSkewWarmCount = 0;
 
     function clearRsAudioTrackPoll() {
       if (rsAudioTrackPollId) {
@@ -4690,8 +4697,8 @@
     }
 
     function stopRsSupplementalMic(streamForDetach = null) {
-      const owned = rsSupplementalOwnedTracks;
-      rsSupplementalOwnedTracks = [];
+      const owned = rsOwnedWebcamAudioTracks;
+      rsOwnedWebcamAudioTracks = [];
       rsSupplementalFallbackTrack = null;
       for (let i = 0; i < owned.length; i++) {
         const trk = owned[i];
@@ -4775,19 +4782,15 @@
       rsAudioCaptureCursor = 0;
       rsAudioCaptureAnchored = false;
       rsAudioAnchorRefineLeft = 0;
+      rsAudioLastSentTEndUs = 0;
+      rsAudioBaselineDiffUs = 0.0;
+      rsAudioFilteredDiffUs = 0.0;
+      rsAudioSkewWarmCount = 0;
       if (unwatchStream) {
-        if (rsSupplementalOwnedTracks.length > 0 || rsSupplementalFallbackTrack) {
-          stopRsSupplementalMic(activeMediaStream);
-          if (rsAudioMicReqStream === activeMediaStream) {
-            rsAudioMicReqStream = null;
-          }
-        } else if (
-          !rsAudioMicReqInFlight &&
-          rsAudioMicReqStream === activeMediaStream &&
-          !getLiveAudioTrack(activeMediaStream)
-        ) {
-          rsAudioMicReqStream = null;
-        }
+        rsAudioMicReqSeq++;
+        rsAudioMicInFlightSeq = 0;
+        stopRsSupplementalMic(activeMediaStream);
+        rsAudioMicReqStream = null;
       }
     }
 
@@ -4844,7 +4847,7 @@
     function requestRsLiveMicrophone(targetStream, reqEpoch) {
       if (
         !targetStream ||
-        rsAudioMicReqInFlight ||
+        rsAudioMicInFlightSeq !== 0 ||
         rsAudioMicReqStream === targetStream ||
         activeSourceMode !== 'webcam' ||
         !navigator.mediaDevices ||
@@ -4853,11 +4856,20 @@
         return;
       }
       rsAudioMicReqStream = targetStream;
-      rsAudioMicReqInFlight = true;
+      const myReqSeq = ++rsAudioMicReqSeq;
+      rsAudioMicInFlightSeq = myReqSeq;
       Promise.resolve()
         .then(() => navigator.mediaDevices.getUserMedia({ audio: true, video: false }))
         .then((micStream) => {
-          rsAudioMicReqInFlight = false;
+          if (myReqSeq !== rsAudioMicInFlightSeq) {
+            if (micStream && micStream !== activeMediaStream && typeof micStream.getTracks === 'function') {
+              micStream.getTracks().forEach((t) => {
+                if (t && typeof t.stop === 'function') t.stop();
+              });
+            }
+            return;
+          }
+          rsAudioMicInFlightSeq = 0;
           const rmNow = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
           const stillValid =
             reqEpoch === sourceEpoch &&
@@ -4894,8 +4906,8 @@
             }
           }
           if (!micTrack) return;
-          if (micStream !== targetStream) {
-            rsSupplementalOwnedTracks.push(micTrack);
+          if (micStream !== targetStream && !rsOwnedWebcamAudioTracks.includes(micTrack)) {
+            rsOwnedWebcamAudioTracks.push(micTrack);
           }
           let inStream = false;
           if (typeof targetStream.getAudioTracks === 'function' && targetStream.getAudioTracks().includes(micTrack)) {
@@ -4912,7 +4924,9 @@
           syncRsLiveAudioCapture();
         })
         .catch(() => {
-          rsAudioMicReqInFlight = false;
+          if (myReqSeq === rsAudioMicInFlightSeq) {
+            rsAudioMicInFlightSeq = 0;
+          }
         });
     }
 
@@ -5003,11 +5017,14 @@
           const hasPumpRef = lastMediaTime >= 0 && lastPumpPerfMs > 0;
           if (!hasPumpRef) return;
           const nowPerf = performance.now();
-          const mediaNowUs = Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0);
+          const mediaNowUs = rsVidClockValid
+            ? Math.round(nowPerf * 1000.0 + rsVidClockOffsetUs)
+            : Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0);
           if (!Number.isFinite(mediaNowUs) || mediaNowUs < 0) return;
           const samples = new Float32Array(ch.length);
           samples.set(ch);
           let outSamples = samples;
+          let didResetBase = false;
           if (!rsAudioCaptureAnchored) {
             const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
             if (availSamples <= 0) {
@@ -5017,10 +5034,16 @@
               outSamples = samples.slice(samples.length - availSamples);
             }
             const outDurUs = Math.round((outSamples.length * 1_000_000.0) / rsAudioCaptureRateHz);
-            rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - outDurUs);
+            const candidateBase = Math.max(0, mediaNowUs - outDurUs);
+            const candidateEnd = candidateBase + outDurUs;
+            rsAudioCaptureBaseUs =
+              rsAudioLastSentTEndUs > 0 && candidateEnd <= rsAudioLastSentTEndUs
+                ? rsAudioLastSentTEndUs
+                : candidateBase;
             rsAudioCaptureCursor = 0;
             rsAudioCaptureAnchored = true;
             rsAudioAnchorRefineLeft = 4;
+            didResetBase = true;
           } else if (rsAudioAnchorRefineLeft > 0) {
             rsAudioAnchorRefineLeft--;
             const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
@@ -5028,20 +5051,49 @@
             const tentativeSkewUs = estNextEndUs - mediaNowUs;
             if (tentativeSkewUs > 200.0 && availSamples > 0) {
               if (tentativeSkewUs <= 800.0 && rsAudioCaptureBaseUs >= tentativeSkewUs) {
-                rsAudioCaptureBaseUs -= Math.round(tentativeSkewUs);
-              } else {
-                if (availSamples < outSamples.length) {
-                  outSamples = outSamples.slice(outSamples.length - availSamples);
+                const newBase = rsAudioCaptureBaseUs - Math.round(tentativeSkewUs);
+                const newEnd = newBase + Math.round(((rsAudioCaptureCursor + outSamples.length) * 1_000_000.0) / rsAudioCaptureRateHz);
+                if (newEnd > rsAudioLastSentTEndUs) {
+                  rsAudioCaptureBaseUs = newBase;
+                  didResetBase = true;
                 }
-                const outDurUs = Math.round((outSamples.length * 1_000_000.0) / rsAudioCaptureRateHz);
-                rsAudioCaptureBaseUs = Math.max(0, mediaNowUs - outDurUs);
-                rsAudioCaptureCursor = 0;
+              } else {
+                let nextSlice = outSamples;
+                if (availSamples < nextSlice.length) {
+                  nextSlice = nextSlice.slice(nextSlice.length - availSamples);
+                }
+                const outDurUs = Math.round((nextSlice.length * 1_000_000.0) / rsAudioCaptureRateHz);
+                const newBase = Math.max(0, mediaNowUs - outDurUs);
+                const newEnd = newBase + outDurUs;
+                if (newEnd > rsAudioLastSentTEndUs) {
+                  outSamples = nextSlice;
+                  rsAudioCaptureBaseUs = newBase;
+                  rsAudioCaptureCursor = 0;
+                  didResetBase = true;
+                }
               }
             }
           }
           rsAudioCaptureCursor += outSamples.length;
           const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
-          const estSkewUs = tEndUs - mediaNowUs;
+          const rawDiffUs = tEndUs - mediaNowUs;
+          if (didResetBase || rsAudioSkewWarmCount === 0) {
+            rsAudioBaselineDiffUs = rawDiffUs;
+            rsAudioFilteredDiffUs = rawDiffUs;
+            rsAudioSkewWarmCount = 1;
+          } else if (rsAudioSkewWarmCount < 8) {
+            rsAudioSkewWarmCount++;
+            rsAudioBaselineDiffUs += (rawDiffUs - rsAudioBaselineDiffUs) / rsAudioSkewWarmCount;
+            rsAudioFilteredDiffUs = rsAudioBaselineDiffUs;
+          } else {
+            const xClamped =
+              rsAudioBaselineDiffUs +
+              Math.max(-2500.0, Math.min(2500.0, rawDiffUs - rsAudioBaselineDiffUs));
+            rsAudioFilteredDiffUs += 0.08 * (xClamped - rsAudioFilteredDiffUs);
+            rsAudioBaselineDiffUs += 0.06 * (xClamped - rsAudioBaselineDiffUs);
+          }
+          const estSkewUs = Math.round(rsAudioFilteredDiffUs - rsAudioBaselineDiffUs);
+          rsAudioLastSentTEndUs = tEndUs;
           worker.postMessage(
             {
               type: 'push_audio_pcm',
@@ -5052,6 +5104,9 @@
             },
             [outSamples.buffer]
           );
+          if (Math.abs(estSkewUs) > 500.0) {
+            rsAudioCaptureAnchored = false;
+          }
         };
         src.connect(proc);
         proc.connect(gain);
@@ -5068,9 +5123,8 @@
 
     function stopMediaCapture(preserveLiveRetry = false) {
       stopRsLiveAudioCapture();
-      stopRsSupplementalMic(activeMediaStream);
-      rsAudioMicReqStream = null;
-      rsAudioMicReqInFlight = false;
+      rsVidClockOffsetUs = 0.0;
+      rsVidClockValid = false;
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
@@ -5212,6 +5266,24 @@
         if (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0) {
           lastPumpPerfMs = extras.nowPerfMs;
         }
+        const refPerf =
+          typeof extras.captureTimeMs === 'number' &&
+          Number.isFinite(extras.captureTimeMs) &&
+          extras.captureTimeMs > 0 &&
+          (typeof extras.nowPerfMs !== 'number' || !Number.isFinite(extras.nowPerfMs) || extras.captureTimeMs <= extras.nowPerfMs)
+            ? extras.captureTimeMs
+            : (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0
+                ? extras.nowPerfMs
+                : performance.now());
+        if (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0 && Number.isFinite(refPerf) && refPerf > 0) {
+          const obsOffsetUs = mediaTimeSec * 1_000_000.0 - refPerf * 1000.0;
+          if (!rsVidClockValid || Math.abs(obsOffsetUs - rsVidClockOffsetUs) > 50_000.0) {
+            rsVidClockOffsetUs = obsOffsetUs;
+            rsVidClockValid = true;
+          } else {
+            rsVidClockOffsetUs += 0.15 * (obsOffsetUs - rsVidClockOffsetUs);
+          }
+        }
       };
       let dispatched = false;
       try {
@@ -5336,10 +5408,16 @@
         lastPresentedFrames = -1;
         pendingVideoGapMask = 0;
         lastPumpPerfMs = 0;
+        rsVidClockOffsetUs = 0.0;
+        rsVidClockValid = false;
         rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
         rsAudioCaptureAnchored = false;
         rsAudioAnchorRefineLeft = 0;
+        rsAudioLastSentTEndUs = 0;
+        rsAudioBaselineDiffUs = 0.0;
+        rsAudioFilteredDiffUs = 0.0;
+        rsAudioSkewWarmCount = 0;
       }
 
       const nomDt = 1.0 / Math.max(8.0, activeVideoFps);
@@ -5372,11 +5450,16 @@
       }
 
       updateVideoTimeLabel();
+      const captureTimeMs =
+        rVfcMeta && typeof rVfcMeta.captureTime === 'number' && Number.isFinite(rVfcMeta.captureTime) && rVfcMeta.captureTime > 0
+          ? rVfcMeta.captureTime
+          : -1.0;
       return await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch, {
         captureAgeMs,
         gapMask,
         presentedFrames: hasPresented ? presentedNow : -1,
         nowPerfMs,
+        captureTimeMs,
       });
     }
 
@@ -5386,6 +5469,8 @@
       lastPresentedFrames = -1;
       pendingVideoGapMask = 0;
       lastPumpPerfMs = 0;
+      rsVidClockOffsetUs = 0.0;
+      rsVidClockValid = false;
       pumpStartPerfMs = performance.now();
       const myEpoch = sourceEpoch;
 
@@ -7392,6 +7477,15 @@
         const myEpoch = sourceEpoch;
         sampleVideoSelect.value = '';
         activeMediaStream = stream;
+        if (wantAudio && typeof stream.getAudioTracks === 'function') {
+          const audTracks = stream.getAudioTracks();
+          for (let i = 0; i < audTracks.length; i++) {
+            const atr = audTracks[i];
+            if (atr && !rsOwnedWebcamAudioTracks.includes(atr)) {
+              rsOwnedWebcamAudioTracks.push(atr);
+            }
+          }
+        }
         rsAudioMicReqStream = wantAudio ? stream : null;
         activeVideoFps = 60.0;
         videoEl.srcObject = stream;

@@ -9971,6 +9971,7 @@ self.onmessage = async (ev) => {
       const totalLen = src && typeof src.length === 'number' ? Math.trunc(src.length) : 0;
 
       const clearOrFaultVibroRing = () => {
+        if (rsCalibConfig.mode === 1) return;
         ringFaulted = true;
         if (rsCalibConfig.mode === 0) {
           vibroRingValid.fill(0);
@@ -10023,7 +10024,7 @@ self.onmessage = async (ev) => {
             offset += chunkLen;
           }
           accepted = allOk && pushed === totalLen ? 1 : 0;
-          if (!accepted || (vibroTelemView && vibroTelemView[0] !== 3)) {
+          if (rsCalibConfig.mode !== 1 && (!accepted || (vibroTelemView && vibroTelemView[0] !== 3))) {
             clearOrFaultVibroRing();
           }
         }

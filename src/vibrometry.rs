@@ -620,19 +620,22 @@ impl VibrometryState {
         sample_rate_hz: f32,
         est_skew_us: f32,
     ) -> u32 {
+        let is_welch = self.mode == RS_MODE_RS_WELCH;
         let n = num_samples as usize;
         if n == 0 || n > AUDIO_STAGING_LEN {
-            self.fresh_solve = 0;
-            if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
-                self.reset_audio_welch_interval();
-                self.planes.fill(0.0);
-                self.telem[3] = 0;
-                self.telem[4] = 0;
-                self.telem[6] = 0;
-                self.telem[21] = 0;
-                self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
-                if self.telem[0] == RS_STATE_READY {
-                    self.telem[0] = RS_STATE_WARMING;
+            if is_welch {
+                self.fresh_solve = 0;
+                if self.calib_valid != 0 {
+                    self.reset_audio_welch_interval();
+                    self.planes.fill(0.0);
+                    self.telem[3] = 0;
+                    self.telem[4] = 0;
+                    self.telem[6] = 0;
+                    self.telem[21] = 0;
+                    self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
+                    if self.telem[0] == RS_STATE_READY {
+                        self.telem[0] = RS_STATE_WARMING;
+                    }
                 }
             }
             return 0;
@@ -640,36 +643,40 @@ impl VibrometryState {
         if !sample_rate_hz.is_finite()
             || sample_rate_hz < 4000.0
             || sample_rate_hz > 192_000.0
-            || (self.calib_valid != 0
-                && self.mode == RS_MODE_RS_WELCH
+            || (is_welch
+                && self.calib_valid != 0
                 && abs_f32(sample_rate_hz - self.calib_audio_rate_hz) > 1.0)
         {
-            self.rate_disturbed = 1;
+            let prev_fresh = self.fresh_solve;
             self.reset_audio_welch_interval();
-            self.planes.fill(0.0);
-            self.fresh_solve = 0;
-            self.telem[3] = 0;
-            self.telem[4] = 0;
-            self.telem[6] = 0;
-            self.telem[21] = 0;
-            if self.mode != RS_MODE_OFF {
+            if is_welch {
+                self.rate_disturbed = 1;
+                self.planes.fill(0.0);
+                self.telem[3] = 0;
+                self.telem[4] = 0;
+                self.telem[6] = 0;
+                self.telem[21] = 0;
                 self.telem[0] = RS_STATE_DISTURBED;
                 self.telem[2] |= RS_REASON_BAD_CALIB;
+            } else {
+                self.fresh_solve = prev_fresh;
             }
             return 0;
         }
         if !est_skew_us.is_finite() {
-            self.skew_disturbed = 1;
+            let prev_fresh = self.fresh_solve;
             self.reset_audio_welch_interval();
-            self.planes.fill(0.0);
-            self.fresh_solve = 0;
-            self.telem[3] = 0;
-            self.telem[4] = 0;
-            self.telem[6] = 0;
-            self.telem[21] = 0;
-            if self.mode != RS_MODE_OFF {
+            if is_welch {
+                self.skew_disturbed = 1;
+                self.planes.fill(0.0);
+                self.telem[3] = 0;
+                self.telem[4] = 0;
+                self.telem[6] = 0;
+                self.telem[21] = 0;
                 self.telem[0] = RS_STATE_DISTURBED;
                 self.telem[2] |= RS_REASON_CLOCK_SKEW;
+            } else {
+                self.fresh_solve = prev_fresh;
             }
             return 0;
         }
@@ -677,36 +684,35 @@ impl VibrometryState {
         self.audio_last_skew_us = est_skew_us;
         self.telem[10] = est_skew_us.to_bits();
 
-        if self.calib_valid != 0 && abs_f32(est_skew_us) > self.max_skew_us {
+        if is_welch && self.calib_valid != 0 && abs_f32(est_skew_us) > self.max_skew_us {
             self.skew_disturbed = 1;
             self.reset_audio_welch_interval();
             self.planes.fill(0.0);
-            self.fresh_solve = 0;
             self.telem[3] = 0;
             self.telem[4] = 0;
             self.telem[6] = 0;
             self.telem[21] = 0;
-            if self.mode != RS_MODE_OFF {
-                self.telem[0] = RS_STATE_DISTURBED;
-                self.telem[2] |= RS_REASON_CLOCK_SKEW;
-            }
+            self.telem[0] = RS_STATE_DISTURBED;
+            self.telem[2] |= RS_REASON_CLOCK_SKEW;
             return 0;
         }
 
         let mut chk = 0usize;
         while chk < n {
             if !self.audio_staging[chk].is_finite() {
-                self.rate_disturbed = 1;
+                let prev_fresh = self.fresh_solve;
                 self.reset_audio_welch_interval();
-                self.planes.fill(0.0);
-                self.fresh_solve = 0;
-                self.telem[3] = 0;
-                self.telem[4] = 0;
-                self.telem[6] = 0;
-                self.telem[21] = 0;
-                if self.mode != RS_MODE_OFF {
+                if is_welch {
+                    self.rate_disturbed = 1;
+                    self.planes.fill(0.0);
+                    self.telem[3] = 0;
+                    self.telem[4] = 0;
+                    self.telem[6] = 0;
+                    self.telem[21] = 0;
                     self.telem[0] = RS_STATE_DISTURBED;
                     self.telem[2] |= RS_REASON_BAD_CALIB;
+                } else {
+                    self.fresh_solve = prev_fresh;
                 }
                 return 0;
             }
@@ -716,39 +722,47 @@ impl VibrometryState {
         if self.audio_has_prev_t != 0 {
             let dt_audio_us = (n as f64) * 1_000_000.0 / (sample_rate_hz as f64);
             if t_end_us <= self.audio_last_t_end_us {
+                let prev_fresh = self.fresh_solve;
                 self.reset_audio_welch_interval();
-                self.planes.fill(0.0);
-                self.fresh_solve = 0;
-                self.telem[3] = 0;
-                self.telem[4] = 0;
-                self.telem[6] = 0;
-                self.telem[21] = 0;
-                if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
-                    self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
-                    if self.telem[0] == RS_STATE_READY {
-                        self.telem[0] = RS_STATE_WARMING;
+                if is_welch {
+                    self.planes.fill(0.0);
+                    self.telem[3] = 0;
+                    self.telem[4] = 0;
+                    self.telem[6] = 0;
+                    self.telem[21] = 0;
+                    if self.calib_valid != 0 {
+                        self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
+                        if self.telem[0] == RS_STATE_READY {
+                            self.telem[0] = RS_STATE_WARMING;
+                        }
                     }
+                } else {
+                    self.fresh_solve = prev_fresh;
                 }
                 return 0;
             }
             let step_us = (t_end_us - self.audio_last_t_end_us) as f64;
             let dt_sample_us = 1_000_000.0 / (sample_rate_hz as f64);
-            let gap_tol_us = (0.5 * dt_sample_us + 2.0).max(3.0);
+            let gap_tol_us = (0.5 * dt_sample_us).max(1.5);
             if abs_f64(step_us - dt_audio_us) > gap_tol_us
                 || abs_f32(sample_rate_hz - self.audio_ring_rate_hz) > 1.0
             {
+                let prev_fresh = self.fresh_solve;
                 self.reset_audio_welch_interval();
-                self.planes.fill(0.0);
-                self.fresh_solve = 0;
-                self.telem[3] = 0;
-                self.telem[4] = 0;
-                self.telem[6] = 0;
-                self.telem[21] = 0;
-                if self.mode == RS_MODE_RS_WELCH && self.calib_valid != 0 {
-                    self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
-                    if self.telem[0] == RS_STATE_READY {
-                        self.telem[0] = RS_STATE_WARMING;
+                if is_welch {
+                    self.planes.fill(0.0);
+                    self.telem[3] = 0;
+                    self.telem[4] = 0;
+                    self.telem[6] = 0;
+                    self.telem[21] = 0;
+                    if self.calib_valid != 0 {
+                        self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
+                        if self.telem[0] == RS_STATE_READY {
+                            self.telem[0] = RS_STATE_WARMING;
+                        }
                     }
+                } else {
+                    self.fresh_solve = prev_fresh;
                 }
             }
         }
@@ -769,14 +783,16 @@ impl VibrometryState {
         if self.last_audio_seg_end_sample < self.audio_interval_start_sample {
             self.last_audio_seg_end_sample = self.audio_interval_start_sample;
         }
-        self.skew_disturbed = 0;
-        self.rate_disturbed = 0;
-        self.telem[2] &= !(RS_REASON_CLOCK_SKEW | RS_REASON_BAD_CALIB);
+        if is_welch {
+            self.skew_disturbed = 0;
+            self.rate_disturbed = 0;
+            self.telem[2] &= !(RS_REASON_CLOCK_SKEW | RS_REASON_BAD_CALIB);
+            self.telem[13] = (sample_rate_hz / (AUDIO_FFT_N as f32)).to_bits();
+        }
         self.audio_last_t_end_us = t_end_us;
         self.audio_has_prev_t = 1;
         self.audio_ring_rate_hz = sample_rate_hz;
         self.telem[18] = self.audio_total_samples as u32;
-        self.telem[13] = (sample_rate_hz / (AUDIO_FFT_N as f32)).to_bits();
         1
     }
 
@@ -1901,8 +1917,10 @@ impl VibrometryState {
                 rel_us_f64(self.t_src_hist_us[newest_hist], t_anchor_us) + cur_q_max * dt_row + half_exp;
             audio_covers_newest = dt_row >= opt_t_max_rel;
             if opt_t_min_rel > 0.0 || opt_cur_min_rel > 0.0 {
-                self.welch_count = 0;
-                self.welch_cursor = 0;
+                if opt_t_min_rel > 0.0 || opt_cur_min_rel > 100_000.0 {
+                    self.welch_count = 0;
+                    self.welch_cursor = 0;
+                }
                 self.planes.fill(0.0);
                 self.telem[0] = RS_STATE_WARMING;
                 self.telem[2] |= RS_REASON_AUDIO_UNDERRUN;
@@ -1992,22 +2010,28 @@ impl VibrometryState {
             0.0
         };
         let mut inband_straddle_ok = false;
+        let mut subbin_oob_top_pxx = 0.0f64;
         if k_end >= 2 {
             let p_top = self.mean_pxx[k_end - 1];
-            if p_top >= 1.0e-12 && p_edge <= p_top * 4.5 && p_edge_next < p_edge {
-                let a0 = crate::wasm_sqrt_f64(p_top);
-                let a1 = crate::wasm_sqrt_f64(p_edge.max(0.0));
-                if a0 + a1 > 0.0 {
-                    let delta = ((2.0 * a1 - a0) / (a0 + a1)).max(0.0);
-                    // Allow tiny discrete-N/f32-quantization bias in Grandke's Hann estimator right at f_opt_max
-                    // without clamping above-bin-k_end tones back down to k_end * df_hz.
-                    let k_end_f = k_end as f64;
-                    let k_cube = (k_end_f * k_end_f * k_end_f).max(1.0);
-                    let cutoff_tol_bins = 2.0e-5 + 0.06 / k_cube;
-                    if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max + cutoff_tol_bins * df_hz {
-                        inband_straddle_ok = true;
-                    }
+            let a0 = crate::wasm_sqrt_f64(p_top.max(0.0));
+            let a1 = crate::wasm_sqrt_f64(p_edge.max(0.0));
+            if p_top >= 1.0e-12 && p_edge <= p_top * 4.5 && p_edge_next < p_edge && a0 + a1 > 0.0 {
+                let delta = ((2.0 * a1 - a0) / (a0 + a1)).max(0.0);
+                // Allow tiny discrete-N/f32-quantization bias in Grandke's Hann estimator right at f_opt_max
+                // without clamping above-bin-k_end tones back down to k_end * df_hz.
+                let k_end_f = k_end as f64;
+                let k_cube = (k_end_f * k_end_f * k_end_f).max(1.0);
+                let cutoff_tol_bins = 2.0e-5 + 0.06 / k_cube;
+                if (((k_end - 1) as f64) + delta) * df_hz <= f_opt_max + cutoff_tol_bins * df_hz {
+                    inband_straddle_ok = true;
                 }
+            }
+            if !inband_straddle_ok
+                && p_top >= 1.0e-12
+                && (k_end < 3 || p_top > self.mean_pxx[k_end - 2])
+                && 2.0 * a1 > a0
+            {
+                subbin_oob_top_pxx = p_top;
             }
         }
         let m_oob_start = if inband_straddle_ok {
@@ -2044,6 +2068,21 @@ impl VibrometryState {
                     leak += pm * w_leak;
                 }
                 m += 1;
+            }
+            if subbin_oob_top_pxx > 0.0 {
+                let d_top = (k_end - 1) - k;
+                let w_top = if d_top == 0 {
+                    1.05
+                } else if d_top == 1 {
+                    0.30
+                } else if d_top == 2 {
+                    0.001
+                } else {
+                    let u = d_top as f64;
+                    let denom_u = PI_64 * u * (u * u - 1.0);
+                    1.40 / (denom_u * denom_u)
+                };
+                leak += subbin_oob_top_pxx * w_top;
             }
             self.oob_leak_pxx[k] = leak;
             let p = self.mean_pxx[k];

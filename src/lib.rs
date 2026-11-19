@@ -6486,7 +6486,9 @@ pub unsafe extern "C" fn chronos_push_audio_block(
     let ok = a
         .vibro
         .push_audio_block(num_samples, t_end_us, sample_rate_hz, est_skew_us);
-    if ok == 0 || a.vibro.get_state() != vibrometry::RS_STATE_READY {
+    if (a.vibro.get_mode() == vibrometry::RS_MODE_RS_WELCH && ok == 0)
+        || a.vibro.get_state() != vibrometry::RS_STATE_READY
+    {
         set_stamp_invalid(
             &mut a.wave2_telem,
             WAVE2_PRODUCT_STAMPS_START + PROD_W2_VIBRO * STAMP_STRIDE,
