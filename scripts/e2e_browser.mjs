@@ -5191,74 +5191,94 @@ async function main() {
             const origGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
               ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
               : null;
-            const nativePushMsgs = [];
-            const capturedStreams = [];
-            try {
-              if (!origGetUserMedia) {
-                return { unsupported: true };
-              }
-              navigator.mediaDevices.getUserMedia = async (constraints) => {
-                const st = await origGetUserMedia(constraints);
-                capturedStreams.push(st);
-                return st;
-              };
-              Worker.prototype.postMessage = function (data) {
-                if (data && data.type === 'push_audio_pcm') {
-                  nativePushMsgs.push({
-                    tEndUs: data.tEndUs,
-                    estSkewUs: data.estSkewUs,
-                    len: data.samples ? data.samples.length : 0,
-                  });
+              const nativePushMsgs = [];
+              const nativeAcks = [];
+              const nativeAckWorkers = new WeakSet();
+              let nativeCapturing = true;
+              const capturedStreams = [];
+              try {
+                if (!origGetUserMedia) {
+                  return { unsupported: true };
                 }
-                return origPostMessage.apply(this, arguments);
-              };
+                navigator.mediaDevices.getUserMedia = async (constraints) => {
+                  const st = await origGetUserMedia(constraints);
+                  capturedStreams.push(st);
+                  return st;
+                };
+                Worker.prototype.postMessage = function (data) {
+                  if (nativeCapturing && data && data.type === 'push_audio_pcm') {
+                    if (!nativeAckWorkers.has(this)) {
+                      nativeAckWorkers.add(this);
+                      this.addEventListener('message', (ev) => {
+                        const d = ev && ev.data;
+                        if (d && d.type === 'wave2_audio_ack' && typeof d.reqId === 'string' && d.reqId.startsWith('e2e-native-')) {
+                          nativeAcks.push(d);
+                        }
+                      });
+                    }
+                    data.wantAck = true;
+                    data.reqId = 'e2e-native-' + nativePushMsgs.length;
+                    nativePushMsgs.push({
+                      tEndUs: data.tEndUs,
+                      estSkewUs: data.estSkewUs,
+                      len: data.samples ? data.samples.length : 0,
+                    });
+                  }
+                  return origPostMessage.apply(this, arguments);
+                };
 
-              const rmSel = document.getElementById('rsVibroModeSelect');
-              if (rmSel) {
-                rmSel.value = '0';
-                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              await new Promise((r) => setTimeout(r, 40));
-              document.getElementById('btnSrcWebcam')?.click();
-              await new Promise((r) => setTimeout(r, 220));
-              const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
-              nativePushMsgs.length = 0;
-
-              if (rmSel) {
-                rmSel.value = '2';
-                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              const deadline = performance.now() + 3200;
-              while (performance.now() < deadline && nativePushMsgs.length < 40) {
+                const rmSel = document.getElementById('rsVibroModeSelect');
+                if (rmSel) {
+                  rmSel.value = '0';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
                 await new Promise((r) => setTimeout(r, 40));
-              }
-              await new Promise((r) => setTimeout(r, 60));
-              const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
-              if (rmSel) {
-                rmSel.value = '0';
-                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              await new Promise((r) => setTimeout(r, 80));
-              const nativePushed = nativePushMsgs.length;
-              const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
-              const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
-              const postOffVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
-              const acceptedDelta = ((postOffVibro?.audioTotalSamples ?? 0) - samplesBefore) >>> 0;
-              const liveAudioAfterOff = capturedStreams.reduce(
-                (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
-                0
-              );
-              return {
-                unsupported: false,
-                nativePushed,
-                pushedSamplesSum,
-                acceptedDelta,
-                nativeAcceptedAll: acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
-                state: nativeVibro?.state ?? -1,
-                reasonMask: nativeVibro?.reasonMask ?? -1,
-                liveAudioAfterOff,
-                maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
-              };
+                document.getElementById('btnSrcWebcam')?.click();
+                await new Promise((r) => setTimeout(r, 220));
+                nativePushMsgs.length = 0;
+                nativeAcks.length = 0;
+
+                if (rmSel) {
+                  rmSel.value = '2';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                const deadline = performance.now() + 3200;
+                while (performance.now() < deadline && nativePushMsgs.length < 40) {
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                await new Promise((r) => setTimeout(r, 60));
+                const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
+                nativeCapturing = false;
+                const ackDeadline = performance.now() + 250;
+                while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
+                  await new Promise((r) => setTimeout(r, 15));
+                }
+                if (rmSel) {
+                  rmSel.value = '0';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                await new Promise((r) => setTimeout(r, 80));
+                const nativePushed = nativePushMsgs.length;
+                const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
+                const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
+                const acceptedDelta = nativeAcks.reduce((acc, a) => acc + (a.accepted ? a.count : 0), 0);
+                const liveAudioAfterOff = capturedStreams.reduce(
+                  (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
+                  0
+                );
+                return {
+                  unsupported: false,
+                  nativePushed,
+                  nativeAckCount: nativeAcks.length,
+                  pushedSamplesSum,
+                  acceptedDelta,
+                  nativeAcceptedAll:
+                    nativeAcks.length === nativePushed && acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
+                  state: nativeVibro?.state ?? -1,
+                  reasonMask: nativeVibro?.reasonMask ?? -1,
+                  liveAudioAfterOff,
+                  maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
+                };
             } finally {
               Worker.prototype.postMessage = origPostMessage;
               if (origGetUserMedia) {
@@ -5905,6 +5925,66 @@ async function main() {
                 750,
                 (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320))
               );
+              const makeHeldBernJitArr = (seedInit, len, hold, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                let cur = 0.0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  if (k % hold === 0) cur = (sd >>> 31) * qMs;
+                  arr[k] = cur;
+                }
+                return arr;
+              };
+              const q48Ms = (128.0 * 1000.0) / 48000.0;
+              const bernHold23Seed2 = makeHeldBernJitArr(2, 3320, 23, q48Ms);
+              const unifHold14Seed2 = makeHeldUnifJitArr(2, 3320, 14, q48Ms);
+              const unifHold25Seed2 = makeHeldUnifJitArr(2, 3320, 25, q48Ms);
+              const p512Sec48 = 512.0 / 48000.0;
+              const cBareHold23Bern = await restartFreshMicSession(48000);
+              const bareHold23BernSeed2Neg20 = await runSustainedDrift(
+                cBareHold23Bern,
+                3320,
+                (b, bd) => b * bd + bernHold23Seed2[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxPh96Hold14 = await restartFreshMicSession(48000);
+              const ctx512Ph96Hold14Seed2Pos20 = await runSustainedDrift(
+                cCtxPh96Hold14,
+                3320,
+                (b, bd) => b * bd + unifHold14Seed2[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((unifHold14Seed2[b] + 9.6) / (1000.0 * p512Sec48))
+              );
+              const cCtxPh96Hold25 = await restartFreshMicSession(48000);
+              const ctx512Ph96Hold25Seed2Pos60 = await runSustainedDrift(
+                cCtxPh96Hold25,
+                3320,
+                (b, bd) => b * bd + unifHold25Seed2[b] + 0.06 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((unifHold25Seed2[b] + 9.6) / (1000.0 * p512Sec48))
+              );
+              const cBareSlow5ms = await restartFreshMicSession(48000);
+              const bareBenignSlow5ms1100 = await runSustainedDrift(
+                cBareSlow5ms,
+                1100,
+                (b, bd) => b * bd + Math.min(5.0, 0.025 * Math.max(0, b - 320))
+              );
+              const cCtxSlow5ms = await restartFreshMicSession(48000);
+              const ctx512BenignSlow5ms1100 = await runSustainedDrift(
+                cCtxSlow5ms,
+                1100,
+                (b, bd) => b * bd + Math.min(5.0, 0.025 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((Math.min(5.0, 0.025 * Math.max(0, b - 320)) + 1.0) / (1000.0 * p512Sec48))
+              );
+              const cCtx23p5ms = await restartFreshMicSession(48000);
+              const ctx512Benign23p5ms750 = await runSustainedDrift(
+                cCtx23p5ms,
+                750,
+                (b, bd) => b * bd + Math.min(23.5, 0.04 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((Math.min(23.5, 0.04 * Math.max(0, b - 320)) + 0.2) / (1000.0 * p512Sec48))
+              );
 
               return {
                 initialGumCount,
@@ -5961,6 +6041,12 @@ async function main() {
                 ctxHold20Seed3Neg,
                 ctxHold20Seed50Benign,
                 bareRand44kSeed5Benign,
+                bareHold23BernSeed2Neg20,
+                ctx512Ph96Hold14Seed2Pos20,
+                ctx512Ph96Hold25Seed2Pos60,
+                bareBenignSlow5ms1100,
+                ctx512BenignSlow5ms1100,
+                ctx512Benign23p5ms750,
               };
             } finally {
               performance.now = origPerfNow;
@@ -6245,7 +6331,52 @@ async function main() {
           webcamAudioCheck.bareRand44kSeed5Benign.maxAbsSkew !== 0 ||
           webcamAudioCheck.bareRand44kSeed5Benign.acceptedBlocks !== 750 ||
           webcamAudioCheck.bareRand44kSeed5Benign.state === 4 ||
-          (webcamAudioCheck.bareRand44kSeed5Benign.reasonMask & 32) !== 0
+          (webcamAudioCheck.bareRand44kSeed5Benign.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareHold23BernSeed2Neg20 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold23BernSeed2Neg20.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.state !== 4 ||
+          (webcamAudioCheck.bareHold23BernSeed2Neg20.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.welchK !== 0 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.stampValid ||
+          !webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.state !== 4 ||
+          (webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.welchK !== 0 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.stampValid ||
+          !webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.state !== 4 ||
+          (webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.welchK !== 0 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.stampValid ||
+          !webcamAudioCheck.bareBenignSlow5ms1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.pushedCount !== 1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.maxAbsSkew !== 0 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.acceptedBlocks !== 1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.state === 4 ||
+          (webcamAudioCheck.bareBenignSlow5ms1100.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512BenignSlow5ms1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.pushedCount !== 1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.acceptedBlocks !== 1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.state === 4 ||
+          (webcamAudioCheck.ctx512BenignSlow5ms1100.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512Benign23p5ms750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.pushedCount !== 750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.state === 4 ||
+          (webcamAudioCheck.ctx512Benign23p5ms750.reasonMask & 32) !== 0
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
