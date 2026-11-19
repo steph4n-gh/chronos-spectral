@@ -4695,14 +4695,14 @@
       r4: 0.0,
       rCount: 0,
       prevM: 0.0,
-      b16: new Float64Array(16),
-      b16Idx: 0,
-      b16Count: 0,
-      b16Sum: 0.0,
-      b12: new Float64Array(12),
-      b12Idx: 0,
-      b12Count: 0,
-      b12Sum: 0.0,
+      b4: new Float64Array(4),
+      b4Idx: 0,
+      b4Count: 0,
+      b4Sum: 0.0,
+      b6: new Float64Array(6),
+      b6Idx: 0,
+      b6Count: 0,
+      b6Sum: 0.0,
       uHist: new Float64Array(17),
       uHistIdx: 0,
       uHistCount: 0,
@@ -4724,14 +4724,14 @@
       rsAudioSkewState.r4 = 0.0;
       rsAudioSkewState.rCount = 0;
       rsAudioSkewState.prevM = 0.0;
-      rsAudioSkewState.b16.fill(0.0);
-      rsAudioSkewState.b16Idx = 0;
-      rsAudioSkewState.b16Count = 0;
-      rsAudioSkewState.b16Sum = 0.0;
-      rsAudioSkewState.b12.fill(0.0);
-      rsAudioSkewState.b12Idx = 0;
-      rsAudioSkewState.b12Count = 0;
-      rsAudioSkewState.b12Sum = 0.0;
+      rsAudioSkewState.b4.fill(0.0);
+      rsAudioSkewState.b4Idx = 0;
+      rsAudioSkewState.b4Count = 0;
+      rsAudioSkewState.b4Sum = 0.0;
+      rsAudioSkewState.b6.fill(0.0);
+      rsAudioSkewState.b6Idx = 0;
+      rsAudioSkewState.b6Count = 0;
+      rsAudioSkewState.b6Sum = 0.0;
       rsAudioSkewState.uHist.fill(0.0);
       rsAudioSkewState.uHistIdx = 0;
       rsAudioSkewState.uHistCount = 0;
@@ -5218,40 +5218,40 @@
             s.prevM = mClamped;
             if (s.warm === 6) s.uAt6 = mClamped;
 
-            // 2) Cascaded 16x12 boxcar annihilates periods 2, 3, 4, 6, 8, 12, 16 while preserving linear drift
-            if (s.b16Count < 16) {
-              s.b16[s.b16Count++] = mClamped;
-              s.b16Sum += mClamped;
+            // 2) Cascaded 4x6 boxcar annihilates periods 2, 3, 4, 6 with low 6-block group delay and zero knee overshoot
+            if (s.b4Count < 4) {
+              s.b4[s.b4Count++] = mClamped;
+              s.b4Sum += mClamped;
             } else {
-              s.b16Sum += mClamped - s.b16[s.b16Idx];
-              s.b16[s.b16Idx] = mClamped;
-              s.b16Idx = (s.b16Idx + 1) & 15;
+              s.b4Sum += mClamped - s.b4[s.b4Idx];
+              s.b4[s.b4Idx] = mClamped;
+              s.b4Idx = (s.b4Idx + 1) & 3;
             }
-            const avg16 = s.b16Sum / s.b16Count;
+            const avg4 = s.b4Sum / s.b4Count;
 
-            let u = avg16;
-            if (s.warm >= 16) {
-              if (s.b12Count < 12) {
-                s.b12[s.b12Count++] = avg16;
-                s.b12Sum += avg16;
+            let u = avg4;
+            if (s.warm >= 8) {
+              if (s.b6Count < 6) {
+                s.b6[s.b6Count++] = avg4;
+                s.b6Sum += avg4;
               } else {
-                s.b12Sum += avg16 - s.b12[s.b12Idx];
-                s.b12[s.b12Idx] = avg16;
-                s.b12Idx = (s.b12Idx + 1) % 12;
+                s.b6Sum += avg4 - s.b6[s.b6Idx];
+                s.b6[s.b6Idx] = avg4;
+                s.b6Idx = (s.b6Idx + 1) % 6;
               }
-              u = s.b12Sum / s.b12Count;
+              u = s.b6Sum / s.b6Count;
             }
 
-            // 3) 8-step 2nd-difference jitter estimator over full-window u
-            if (s.warm >= 27) {
+            // 3) 8-step 2nd-difference jitter estimator once med5 + 4x6 boxcar reach steady state
+            if (s.warm >= 13) {
               s.uHist[s.uHistIdx] = u;
               s.uHistIdx = (s.uHistIdx + 1) % 17;
               if (s.uHistCount < 17) s.uHistCount++;
               if (s.uHistCount === 17) {
                 const u8 = s.uHist[(s.uHistIdx + 17 - 9) % 17];
                 const u16 = s.uHist[s.uHistIdx];
-                const d2_8 = Math.min(4000.0, Math.abs(u - 2.0 * u8 + u16));
-                if (s.warm === 43) {
+                const d2_8 = Math.min(5000.0, Math.abs(u - 2.0 * u8 + u16));
+                if (s.warm === 29) {
                   s.sigEma = d2_8;
                   s.sigPeak = d2_8;
                 } else {
@@ -5262,25 +5262,28 @@
             }
 
             // 4) Anchor baseline after cascaded boxcars fill, then threshold against Web Audio / dispatch cushion
-            if (s.warm >= 10 && s.warm < 27) {
-              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 12500.0));
-            } else if (s.warm >= 27 && s.warm <= 31) {
+            if (s.warm >= 10 && s.warm < 13) {
+              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 16000.0));
+            } else if (s.warm >= 13 && s.warm <= 17) {
               s.initBuf.push(u);
-              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 12500.0));
-              if (s.warm === 31) {
+              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 16000.0));
+              if (s.warm === 17) {
                 const sorted = s.initBuf.slice().sort((x, y) => x - y);
                 s.baseU = Math.abs(sorted[2] - s.uAt6) > 8000.0 ? s.uAt6 : sorted[2];
                 s.baseCount = 5;
               }
-            } else if (s.warm > 31) {
-              const sig8 = s.uHistCount === 17 ? Math.min(3000.0, Math.max(s.sigEma, s.sigPeak)) : 250.0;
+            } else if (s.warm > 17) {
+              const sig8 = s.uHistCount === 17 ? Math.min(3500.0, Math.max(s.sigEma, s.sigPeak)) : 400.0;
               if (s.uHistCount === 17 && s.baseCount < 96 && Math.abs(u - s.baseU) <= 1.8 * sig8) {
                 s.baseCount++;
                 s.baseU += (u - s.baseU) / s.baseCount;
               }
               const quantumUs = (128.0 * 1_000_000.0) / Math.max(8000.0, rsAudioCaptureRateHz);
-              const cushionUs = clockKind > 0 ? 1100.0 : (2.0 * quantumUs + 15.0);
-              const margin = cushionUs + 3.2 * sig8;
+              const cushionUs =
+                clockKind === 1 || clockKind === 2
+                  ? 1250.0
+                  : Math.min(5500.0, Math.max(2350.0, 2.0 * quantumUs + 15.0));
+              const margin = cushionUs + 3.6 * sig8;
               estSkewUs = Math.round(softThreshSkew(u - s.baseU, margin));
             }
           }
