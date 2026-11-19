@@ -4684,6 +4684,7 @@
     let rsOwnedWebcamAudioTracks = [];
     let rsVidClockOffsetUs = 0.0;
     let rsVidClockValid = false;
+    let rsVidClockCaptureTimed = false;
     let rsAudioLastSentTEndUs = 0;
     const rsAudioSkewState = {
       warm: 0,
@@ -4730,17 +4731,26 @@
       b36Idx: 0,
       b36Count: 0,
       b36Sum: 0.0,
-      zRing: new Float64Array(320),
+      zRing: new Float64Array(512),
       zIdx: 0,
       zCount: 0,
       runMinT: 0.0,
       runMaxT: 0.0,
+      hasPullInit: false,
+      a3Min: 0.0,
+      a3Max: 0.0,
+      pullMinUs: 0.0,
+      pullMaxUs: 0.0,
+      prevPullStepUs: 0.0,
+      pullUnitUs: 0.0,
       ctPullWarmMin: 0.0,
       ctPullWarmMax: 0.0,
-      pRing: new Float64Array(64),
+      warmPullTot: 0,
+      warmPullAtMin: 0,
+      pRing: new Float64Array(96),
       pIdx: 0,
       pCount: 0,
-      stripY: new Float64Array(313),
+      stripY: new Float64Array(505),
       stripPreMin: new Float64Array(313),
       stripPreMax: new Float64Array(313),
       stripSufMin: new Float64Array(313),
@@ -4804,8 +4814,17 @@
       rsAudioSkewState.zCount = 0;
       rsAudioSkewState.runMinT = 0.0;
       rsAudioSkewState.runMaxT = 0.0;
+      rsAudioSkewState.hasPullInit = false;
+      rsAudioSkewState.a3Min = 0.0;
+      rsAudioSkewState.a3Max = 0.0;
+      rsAudioSkewState.pullMinUs = 0.0;
+      rsAudioSkewState.pullMaxUs = 0.0;
+      rsAudioSkewState.prevPullStepUs = 0.0;
+      rsAudioSkewState.pullUnitUs = 0.0;
       rsAudioSkewState.ctPullWarmMin = 0.0;
       rsAudioSkewState.ctPullWarmMax = 0.0;
+      rsAudioSkewState.warmPullTot = 0;
+      rsAudioSkewState.warmPullAtMin = 0;
       rsAudioSkewState.pRing.fill(0.0);
       rsAudioSkewState.pIdx = 0;
       rsAudioSkewState.pCount = 0;
@@ -5304,6 +5323,7 @@
           }
 
           const aligned0 = raw0 - s.kindOriginUs[0];
+          const aligned3 = hasCt ? raw3 - s.kindOriginUs[3] : aligned0;
           let alignedUs = aligned0;
           let trendInputUs = aligned0;
           if (hasTs) {
@@ -5313,7 +5333,7 @@
           } else {
             s.tsCleanRun = 0;
             if (hasCt) {
-              alignedUs = raw3 - s.kindOriginUs[3];
+              alignedUs = aligned3;
             }
           }
 
@@ -5400,21 +5420,48 @@
               if (mTrend > s.runMaxT) s.runMaxT = mTrend;
             }
             s.zRing[s.zIdx] = mTrend;
-            s.zIdx = (s.zIdx + 1) % 320;
-            if (s.zCount < 320) s.zCount++;
+            s.zIdx = (s.zIdx + 1) & 511;
+            if (s.zCount < 512) s.zCount++;
 
-            const pullStepUs = !hasTs && hasCt ? alignedUs - aligned0 : 0.0;
+            const pullStepUs = !hasTs && hasCt ? aligned3 - aligned0 : 0.0;
             const warmPullGate = s.maxStep2 <= 180.0 ? 250.0 : quantumUs + 150.0;
-            if (s.warm === 1) {
-              s.ctPullWarmMin = pullStepUs;
-              s.ctPullWarmMax = pullStepUs;
-            } else if (Math.abs(aligned0) <= warmPullGate) {
-              if (pullStepUs < s.ctPullWarmMin) s.ctPullWarmMin = pullStepUs;
-              if (pullStepUs > s.ctPullWarmMax) s.ctPullWarmMax = pullStepUs;
+            if (!hasTs && hasCt) {
+              if (!s.hasPullInit) {
+                s.hasPullInit = true;
+                s.a3Min = aligned3;
+                s.a3Max = aligned3;
+                s.pullMinUs = pullStepUs;
+                s.pullMaxUs = pullStepUs;
+                s.prevPullStepUs = pullStepUs;
+                s.ctPullWarmMin = pullStepUs;
+                s.ctPullWarmMax = pullStepUs;
+                s.warmPullTot = 1;
+                s.warmPullAtMin = 1;
+              } else {
+                if (aligned3 < s.a3Min) s.a3Min = aligned3;
+                if (aligned3 > s.a3Max) s.a3Max = aligned3;
+                if (pullStepUs < s.pullMinUs) s.pullMinUs = pullStepUs;
+                if (pullStepUs > s.pullMaxUs) s.pullMaxUs = pullStepUs;
+                const dp = Math.abs(pullStepUs - s.prevPullStepUs);
+                if (dp >= 0.8 * quantumUs && (s.pullUnitUs === 0.0 || dp < s.pullUnitUs)) {
+                  s.pullUnitUs = dp;
+                }
+                s.prevPullStepUs = pullStepUs;
+                if (s.warm <= 200 && Math.abs(aligned0) <= warmPullGate) {
+                  if (pullStepUs < s.ctPullWarmMin) {
+                    s.ctPullWarmMin = pullStepUs;
+                    s.warmPullAtMin = 1;
+                  } else if (pullStepUs <= s.ctPullWarmMin + 0.4 * quantumUs) {
+                    s.warmPullAtMin++;
+                  }
+                  if (pullStepUs > s.ctPullWarmMax) s.ctPullWarmMax = pullStepUs;
+                  s.warmPullTot++;
+                }
+              }
+              s.pRing[s.pIdx] = pullStepUs;
+              s.pIdx = (s.pIdx + 1) % 96;
+              if (s.pCount < 96) s.pCount++;
             }
-            s.pRing[s.pIdx] = pullStepUs;
-            s.pIdx = (s.pIdx + 1) & 63;
-            if (s.pCount < 64) s.pCount++;
 
             if (s.t12Count < 12) {
               s.t12[s.t12Count++] = mTrend;
@@ -5455,8 +5502,9 @@
               s.baseW += (w36 - s.baseW) / s.baseWCount;
             }
 
+            let audioSkew = 0.0;
             if (s.warm >= 10 && s.warm < 24) {
-              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, Math.max(16000.0, 1.5 * pull512Us)));
+              audioSkew = softThreshSkew(mClamped - s.uAt6, Math.max(16000.0, 1.5 * pull512Us));
             } else if (s.warm >= 24) {
               const cushionUs =
                 s.tsCleanRun >= 32
@@ -5467,40 +5515,68 @@
               const offSkew = softThreshSkew(devU, cushionUs);
 
               let pRecentMin = pullStepUs;
-              let pRecentMax = pullStepUs;
               if (!hasTs && hasCt) {
                 for (let k = 0; k < s.pCount; k++) {
                   const pv = s.pRing[k];
                   if (pv < pRecentMin) pRecentMin = pv;
-                  if (pv > pRecentMax) pRecentMax = pv;
                 }
               }
-              const hasNewPosPull = pRecentMax > s.ctPullWarmMax + 0.35 * pull512Us;
-              const hasNewNegPull = pRecentMin < s.ctPullWarmMin - 0.35 * pull512Us;
+              const effPullPeriod = s.pullUnitUs > 0.0 ? Math.min(pull512Us + 50.0, s.pullUnitUs) : pull512Us;
+              const spanA3 = s.hasPullInit ? s.a3Max - s.a3Min : 0.0;
+              const hasNewPosPull = s.pullMaxUs > s.ctPullWarmMax + 0.75 * quantumUs;
+              const warmBimodalCleared =
+                s.ctPullWarmMax - s.ctPullWarmMin >= 0.75 * quantumUs &&
+                s.warmPullTot >= 24 &&
+                s.warmPullAtMin >= 0.12 * s.warmPullTot &&
+                pRecentMin > s.ctPullWarmMin + 0.75 * quantumUs;
+              const hasNewNegPull =
+                s.ctPullWarmMax - s.ctPullWarmMin < 0.4 * quantumUs &&
+                s.pullMinUs < s.ctPullWarmMin - 0.75 * quantumUs;
               const multiPullDispOnly =
                 !hasTs &&
                 hasCt &&
-                Math.abs(devU) < cushionUs &&
-                ((devW < 0.0 && hasNewPosPull) || (devW > 0.0 && hasNewNegPull));
+                spanA3 <= effPullPeriod + 25.0 &&
+                ((devW < 0.0 && (hasNewPosPull || warmBimodalCleared)) || (devW > 0.0 && hasNewNegPull));
 
               let trendSkew = 0.0;
-              if (!multiPullDispOnly) {
+              if (!hasTs && hasCt && s.hasPullInit && spanA3 > effPullPeriod + 350.0) {
+                const sgnCt = devW !== 0.0 ? (devW < 0.0 ? -1 : 1) : (aligned0 < 0.0 ? -1 : 1);
+                trendSkew = softThreshSkew(sgnCt * (spanA3 - effPullPeriod), 350.0);
+              }
+
+              const certMargin = Math.max(1800.0, 0.55 * quantumUs + 350.0);
+              if (multiPullDispOnly) {
+                s.driftSign = 0;
+              } else if (s.driftSign !== 0 && s.driftSign * devW <= certMargin) {
+                s.driftSign = 0;
+              }
+
+              if (!multiPullDispOnly && !hasTs && s.driftSign === 0) {
+                const stripCap =
+                  s.maxStep2 <= 180.0
+                    ? Math.max(220.0, 2.2 * s.maxStep2 + 80.0)
+                    : quantumUs + 15.0;
+                let stripHitSpan = 0.0;
+
                 if (s.zCount >= 309) {
                   const W = 308;
-                  const zEnd = s.zRing[(s.zIdx + 319) % 320];
-                  const zStart = s.zRing[(s.zIdx + 319 - W) % 320];
+                  const zEnd = s.zRing[(s.zIdx + 511) & 511];
+                  const zStart = s.zRing[(s.zIdx + 511 - W) & 511];
                   const spanZ = zEnd - zStart;
                   const sgnZ = spanZ >= 0.0 ? 1 : -1;
                   const runSpan = s.runMaxT - s.runMinT;
+                  const lo1 = sgnZ > 0 || s.maxStep2 <= 180.0 ? 14.2 : 19.65;
+                  const hi1 = 23.6;
+                  const reqSpan1 = sgnZ > 0 ? 5200.0 : (s.maxStep2 <= 180.0 ? 5550.0 : 6050.0);
                   const minDevW1 = Math.max(2400.0, 5600.0 - quantumUs - 150.0);
                   if (
-                    runSpan >= 6050.0 &&
+                    runSpan >= reqSpan1 &&
                     sgnZ * devW >= minDevW1 &&
-                    sgnZ * spanZ >= W * 19.65 - quantumUs - 15.0
+                    sgnZ * spanZ >= W * lo1 - quantumUs - 15.0
                   ) {
                     const y = s.stripY;
                     for (let m = 0; m <= W; m++) {
-                      y[m] = s.zRing[(s.zIdx + 319 - (W - m)) % 320];
+                      y[m] = s.zRing[(s.zIdx + 511 - (W - m)) & 511];
                     }
                     const evalW = (bt) => {
                       let mn = 1e18;
@@ -5512,37 +5588,46 @@
                       }
                       return mx - mn;
                     };
-                    const stripCap =
-                      s.maxStep2 <= 180.0
-                        ? Math.max(220.0, 2.2 * s.maxStep2 + 80.0)
-                        : quantumUs + 15.0;
-                    let stripHitSpan = 0.0;
+                    const evalWF = (bt) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W; m += 2) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      return mx - mn;
+                    };
 
-                    let lo1 = 19.65;
-                    let hi1 = 22.5;
+                    let a1 = lo1;
+                    let b1 = hi1;
                     for (let it = 0; it < 12; it++) {
-                      const m1 = lo1 + (hi1 - lo1) / 3.0;
-                      const m2 = hi1 - (hi1 - lo1) / 3.0;
-                      if (evalW(sgnZ * m1) <= evalW(sgnZ * m2)) hi1 = m2;
-                      else lo1 = m1;
+                      const m1 = a1 + (b1 - a1) / 3.0;
+                      const m2 = b1 - (b1 - a1) / 3.0;
+                      if (evalW(sgnZ * m1) <= evalW(sgnZ * m2)) b1 = m2;
+                      else a1 = m1;
                     }
-                    const mag1 = 0.5 * (lo1 + hi1);
+                    const mag1 = 0.5 * (a1 + b1);
                     if (evalW(sgnZ * mag1) <= stripCap) {
                       stripHitSpan = sgnZ * mag1 * W;
-                    } else if (
-                      runSpan >= 6500.0 &&
-                      sgnZ * devW >= Math.max(3000.0, 6500.0 - quantumUs - 150.0)
-                    ) {
-                      let lo2 = 22.5;
-                      let hi2 = Math.max(23.0, (Math.abs(spanZ) + quantumUs) / W + 0.5);
-                      if (hi2 > 22.5) {
-                        for (let it = 0; it < 13; it++) {
-                          const m1 = lo2 + (hi2 - lo2) / 3.0;
-                          const m2 = hi2 - (hi2 - lo2) / 3.0;
-                          if (evalW(sgnZ * m1) <= evalW(sgnZ * m2)) hi2 = m2;
-                          else lo2 = m1;
+                    } else {
+                      const reqSpanB2 =
+                        sgnZ < 0 && s.maxStep2 > 180.0
+                          ? Math.max(6500.0, 5000.0 + quantumUs + 25.0)
+                          : 6500.0;
+                      if (
+                        runSpan >= reqSpanB2 &&
+                        sgnZ * devW >= Math.max(3000.0, 6500.0 - quantumUs - 150.0)
+                      ) {
+                        let a2 = hi1;
+                        let b2 = Math.max(hi1 + 0.6, (Math.abs(spanZ) + quantumUs) / W + 0.5);
+                        for (let it = 0; it < 12; it++) {
+                          const m1 = a2 + (b2 - a2) / 3.0;
+                          const m2 = b2 - (b2 - a2) / 3.0;
+                          if (evalWF(sgnZ * m1) <= evalWF(sgnZ * m2)) b2 = m2;
+                          else a2 = m1;
                         }
-                        const mag2 = 0.5 * (lo2 + hi2);
+                        const mag2 = 0.5 * (a2 + b2);
                         if (evalW(sgnZ * mag2) <= stripCap) {
                           const preMin = s.stripPreMin;
                           const preMax = s.stripPreMax;
@@ -5560,7 +5645,7 @@
                             sufMin[m] = Math.min(sufMin[m + 1], y[m]);
                             sufMax[m] = Math.max(sufMax[m + 1], y[m]);
                           }
-                          const Lr = 88;
+                          const Lr = 136;
                           const pCap = stripCap + 5.0;
                           let isShift =
                             sufMax[Lr] - sufMin[Lr] <= pCap ||
@@ -5576,30 +5661,92 @@
                         }
                       }
                     }
-                    if (stripHitSpan !== 0.0) {
-                      const tStrip = softThreshSkew(stripHitSpan, 2500.0);
-                      if (Math.abs(tStrip) > Math.abs(trendSkew)) trendSkew = tStrip;
+                  }
+                }
+
+                if (stripHitSpan === 0.0 && s.zCount >= 501) {
+                  const W2 = 500;
+                  const zEnd2 = s.zRing[(s.zIdx + 511) & 511];
+                  const zQ1 = s.zRing[(s.zIdx + 511 - 333) & 511];
+                  const zQ2 = s.zRing[(s.zIdx + 511 - 166) & 511];
+                  const zStart2 = s.zRing[(s.zIdx + 511 - W2) & 511];
+                  const spanZ2 = zEnd2 - zStart2;
+                  const sgnZ2 = spanZ2 >= 0.0 ? 1 : -1;
+                  const reqSpan2 =
+                    sgnZ2 > 0
+                      ? 5200.0
+                      : (s.maxStep2 <= 180.0 ? 5550.0 : Math.max(6200.0, 5000.0 + quantumUs + 25.0));
+                  const thirds2 =
+                    sgnZ2 * (zQ1 - zStart2) >= 167 * 9.5 - quantumUs - 20.0 &&
+                    sgnZ2 * (zQ2 - zQ1) >= 167 * 9.5 - quantumUs - 20.0 &&
+                    sgnZ2 * (zEnd2 - zQ2) >= 166 * 9.5 - quantumUs - 20.0;
+                  if (
+                    s.runMaxT - s.runMinT >= reqSpan2 &&
+                    thirds2 &&
+                    sgnZ2 * devW >= 3600.0 &&
+                    sgnZ2 * spanZ2 >= W2 * 9.5 - quantumUs - 15.0
+                  ) {
+                    const y = s.stripY;
+                    for (let m = 0; m <= W2; m++) {
+                      y[m] = s.zRing[(s.zIdx + 511 - (W2 - m)) & 511];
+                    }
+                    const evalW2 = (bt) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W2; m += 2) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      return mx - mn;
+                    };
+                    let aS = 9.5;
+                    let bS = 20.0;
+                    for (let it = 0; it < 12; it++) {
+                      const m1 = aS + (bS - aS) / 3.0;
+                      const m2 = bS - (bS - aS) / 3.0;
+                      if (evalW2(sgnZ2 * m1) <= evalW2(sgnZ2 * m2)) bS = m2;
+                      else aS = m1;
+                    }
+                    const magS = 0.5 * (aS + bS);
+                    let mnF = 1e18;
+                    let mxF = -1e18;
+                    for (let m = 0; m <= W2; m++) {
+                      const r = y[m] - sgnZ2 * magS * m;
+                      if (r < mnF) mnF = r;
+                      if (r > mxF) mxF = r;
+                    }
+                    if (mxF - mnF <= stripCap) {
+                      stripHitSpan = sgnZ2 * magS * W2;
                     }
                   }
                 }
 
-                if (trendSkew > 500.0) s.driftSign = 1;
-                else if (trendSkew < -500.0) s.driftSign = -1;
-              } else {
-                s.driftSign = 0;
-              }
-
-              const certMargin = Math.max(1800.0, 0.55 * quantumUs + 350.0);
-              if (s.driftSign !== 0 && !multiPullDispOnly) {
-                if (s.driftSign * devW <= certMargin) {
-                  s.driftSign = 0;
-                } else {
-                  const certSkew = softThreshSkew(devW, certMargin);
-                  if (Math.abs(certSkew) > Math.abs(trendSkew)) trendSkew = certSkew;
+                if (stripHitSpan !== 0.0) {
+                  const tStrip = softThreshSkew(stripHitSpan, 2500.0);
+                  if (Math.abs(tStrip) > Math.abs(trendSkew)) trendSkew = tStrip;
                 }
               }
 
-              estSkewUs = Math.round(Math.abs(trendSkew) > Math.abs(offSkew) ? trendSkew : offSkew);
+              if (!multiPullDispOnly && Math.abs(trendSkew) > 500.0) {
+                s.driftSign = trendSkew > 0.0 ? 1 : -1;
+              }
+              if (s.driftSign !== 0 && !multiPullDispOnly) {
+                const certSkew = softThreshSkew(devW, certMargin);
+                if (Math.abs(certSkew) > Math.abs(trendSkew)) trendSkew = certSkew;
+              }
+
+              audioSkew = Math.abs(trendSkew) > Math.abs(offSkew) ? trendSkew : offSkew;
+            }
+
+            if (s.warm >= 10) {
+              const curVidRefUs = rsVidClockValid
+                ? rsVidClockOffsetUs
+                : lastMediaTime * 1_000_000.0 - lastPumpPerfMs * 1000.0;
+              const vidRefDeltaUs = Number.isFinite(curVidRefUs) ? curVidRefUs - s.refOriginUs : 0.0;
+              const vidCushionUs = rsVidClockValid && rsVidClockCaptureTimed ? 1500.0 : 17200.0;
+              const vidSkewUs = s.warm >= 12 ? softThreshSkew(vidRefDeltaUs, vidCushionUs) : 0.0;
+              estSkewUs = Math.round(audioSkew - vidSkewUs);
             }
           }
           rsAudioLastSentTEndUs = tEndUs;
@@ -5631,6 +5778,7 @@
       stopRsLiveAudioCapture();
       rsVidClockOffsetUs = 0.0;
       rsVidClockValid = false;
+      rsVidClockCaptureTimed = false;
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
@@ -5772,15 +5920,16 @@
         if (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0) {
           lastPumpPerfMs = extras.nowPerfMs;
         }
-        const refPerf =
+        const hasCaptureTime =
           typeof extras.captureTimeMs === 'number' &&
           Number.isFinite(extras.captureTimeMs) &&
           extras.captureTimeMs > 0 &&
-          (typeof extras.nowPerfMs !== 'number' || !Number.isFinite(extras.nowPerfMs) || extras.captureTimeMs <= extras.nowPerfMs)
-            ? extras.captureTimeMs
-            : (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0
-                ? extras.nowPerfMs
-                : performance.now());
+          (typeof extras.nowPerfMs !== 'number' || !Number.isFinite(extras.nowPerfMs) || extras.captureTimeMs <= extras.nowPerfMs);
+        const refPerf = hasCaptureTime
+          ? extras.captureTimeMs
+          : (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0
+              ? extras.nowPerfMs
+              : performance.now());
         if (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0 && Number.isFinite(refPerf) && refPerf > 0) {
           const obsOffsetUs = mediaTimeSec * 1_000_000.0 - refPerf * 1000.0;
           if (!rsVidClockValid || Math.abs(obsOffsetUs - rsVidClockOffsetUs) > 50_000.0) {
@@ -5789,6 +5938,7 @@
           } else {
             rsVidClockOffsetUs += 0.15 * (obsOffsetUs - rsVidClockOffsetUs);
           }
+          rsVidClockCaptureTimed = hasCaptureTime;
         }
       };
       let dispatched = false;
@@ -5916,6 +6066,7 @@
         lastPumpPerfMs = 0;
         rsVidClockOffsetUs = 0.0;
         rsVidClockValid = false;
+        rsVidClockCaptureTimed = false;
         rsAudioCaptureBaseUs = 0;
         rsAudioCaptureCursor = 0;
         rsAudioCaptureAnchored = false;
@@ -5975,6 +6126,7 @@
       lastPumpPerfMs = 0;
       rsVidClockOffsetUs = 0.0;
       rsVidClockValid = false;
+      rsVidClockCaptureTimed = false;
       pumpStartPerfMs = performance.now();
       const myEpoch = sourceEpoch;
 
