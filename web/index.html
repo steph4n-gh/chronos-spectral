@@ -4687,7 +4687,13 @@
     let rsAudioLastSentTEndUs = 0;
     const rsAudioSkewState = {
       warm: 0,
-      clockKind: -1,
+      tsCleanRun: 0,
+      hasTsOrigin: false,
+      tsOriginSec: 0.0,
+      hasCtOrigin: false,
+      ctOriginSec: 0.0,
+      kindSeen: new Uint8Array(4),
+      kindOriginUs: new Float64Array(4),
       r0: 0.0,
       r1: 0.0,
       r2: 0.0,
@@ -4695,28 +4701,41 @@
       r4: 0.0,
       rCount: 0,
       prevM: 0.0,
-      b4: new Float64Array(4),
-      b4Idx: 0,
-      b4Count: 0,
-      b4Sum: 0.0,
-      b6: new Float64Array(6),
-      b6Idx: 0,
-      b6Count: 0,
-      b6Sum: 0.0,
-      uHist: new Float64Array(17),
-      uHistIdx: 0,
-      uHistCount: 0,
-      sigEma: 0.0,
-      sigPeak: 0.0,
       uAt6: 0.0,
-      initBuf: [],
+      b12: new Float64Array(12),
+      b12Idx: 0,
+      b12Count: 0,
+      b12Sum: 0.0,
+      b16: new Float64Array(16),
+      b16Idx: 0,
+      b16Count: 0,
+      b16Sum: 0.0,
+      b36: new Float64Array(36),
+      b36Idx: 0,
+      b36Count: 0,
+      b36Sum: 0.0,
+      b48: new Float64Array(48),
+      b48Idx: 0,
+      b48Count: 0,
+      b48Sum: 0.0,
+      vRing: new Float64Array(248),
+      vIdx: 0,
+      vCount: 0,
+      uFirst: 0.0,
       baseU: 0.0,
       baseCount: 0,
+      driftSign: 0,
     };
 
-    function resetRsAudioSkewState(clockKind = -1) {
+    function resetRsAudioSkewState() {
       rsAudioSkewState.warm = 0;
-      rsAudioSkewState.clockKind = clockKind;
+      rsAudioSkewState.tsCleanRun = 0;
+      rsAudioSkewState.hasTsOrigin = false;
+      rsAudioSkewState.tsOriginSec = 0.0;
+      rsAudioSkewState.hasCtOrigin = false;
+      rsAudioSkewState.ctOriginSec = 0.0;
+      rsAudioSkewState.kindSeen.fill(0);
+      rsAudioSkewState.kindOriginUs.fill(0.0);
       rsAudioSkewState.r0 = 0.0;
       rsAudioSkewState.r1 = 0.0;
       rsAudioSkewState.r2 = 0.0;
@@ -4724,23 +4743,30 @@
       rsAudioSkewState.r4 = 0.0;
       rsAudioSkewState.rCount = 0;
       rsAudioSkewState.prevM = 0.0;
-      rsAudioSkewState.b4.fill(0.0);
-      rsAudioSkewState.b4Idx = 0;
-      rsAudioSkewState.b4Count = 0;
-      rsAudioSkewState.b4Sum = 0.0;
-      rsAudioSkewState.b6.fill(0.0);
-      rsAudioSkewState.b6Idx = 0;
-      rsAudioSkewState.b6Count = 0;
-      rsAudioSkewState.b6Sum = 0.0;
-      rsAudioSkewState.uHist.fill(0.0);
-      rsAudioSkewState.uHistIdx = 0;
-      rsAudioSkewState.uHistCount = 0;
-      rsAudioSkewState.sigEma = 0.0;
-      rsAudioSkewState.sigPeak = 0.0;
       rsAudioSkewState.uAt6 = 0.0;
-      rsAudioSkewState.initBuf.length = 0;
+      rsAudioSkewState.b12.fill(0.0);
+      rsAudioSkewState.b12Idx = 0;
+      rsAudioSkewState.b12Count = 0;
+      rsAudioSkewState.b12Sum = 0.0;
+      rsAudioSkewState.b16.fill(0.0);
+      rsAudioSkewState.b16Idx = 0;
+      rsAudioSkewState.b16Count = 0;
+      rsAudioSkewState.b16Sum = 0.0;
+      rsAudioSkewState.b36.fill(0.0);
+      rsAudioSkewState.b36Idx = 0;
+      rsAudioSkewState.b36Count = 0;
+      rsAudioSkewState.b36Sum = 0.0;
+      rsAudioSkewState.b48.fill(0.0);
+      rsAudioSkewState.b48Idx = 0;
+      rsAudioSkewState.b48Count = 0;
+      rsAudioSkewState.b48Sum = 0.0;
+      rsAudioSkewState.vRing.fill(0.0);
+      rsAudioSkewState.vIdx = 0;
+      rsAudioSkewState.vCount = 0;
+      rsAudioSkewState.uFirst = 0.0;
       rsAudioSkewState.baseU = 0.0;
       rsAudioSkewState.baseCount = 0;
+      rsAudioSkewState.driftSign = 0;
     }
 
     function med5Skew(a, b, c, d, e) {
@@ -5139,10 +5165,46 @@
               }
             }
           }
+          const s = rsAudioSkewState;
+          if (didResetBase) {
+            resetRsAudioSkewState();
+          }
           rsAudioCaptureCursor += outSamples.length;
+          const safeRateHz = Math.max(8000.0, rsAudioCaptureRateHz);
+          const cursorSec = rsAudioCaptureCursor / safeRateHz;
           const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
-          let audClockPerfMs = nowPerf;
-          let clockKind = 0;
+          const skewFromPerfMs = (perfMs) => {
+            const mUs = rsVidClockValid
+              ? Math.round(perfMs * 1000.0 + rsVidClockOffsetUs)
+              : Math.round(lastMediaTime * 1_000_000.0 + (perfMs - lastPumpPerfMs) * 1000.0);
+            return tEndUs - (Number.isFinite(mUs) ? mUs : mediaNowUs);
+          };
+
+          const raw0 = skewFromPerfMs(nowPerf);
+          if (!s.kindSeen[0]) {
+            s.kindOriginUs[0] = raw0 - s.prevM;
+            s.kindSeen[0] = 1;
+          }
+
+          let hasCt = false;
+          let raw3 = 0.0;
+          if (typeof ctx.currentTime === 'number' && Number.isFinite(ctx.currentTime) && ctx.currentTime > 0) {
+            if (!s.hasCtOrigin || Math.abs(cursorSec + s.ctOriginSec - ctx.currentTime) >= 10.0) {
+              s.ctOriginSec = ctx.currentTime - cursorSec;
+              s.hasCtOrigin = true;
+            }
+            const obsPullSec = ctx.currentTime - (cursorSec + s.ctOriginSec);
+            raw3 = skewFromPerfMs(nowPerf - obsPullSec * 1000.0);
+            hasCt = true;
+            if (!s.kindSeen[3]) {
+              s.kindOriginUs[3] = raw3 - s.prevM;
+              s.kindSeen[3] = 1;
+            }
+          }
+
+          let hasTs = false;
+          let rawTs = 0.0;
+          let tsKind = 1;
           if (typeof ctx.getOutputTimestamp === 'function') {
             try {
               const ts = ctx.getOutputTimestamp();
@@ -5155,54 +5217,61 @@
                 Number.isFinite(ts.contextTime) &&
                 ts.contextTime > 0
               ) {
+                if (!s.hasTsOrigin || Math.abs(cursorSec + s.tsOriginSec - ts.contextTime) >= 10.0) {
+                  s.tsOriginSec = ts.contextTime - cursorSec;
+                  s.hasTsOrigin = true;
+                }
+                const raw1 = skewFromPerfMs(ts.performanceTime + (cursorSec + s.tsOriginSec - ts.contextTime) * 1000.0);
+                if (!s.kindSeen[1]) {
+                  s.kindOriginUs[1] = raw1 - s.prevM;
+                  s.kindSeen[1] = 1;
+                }
                 if (
                   ev &&
                   typeof ev.playbackTime === 'number' &&
                   Number.isFinite(ev.playbackTime) &&
                   ev.playbackTime > 0 &&
-                  Math.abs(ev.playbackTime - ts.contextTime) < 4.0
+                  Math.abs(ev.playbackTime - ts.contextTime) < 10.0
                 ) {
-                  audClockPerfMs = ts.performanceTime + (ev.playbackTime - ts.contextTime) * 1000.0;
-                  clockKind = 2;
+                  const raw2 = skewFromPerfMs(ts.performanceTime + (ev.playbackTime - ts.contextTime) * 1000.0);
+                  if (!s.kindSeen[2]) {
+                    s.kindOriginUs[2] = raw2 - s.prevM;
+                    s.kindSeen[2] = 1;
+                  }
+                  rawTs = raw2;
+                  tsKind = 2;
                 } else {
-                  audClockPerfMs = ts.performanceTime;
-                  clockKind = 1;
+                  rawTs = raw1;
+                  tsKind = 1;
                 }
+                hasTs = true;
               }
             } catch (_tsErr) {}
           }
-          if (
-            clockKind === 0 &&
-            typeof ctx.currentTime === 'number' &&
-            Number.isFinite(ctx.currentTime) &&
-            ctx.currentTime > 0 &&
-            ev &&
-            typeof ev.playbackTime === 'number' &&
-            Number.isFinite(ev.playbackTime) &&
-            ev.playbackTime > 0 &&
-            Math.abs(ctx.currentTime - ev.playbackTime) < 1.0
-          ) {
-            audClockPerfMs = nowPerf - (ctx.currentTime - ev.playbackTime) * 1000.0;
-            clockKind = 3;
-          }
-          const skewMediaNowUs = rsVidClockValid
-            ? Math.round(audClockPerfMs * 1000.0 + rsVidClockOffsetUs)
-            : Math.round(lastMediaTime * 1_000_000.0 + (audClockPerfMs - lastPumpPerfMs) * 1000.0);
-          const rawDiffUs =
-            tEndUs - (Number.isFinite(skewMediaNowUs) ? skewMediaNowUs : mediaNowUs);
-          let estSkewUs = 0;
-          const s = rsAudioSkewState;
-          if (didResetBase || s.clockKind !== clockKind) {
-            resetRsAudioSkewState(clockKind);
-          } else {
-            s.warm++;
 
-            // 1) 5-tap median rejects 1- and 2-sample GC bursts before filtering
+          let alignedUs = raw0 - s.kindOriginUs[0];
+          if (hasTs) {
+            alignedUs = rawTs - s.kindOriginUs[tsKind];
+            s.tsCleanRun++;
+          } else {
+            s.tsCleanRun = 0;
+            if (hasCt) {
+              alignedUs = raw3 - s.kindOriginUs[3];
+            }
+          }
+
+          let estSkewUs = 0;
+          if (!didResetBase) {
+            s.warm++;
+            const quantumUs = (128.0 * 1_000_000.0) / safeRateHz;
+            const pull512Us = (512.0 * 1_000_000.0) / safeRateHz;
+
+            // 1) 5-tap median + rate-scaled step clamp rejects isolated GC / fallback outliers
             s.r0 = s.r1;
             s.r1 = s.r2;
             s.r2 = s.r3;
             s.r3 = s.r4;
-            s.r4 = rawDiffUs;
+            s.r4 = alignedUs;
             if (s.rCount < 5) s.rCount++;
             let rawMed;
             if (s.rCount < 5) {
@@ -5211,80 +5280,118 @@
             } else {
               rawMed = med5Skew(s.r0, s.r1, s.r2, s.r3, s.r4);
             }
+            const stepClamp = Math.max(3500.0, 1.35 * pull512Us);
             const mClamped =
               s.warm <= 5
                 ? rawMed
-                : s.prevM + Math.max(-3500.0, Math.min(3500.0, rawMed - s.prevM));
+                : s.prevM + Math.max(-stepClamp, Math.min(stepClamp, rawMed - s.prevM));
             s.prevM = mClamped;
             if (s.warm === 6) s.uAt6 = mClamped;
 
-            // 2) Cascaded 4x6 boxcar annihilates periods 2, 3, 4, 6 with low 6-block group delay and zero knee overshoot
-            if (s.b4Count < 4) {
-              s.b4[s.b4Count++] = mClamped;
-              s.b4Sum += mClamped;
+            // 2) Fast offset branch u = Boxcar(12) * Boxcar(16) + slow trend branch v = Boxcar(12) * Boxcar(36) * Boxcar(48)
+            if (s.b12Count < 12) {
+              s.b12[s.b12Count++] = mClamped;
+              s.b12Sum += mClamped;
             } else {
-              s.b4Sum += mClamped - s.b4[s.b4Idx];
-              s.b4[s.b4Idx] = mClamped;
-              s.b4Idx = (s.b4Idx + 1) & 3;
+              s.b12Sum += mClamped - s.b12[s.b12Idx];
+              s.b12[s.b12Idx] = mClamped;
+              s.b12Idx = (s.b12Idx + 1) % 12;
             }
-            const avg4 = s.b4Sum / s.b4Count;
+            const avg12 = s.b12Sum / s.b12Count;
 
-            let u = avg4;
-            if (s.warm >= 8) {
-              if (s.b6Count < 6) {
-                s.b6[s.b6Count++] = avg4;
-                s.b6Sum += avg4;
-              } else {
-                s.b6Sum += avg4 - s.b6[s.b6Idx];
-                s.b6[s.b6Idx] = avg4;
-                s.b6Idx = (s.b6Idx + 1) % 6;
+            if (s.b16Count < 16) {
+              s.b16[s.b16Count++] = avg12;
+              s.b16Sum += avg12;
+            } else {
+              s.b16Sum += avg12 - s.b16[s.b16Idx];
+              s.b16[s.b16Idx] = avg12;
+              s.b16Idx = (s.b16Idx + 1) & 15;
+            }
+            const u = s.b16Sum / s.b16Count;
+
+            if (s.b36Count < 36) {
+              s.b36[s.b36Count++] = avg12;
+              s.b36Sum += avg12;
+            } else {
+              s.b36Sum += avg12 - s.b36[s.b36Idx];
+              s.b36[s.b36Idx] = avg12;
+              s.b36Idx = (s.b36Idx + 1) % 36;
+            }
+            const w36 = s.b36Sum / s.b36Count;
+
+            if (s.b48Count < 48) {
+              s.b48[s.b48Count++] = w36;
+              s.b48Sum += w36;
+            } else {
+              s.b48Sum += w36 - s.b48[s.b48Idx];
+              s.b48[s.b48Idx] = w36;
+              s.b48Idx = (s.b48Idx + 1) % 48;
+            }
+            const v = s.b48Sum / s.b48Count;
+
+            s.vRing[s.vIdx] = v;
+            s.vIdx = (s.vIdx + 1) % 248;
+            if (s.vCount < 248) s.vCount++;
+
+            const baseGate = Math.max(2200.0, 0.85 * quantumUs);
+            if (s.warm === 20) {
+              s.uFirst = u;
+              s.baseU = u;
+              s.baseCount = 1;
+            } else if (s.warm > 20 && s.baseCount < 48 && Math.abs(u - s.uFirst) <= baseGate) {
+              s.baseCount++;
+              s.baseU += (u - s.baseU) / s.baseCount;
+            }
+
+            if (s.warm >= 10 && s.warm < 24) {
+              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, Math.max(16000.0, 1.5 * pull512Us)));
+            } else if (s.warm >= 24) {
+              const cushionUs =
+                s.tsCleanRun >= 32
+                  ? 1250.0
+                  : Math.max(9200.0, Math.min(34000.0, pull512Us + 450.0));
+              const devU = u - s.baseU;
+              const offSkew = softThreshSkew(devU, cushionUs);
+
+              let trendSkew = 0.0;
+              if (s.vCount >= 241) {
+                const vAt = (lag) => s.vRing[(s.vIdx + 248 - 1 - lag) % 248];
+                const evalUniformGrid = (stepLen, count, minStep, ratioCap) => {
+                  const mags = [];
+                  let sgn = 0;
+                  let maxS = 0.0;
+                  for (let m = 0; m < count; m++) {
+                    const d = vAt(m * stepLen) - vAt((m + 1) * stepLen);
+                    if (m === 0) sgn = d >= 0.0 ? 1 : -1;
+                    const sv = sgn * d;
+                    if (sv <= minStep) return 0.0;
+                    mags.push(sv);
+                    if (sv > maxS) maxS = sv;
+                  }
+                  mags.sort((a, b) => a - b);
+                  const medS = mags[mags.length >> 1];
+                  if (maxS > ratioCap * medS + 150.0) return 0.0;
+                  return softThreshSkew(vAt(0) - vAt(count * stepLen), 2500.0);
+                };
+                const t48 = evalUniformGrid(48, 5, 540.0, 1.85);
+                const t60 = evalUniformGrid(60, 4, 920.0, 1.2);
+                trendSkew = Math.abs(t60) > Math.abs(t48) ? t60 : t48;
+                if (trendSkew > 500.0) s.driftSign = 1;
+                else if (trendSkew < -500.0) s.driftSign = -1;
               }
-              u = s.b6Sum / s.b6Count;
-            }
 
-            // 3) 8-step 2nd-difference jitter estimator once med5 + 4x6 boxcar reach steady state
-            if (s.warm >= 13) {
-              s.uHist[s.uHistIdx] = u;
-              s.uHistIdx = (s.uHistIdx + 1) % 17;
-              if (s.uHistCount < 17) s.uHistCount++;
-              if (s.uHistCount === 17) {
-                const u8 = s.uHist[(s.uHistIdx + 17 - 9) % 17];
-                const u16 = s.uHist[s.uHistIdx];
-                const d2_8 = Math.min(5000.0, Math.abs(u - 2.0 * u8 + u16));
-                if (s.warm === 29) {
-                  s.sigEma = d2_8;
-                  s.sigPeak = d2_8;
+              const certMargin = Math.max(1800.0, 0.55 * quantumUs + 350.0);
+              if (s.driftSign !== 0) {
+                const devV = v - s.baseU;
+                if (s.driftSign * devV <= certMargin) {
+                  s.driftSign = 0;
                 } else {
-                  s.sigEma += 0.08 * (d2_8 - s.sigEma);
-                  s.sigPeak = Math.max(s.sigPeak * 0.997, s.sigEma);
+                  const certSkew = softThreshSkew(devV, certMargin);
+                  if (Math.abs(certSkew) > Math.abs(trendSkew)) trendSkew = certSkew;
                 }
               }
-            }
 
-            // 4) Anchor baseline after cascaded boxcars fill, then threshold against Web Audio / dispatch cushion
-            if (s.warm >= 10 && s.warm < 13) {
-              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 16000.0));
-            } else if (s.warm >= 13 && s.warm <= 17) {
-              s.initBuf.push(u);
-              estSkewUs = Math.round(softThreshSkew(mClamped - s.uAt6, 16000.0));
-              if (s.warm === 17) {
-                const sorted = s.initBuf.slice().sort((x, y) => x - y);
-                s.baseU = Math.abs(sorted[2] - s.uAt6) > 8000.0 ? s.uAt6 : sorted[2];
-                s.baseCount = 5;
-              }
-            } else if (s.warm > 17) {
-              const sig8 = s.uHistCount === 17 ? Math.min(3500.0, Math.max(s.sigEma, s.sigPeak)) : 400.0;
-              if (s.uHistCount === 17 && s.baseCount < 96 && Math.abs(u - s.baseU) <= 1.8 * sig8) {
-                s.baseCount++;
-                s.baseU += (u - s.baseU) / s.baseCount;
-              }
-              const quantumUs = (128.0 * 1_000_000.0) / Math.max(8000.0, rsAudioCaptureRateHz);
-              const cushionUs =
-                clockKind === 1 || clockKind === 2
-                  ? 1250.0
-                  : Math.min(5500.0, Math.max(2350.0, 2.0 * quantumUs + 15.0));
-              const margin = cushionUs + 3.6 * sig8;
-              estSkewUs = Math.round(softThreshSkew(u - s.baseU, margin));
+              estSkewUs = Math.round(Math.abs(trendSkew) > Math.abs(offSkew) ? trendSkew : offSkew);
             }
           }
           rsAudioLastSentTEndUs = tEndUs;

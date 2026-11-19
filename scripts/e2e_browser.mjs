@@ -5588,7 +5588,7 @@ async function main() {
 
               // Sustained clock drift & dispatch delay checks (Round 14 & Round 15 P2 regression suite)
               let driftRunSeq = 0;
-              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn, hwSetupFn = null, curTimeSetupFn = null) => {
+              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn, hwSetupFn = null, curTimeSetupFn = null, omitPlaybackTime = false) => {
                 driftRunSeq++;
                 const msgStart = pushedAudioMsgs.length;
                 cctx.fillStyle = 'rgb(' + (40 + driftRunSeq * 15) + ',' + (70 + driftRunSeq * 10) + ',110)';
@@ -5604,7 +5604,7 @@ async function main() {
                 ctxObj.currentTimeFn = typeof curTimeSetupFn === 'function'
                   ? () => curTimeSetupFn(curBlockIdx, blockDurMs)
                   : null;
-                const hasPlayTime = typeof hwSetupFn === 'function' || typeof curTimeSetupFn === 'function';
+                const hasPlayTime = !omitPlaybackTime && (typeof hwSetupFn === 'function' || typeof curTimeSetupFn === 'function');
                 const playTimeOf = (idx) => (hasPlayTime ? 1.0 + ((idx + 1) * 2048.0) / sr : undefined);
                 for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
                   cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
@@ -5633,7 +5633,7 @@ async function main() {
                 virtOffsetMs = 0.0;
                 cctx.fillStyle = 'rgb(' + (60 + driftRunSeq * 20) + ',' + (90 + driftRunSeq * 15) + ',140)';
                 cctx.fillRect(30, 30, 52, 52);
-                await new Promise((r) => setTimeout(r, totalBlocks > 1000 ? 150 : 80));
+                await new Promise((r) => setTimeout(r, totalBlocks > 3500 ? 200 : (totalBlocks > 1000 ? 150 : 80)));
                 const snap = window.__chronosWave2Probe?.getLastWave2() || null;
                 const slice = pushedAudioMsgs.slice(msgStart);
                 const samplesAfter = snap?.vibro?.audioTotalSamples ?? 0;
@@ -5714,7 +5714,7 @@ async function main() {
                 410,
                 (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
                 null,
-                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor(Math.min(5.333e-3, 1e-4 * Math.max(0, b - 320)) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((Math.min(5.333e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
               );
               const cBare44k1Pos = await restartFreshMicSession(44100);
               const bare44k1LatePosP4 = await runSustainedDrift(
@@ -5727,6 +5727,78 @@ async function main() {
                 cBare44k1Neg,
                 3320,
                 (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtx512Pull48k = await restartFreshMicSession(48000);
+              const ctx512Pull48k8000 = await runSustainedDrift(
+                cCtx512Pull48k,
+                410,
+                (b, bd) => b * bd + Math.min(8.0, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((Math.min(8e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 48000.0)) * (512.0 / 48000.0)
+              );
+              const cCtx512Pull96k = await restartFreshMicSession(96000);
+              const ctx512Pull96k5333 = await runSustainedDrift(
+                cCtx512Pull96k,
+                410,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 96000.0 + Math.floor((Math.min(5.333e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 96000.0)) * (512.0 / 96000.0)
+              );
+              const cRawTsNoPlay = await restartFreshMicSession(48000);
+              const rawTsNoPlay750 = await runSustainedDrift(
+                cRawTsNoPlay,
+                750,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
+                (b, basePerf, bd) => {
+                  const dMs = Math.min(5.333, 0.1 * Math.max(0, b - 320));
+                  const pSec = 256.0 / 48000.0;
+                  const pulls = Math.floor(((dMs + 1.0) * 1e-3) / pSec);
+                  return {
+                    contextTime: 1.0 + (b * 2048.0) / 48000.0 + pulls * pSec,
+                    performanceTime: basePerf + b * bd - 1.0 + pulls * pSec * 1000.0,
+                  };
+                },
+                null,
+                true
+              );
+              const cBare48kPosP12 = await restartFreshMicSession(48000);
+              const bare48kLatePosP12 = await runSustainedDrift(
+                cBare48kPosP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBare48kNegP12 = await restartFreshMicSession(48000);
+              const bare48kLateNegP12 = await runSustainedDrift(
+                cBare48kNegP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtx48kPosP12 = await restartFreshMicSession(48000);
+              const ctx48kLatePosP12 = await runSustainedDrift(
+                cCtx48kPosP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => {
+                  const jitSec = 2.667e-3 * (Math.floor(b / 6) % 2);
+                  const pSec = 256.0 / 48000.0;
+                  return 1.0 + (b * 2048.0) / 48000.0 + Math.floor((jitSec + 1e-3) / pSec) * pSec;
+                }
+              );
+              const cIntermittentTs = await restartFreshMicSession(48000);
+              const intermittentNullTs4320 = await runSustainedDrift(
+                cIntermittentTs,
+                4320,
+                (b, bd) => b * bd + 0.02 * Math.max(0, b - 3000),
+                (b, basePerf, bd) => (
+                  b % 16 === 0
+                    ? null
+                    : {
+                        contextTime: 1.0 + (b * 2048.0) / 48000.0,
+                        performanceTime: basePerf + b * bd + 0.02 * Math.max(0, b - 3000) - bd,
+                      }
+                ),
+                (b) => 1.0 + (b * 2048.0) / 48000.0
               );
 
               return {
@@ -5766,6 +5838,13 @@ async function main() {
                 ctxPullDisp5333,
                 bare44k1LatePosP4,
                 bare44k1LateNegP4,
+                ctx512Pull48k8000,
+                ctx512Pull96k5333,
+                rawTsNoPlay750,
+                bare48kLatePosP12,
+                bare48kLateNegP12,
+                ctx48kLatePosP12,
+                intermittentNullTs4320,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5829,7 +5908,7 @@ async function main() {
           webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftPos.lastSkew >= -20000 ||
           webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftPos.acceptedBlocks >= 100 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 165 ||
           webcamAudioCheck.driftPos.state !== 4 ||
           (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftPos.welchK !== 0 ||
@@ -5839,7 +5918,7 @@ async function main() {
           webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
           webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftNeg.acceptedBlocks >= 100 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 165 ||
           webcamAudioCheck.driftNeg.state !== 4 ||
           (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftNeg.welchK !== 0 ||
@@ -5906,7 +5985,61 @@ async function main() {
           webcamAudioCheck.bare44k1LateNegP4.state !== 4 ||
           (webcamAudioCheck.bare44k1LateNegP4.reasonMask & 32) === 0 ||
           webcamAudioCheck.bare44k1LateNegP4.welchK !== 0 ||
-          webcamAudioCheck.bare44k1LateNegP4.stampValid
+          webcamAudioCheck.bare44k1LateNegP4.stampValid ||
+          !webcamAudioCheck.ctx512Pull48k8000 ||
+          webcamAudioCheck.ctx512Pull48k8000.pushedCount !== 410 ||
+          webcamAudioCheck.ctx512Pull48k8000.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Pull48k8000.acceptedBlocks !== 410 ||
+          webcamAudioCheck.ctx512Pull48k8000.state === 4 ||
+          (webcamAudioCheck.ctx512Pull48k8000.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512Pull96k5333 ||
+          webcamAudioCheck.ctx512Pull96k5333.pushedCount !== 410 ||
+          webcamAudioCheck.ctx512Pull96k5333.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Pull96k5333.acceptedBlocks !== 410 ||
+          webcamAudioCheck.ctx512Pull96k5333.state === 4 ||
+          (webcamAudioCheck.ctx512Pull96k5333.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.rawTsNoPlay750 ||
+          webcamAudioCheck.rawTsNoPlay750.pushedCount !== 750 ||
+          webcamAudioCheck.rawTsNoPlay750.maxAbsSkew !== 0 ||
+          webcamAudioCheck.rawTsNoPlay750.acceptedBlocks !== 750 ||
+          webcamAudioCheck.rawTsNoPlay750.state === 4 ||
+          (webcamAudioCheck.rawTsNoPlay750.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bare48kLatePosP12 ||
+          webcamAudioCheck.bare48kLatePosP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare48kLatePosP12.lastSkew) <= 500 ||
+          webcamAudioCheck.bare48kLatePosP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare48kLatePosP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare48kLatePosP12.state !== 4 ||
+          (webcamAudioCheck.bare48kLatePosP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare48kLatePosP12.welchK !== 0 ||
+          webcamAudioCheck.bare48kLatePosP12.stampValid ||
+          !webcamAudioCheck.bare48kLateNegP12 ||
+          webcamAudioCheck.bare48kLateNegP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare48kLateNegP12.lastSkew) <= 500 ||
+          webcamAudioCheck.bare48kLateNegP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare48kLateNegP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare48kLateNegP12.state !== 4 ||
+          (webcamAudioCheck.bare48kLateNegP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare48kLateNegP12.welchK !== 0 ||
+          webcamAudioCheck.bare48kLateNegP12.stampValid ||
+          !webcamAudioCheck.ctx48kLatePosP12 ||
+          webcamAudioCheck.ctx48kLatePosP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx48kLatePosP12.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx48kLatePosP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx48kLatePosP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx48kLatePosP12.state !== 4 ||
+          (webcamAudioCheck.ctx48kLatePosP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx48kLatePosP12.welchK !== 0 ||
+          webcamAudioCheck.ctx48kLatePosP12.stampValid ||
+          !webcamAudioCheck.intermittentNullTs4320 ||
+          webcamAudioCheck.intermittentNullTs4320.pushedCount !== 4320 ||
+          Math.abs(webcamAudioCheck.intermittentNullTs4320.lastSkew) <= 500 ||
+          webcamAudioCheck.intermittentNullTs4320.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.intermittentNullTs4320.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.intermittentNullTs4320.state !== 4 ||
+          (webcamAudioCheck.intermittentNullTs4320.reasonMask & 32) === 0 ||
+          webcamAudioCheck.intermittentNullTs4320.welchK !== 0 ||
+          webcamAudioCheck.intermittentNullTs4320.stampValid
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
