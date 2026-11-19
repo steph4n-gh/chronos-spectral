@@ -5800,6 +5800,54 @@ async function main() {
                 ),
                 (b) => 1.0 + (b * 2048.0) / 48000.0
               );
+              const makeRandJitArr = (seedInit, len, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  arr[k] = (sd >>> 31) * qMs;
+                }
+                return arr;
+              };
+              const randJit1Pos = makeRandJitArr(1, 3320, 2.667);
+              const randJit7Neg = makeRandJitArr(7, 3320, 2.667);
+              const randJit44kBenign = makeRandJitArr(5, 750, 2.9025);
+              const cBareRand1Pos = await restartFreshMicSession(48000);
+              const bareRandSeed1Pos = await runSustainedDrift(
+                cBareRand1Pos,
+                3320,
+                (b, bd) => b * bd + randJit1Pos[b] + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBareRand7Neg = await restartFreshMicSession(48000);
+              const bareRandSeed7Neg = await runSustainedDrift(
+                cBareRand7Neg,
+                3320,
+                (b, bd) => b * bd + randJit7Neg[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxRand1Pos = await restartFreshMicSession(48000);
+              const ctxRandSeed1Pos = await runSustainedDrift(
+                cCtxRand1Pos,
+                3320,
+                (b, bd) => b * bd + randJit1Pos[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((randJit1Pos[b] * 1e-3 + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+              );
+              const cCtxRand7Neg = await restartFreshMicSession(48000);
+              const ctxRandSeed7Neg = await runSustainedDrift(
+                cCtxRand7Neg,
+                3320,
+                (b, bd) => b * bd + randJit7Neg[b] - 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((randJit7Neg[b] * 1e-3 + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+              );
+              const cCtxRandBenign = await restartFreshMicSession(44100);
+              const ctxRandBenign512Pull = await runSustainedDrift(
+                cCtxRandBenign,
+                750,
+                (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 44100.0 + Math.floor((randJit44kBenign[b] * 1e-3 + Math.min(11.589e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 44100.0)) * (512.0 / 44100.0)
+              );
 
               return {
                 initialGumCount,
@@ -5845,6 +5893,11 @@ async function main() {
                 bare48kLateNegP12,
                 ctx48kLatePosP12,
                 intermittentNullTs4320,
+                bareRandSeed1Pos,
+                bareRandSeed7Neg,
+                ctxRandSeed1Pos,
+                ctxRandSeed7Neg,
+                ctxRandBenign512Pull,
               };
             } finally {
               performance.now = origPerfNow;
@@ -6039,7 +6092,49 @@ async function main() {
           webcamAudioCheck.intermittentNullTs4320.state !== 4 ||
           (webcamAudioCheck.intermittentNullTs4320.reasonMask & 32) === 0 ||
           webcamAudioCheck.intermittentNullTs4320.welchK !== 0 ||
-          webcamAudioCheck.intermittentNullTs4320.stampValid
+          webcamAudioCheck.intermittentNullTs4320.stampValid ||
+          !webcamAudioCheck.bareRandSeed1Pos ||
+          webcamAudioCheck.bareRandSeed1Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareRandSeed1Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.bareRandSeed1Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareRandSeed1Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareRandSeed1Pos.state !== 4 ||
+          (webcamAudioCheck.bareRandSeed1Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareRandSeed1Pos.welchK !== 0 ||
+          webcamAudioCheck.bareRandSeed1Pos.stampValid ||
+          !webcamAudioCheck.bareRandSeed7Neg ||
+          webcamAudioCheck.bareRandSeed7Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareRandSeed7Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.bareRandSeed7Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareRandSeed7Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareRandSeed7Neg.state !== 4 ||
+          (webcamAudioCheck.bareRandSeed7Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareRandSeed7Neg.welchK !== 0 ||
+          webcamAudioCheck.bareRandSeed7Neg.stampValid ||
+          !webcamAudioCheck.ctxRandSeed1Pos ||
+          webcamAudioCheck.ctxRandSeed1Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxRandSeed1Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxRandSeed1Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxRandSeed1Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxRandSeed1Pos.state !== 4 ||
+          (webcamAudioCheck.ctxRandSeed1Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxRandSeed1Pos.welchK !== 0 ||
+          webcamAudioCheck.ctxRandSeed1Pos.stampValid ||
+          !webcamAudioCheck.ctxRandSeed7Neg ||
+          webcamAudioCheck.ctxRandSeed7Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxRandSeed7Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxRandSeed7Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxRandSeed7Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxRandSeed7Neg.state !== 4 ||
+          (webcamAudioCheck.ctxRandSeed7Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxRandSeed7Neg.welchK !== 0 ||
+          webcamAudioCheck.ctxRandSeed7Neg.stampValid ||
+          !webcamAudioCheck.ctxRandBenign512Pull ||
+          webcamAudioCheck.ctxRandBenign512Pull.pushedCount !== 750 ||
+          webcamAudioCheck.ctxRandBenign512Pull.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctxRandBenign512Pull.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctxRandBenign512Pull.state === 4 ||
+          (webcamAudioCheck.ctxRandBenign512Pull.reasonMask & 32) !== 0
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
