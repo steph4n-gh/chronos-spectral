@@ -5231,8 +5231,8 @@ async function main() {
                 rmSel.value = '2';
                 rmSel.dispatchEvent(new Event('change', { bubbles: true }));
               }
-              const deadline = performance.now() + 2500;
-              while (performance.now() < deadline && nativePushMsgs.length < 26) {
+              const deadline = performance.now() + 2800;
+              while (performance.now() < deadline && nativePushMsgs.length < 34) {
                 await new Promise((r) => setTimeout(r, 40));
               }
               await new Promise((r) => setTimeout(r, 60));
@@ -5280,7 +5280,7 @@ async function main() {
         if (
           !nativeWebcamCheck ||
           nativeWebcamCheck.unsupported ||
-          nativeWebcamCheck.nativePushed < 24 ||
+          nativeWebcamCheck.nativePushed < 30 ||
           nativeWebcamCheck.maxAbsSkew > 500 ||
           !nativeWebcamCheck.nativeAcceptedAll ||
           nativeWebcamCheck.state === 4 ||
@@ -5312,6 +5312,7 @@ async function main() {
             const dStaleA = realAc.createMediaStreamDestination();
             const dStaleB1 = realAc.createMediaStreamDestination();
             const dStaleB2 = realAc.createMediaStreamDestination();
+            const dDriftNeg = realAc.createMediaStreamDestination();
             const trackA = d1.stream.getAudioTracks()[0];
             const trackB = d2.stream.getAudioTracks()[0];
             const trackC = d3.stream.getAudioTracks()[0];
@@ -5319,6 +5320,7 @@ async function main() {
             const trackStaleA = dStaleA.stream.getAudioTracks()[0];
             const trackStaleB1 = dStaleB1.stream.getAudioTracks()[0];
             const trackStaleB2 = dStaleB2.stream.getAudioTracks()[0];
+            const trackDriftNeg = dDriftNeg.stream.getAudioTracks()[0];
             const stream = canvas.captureStream(30);
             const micOnlyStream = new MediaStream([trackA]);
             const combStream = canvas.captureStream(30);
@@ -5414,6 +5416,9 @@ async function main() {
                     }
                     if (gumMode === 'stale_b2_mic') {
                       return new MediaStream([trackStaleB2]);
+                    }
+                    if (gumMode === 'drift_neg_mic') {
+                      return new MediaStream([trackDriftNeg]);
                     }
                     return constraints && constraints.audio && !constraints.video ? micOnlyStream : stream;
                   },
@@ -5549,6 +5554,74 @@ async function main() {
               const staleB1TracksEnded = trackStaleB1.readyState === 'ended';
               const staleBTracksIds = streamStaleB.getAudioTracks().map((tr) => tr.id);
 
+              const pushedBeforeDriftCount = pushedAudioMsgs.length;
+              const sdBtn = document.getElementById('btnResSd');
+              if (sdBtn) sdBtn.click();
+              const scanSel = document.getElementById('selRsScanDir');
+              if (scanSel && scanSel.value !== '0') {
+                scanSel.value = '0';
+                scanSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              await new Promise((r) => setTimeout(r, 40));
+
+              // Sustained clock drift (+/-100 us/callback over 320 callbacks = +/-31.9 ms) must trip DISTURBED | CLOCK_SKEW
+              const runSustainedDrift = async (ctxObj, deltaMsPerCb) => {
+                const msgStart = pushedAudioMsgs.length;
+                cctx.fillStyle = deltaMsPerCb > 0 ? '#284868' : '#2c4c6c';
+                cctx.fillRect(16, 16, 48, 48);
+                await new Promise((r) => setTimeout(r, 40));
+                const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
+                for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
+                  cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
+                  cctx.fillRect(24 + (f % 10) * 6, 24, 48, 48);
+                  await new Promise((r) => setTimeout(r, 40));
+                  if (f >= 2) {
+                    frozenNowMs = origPerfNow();
+                    virtOffsetMs = 0.0;
+                    fireAudioCb(ctxObj);
+                    if (pushedAudioMsgs.length === msgStart) {
+                      frozenNowMs = null;
+                    }
+                  }
+                }
+                if (pushedAudioMsgs.length === msgStart + 1) {
+                  for (let b = 1; b < 320; b++) {
+                    virtOffsetMs = b * ((2048.0 * 1000.0) / 48000.0 + deltaMsPerCb);
+                    fireAudioCb(ctxObj);
+                  }
+                }
+                frozenNowMs = null;
+                virtOffsetMs = 0.0;
+                cctx.fillStyle = deltaMsPerCb > 0 ? '#305070' : '#406080';
+                cctx.fillRect(30, 30, 52, 52);
+                await new Promise((r) => setTimeout(r, 80));
+                const snap = window.__chronosWave2Probe?.getLastWave2() || null;
+                const slice = pushedAudioMsgs.slice(msgStart);
+                const samplesAfter = snap?.vibro?.audioTotalSamples ?? 0;
+                return {
+                  pushedCount: slice.length,
+                  lastSkew: slice.length > 0 ? slice[slice.length - 1].estSkewUs : 0,
+                  maxAbsSkew: slice.reduce((mx, m) => Math.max(mx, Math.abs(m.estSkewUs)), 0),
+                  acceptedBlocks: Math.round(((samplesAfter - samplesBefore) >>> 0) / 2048),
+                  state: snap?.vibro?.state ?? -1,
+                  reasonMask: snap?.vibro?.reasonMask ?? -1,
+                  welchK: snap?.vibro?.welchK ?? -1,
+                  stampValid: Boolean(snap?.stamps?.vibro?.valid),
+                };
+              };
+
+              const driftPos = await runSustainedDrift(cStaleFinal, 0.1);
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              await new Promise((r) => setTimeout(r, 30));
+              gumMode = 'drift_neg_mic';
+              const ctxBeforeNeg = ctxSpies.length;
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 40 && ctxSpies.length === ctxBeforeNeg; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              const cDriftNeg = ctxSpies[ctxSpies.length - 1] || null;
+              const driftNeg = await runSustainedDrift(cDriftNeg, -0.1);
+
               return {
                 initialGumCount,
                 initialGumAudio,
@@ -5566,8 +5639,8 @@ async function main() {
                 trackBId: trackB.id,
                 trackCId: trackC.id,
                 prePumpCount,
-                pushedCount: pushedAudioMsgs.length,
-                pushedSkews: pushedAudioMsgs.map((m) => m.estSkewUs),
+                pushedCount: pushedBeforeDriftCount,
+                pushedSkews: pushedAudioMsgs.slice(0, 4).map((m) => m.estSkewUs),
                 postAudioReason,
                 combAudioEndedAfterOff,
                 combTracksLeftAfterOff,
@@ -5576,6 +5649,8 @@ async function main() {
                 staleBTracksIds,
                 staleFinalBoundIds: cStaleFinal ? cStaleFinal.boundTrackIds : [],
                 trackStaleB2Id: trackStaleB2.id,
+                driftPos,
+                driftNeg,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5594,9 +5669,11 @@ async function main() {
               trackStaleA.stop();
               trackStaleB1.stop();
               trackStaleB2.stop();
+              trackDriftNeg.stop();
               await realAc.close().catch(() => {});
               const rmSel = document.getElementById('rsVibroModeSelect');
               if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              document.getElementById('btnResHd')?.click();
               document.getElementById('btnSrcTestbench')?.click();
               await new Promise((r) => setTimeout(r, 40));
             }
@@ -5630,7 +5707,27 @@ async function main() {
           webcamAudioCheck.staleBTracksIds.length !== 1 ||
           webcamAudioCheck.staleBTracksIds[0] !== webcamAudioCheck.trackStaleB2Id ||
           webcamAudioCheck.staleFinalBoundIds.length !== 1 ||
-          webcamAudioCheck.staleFinalBoundIds[0] !== webcamAudioCheck.trackStaleB2Id
+          webcamAudioCheck.staleFinalBoundIds[0] !== webcamAudioCheck.trackStaleB2Id ||
+          !webcamAudioCheck.driftPos ||
+          webcamAudioCheck.driftPos.pushedCount !== 320 ||
+          webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
+          webcamAudioCheck.driftPos.lastSkew >= -20000 ||
+          webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 60 ||
+          webcamAudioCheck.driftPos.state !== 4 ||
+          (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.driftPos.welchK !== 0 ||
+          webcamAudioCheck.driftPos.stampValid ||
+          !webcamAudioCheck.driftNeg ||
+          webcamAudioCheck.driftNeg.pushedCount !== 320 ||
+          webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
+          webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 60 ||
+          webcamAudioCheck.driftNeg.state !== 4 ||
+          (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.driftNeg.welchK !== 0 ||
+          webcamAudioCheck.driftNeg.stampValid
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }

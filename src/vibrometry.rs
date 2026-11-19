@@ -989,7 +989,7 @@ impl VibrometryState {
             let gap_bit = if hard_gap { RS_REASON_FRAME_GAP } else { 0 };
             self.reset_continuity(0);
             self.telem[0] = RS_STATE_UNCALIBRATED;
-            self.telem[2] = uncalib_reasons | gap_bit;
+            self.telem[2] |= uncalib_reasons | gap_bit;
             return;
         }
 
