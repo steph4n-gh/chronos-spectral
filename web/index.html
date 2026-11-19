@@ -4693,17 +4693,16 @@
       r3: 0.0,
       r4: 0.0,
       rCount: 0,
-      prevU: 0.0,
-      d2Prev1: 0.0,
-      d2Prev2: 0.0,
+      prevM: 0.0,
+      pPrev: 0.0,
+      uPrev1: 0.0,
+      uPrev2: 0.0,
       sigEma: 0.0,
       sigPeak: 0.0,
-      regN: 0,
-      meanK: 0.0,
-      meanU: 0.0,
-      cKU: 0.0,
-      cKK: 0.0,
-      emaCur: 0.0,
+      initBuf: [],
+      baseU: 0.0,
+      baseCount: 0,
+      curU: 0.0,
     };
 
     function resetRsAudioSkewState() {
@@ -4714,17 +4713,16 @@
       rsAudioSkewState.r3 = 0.0;
       rsAudioSkewState.r4 = 0.0;
       rsAudioSkewState.rCount = 0;
-      rsAudioSkewState.prevU = 0.0;
-      rsAudioSkewState.d2Prev1 = 0.0;
-      rsAudioSkewState.d2Prev2 = 0.0;
+      rsAudioSkewState.prevM = 0.0;
+      rsAudioSkewState.pPrev = 0.0;
+      rsAudioSkewState.uPrev1 = 0.0;
+      rsAudioSkewState.uPrev2 = 0.0;
       rsAudioSkewState.sigEma = 0.0;
       rsAudioSkewState.sigPeak = 0.0;
-      rsAudioSkewState.regN = 0;
-      rsAudioSkewState.meanK = 0.0;
-      rsAudioSkewState.meanU = 0.0;
-      rsAudioSkewState.cKU = 0.0;
-      rsAudioSkewState.cKK = 0.0;
-      rsAudioSkewState.emaCur = 0.0;
+      rsAudioSkewState.initBuf.length = 0;
+      rsAudioSkewState.baseU = 0.0;
+      rsAudioSkewState.baseCount = 0;
+      rsAudioSkewState.curU = 0.0;
     }
 
     function med5Skew(a, b, c, d, e) {
@@ -5132,24 +5130,8 @@
             resetRsAudioSkewState();
           } else {
             s.warm++;
-            if (s.warm === 1) {
-              s.d2Prev2 = rawDiffUs;
-            } else if (s.warm === 2) {
-              s.d2Prev1 = rawDiffUs;
-            } else {
-              const d2 = Math.min(8000.0, Math.abs(rawDiffUs - 2.0 * s.d2Prev1 + s.d2Prev2));
-              s.d2Prev2 = s.d2Prev1;
-              s.d2Prev1 = rawDiffUs;
-              const instSig = d2 * 0.55;
-              if (s.warm === 3) {
-                s.sigEma = instSig;
-                s.sigPeak = instSig;
-              } else {
-                s.sigEma += 0.10 * (instSig - s.sigEma);
-                s.sigPeak = Math.max(s.sigPeak * 0.992, s.sigEma);
-              }
-            }
 
+            // 1) 5-tap median rejects 1- and 2-sample GC bursts before filtering
             s.r0 = s.r1;
             s.r1 = s.r2;
             s.r2 = s.r3;
@@ -5163,39 +5145,54 @@
             } else {
               rawMed = med5Skew(s.r0, s.r1, s.r2, s.r3, s.r4);
             }
-            const u =
-              s.warm === 1
+            const mClamped =
+              s.warm <= 5
                 ? rawMed
-                : s.prevU + Math.max(-4000.0, Math.min(4000.0, rawMed - s.prevU));
-            s.prevU = u;
+                : s.prevM + Math.max(-3500.0, Math.min(3500.0, rawMed - s.prevM));
+            s.prevM = mClamped;
 
-            if (s.warm >= 8) {
-              s.regN++;
-              const dk = s.regN - s.meanK;
-              s.meanK += dk / s.regN;
-              const du = u - s.meanU;
-              s.meanU += du / s.regN;
-              s.cKU += dk * (u - s.meanU);
-              s.cKK += dk * (s.regN - s.meanK);
-              if (s.regN === 1) {
-                s.emaCur = u;
+            // 2) 2-tap pairwise mean cancels period-2 quantum alternation while preserving linear drift
+            const u = s.warm === 1 ? mClamped : 0.5 * (mClamped + s.pPrev);
+            s.pPrev = mClamped;
+
+            // 3) Jitter scale from 2nd difference of u (invariant to constant offset, linear drift, and period-2 ripple)
+            if (s.warm === 6) {
+              s.uPrev2 = u;
+            } else if (s.warm === 7) {
+              s.uPrev1 = u;
+            } else if (s.warm >= 8) {
+              const d2u = Math.min(5000.0, Math.abs(u - 2.0 * s.uPrev1 + s.uPrev2));
+              s.uPrev2 = s.uPrev1;
+              s.uPrev1 = u;
+              if (s.warm === 8) {
+                s.sigEma = d2u;
+                s.sigPeak = d2u;
               } else {
-                s.emaCur += 0.04 * (u - s.emaCur);
+                s.sigEma += 0.08 * (d2u - s.sigEma);
+                s.sigPeak = Math.max(s.sigPeak * 0.997, s.sigEma);
               }
-              if (s.regN >= 6) {
-                const sig = Math.min(4000.0, Math.max(s.sigEma, s.sigPeak));
-                const rawTrend = (s.cKU / (s.cKK + 8.0)) * (s.regN - 1);
-                const trendMargin = (30.0 * sig) / Math.sqrt(s.regN) + 9000.0 / s.regN;
-                const estTrend = softThreshSkew(rawTrend, trendMargin);
+            }
 
-                const rawStep = s.emaCur - s.meanU;
-                const stepMargin = 2.4 * sig + 4500.0 / s.regN;
-                const estStep = softThreshSkew(rawStep, stepMargin);
-
-                estSkewUs = Math.round(
-                  Math.abs(estTrend) >= Math.abs(estStep) ? estTrend : estStep
-                );
+            // 4) Baseline anchor over post-settling window, then soft-thresholded divergence above dispatch cushion
+            if (s.warm >= 6 && s.warm <= 10) {
+              s.initBuf.push(u);
+              if (s.warm === 10) {
+                const sorted = s.initBuf.slice().sort((x, y) => x - y);
+                s.baseU = sorted[2];
+                s.baseCount = 5;
+                s.curU = u;
               }
+            } else if (s.warm > 10) {
+              s.curU += 0.12 * (u - s.curU);
+              const sigU = Math.min(3000.0, Math.max(s.sigEma, s.sigPeak));
+              if (s.baseCount < 96 && Math.abs(u - s.baseU) <= 3.5 * sigU) {
+                s.baseCount++;
+                s.baseU += (u - s.baseU) / s.baseCount;
+              }
+              const quantumUs = (128.0 * 1_000_000.0) / Math.max(8000.0, rsAudioCaptureRateHz);
+              const dispatchCushionUs = Math.max(2350.0, 0.88 * quantumUs);
+              const margin = dispatchCushionUs + 8.0 * sigU;
+              estSkewUs = Math.round(softThreshSkew(s.curU - s.baseU, margin));
             }
           }
           rsAudioLastSentTEndUs = tEndUs;

@@ -5321,6 +5321,8 @@ async function main() {
             const trackStaleB1 = dStaleB1.stream.getAudioTracks()[0];
             const trackStaleB2 = dStaleB2.stream.getAudioTracks()[0];
             const trackDriftNeg = dDriftNeg.stream.getAudioTracks()[0];
+            const driftExtraTracks = [];
+            let nextDynamicMicTrack = null;
             const stream = canvas.captureStream(30);
             const micOnlyStream = new MediaStream([trackA]);
             const combStream = canvas.captureStream(30);
@@ -5419,6 +5421,9 @@ async function main() {
                     }
                     if (gumMode === 'drift_neg_mic') {
                       return new MediaStream([trackDriftNeg]);
+                    }
+                    if (gumMode === 'dynamic_mic' && nextDynamicMicTrack) {
+                      return new MediaStream([nextDynamicMicTrack]);
                     }
                     return constraints && constraints.audio && !constraints.video ? micOnlyStream : stream;
                   },
@@ -5564,20 +5569,23 @@ async function main() {
               }
               await new Promise((r) => setTimeout(r, 40));
 
-              // Sustained clock drift (+/-100 us/callback over 320 callbacks = +/-31.9 ms) must trip DISTURBED | CLOCK_SKEW
-              const runSustainedDrift = async (ctxObj, deltaMsPerCb) => {
+              // Sustained clock drift & dispatch delay checks (P2 #1/#2 regression suite)
+              let driftRunSeq = 0;
+              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn) => {
+                driftRunSeq++;
                 const msgStart = pushedAudioMsgs.length;
-                cctx.fillStyle = deltaMsPerCb > 0 ? '#284868' : '#2c4c6c';
+                cctx.fillStyle = 'rgb(' + (40 + driftRunSeq * 15) + ',' + (70 + driftRunSeq * 10) + ',110)';
                 cctx.fillRect(16, 16, 48, 48);
                 await new Promise((r) => setTimeout(r, 40));
                 const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
+                const blockDurMs = (2048.0 * 1000.0) / 48000.0;
                 for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
                   cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
                   cctx.fillRect(24 + (f % 10) * 6, 24, 48, 48);
                   await new Promise((r) => setTimeout(r, 40));
                   if (f >= 2) {
                     frozenNowMs = origPerfNow();
-                    virtOffsetMs = 0.0;
+                    virtOffsetMs = offsetMsFn(0, blockDurMs);
                     fireAudioCb(ctxObj);
                     if (pushedAudioMsgs.length === msgStart) {
                       frozenNowMs = null;
@@ -5585,16 +5593,16 @@ async function main() {
                   }
                 }
                 if (pushedAudioMsgs.length === msgStart + 1) {
-                  for (let b = 1; b < 320; b++) {
-                    virtOffsetMs = b * ((2048.0 * 1000.0) / 48000.0 + deltaMsPerCb);
+                  for (let b = 1; b < totalBlocks; b++) {
+                    virtOffsetMs = offsetMsFn(b, blockDurMs);
                     fireAudioCb(ctxObj);
                   }
                 }
                 frozenNowMs = null;
                 virtOffsetMs = 0.0;
-                cctx.fillStyle = deltaMsPerCb > 0 ? '#305070' : '#406080';
+                cctx.fillStyle = 'rgb(' + (60 + driftRunSeq * 20) + ',' + (90 + driftRunSeq * 15) + ',140)';
                 cctx.fillRect(30, 30, 52, 52);
-                await new Promise((r) => setTimeout(r, 80));
+                await new Promise((r) => setTimeout(r, totalBlocks > 1000 ? 150 : 80));
                 const snap = window.__chronosWave2Probe?.getLastWave2() || null;
                 const slice = pushedAudioMsgs.slice(msgStart);
                 const samplesAfter = snap?.vibro?.audioTotalSamples ?? 0;
@@ -5610,17 +5618,43 @@ async function main() {
                 };
               };
 
-              const driftPos = await runSustainedDrift(cStaleFinal, 0.1);
-              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
-              await new Promise((r) => setTimeout(r, 30));
-              gumMode = 'drift_neg_mic';
-              const ctxBeforeNeg = ctxSpies.length;
-              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
-              for (let i = 0; i < 40 && ctxSpies.length === ctxBeforeNeg; i++) {
-                await new Promise((r) => setTimeout(r, 25));
-              }
-              const cDriftNeg = ctxSpies[ctxSpies.length - 1] || null;
-              const driftNeg = await runSustainedDrift(cDriftNeg, -0.1);
+              const restartFreshMicSession = async () => {
+                if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+                await new Promise((r) => setTimeout(r, 30));
+                const dst = realAc.createMediaStreamDestination();
+                const trk = dst.stream.getAudioTracks()[0];
+                driftExtraTracks.push(trk);
+                nextDynamicMicTrack = trk;
+                gumMode = 'dynamic_mic';
+                const ctxBefore = ctxSpies.length;
+                if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+                for (let i = 0; i < 40 && ctxSpies.length === ctxBefore; i++) {
+                  await new Promise((r) => setTimeout(r, 25));
+                }
+                return ctxSpies[ctxSpies.length - 1] || null;
+              };
+
+              const driftPos = await runSustainedDrift(cStaleFinal, 320, (b, bd) => b * (bd + 0.1));
+              const cDriftNeg = await restartFreshMicSession();
+              const driftNeg = await runSustainedDrift(cDriftNeg, 320, (b, bd) => b * (bd - 0.1));
+              const cLatePos = await restartFreshMicSession();
+              const lateDriftPos = await runSustainedDrift(
+                cLatePos,
+                3320,
+                (b, bd) => b * bd + 2.667 * (b % 2) + 0.02 * Math.max(0, b - 3000)
+              );
+              const cLateNeg = await restartFreshMicSession();
+              const lateDriftNeg = await runSustainedDrift(
+                cLateNeg,
+                3320,
+                (b, bd) => b * bd + 2.667 * (b % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cDispOnly = await restartFreshMicSession();
+              const dispatchDelayOnly = await runSustainedDrift(
+                cDispOnly,
+                410,
+                (b, bd) => b * bd + Math.min(2.0, 0.1 * Math.max(0, b - 320))
+              );
 
               return {
                 initialGumCount,
@@ -5651,6 +5685,9 @@ async function main() {
                 trackStaleB2Id: trackStaleB2.id,
                 driftPos,
                 driftNeg,
+                lateDriftPos,
+                lateDriftNeg,
+                dispatchDelayOnly,
               };
             } finally {
               performance.now = origPerfNow;
@@ -5670,6 +5707,7 @@ async function main() {
               trackStaleB1.stop();
               trackStaleB2.stop();
               trackDriftNeg.stop();
+              driftExtraTracks.forEach((tr) => tr.stop());
               await realAc.close().catch(() => {});
               const rmSel = document.getElementById('rsVibroModeSelect');
               if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -5713,7 +5751,7 @@ async function main() {
           webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftPos.lastSkew >= -20000 ||
           webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftPos.acceptedBlocks >= 60 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 80 ||
           webcamAudioCheck.driftPos.state !== 4 ||
           (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftPos.welchK !== 0 ||
@@ -5723,11 +5761,35 @@ async function main() {
           webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
           webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
           webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
-          webcamAudioCheck.driftNeg.acceptedBlocks >= 60 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 80 ||
           webcamAudioCheck.driftNeg.state !== 4 ||
           (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
           webcamAudioCheck.driftNeg.welchK !== 0 ||
-          webcamAudioCheck.driftNeg.stampValid
+          webcamAudioCheck.driftNeg.stampValid ||
+          !webcamAudioCheck.lateDriftPos ||
+          webcamAudioCheck.lateDriftPos.pushedCount !== 3320 ||
+          webcamAudioCheck.lateDriftPos.lastSkew >= -3000 ||
+          webcamAudioCheck.lateDriftPos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftPos.acceptedBlocks >= 3250 ||
+          webcamAudioCheck.lateDriftPos.state !== 4 ||
+          (webcamAudioCheck.lateDriftPos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftPos.welchK !== 0 ||
+          webcamAudioCheck.lateDriftPos.stampValid ||
+          !webcamAudioCheck.lateDriftNeg ||
+          webcamAudioCheck.lateDriftNeg.pushedCount !== 3320 ||
+          webcamAudioCheck.lateDriftNeg.lastSkew <= 3000 ||
+          webcamAudioCheck.lateDriftNeg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftNeg.acceptedBlocks >= 3250 ||
+          webcamAudioCheck.lateDriftNeg.state !== 4 ||
+          (webcamAudioCheck.lateDriftNeg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftNeg.welchK !== 0 ||
+          webcamAudioCheck.lateDriftNeg.stampValid ||
+          !webcamAudioCheck.dispatchDelayOnly ||
+          webcamAudioCheck.dispatchDelayOnly.pushedCount !== 410 ||
+          webcamAudioCheck.dispatchDelayOnly.maxAbsSkew > 500 ||
+          webcamAudioCheck.dispatchDelayOnly.acceptedBlocks !== 410 ||
+          webcamAudioCheck.dispatchDelayOnly.state === 4 ||
+          (webcamAudioCheck.dispatchDelayOnly.reasonMask & 32) !== 0
         ) {
           throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
         }
