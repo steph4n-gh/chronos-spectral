@@ -210,6 +210,345 @@ async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs =
   throw new Error(`Timeout waiting for [${description}]. Last state: ${JSON.stringify(lastVal)}`);
 }
 
+const SWARM_INSPECT_PROBE_COORDS = [
+  [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
+  [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
+  [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
+  [0.78, 0.30], [0.76, 0.68], [0.54, 0.26], [0.82, 0.48], [0.52, 0.72], [0.72, 0.24],
+];
+
+// Clicks noncentral points on #hudCanvas until one inspects a live Swarm track, then verifies the
+// worker's ack echoes the clicked point and #swarmInspectReadout shows a fresh, different track
+// located at that point. Three details keep this deterministic on slow or loaded machines:
+//  - Chrome truncates MouseEvent clientX/clientY (synthetic and CDP Input alike) to whole CSS px, so
+//    the click goes to a whole pixel and the expected request is derived from that pixel. A
+//    fractional click could miss the 0.5 frame-px request tolerance by construction.
+//  - The ack and the readout are captured together, in the microtask after the telemetry frame that
+//    applies the ack (both are written in the same synchronous updateContinuumDomUi call). Polling
+//    from CDP instead samples the readout hundreds of ms later under load, after the inspected
+//    track has moved past the distance allowance.
+//  - A click on empty sky, on a track that expired before the causal frame, or just after the
+//    looping clip resets every track is not a product failure, so the probe clicks again (cycling
+//    the coordinate list) until the budget runs out. Every match check is unchanged.
+async function probeSwarmInspectOnHud(cdp, sessionId, label, opts = {}) {
+  const {
+    useCdpClick = false,
+    attemptTimeoutMs = 1800,
+    budgetMs = 20000,
+    waitFor = waitForCondition,
+  } = opts;
+  const ciTimeoutScale = Math.max(1.0, Math.min(2.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0') * 0.6));
+  const deadline = Date.now() + Math.round(budgetMs * ciTimeoutScale);
+  const before = await cdp.evalJs(
+    sessionId,
+    `(() => {
+      const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
+      const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+      const mt = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)/i);
+      const resTxt = (document.getElementById('inputResMeta')?.textContent || '').trim();
+      const rm = resTxt.match(/(\\d+)\\s*[×x]\\s*(\\d+)/i);
+      const fw = rm ? parseInt(rm[1], 10) : 640;
+      const fh = rm ? parseInt(rm[2], 10) : 360;
+      return {
+        readout,
+        tid: mc ? parseInt(mc[1], 10) : (mt ? parseInt(mt[1], 10) : 0),
+        nx: mc ? parseFloat(mc[2]) / fw : null,
+        ny: mc ? parseFloat(mc[3]) / fh : null,
+        fw,
+        fh,
+      };
+    })()`
+  );
+  const filteredCoords = SWARM_INSPECT_PROBE_COORDS.filter(([nx, ny]) => {
+    if (Math.hypot(nx - 0.5, ny - 0.5) < 0.12) return false;
+    if (before && before.nx !== null && before.ny !== null) {
+      return Math.hypot(nx - before.nx, ny - before.ny) >= 0.15;
+    }
+    return true;
+  });
+  const coords = filteredCoords.length ? filteredCoords : SWARM_INSPECT_PROBE_COORDS;
+  const rejects = {};
+  let attempts = 0;
+  let lastReject = null;
+  for (let pass = 0; pass === 0 || Date.now() < deadline; pass++) {
+    for (const [nx, ny] of coords) {
+      if (pass > 0 && Date.now() >= deadline) break;
+      attempts++;
+      const token = `${Date.now()}-${attempts}`;
+      const pt = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const el = document.getElementById('swarmInspectReadout');
+          const hud = document.getElementById('hudCanvas');
+          if (!el || !hud) return null;
+          const readout = (el.textContent || '').trim();
+          const prevInspectSeq = window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0;
+          if (window.__e2eInspectObs) window.__e2eInspectObs.disconnect();
+          window.__e2eInspectCap = null;
+          const obs = new MutationObserver(() => {
+            const ack = window.__chronosUiState?.lastInspectAck;
+            if (window.__e2eInspectCap || !ack || !Number.isInteger(ack.inspectSeq) || ack.inspectSeq <= prevInspectSeq) return;
+            window.__e2eInspectCap = { token: ${JSON.stringify(token)}, ack: { ...ack }, readout: (el.textContent || '').trim() };
+            obs.disconnect();
+          });
+          obs.observe(el, { attributes: true, attributeFilter: ['data-inspect-seq'], childList: true, characterData: true, subtree: true });
+          window.__e2eInspectObs = obs;
+          const r = hud.getBoundingClientRect();
+          const x = Math.round(r.left + r.width * ${nx});
+          const y = Math.round(r.top + r.height * ${ny});
+          if (!${Boolean(useCdpClick)}) {
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+          }
+          return { x, y, effNx: (x - r.left) / r.width, effNy: (y - r.top) / r.height, attemptBeforeReadout: readout, prevInspectSeq };
+        })()`
+      );
+      if (!pt) continue;
+      if (useCdpClick) {
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
+        await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
+      }
+      let res = null;
+      try {
+        res = await waitFor(
+          cdp,
+          sessionId,
+          `${label} (${nx},${ny})`,
+          `(() => {
+            const cap = window.__e2eInspectCap;
+            if (!cap || cap.token !== ${JSON.stringify(token)}) {
+              return { ok: false, inspectSeq: window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0 };
+            }
+            const { ack, readout } = cap;
+            const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
+            if (!mc) {
+              return { ok: true, matched: false, reason: 'status:' + ack.inspectStatus, readout, tid: 0, inspectSeq: ack.inspectSeq };
+            }
+            const tid = parseInt(mc[1], 10);
+            const effNx = ${pt.effNx};
+            const effNy = ${pt.effNy};
+            const ackMatchesReq =
+              Number.isFinite(ack.inspectReqNormX) &&
+              Number.isFinite(ack.inspectReqNormY) &&
+              Number.isFinite(ack.inspectReqPxX) &&
+              Number.isFinite(ack.inspectReqPxY) &&
+              Math.abs(ack.inspectReqNormX - effNx) <= 0.005 &&
+              Math.abs(ack.inspectReqNormY - effNy) <= 0.005 &&
+              Math.abs(ack.inspectReqPxX - effNx * ${before.fw}) <= 0.5 &&
+              Math.abs(ack.inspectReqPxY - effNy * ${before.fh}) <= 0.5 &&
+              ack.inspectedTid === tid &&
+              ['live', 'pinned'].includes(ack.inspectStatus);
+            if (!ackMatchesReq) {
+              return { ok: true, matched: false, reason: 'ack-mismatch:' + ack.inspectStatus, readout, tid: 0, inspectSeq: ack.inspectSeq, ack };
+            }
+            const ix = parseFloat(mc[2]);
+            const iy = parseFloat(mc[3]);
+            const ixNorm = ix / ${before.fw};
+            const iyNorm = iy / ${before.fh};
+            const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
+            const mSpd = readout.match(/·\\s*([\\d.]+)\\s*px\\/s/i);
+            const spdPxS = mSpd ? parseFloat(mSpd[1]) : 0;
+            const qScale = ${before.fw} / 640.0;
+            const maxAllowedDist = ack.inspectStatus === 'pinned'
+              ? (16.0 * qScale + spdPxS * 0.40 + 4.0)
+              : (24.0 * qScale + 0.5);
+            const coordMatch = pxDist < maxAllowedDist;
+            const freshReadout = readout !== ${JSON.stringify(pt.attemptBeforeReadout)} && readout !== ${JSON.stringify(before.readout)};
+            const shiftedTarget = ${before.tid} === 0 || tid !== ${before.tid} ||
+              (${before.nx !== null ? `Math.hypot(ixNorm - ${before.nx}, iyNorm - ${before.ny}) >= 0.12` : 'false'});
+            const matched = tid > 0 && coordMatch && freshReadout && shiftedTarget;
+            const reason = matched ? 'matched' : !coordMatch ? 'coord:' + ack.inspectStatus : !freshReadout ? 'stale-readout' : 'same-target';
+            return { ok: true, matched, reason, readout, tid, ixNorm, iyNorm, inspectSeq: ack.inspectSeq, pxDist, maxAllowedDist };
+          })()`,
+          attemptTimeoutMs
+        );
+      } catch (err) {
+        if (/^Page JS exception/.test(String(err && err.message))) throw err;
+        res = { matched: false, reason: 'no-ack' };
+      }
+      if (res && res.matched) return { ...res, attempts };
+      rejects[res.reason] = (rejects[res.reason] || 0) + 1;
+      lastReject = { nx, ny, ...res };
+    }
+  }
+  throw new Error(
+    `${label}: #swarmInspectReadout did not lock onto a fresh track with matching noncentral coordinates ` +
+      `(attempts=${attempts}, rejects=${JSON.stringify(rejects)}, last=${JSON.stringify(lastReject)})`
+  );
+}
+
+// Step 10e native gate: fake webcam + Web Audio capture into the RS+Welch chain on a deck page.
+async function verifyNativeWebcamAudioGate(cdp, sessionId) {
+  const runNativeWebcamWindow = () => cdp.evalJs(
+    sessionId,
+    `(async () => {
+      const origPostMessage = Worker.prototype.postMessage;
+      const origGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+        ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+        : null;
+        const nativePushMsgs = [];
+        const nativeAcks = [];
+        const nativeAckWorkers = new WeakSet();
+        let nativeCapturing = true;
+        const capturedStreams = [];
+        // Independent witness for dropped frames: count webcam frames Chrome presented that no
+        // rVFC callback saw (presentedFrames jumps), the same evidence the product flags as FRAME_GAP.
+        const vidEl = document.getElementById('hiddenVideoSource');
+        let rvfcWatching = false;
+        let rvfcLastPresented = -1;
+        let browserSkippedFrames = 0;
+        const onWitnessFrame = (_now, meta) => {
+          if (!rvfcWatching) return;
+          if (rvfcLastPresented >= 0 && meta.presentedFrames > rvfcLastPresented + 1) {
+            browserSkippedFrames += meta.presentedFrames - rvfcLastPresented - 1;
+          }
+          rvfcLastPresented = meta.presentedFrames;
+          vidEl.requestVideoFrameCallback(onWitnessFrame);
+        };
+        try {
+          if (!origGetUserMedia) {
+            return { unsupported: true };
+          }
+          navigator.mediaDevices.getUserMedia = async (constraints) => {
+            const st = await origGetUserMedia(constraints);
+            capturedStreams.push(st);
+            return st;
+          };
+          Worker.prototype.postMessage = function (data) {
+            if (nativeCapturing && data && data.type === 'push_audio_pcm') {
+              if (!nativeAckWorkers.has(this)) {
+                nativeAckWorkers.add(this);
+                this.addEventListener('message', (ev) => {
+                  const d = ev && ev.data;
+                  if (d && d.type === 'wave2_audio_ack' && typeof d.reqId === 'string' && d.reqId.startsWith('e2e-native-')) {
+                    nativeAcks.push(d);
+                  }
+                });
+              }
+              data.wantAck = true;
+              data.reqId = 'e2e-native-' + nativePushMsgs.length;
+              nativePushMsgs.push({
+                tEndUs: data.tEndUs,
+                estSkewUs: data.estSkewUs,
+                len: data.samples ? data.samples.length : 0,
+              });
+            }
+            return origPostMessage.apply(this, arguments);
+          };
+
+          const rmSel = document.getElementById('rsVibroModeSelect');
+          if (rmSel) {
+            rmSel.value = '0';
+            rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          await new Promise((r) => setTimeout(r, 40));
+          document.getElementById('btnSrcWebcam')?.click();
+          await new Promise((r) => setTimeout(r, 220));
+          nativePushMsgs.length = 0;
+          nativeAcks.length = 0;
+
+          if (rmSel) {
+            rmSel.value = '2';
+            rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          if (vidEl && typeof vidEl.requestVideoFrameCallback === 'function') {
+            rvfcWatching = true;
+            vidEl.requestVideoFrameCallback(onWitnessFrame);
+          }
+          const deadline = performance.now() + 4500;
+          while (performance.now() < deadline && nativePushMsgs.length < 40) {
+            await new Promise((r) => setTimeout(r, 40));
+          }
+          nativeCapturing = false;
+          rvfcWatching = false;
+          const ackDeadline = performance.now() + 2500;
+          while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
+            await new Promise((r) => setTimeout(r, 15));
+          }
+          await new Promise((r) => setTimeout(r, 40));
+          const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
+          if (rmSel) {
+            rmSel.value = '0';
+            rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          await new Promise((r) => setTimeout(r, 80));
+          const nativePushed = nativePushMsgs.length;
+          const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
+          const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
+          const acceptedDelta = nativeAcks.reduce((acc, a) => acc + (a.accepted ? a.count : 0), 0);
+          const liveAudioAfterOff = capturedStreams.reduce(
+            (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
+            0
+          );
+          return {
+            unsupported: false,
+            nativePushed,
+            nativeAckCount: nativeAcks.length,
+            pushedSamplesSum,
+            acceptedDelta,
+            nativeAcceptedAll:
+              nativeAcks.length === nativePushed && acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
+            state: nativeVibro?.state ?? -1,
+            reasonMask: nativeVibro?.reasonMask ?? -1,
+            liveAudioAfterOff,
+            maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
+            browserSkippedFrames,
+          };
+      } finally {
+        rvfcWatching = false;
+        Worker.prototype.postMessage = origPostMessage;
+        if (origGetUserMedia) {
+          navigator.mediaDevices.getUserMedia = origGetUserMedia;
+        }
+        const rmSel = document.getElementById('rsVibroModeSelect');
+        if (rmSel) {
+          rmSel.value = '0';
+          rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        document.getElementById('btnSrcTestbench')?.click();
+        await new Promise((r) => setTimeout(r, 60));
+      }
+    })()`
+  );
+  const nativeWebcamGateFails = (r) =>
+    !r ||
+    r.unsupported ||
+    r.nativePushed < 36 ||
+    r.maxAbsSkew > 500 ||
+    !r.nativeAcceptedAll ||
+    r.state === 4 ||
+    (r.reasonMask & 32) !== 0 ||
+    r.liveAudioAfterOff !== 0;
+  // A window in which Chrome itself dropped webcam frames (a starved main thread) cannot show a
+  // gap-free RS+Welch chain: the product is right to report DISTURBED with only RS_REASON_FRAME_GAP.
+  // Such a window, and only such a window, is re-run. Every other check must already have passed
+  // in it, and any other disturbance reason, a skew, a rejected block, or a FRAME_GAP without
+  // witnessed dropped frames fails at once.
+  const isWitnessedFrameGapOnly = (r) =>
+    Boolean(r) &&
+    !r.unsupported &&
+    r.state === 4 &&
+    r.reasonMask === 8 &&
+    r.browserSkippedFrames > 0 &&
+    r.nativePushed >= 36 &&
+    r.maxAbsSkew <= 500 &&
+    r.nativeAcceptedAll &&
+    r.liveAudioAfterOff === 0;
+  const nativeWebcamAttempts = [];
+  let nativeWebcamCheck = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    nativeWebcamCheck = await runNativeWebcamWindow();
+    nativeWebcamAttempts.push(nativeWebcamCheck);
+    if (!nativeWebcamGateFails(nativeWebcamCheck) || !isWitnessedFrameGapOnly(nativeWebcamCheck) || attempt === 3) break;
+    console.log(
+      `  [RETRY] Step 10e: capture window ${attempt}/3 was disturbed only by FRAME_GAP after Chrome dropped ${nativeWebcamCheck.browserSkippedFrames} webcam frame(s); taking a fresh window`
+    );
+  }
+  if (nativeWebcamGateFails(nativeWebcamCheck)) {
+    throw new Error('Step 10e native Chrome webcam + Web Audio live gate failed: ' + JSON.stringify(nativeWebcamAttempts));
+  }
+  return { ...nativeWebcamCheck, attempts: nativeWebcamAttempts.length };
+}
+
 async function main() {
   console.log('========================================================================');
   console.log(' CHRONOS-SPECTRAL // Headless Chrome CDP Full-Stack E2E Verification');
@@ -1695,113 +2034,12 @@ async function main() {
       }
 
       // Click a populated noncentral region on #hudCanvas and verify a fresh field inspection update + normalized coordinate mapping
-      let inspectState = null;
-      const probeCoords = [
-        [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
-        [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
-        [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
-        [0.78, 0.30], [0.76, 0.68], [0.54, 0.26], [0.82, 0.48], [0.52, 0.72], [0.72, 0.24],
-      ];
-      const beforeProbe = await cdp.evalJs(
+      const inspectState = await probeSwarmInspectOnHud(
+        cdp,
         sessionId,
-        `(() => {
-          const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-          const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
-          const mt = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)/i);
-          const resTxt = (document.getElementById('inputResMeta')?.textContent || '').trim();
-          const rm = resTxt.match(/(\\d+)\\s*[×x]\\s*(\\d+)/i);
-          const fw = rm ? parseInt(rm[1], 10) : 640;
-          const fh = rm ? parseInt(rm[2], 10) : 360;
-          return {
-            readout,
-            tid: mc ? parseInt(mc[1], 10) : (mt ? parseInt(mt[1], 10) : 0),
-            nx: mc ? parseFloat(mc[2]) / fw : null,
-            ny: mc ? parseFloat(mc[3]) / fh : null,
-            fw,
-            fh,
-          };
-        })()`
+        `Step 6c (${cfg.id}): fresh #swarmInspectReadout + inspectSeq + noncentral coordinate`,
+        { attemptTimeoutMs: 2000 }
       );
-      const filteredProbeCoords = probeCoords.filter(([nx, ny]) => {
-        if (Math.hypot(nx - 0.5, ny - 0.5) < 0.12) return false;
-        if (beforeProbe && beforeProbe.nx !== null && beforeProbe.ny !== null) {
-          return Math.hypot(nx - beforeProbe.nx, ny - beforeProbe.ny) >= 0.15;
-        }
-        return true;
-      });
-      for (const [nx, ny] of (filteredProbeCoords.length ? filteredProbeCoords : probeCoords)) {
-        const attemptBefore = await cdp.evalJs(
-          sessionId,
-          `(() => {
-            const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-            const prevInspectSeq = window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0;
-            const hud = document.getElementById('hudCanvas');
-            if (!hud) return null;
-            const r = hud.getBoundingClientRect();
-            const cx = r.left + r.width * ${nx};
-            const cy = r.top + r.height * ${ny};
-            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: cx, clientY: cy }));
-            return { readout, prevInspectSeq };
-          })()`
-        );
-        if (!attemptBefore) continue;
-        try {
-          inspectState = await waitForCondition(
-            cdp,
-            sessionId,
-            `Step 6c ${cfg.id}: fresh #swarmInspectReadout + inspectSeq + coord (${nx},${ny})`,
-            `(() => {
-              const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-              const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
-              const ack = window.__chronosUiState?.lastInspectAck;
-              if (!ack || !Number.isInteger(ack.inspectSeq) || ack.inspectSeq <= ${attemptBefore.prevInspectSeq}) {
-                return { ok: false, readout, tid: 0, inspectSeq: ack?.inspectSeq ?? 0 };
-              }
-              if (!mc) {
-                return { ok: true, matched: false, readout, tid: 0, inspectSeq: ack.inspectSeq };
-              }
-              const tid = parseInt(mc[1], 10);
-              const ackMatchesReq =
-                Number.isFinite(ack.inspectReqNormX) &&
-                Number.isFinite(ack.inspectReqNormY) &&
-                Number.isFinite(ack.inspectReqPxX) &&
-                Number.isFinite(ack.inspectReqPxY) &&
-                Math.abs(ack.inspectReqNormX - ${nx}) <= 0.005 &&
-                Math.abs(ack.inspectReqNormY - ${ny}) <= 0.005 &&
-                Math.abs(ack.inspectReqPxX - ${nx} * ${beforeProbe.fw}) <= 0.5 &&
-                Math.abs(ack.inspectReqPxY - ${ny} * ${beforeProbe.fh}) <= 0.5 &&
-                ack.inspectedTid === tid &&
-                ['live', 'pinned'].includes(ack.inspectStatus);
-              if (!ackMatchesReq) {
-                return { ok: true, matched: false, readout, tid: 0, inspectSeq: ack.inspectSeq };
-              }
-              const ix = parseFloat(mc[2]);
-              const iy = parseFloat(mc[3]);
-              const ixNorm = ix / ${beforeProbe.fw};
-              const iyNorm = iy / ${beforeProbe.fh};
-              const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
-              const mSpd = readout.match(/·\\s*([\\d.]+)\\s*px\\/s/i);
-              const spdPxS = mSpd ? parseFloat(mSpd[1]) : 0;
-              const qScale = ${beforeProbe.fw} / 640.0;
-              const maxAllowedDist = ack.inspectStatus === 'pinned'
-                ? (16.0 * qScale + spdPxS * 0.40 + 4.0)
-                : (24.0 * qScale + 0.5);
-              const coordMatch = pxDist < maxAllowedDist;
-              const freshReadout = readout !== ${JSON.stringify(attemptBefore.readout)} && readout !== ${JSON.stringify(beforeProbe.readout)};
-              const shiftedTarget = ${beforeProbe.tid} === 0 || tid !== ${beforeProbe.tid} ||
-                (${beforeProbe.nx !== null ? `Math.hypot(ixNorm - ${beforeProbe.nx}, iyNorm - ${beforeProbe.ny}) >= 0.12` : 'false'});
-              return { ok: true, matched: tid > 0 && coordMatch && freshReadout && shiftedTarget, readout, tid, ixNorm, iyNorm, inspectSeq: ack.inspectSeq, pxDist };
-            })()`,
-            2000
-          );
-          if (inspectState && inspectState.matched) break;
-        } catch (_probeErr) {
-          // Try next noncentral dense probe point if this coordinate fell outside active track radius
-        }
-      }
-      if (!inspectState || !inspectState.matched) {
-        throw new Error(`Step 6c (${cfg.id}): #swarmInspectReadout did not produce fresh INSP μT<tid> matching noncentral #hudCanvas coordinates`);
-      }
 
       const pipPngBytes = await captureClipBytes('pipCanvas');
       if (pipPngBytes < 600) {
@@ -1898,124 +2136,6 @@ async function main() {
         sessionId
       );
       return pt;
-    };
-
-    const probeSwarmInspectOnHud = async (label, useCdpClick = false) => {
-      const coords = [
-        [0.35, 0.42], [0.65, 0.58], [0.33, 0.54], [0.67, 0.46],
-        [0.40, 0.35], [0.60, 0.65], [0.38, 0.60], [0.62, 0.40],
-        [0.30, 0.50], [0.70, 0.50], [0.42, 0.62], [0.58, 0.38],
-        [0.78, 0.30], [0.76, 0.68], [0.54, 0.26], [0.82, 0.48], [0.52, 0.72], [0.72, 0.24],
-      ];
-      const before = await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-          const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
-          const mt = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)/i);
-          const resTxt = (document.getElementById('inputResMeta')?.textContent || '').trim();
-          const rm = resTxt.match(/(\\d+)\\s*[×x]\\s*(\\d+)/i);
-          const fw = rm ? parseInt(rm[1], 10) : 640;
-          const fh = rm ? parseInt(rm[2], 10) : 360;
-          return {
-            readout,
-            tid: mc ? parseInt(mc[1], 10) : (mt ? parseInt(mt[1], 10) : 0),
-            nx: mc ? parseFloat(mc[2]) / fw : null,
-            ny: mc ? parseFloat(mc[3]) / fh : null,
-            fw,
-            fh,
-          };
-        })()`
-      );
-      const filteredCoords = coords.filter(([nx, ny]) => {
-        if (Math.hypot(nx - 0.5, ny - 0.5) < 0.12) return false;
-        if (before && before.nx !== null && before.ny !== null) {
-          return Math.hypot(nx - before.nx, ny - before.ny) >= 0.15;
-        }
-        return true;
-      });
-      for (const [nx, ny] of (filteredCoords.length ? filteredCoords : coords)) {
-        const pt = await cdp.evalJs(
-          sessionId,
-          `(() => {
-            const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-            const prevInspectSeq = window.__chronosUiState?.lastInspectAck?.inspectSeq ?? 0;
-            const hud = document.getElementById('hudCanvas');
-            if (!hud) return null;
-            const r = hud.getBoundingClientRect();
-            const x = r.left + r.width * ${nx};
-            const y = r.top + r.height * ${ny};
-            if (!${Boolean(useCdpClick)}) {
-              hud.dispatchEvent(new MouseEvent('click', {
-                bubbles: true,
-                cancelable: true,
-                clientX: x,
-                clientY: y,
-              }));
-            }
-            return { x, y, attemptBeforeReadout: readout, prevInspectSeq };
-          })()`
-        );
-        if (!pt) continue;
-        if (useCdpClick) {
-          await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
-          await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: pt.x, y: pt.y, button: 'left', clickCount: 1 }, sessionId);
-        }
-        try {
-          const res = await waitForCondition(
-            cdp,
-            sessionId,
-            `${label} (${nx},${ny})`,
-            `(() => {
-              const readout = (document.getElementById('swarmInspectReadout')?.textContent || '').trim();
-              const mc = readout.match(/^INSP\\s+(?:μ|u)T([1-9]\\d*)(?:\\s*·\\s*B\\d+)?\\s*·\\s*\\(([-\\d.]+),\\s*([-\\d.]+)\\)/i);
-              const ack = window.__chronosUiState?.lastInspectAck;
-              if (!ack || !Number.isInteger(ack.inspectSeq) || ack.inspectSeq <= ${pt.prevInspectSeq}) {
-                return { ok: false, readout, inspectSeq: ack?.inspectSeq ?? 0 };
-              }
-              if (!mc) {
-                return { ok: true, matched: false, readout, inspectSeq: ack.inspectSeq };
-              }
-              const tid = parseInt(mc[1], 10);
-              const ackMatchesReq =
-                Number.isFinite(ack.inspectReqNormX) &&
-                Number.isFinite(ack.inspectReqNormY) &&
-                Number.isFinite(ack.inspectReqPxX) &&
-                Number.isFinite(ack.inspectReqPxY) &&
-                Math.abs(ack.inspectReqNormX - ${nx}) <= 0.005 &&
-                Math.abs(ack.inspectReqNormY - ${ny}) <= 0.005 &&
-                Math.abs(ack.inspectReqPxX - ${nx} * ${before.fw}) <= 0.5 &&
-                Math.abs(ack.inspectReqPxY - ${ny} * ${before.fh}) <= 0.5 &&
-                ack.inspectedTid === tid &&
-                ['live', 'pinned'].includes(ack.inspectStatus);
-              if (!ackMatchesReq) {
-                return { ok: true, matched: false, readout, inspectSeq: ack.inspectSeq };
-              }
-              const ix = parseFloat(mc[2]);
-              const iy = parseFloat(mc[3]);
-              const ixNorm = ix / ${before.fw};
-              const iyNorm = iy / ${before.fh};
-              const pxDist = Math.hypot(ix - ack.inspectReqPxX, iy - ack.inspectReqPxY);
-              const mSpd = readout.match(/·\\s*([\\d.]+)\\s*px\\/s/i);
-              const spdPxS = mSpd ? parseFloat(mSpd[1]) : 0;
-              const qScale = ${before.fw} / 640.0;
-              const maxAllowedDist = ack.inspectStatus === 'pinned'
-                ? (16.0 * qScale + spdPxS * 0.40 + 4.0)
-                : (24.0 * qScale + 0.5);
-              const coordMatch = pxDist < maxAllowedDist;
-              const freshReadout = readout !== ${JSON.stringify(pt.attemptBeforeReadout)} && readout !== ${JSON.stringify(before.readout)};
-              const shiftedTarget = ${before.tid} === 0 || tid !== ${before.tid} ||
-                (${before.nx !== null ? `Math.hypot(ixNorm - ${before.nx}, iyNorm - ${before.ny}) >= 0.12` : 'false'});
-              return { ok: true, matched: tid > 0 && coordMatch && freshReadout && shiftedTarget, readout, tid, ixNorm, iyNorm, inspectSeq: ack.inspectSeq, pxDist };
-            })()`,
-            1800
-          );
-          if (res && res.matched) return res;
-        } catch (_probeErr) {
-          // Try next noncentral dense region if current coordinate sits over empty sky between starlings
-        }
-      }
-      throw new Error(`${label}: #swarmInspectReadout did not lock onto a fresh track with matching noncentral coordinates`);
     };
 
     await cdp.evalJs(
@@ -2131,8 +2251,9 @@ async function main() {
     );
 
     const hiddenHeroInspect = await probeSwarmInspectOnHud(
-      'Step 6d: Swarm inspect readout stays live while Hero-16 overlay is hidden',
-      false
+      cdp,
+      sessionId,
+      'Step 6d: Swarm inspect readout stays live while Hero-16 overlay is hidden'
     );
     const hiddenHeroPipBytes = await captureClipBytes('pipCanvas');
     if (hiddenHeroPipBytes < 600) {
@@ -2381,8 +2502,10 @@ async function main() {
     );
 
     await probeSwarmInspectOnHud(
+      cdp,
+      sessionId,
       'Step 6d: Clicking fullscreen #hudCanvas sustains valid Swarm inspection readout',
-      true
+      { useCdpClick: true }
     );
 
     await sendCdpKey('Escape', 'Escape', 27, 0);
@@ -5231,128 +5354,7 @@ async function main() {
         }
 
         // 10e. Webcam Live Audio Anchoring (Native Fake Webcam + Mock Lifecycle Edge Cases)
-        const nativeWebcamCheck = await cdp.evalJs(
-          w2Session,
-          `(async () => {
-            const origPostMessage = Worker.prototype.postMessage;
-            const origGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
-              ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
-              : null;
-              const nativePushMsgs = [];
-              const nativeAcks = [];
-              const nativeAckWorkers = new WeakSet();
-              let nativeCapturing = true;
-              const capturedStreams = [];
-              try {
-                if (!origGetUserMedia) {
-                  return { unsupported: true };
-                }
-                navigator.mediaDevices.getUserMedia = async (constraints) => {
-                  const st = await origGetUserMedia(constraints);
-                  capturedStreams.push(st);
-                  return st;
-                };
-                Worker.prototype.postMessage = function (data) {
-                  if (nativeCapturing && data && data.type === 'push_audio_pcm') {
-                    if (!nativeAckWorkers.has(this)) {
-                      nativeAckWorkers.add(this);
-                      this.addEventListener('message', (ev) => {
-                        const d = ev && ev.data;
-                        if (d && d.type === 'wave2_audio_ack' && typeof d.reqId === 'string' && d.reqId.startsWith('e2e-native-')) {
-                          nativeAcks.push(d);
-                        }
-                      });
-                    }
-                    data.wantAck = true;
-                    data.reqId = 'e2e-native-' + nativePushMsgs.length;
-                    nativePushMsgs.push({
-                      tEndUs: data.tEndUs,
-                      estSkewUs: data.estSkewUs,
-                      len: data.samples ? data.samples.length : 0,
-                    });
-                  }
-                  return origPostMessage.apply(this, arguments);
-                };
-
-                const rmSel = document.getElementById('rsVibroModeSelect');
-                if (rmSel) {
-                  rmSel.value = '0';
-                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                await new Promise((r) => setTimeout(r, 40));
-                document.getElementById('btnSrcWebcam')?.click();
-                await new Promise((r) => setTimeout(r, 220));
-                nativePushMsgs.length = 0;
-                nativeAcks.length = 0;
-
-                if (rmSel) {
-                  rmSel.value = '2';
-                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                const deadline = performance.now() + 4500;
-                while (performance.now() < deadline && nativePushMsgs.length < 40) {
-                  await new Promise((r) => setTimeout(r, 40));
-                }
-                nativeCapturing = false;
-                const ackDeadline = performance.now() + 2500;
-                while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
-                  await new Promise((r) => setTimeout(r, 15));
-                }
-                await new Promise((r) => setTimeout(r, 40));
-                const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
-                if (rmSel) {
-                  rmSel.value = '0';
-                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-                }
-                await new Promise((r) => setTimeout(r, 80));
-                const nativePushed = nativePushMsgs.length;
-                const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
-                const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
-                const acceptedDelta = nativeAcks.reduce((acc, a) => acc + (a.accepted ? a.count : 0), 0);
-                const liveAudioAfterOff = capturedStreams.reduce(
-                  (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
-                  0
-                );
-                return {
-                  unsupported: false,
-                  nativePushed,
-                  nativeAckCount: nativeAcks.length,
-                  pushedSamplesSum,
-                  acceptedDelta,
-                  nativeAcceptedAll:
-                    nativeAcks.length === nativePushed && acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
-                  state: nativeVibro?.state ?? -1,
-                  reasonMask: nativeVibro?.reasonMask ?? -1,
-                  liveAudioAfterOff,
-                  maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
-                };
-            } finally {
-              Worker.prototype.postMessage = origPostMessage;
-              if (origGetUserMedia) {
-                navigator.mediaDevices.getUserMedia = origGetUserMedia;
-              }
-              const rmSel = document.getElementById('rsVibroModeSelect');
-              if (rmSel) {
-                rmSel.value = '0';
-                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
-              }
-              document.getElementById('btnSrcTestbench')?.click();
-              await new Promise((r) => setTimeout(r, 60));
-            }
-          })()`
-        );
-        if (
-          !nativeWebcamCheck ||
-          nativeWebcamCheck.unsupported ||
-          nativeWebcamCheck.nativePushed < 36 ||
-          nativeWebcamCheck.maxAbsSkew > 500 ||
-          !nativeWebcamCheck.nativeAcceptedAll ||
-          nativeWebcamCheck.state === 4 ||
-          (nativeWebcamCheck.reasonMask & 32) !== 0 ||
-          nativeWebcamCheck.liveAudioAfterOff !== 0
-        ) {
-          throw new Error('Step 10e native Chrome webcam + Web Audio live gate failed: ' + JSON.stringify(nativeWebcamCheck));
-        }
+        await verifyNativeWebcamAudioGate(cdp, w2Session);
 
         const webcamAudioCheck = await cdp.evalJs(
           w2Session,
@@ -6690,11 +6692,15 @@ async function main() {
   }
 }
 
-main()
-  .then(() => {
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error('E2E FAILED:', err.message || err);
-    process.exit(1);
-  });
+export { probeSwarmInspectOnHud, verifyNativeWebcamAudioGate };
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+    .then(() => {
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error('E2E FAILED:', err.message || err);
+      process.exit(1);
+    });
+}
