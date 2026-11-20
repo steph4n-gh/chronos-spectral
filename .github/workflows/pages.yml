@@ -32,7 +32,7 @@ jobs:
       )
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     runs-on: ubuntu-latest
     steps:
       - name: Check out verified commit
@@ -50,4 +50,19 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@v4
+
+      # deploy-pages lists this run's artifacts straight after the upload step. GitHub's listing
+      # sometimes lags and returns none ("No artifacts named github-pages were found"), which
+      # fails before any deployment is created. Re-running the job does not help: the re-run
+      # uploads a second artifact with the same name and fails on the duplicate. So wait and
+      # try once more inside the same job; if the second attempt fails, the job fails.
+      - name: Wait before retrying the deploy
+        if: steps.deployment.outcome == 'failure'
+        run: sleep 30
+
+      - name: Deploy to GitHub Pages (retry)
+        id: deployment_retry
+        if: steps.deployment.outcome == 'failure'
         uses: actions/deploy-pages@v4
