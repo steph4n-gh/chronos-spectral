@@ -24,6 +24,13 @@ crate-type = ["rlib"]
 test = false
 doctest = false
 
+# CSTRACE replay driver: replays kernel traces recorded from the wasm build against this native
+# build and checks every return value and region digest bit for bit (docs/VERIFICATION_AND_BENCHMARKS.md,
+# "Native replay driver").
+[[bin]]
+name = "chronos_replay"
+path = "replay/main.rs"
+
 [dependencies]
 
 # Same feature names as the root package (the shared source refers to them). `native-lib` is on
@@ -33,5 +40,16 @@ default = ["native-lib"]
 native-lib = []
 simd-force-scalar = []
 simd-conformance = []
+
+# Overflow checks and debug assertions (including core's UB precondition checks) on: arithmetic
+# that silently wraps in the release wasm panics here instead. `opt-level = 1` builds in about
+# two thirds of the release time and replays traces about as fast (`dev` is ~100x slower);
+# results are identical at every opt-level (Rust never contracts or reorders float operations).
+# The native parity gate (scripts/gate_native_parity.mjs) builds the replay driver with it.
+[profile.checked]
+inherits = "release"
+opt-level = 1
+overflow-checks = true
+debug-assertions = true
 
 [workspace]

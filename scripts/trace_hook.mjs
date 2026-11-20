@@ -23,7 +23,9 @@
 //   3. calls the real export with the arguments converted exactly as the wasm
 //      JS API converts them, records them and the result;
 //   4. re-snapshots the memory and records the XXH32 digest of every digested
-//      region.
+//      region (with the platform-descriptive words of PLATFORM_WORDS in
+//      trace_lib.mjs zeroed; the mask is written into the header metadata as
+//      `digestMask`).
 // Getters (`chronos_get_*`, `padic_ultrametric_val`) do not write kernel
 // memory, so by default they skip step 4 (only the shadow stack is
 // re-synchronised after them, and they carry no digests).
@@ -54,11 +56,13 @@ import path from 'node:path';
 import { threadId } from 'node:worker_threads';
 import {
   buildRegionTable,
+  digestMask,
   encodeHeader,
   encodeValue,
   isPureExport,
   parseWasmExports,
   xxh32,
+  xxh32Masked,
   FFLAG,
   HFLAG,
   RFLAG,
@@ -358,6 +362,8 @@ class Recorder {
       strict: cfg.strict,
       stackTop: this.stackTop,
       budgetScale: process.env.CHRONOS_CI_BUDGET_SCALE || null,
+      // Platform-descriptive words zeroed before hashing (format 1.1).
+      digestMask: digestMask(),
     };
     const header = encodeHeader({
       wasmSha256: info.sha256,
@@ -385,6 +391,9 @@ class Recorder {
     }
     this.pristine = info.pristine;
     this.snapI32 = new Int32Array(this.snap.buffer, this.snap.byteOffset, this.memBytes >>> 2);
+    const mask = meta.digestMask;
+    this.maskWords = this.digested.map((r) => mask[r.name] || null);
+    this.maskScratch = new Uint8Array(Math.max(0, ...this.digested.filter((r, i) => this.maskWords[i]).map((r) => r.byteLen)));
     this.hashes = new Uint32Array(this.digested.length);
     this.dirty = new Uint8Array(this.digested.length).fill(1);
     this.step = new StepBuf();
@@ -634,7 +643,7 @@ class Recorder {
       for (let i = 0; i < this.digested.length; i++) {
         if (this.dirty[i]) {
           const r = this.digested[i];
-          this.hashes[i] = xxh32(this.memU8, r.addr, r.byteLen);
+          this.hashes[i] = xxh32Masked(this.memU8, r.addr, r.byteLen, this.maskWords[i], this.maskScratch);
           this.dirty[i] = 0;
         }
       }

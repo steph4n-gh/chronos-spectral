@@ -18393,3 +18393,8 @@ mod native_cdylib_runtime {
     #[no_mangle]
     extern "C" fn rust_eh_personality() {}
 }
+
+// Native-only support for host tools (pristine-arena reset, native region layout); see
+// `src/native.rs`. Declared last for the same reason as the module above.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
