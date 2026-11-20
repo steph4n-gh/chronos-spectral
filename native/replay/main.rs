@@ -311,9 +311,10 @@ fn main() -> ExitCode {
     let hashed: usize = digested.iter().map(|r| r.byte_len).sum();
     let exempt = 4 * allowlist::PLATFORM_WORDS.len();
     println!(
-        "chronos_replay: {} trace(s), native kernel {} ({} B arena, overflow checks {}, debug assertions {})",
+        "chronos_replay: {} trace(s), native kernel {} / simd backend {} ({} B arena, overflow checks {}, debug assertions {})",
         files.len(),
         std::env::consts::ARCH,
+        chronos_spectral::simd::BACKEND_NAME,
         chronos_spectral::native::arena_bytes(),
         if overflow_checks { "on" } else { "off" },
         if cfg!(debug_assertions) { "on" } else { "off" },
