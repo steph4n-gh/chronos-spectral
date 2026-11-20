@@ -6071,8 +6071,6 @@ fn eval_lk_patch_wasm<const NEED_GRAD: bool, const ROWS4: bool>(
     loss_out
 }
 
-/// Evaluates 8x8 bilinearly warped patch at `(cx, cy)` and accumulates true Huber IRLS
-/// objective, L1 mean residual, Hessian `(H_xx, H_xy, H_yy)`, and gradient residual `(b_x, b_y)`.
 /// Runs 2-iteration SIMD128 Huber IC-LK sub-pixel refinement on `luma` using `ms.tracks.tpl8_i8[ti]`
 /// and arena-resident `lk_*` scratch (zero stack buffers >= 64 B). Enforces zero-mean projected
 /// template gradients, monotonic true-Huber-loss atomic checkpointing with final-step verification,
