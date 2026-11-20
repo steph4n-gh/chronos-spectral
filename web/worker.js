@@ -6596,6 +6596,55 @@ function unrotateBoxFromOriented(dispW, dispH, dispX0, dispY0, dispCw, dispCh, o
   };
 }
 
+function currentEffectiveRoiProjection() {
+  if (sourceMode === 'testbench') {
+    return {
+      sx0: 0,
+      sy0: 0,
+      sw: 1,
+      sh: 1,
+      orientation: 0,
+      dx0: 0,
+      dy0: 0,
+      dw: 1,
+      dh: 1,
+    };
+  }
+  const srcW = Math.max(1, lastIngestGeom.srcW || frameW || 1);
+  const srcH = Math.max(1, lastIngestGeom.srcH || frameH || 1);
+  const g = resolveIngestGeomSpec(srcW, srcH, null);
+  const gSrcW = Math.max(1, g.srcW || srcW);
+  const gSrcH = Math.max(1, g.srcH || srcH);
+  const gEngW = Math.max(1, g.engineW || frameW || 1);
+  const gEngH = Math.max(1, g.engineH || frameH || 1);
+  return {
+    sx0: g.cropX0 / gSrcW,
+    sy0: g.cropY0 / gSrcH,
+    sw: g.cropW / gSrcW,
+    sh: g.cropH / gSrcH,
+    orientation: g.orientation & 7,
+    dx0: g.dstX / gEngW,
+    dy0: g.dstY / gEngH,
+    dw: g.dstW / gEngW,
+    dh: g.dstH / gEngH,
+  };
+}
+
+function roiProjectionChanged(a, b) {
+  if (!a || !b) return false;
+  return (
+    a.orientation !== b.orientation ||
+    Math.abs(a.sx0 - b.sx0) > 1e-6 ||
+    Math.abs(a.sy0 - b.sy0) > 1e-6 ||
+    Math.abs(a.sw - b.sw) > 1e-6 ||
+    Math.abs(a.sh - b.sh) > 1e-6 ||
+    Math.abs(a.dx0 - b.dx0) > 1e-6 ||
+    Math.abs(a.dy0 - b.dy0) > 1e-6 ||
+    Math.abs(a.dw - b.dw) > 1e-6 ||
+    Math.abs(a.dh - b.dh) > 1e-6
+  );
+}
+
 function resolveIngestGeomSpec(bw, bh, infoGeom = null) {
   const g = infoGeom || {};
   const orientation =
@@ -9507,8 +9556,17 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'set_resolution') {
     if (wasmExports) {
+      const prevRoiProj = currentEffectiveRoiProjection();
       const reqMode = msg.resMode !== undefined ? msg.resMode : msg.mode;
       configureResolutionViews(reqMode ? 1 : 0, false);
+      const nextRoiProj = currentEffectiveRoiProjection();
+      const roiInvalidated =
+        roiProjectionChanged(prevRoiProj, nextRoiProj) &&
+        (calMode === 'ruler' || calMode === 'homography' || calArmed !== 'none');
+      if (roiInvalidated) {
+        clearCalibrationState();
+        recordCalibrationSegmentTransition('roi_changed');
+      }
       self.postMessage({
         type: 'resolution_changed',
         resMode,
@@ -9516,7 +9574,14 @@ self.onmessage = async (ev) => {
         frameH,
         pipDim,
       });
-      emitCalibrationState();
+      emitCalibrationState(
+        roiInvalidated
+          ? 'ROI CROP CHANGED · IMAGE-PLANE CALIBRATION RESET TO PX UNITS'
+          : ''
+      );
+      if (roiInvalidated) {
+        redrawPausedHudIfReady();
+      }
     }
   } else if (msg.type === 'set_scenario') {
     applyTestbenchScenarioSwitch(msg.scenario);
@@ -9800,6 +9865,7 @@ self.onmessage = async (ev) => {
       emitTelemetrySnapshot();
     }
   } else if (msg.type === 'set_roi') {
+    const prevRoiProj = currentEffectiveRoiProjection();
     let rsGeomChanged = false;
     if (typeof msg.native1to1 === 'boolean') {
       rsGeomChanged = rsGeomChanged || nativeRoiEnabled !== msg.native1to1;
@@ -9840,6 +9906,15 @@ self.onmessage = async (ev) => {
       const nextSd = msg.scanDir >>> 0;
       rsGeomChanged = rsGeomChanged || roiScanDir !== nextSd;
       roiScanDir = nextSd;
+    }
+    const nextRoiProj = currentEffectiveRoiProjection();
+    if (
+      roiProjectionChanged(prevRoiProj, nextRoiProj) &&
+      (calMode === 'ruler' || calMode === 'homography' || calArmed !== 'none')
+    ) {
+      clearCalibrationState();
+      recordCalibrationSegmentTransition('roi_changed');
+      emitCalibrationState('ROI CROP CHANGED · IMAGE-PLANE CALIBRATION RESET TO PX UNITS');
     }
     if (rsGeomChanged) {
       resetTestbenchRsState();

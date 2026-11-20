@@ -66,7 +66,7 @@ For slower shared cloud virtual machines, set `CHRONOS_CI_BUDGET_SCALE=3.5` (mat
 
 ## Static binary and safety invariants
 
-Measured directly on `web/chronos_spectral.wasm` (`2,474,656 B`):
+Measured directly on `web/chronos_spectral.wasm` (`2,474,879 B`):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |

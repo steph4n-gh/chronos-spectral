@@ -3675,6 +3675,53 @@ async function main() {
           8000
         );
 
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnCalRuler')?.click();
+            const hud = document.getElementById('hudCanvas');
+            const r = hud.getBoundingClientRect();
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * 0.25, clientY: r.top + r.height * 0.50 }));
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * 0.75, clientY: r.top + r.height * 0.50 }));
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b-cal: SURVEYED RULER active on cropped 1:1 ROI before ROI shift',
+          `(() => ({
+            ok: document.getElementById('calBadge')?.textContent === 'SURVEYED RULER',
+            badge: document.getElementById('calBadge')?.textContent || '',
+          }))()`,
+          8000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const rx = document.getElementById('rangeRoiX0');
+            if (rx) { rx.value = '0'; rx.dispatchEvent(new Event('input', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b-cal-reset: Shifting Native 1:1 crop_x0 resets stale SURVEYED RULER to PX UNITS',
+          `(() => {
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            const badge = document.getElementById('calBadge')?.textContent || '';
+            const live = document.getElementById('calStatusLive')?.textContent || '';
+            return {
+              ok: roiTxt === '1:1 NATIVE (0,180 320x180)' && badge === 'PX UNITS' && live.includes('ROI CROP CHANGED'),
+              roiTxt,
+              badge,
+              live,
+            };
+          })()`,
+          8000
+        );
+
         // 9c. Restore HD and trigger Controlled Handheld Failure -> banner turns danger with SHIFT readout
         await cdp.evalJs(
           w1Session,
@@ -5249,7 +5296,7 @@ async function main() {
                 await new Promise((r) => setTimeout(r, 60));
                 const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
                 nativeCapturing = false;
-                const ackDeadline = performance.now() + 250;
+                const ackDeadline = performance.now() + 2500;
                 while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
                   await new Promise((r) => setTimeout(r, 15));
                 }
@@ -5414,11 +5461,46 @@ async function main() {
               window.webkitAudioContext = MockAudioContext;
 
               const pushedAudioMsgs = [];
+              const driftAckWorkers = new WeakSet();
+              let pendingDriftNextWantAckReqId = '';
+              let pendingDriftAckReqId = '';
+              let pendingDriftSawAck = false;
+              let pendingDriftDrainResolve = null;
+              let driftLastReqIdSeen = '';
+              const resolvePendingDriftDrain = () => {
+                if (pendingDriftDrainResolve) {
+                  const fn = pendingDriftDrainResolve;
+                  pendingDriftDrainResolve = null;
+                  fn(driftLastReqIdSeen);
+                }
+              };
               let virtOffsetMs = 0.0;
               let frozenNowMs = null;
               performance.now = () => (frozenNowMs !== null ? frozenNowMs : origPerfNow()) + virtOffsetMs;
               Worker.prototype.postMessage = function (data) {
                 if (data && data.type === 'push_audio_pcm') {
+                  if (!driftAckWorkers.has(this)) {
+                    driftAckWorkers.add(this);
+                    this.addEventListener('message', (ev) => {
+                      const d = ev && ev.data;
+                      if (!d || !pendingDriftAckReqId) return;
+                      if (d.type === 'wave2_audio_ack' && d.reqId === pendingDriftAckReqId) {
+                        pendingDriftSawAck = true;
+                        driftLastReqIdSeen = d.reqId;
+                      } else if (pendingDriftSawAck && d.type === 'telemetry') {
+                        pendingDriftAckReqId = '';
+                        pendingDriftSawAck = false;
+                        resolvePendingDriftDrain();
+                      }
+                    });
+                  }
+                  if (pendingDriftNextWantAckReqId) {
+                    data.wantAck = true;
+                    data.reqId = pendingDriftNextWantAckReqId;
+                    pendingDriftAckReqId = pendingDriftNextWantAckReqId;
+                    pendingDriftSawAck = false;
+                    pendingDriftNextWantAckReqId = '';
+                  }
                   pushedAudioMsgs.push({
                     tEndUs: data.tEndUs,
                     estSkewUs: data.estSkewUs,
@@ -5626,7 +5708,7 @@ async function main() {
                 for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
                   cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
                   cctx.fillRect(24 + (f % 10) * 6, 24, 48, 48);
-                  await new Promise((r) => setTimeout(r, 40));
+                  await new Promise((r) => setTimeout(r, 45));
                   if (f >= 2) {
                     if (videoDriftRatePerBlock !== 0.0) {
                       const img = cctx.createImageData(canvas.width, canvas.height);
@@ -5641,16 +5723,44 @@ async function main() {
                       cctx.putImageData(img, 0, 0);
                       await new Promise((r) => setTimeout(r, 55));
                     }
+                    const probe1 = window.__chronosWave1Probe;
+                    const busyDeadline = origPerfNow() + 500;
+                    while (origPerfNow() < busyDeadline) {
+                      const bNow = probe1?.getBusyState?.();
+                      const vNow = window.__chronosWave2Probe?.getLastWave2()?.vibro?.state;
+                      if ((!bNow || (!bNow.workerFrameBusy && !bNow.bitmapCaptureBusy)) && vNow === 2) break;
+                      await new Promise((r) => setTimeout(r, 15));
+                    }
+                    const readyStateNow = window.__chronosWave2Probe?.getLastWave2()?.vibro?.state;
+                    if (readyStateNow !== 2 && f < 29) continue;
                     curBlockIdx = 0;
                     frozenNowMs = origPerfNow();
                     virtOffsetMs = offsetMsFn(0, blockDurMs);
+                    if (totalBlocks === 1) {
+                      pendingDriftNextWantAckReqId = 'e2e-drift-' + driftRunSeq;
+                    }
                     fireAudioCb(ctxObj, playTimeOf(0));
                     if (pushedAudioMsgs.length === msgStart) {
+                      pendingDriftNextWantAckReqId = '';
                       frozenNowMs = null;
                     }
                   }
                 }
-                if (pushedAudioMsgs.length === msgStart + 1) {
+                let drainPromise = null;
+                if (totalBlocks === 1 && pendingDriftAckReqId) {
+                  drainPromise = new Promise((resolve) => {
+                    const timer = setTimeout(() => {
+                      if (pendingDriftDrainResolve) {
+                        pendingDriftDrainResolve = null;
+                        resolve('timeout');
+                      }
+                    }, 20000);
+                    pendingDriftDrainResolve = (reqId) => {
+                      clearTimeout(timer);
+                      resolve(reqId);
+                    };
+                  });
+                } else if (pushedAudioMsgs.length === msgStart + 1) {
                   let nextFrame = 1;
                   const framePeriodMs = 1000.0 / 30.0;
                   const vsyncMs = 1000.0 / 60.0;
@@ -5674,18 +5784,39 @@ async function main() {
                       }
                     }
                     virtOffsetMs = offsetMsFn(b, blockDurMs);
+                    if (b === totalBlocks - 1) {
+                      pendingDriftNextWantAckReqId = 'e2e-drift-' + driftRunSeq;
+                    }
                     fireAudioCb(ctxObj, playTimeOf(b));
                   }
+                  if (pendingDriftAckReqId) {
+                    drainPromise = new Promise((resolve) => {
+                      const timer = setTimeout(() => {
+                        if (pendingDriftDrainResolve) {
+                          pendingDriftDrainResolve = null;
+                          resolve('timeout');
+                        }
+                      }, 20000);
+                      pendingDriftDrainResolve = (reqId) => {
+                        clearTimeout(timer);
+                        resolve(reqId);
+                      };
+                    });
+                  }
                 }
+                pendingDriftNextWantAckReqId = '';
                 ctxObj.hwClockFn = null;
                 ctxObj.currentTimeFn = null;
                 frozenNowMs = null;
                 virtOffsetMs = 0.0;
-                if (videoDriftRatePerBlock === 0.0) {
-                  cctx.fillStyle = 'rgb(' + (60 + driftRunSeq * 20) + ',' + (90 + driftRunSeq * 15) + ',140)';
-                  cctx.fillRect(30, 30, 52, 52);
+                if (drainPromise) {
+                  await drainPromise;
+                } else {
+                  await new Promise((r) => setTimeout(r, 120));
                 }
-                await new Promise((r) => setTimeout(r, totalBlocks > 3500 ? 200 : (totalBlocks > 1000 ? 150 : 80)));
+                pendingDriftAckReqId = '';
+                pendingDriftSawAck = false;
+                pendingDriftDrainResolve = null;
                 const snap = window.__chronosWave2Probe?.getLastWave2() || null;
                 const slice = pushedAudioMsgs.slice(msgStart);
                 const samplesAfter = snap?.vibro?.audioTotalSamples ?? 0;

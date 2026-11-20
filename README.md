@@ -8,7 +8,7 @@
 
 CHRONOS-SPECTRAL turns raw video pixels directly into occlusion-bridged trajectories, symbolic differential equations, continuum flow decompositions, Background-Oriented Schlieren (BOS) refraction fields, and rolling-shutter vibrometry maps inside one zero-allocation WebAssembly kernel. It solves tracking, phase estimation, and physical system identification from classical signal processing and variational mechanics rather than trained neural networks.
 
-Everything compiles into one `2.36 MiB` (`2,474,656 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 22,644,848 B`, `dualStaticEnd = 22,704,064 B`). The kernel has `75` exports, zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and zero `unsafe` code inside the continuum physics module.
+Everything compiles into one `2.36 MiB` (`2,474,879 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 22,644,848 B`, `dualStaticEnd = 22,704,064 B`). The kernel has `75` exports, zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and zero `unsafe` code inside the continuum physics module.
 
 ## Live demonstrations
 

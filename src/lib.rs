@@ -774,6 +774,7 @@ const CTRL_HERO_PHYS_SLOT_MASK: usize = 5;
 const CTRL_AUTO_HERO_MASK: usize = 6;
 const CTRL_AUTO_HERO_MICRO_BASE: usize = 7; // 7, 8, 9 hold micro_tid for up to 3 auto-promoted Heroes
 const CTRL_AUTO_HERO_SLOTS: usize = 10;     // packed bytes: (slot_m + 1) per binding k in 0..3, 0 = empty
+const CTRL_PREV_EXCESS_DT_US: usize = 11;   // previous sustained slow-rate dt_us candidate for nominal relearning
 
 #[repr(C, align(16))]
 #[derive(Copy, Clone)]
@@ -10404,16 +10405,32 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
                 let prev_us = ((prev_meta.t_src_us_hi as u64) << 32) | (prev_meta.t_src_us_lo as u64);
                 if cur_us <= prev_us {
                     gap |= FRAME_GAP_NONINC_PTS;
+                    a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
                 } else {
                     let dt_us = cur_us - prev_us;
                     let nom = a.ingest_ctrl[CTRL_NOM_DT_US];
-                    if dt_us > 250_000
-                        || (nom > 0 && (dt_us as u128) * 2 > (nom as u128) * 3)
-                    {
+                    let seq_clean =
+                        (gap & (FRAME_GAP_SEQ | FRAME_GAP_SEEK_RESTART | FRAME_GAP_WRAP)) == 0;
+                    if dt_us > 250_000 {
                         gap |= FRAME_GAP_EXCESS_DT;
-                    } else if (gap & (FRAME_GAP_SEQ | FRAME_GAP_SEEK_RESTART | FRAME_GAP_WRAP))
-                        == 0
-                    {
+                        a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
+                    } else if nom > 0 && (dt_us as u128) * 2 > (nom as u128) * 3 {
+                        let clamped_us = dt_us.clamp(1_000, 250_000) as u32;
+                        let prev_excess = a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US];
+                        if seq_clean
+                            && prev_excess > 0
+                            && (clamped_us as u64) * 4 >= (prev_excess as u64) * 3
+                            && (clamped_us as u64) * 4 <= (prev_excess as u64) * 5
+                        {
+                            a.ingest_ctrl[CTRL_NOM_DT_US] =
+                                (((prev_excess as u64) + (clamped_us as u64)) / 2) as u32;
+                            a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
+                        } else {
+                            gap |= FRAME_GAP_EXCESS_DT;
+                            a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] =
+                                if seq_clean { clamped_us } else { 0 };
+                        }
+                    } else if seq_clean {
                         let clamped_us = dt_us.clamp(1_000, 250_000) as u32;
                         let next_nom = if nom == 0 {
                             clamped_us
@@ -10421,17 +10438,24 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
                             (((nom as u64) * 7 + (clamped_us as u64)) / 8) as u32
                         };
                         a.ingest_ctrl[CTRL_NOM_DT_US] = next_nom;
+                        a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
+                    } else {
+                        a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
                     }
                 }
-            } else if (meta.flags & INGEST_FLAG_PTS_KNOWN) == 0
-                && dt_sec.is_finite()
-                && dt_sec > 0.25
-            {
-                gap |= FRAME_GAP_EXCESS_DT;
+            } else {
+                a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
+                if (meta.flags & INGEST_FLAG_PTS_KNOWN) == 0
+                    && dt_sec.is_finite()
+                    && dt_sec > 0.25
+                {
+                    gap |= FRAME_GAP_EXCESS_DT;
+                }
             }
         } else {
             gap |= FRAME_GAP_SEEK_RESTART;
             a.ingest_ctrl[CTRL_NOM_DT_US] = 0;
+            a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
         }
 
         let geom_changed = ((meta.flags & INGEST_FLAG_GEOM_KNOWN) != 0
@@ -10455,6 +10479,7 @@ pub unsafe extern "C" fn chronos_pre_tick(dt_sec: f32) {
             || meta.engine_h != prev_meta.engine_h;
         if geom_changed {
             gap |= FRAME_GAP_GEOM_CHANGE;
+            a.ingest_ctrl[CTRL_PREV_EXCESS_DT_US] = 0;
         }
     }
 

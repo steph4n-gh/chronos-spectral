@@ -1509,6 +1509,90 @@ async function main() {
     assert((v.ringMeta[mOff + 21] & GAP_SEEK_RESTART) !== 0 && v.bosTelem[2] === 3 && v.bosTelem[10] === 0, 'Seek/restart must set GAP_SEEK_RESTART and reset BOS warmup');
   }
 
+  // Sustained FPS step-down (60 fps -> 30 fps on same source_epoch=32 with contiguous seq)
+  // relearns CTRL_NOM_DT_US after one GAP_EXCESS_DT transition instead of wedging every frame
+  {
+    let tRateUs = tHdUs + 33333;
+    let rateSeq = 0;
+    for (let k = 0; k < 8; k++) {
+      const ptr = exp.chronos_get_ingest_rgba_ptr();
+      new Uint8Array(mem.buffer, ptr, hdBytes).set(hdTex);
+      assert(
+        exp.chronos_set_ingest_meta(
+          32,
+          rateSeq++,
+          tRateUs >>> 0,
+          Math.floor(tRateUs / 4294967296) >>> 0,
+          -1.0,
+          flagsBase,
+          640,
+          360,
+          0,
+          0,
+          640,
+          360,
+          0,
+          0xffffffff,
+          0,
+          0,
+          640,
+          360,
+          0,
+          1
+        ) === 1,
+        'Stage 60fps warmup frame'
+      );
+      exp.chronos_pre_tick(1 / 60);
+      solveFiedlerLanczos(exp, v.lap, v.fiedler);
+      exp.chronos_post_tick(1 / 60);
+      tRateUs += 16667;
+    }
+    tRateUs += 16666; // First step-down interval = 33333 us (2x 60fps nominal)
+    const epAt60 = v.w1[6];
+    for (let k = 0; k < 7; k++) {
+      const ptr = exp.chronos_get_ingest_rgba_ptr();
+      const slotIdx = Math.round((ptr - ring0Ptr) / FULL_RING_SLOT_BYTES);
+      new Uint8Array(mem.buffer, ptr, hdBytes).set(hdTex);
+      assert(
+        exp.chronos_set_ingest_meta(
+          32,
+          rateSeq++,
+          tRateUs >>> 0,
+          Math.floor(tRateUs / 4294967296) >>> 0,
+          -1.0,
+          flagsBase,
+          640,
+          360,
+          0,
+          0,
+          640,
+          360,
+          0,
+          0xffffffff,
+          0,
+          0,
+          640,
+          360,
+          0,
+          1
+        ) === 1,
+        'Stage 30fps step-down frame'
+      );
+      exp.chronos_pre_tick(1 / 30);
+      solveFiedlerLanczos(exp, v.lap, v.fiedler);
+      exp.chronos_post_tick(1 / 30);
+      const mOff = slotIdx * RING_META_STRIDE;
+      if (k === 0) {
+        assert(v.ringMeta[mOff + 21] === GAP_EXCESS_DT, `First 60->30fps frame must flag GAP_EXCESS_DT=4, got 0x${v.ringMeta[mOff + 21].toString(16)}`);
+        assert(v.w1[6] === epAt60 + 1, `First 60->30fps frame must bump continuity_epoch ${epAt60}->${epAt60 + 1}, got ${v.w1[6]}`);
+      } else {
+        assert(v.ringMeta[mOff + 21] === 0, `Sustained 30fps frame #${k + 1} must relearn nominal dt with gap=0, got 0x${v.ringMeta[mOff + 21].toString(16)}`);
+        assert(v.w1[6] === epAt60 + 1, `Sustained 30fps frame #${k + 1} must hold continuity_epoch=${epAt60 + 1}, got ${v.w1[6]}`);
+      }
+      tRateUs += 33333;
+    }
+  }
+
   // 4. Engine counter u32::MAX -> 0 rollover check on isolated Wasm instance with monotonic u64 ring_cursor and K=8
   {
     const iso = instantiateWasm(wasmBytes);
