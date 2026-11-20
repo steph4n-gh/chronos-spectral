@@ -3,6 +3,8 @@
 // trace_replay.mjs and record_canonical_traces.mjs). Zero dependencies.
 //
 //   - xxh32():            the digest hash (standard XXH32, seed 0)
+//   - PLATFORM_WORDS / xxh32Masked(): the platform-descriptive words zeroed
+//                         before hashing (format 1.1, meta.digestMask)
 //   - parseWasmExports(): export name -> parameter/result value types
 //   - buildRegionTable(): the named memory regions, derived from src/*.rs
 //   - encodeHeader() / TraceReader: the binary trace format (CSTRACE v1)
@@ -369,6 +371,43 @@ export function buildRegionTable(srcDir = path.join(ROOT, 'src')) {
 }
 
 /**
+ * Platform-descriptive words: 32-bit words of digested regions whose value
+ * describes the build (pointer width, linker layout), not the computation, so
+ * the wasm32 kernel and a native kernel legitimately disagree on them. The
+ * recorder zeroes exactly these words before hashing a region and writes the
+ * list into every trace as `meta.digestMask`; replayers hash the same way. The
+ * native replay driver refuses a trace whose mask is not exactly its own copy
+ * (native/replay/allowlist.rs), so a trace cannot widen the exemption.
+ */
+export const PLATFORM_WORDS = [
+  { region: 'telemetry', word: 20, why: 'size_of::<Arena>() as f32: the arena holds usize fields, so its size depends on pointer width' },
+  { region: 'wave1_telemetry', word: 1, why: 'size_of::<Arena>() as u32 (pointer-width dependent, as above)' },
+  { region: 'wave1_telemetry', word: 12, why: "the wasm linker's __heap_base (end of the static image); 0 in a native build" },
+  { region: 'wave2_telemetry', word: 1, why: 'size_of::<Arena>() as u32 (pointer-width dependent, as above)' },
+];
+
+/** `{ region: [word, ...] }` for PLATFORM_WORDS, words ascending (the `meta.digestMask` value). */
+export function digestMask() {
+  const m = {};
+  for (const p of PLATFORM_WORDS) (m[p.region] ||= []).push(p.word);
+  for (const k of Object.keys(m)) m[k].sort((a, b) => a - b);
+  return m;
+}
+
+/**
+ * XXH32 of region bytes u8[off, off+len) with the 32-bit words listed in
+ * `words` (word indices within the region) read as zero. `scratch` is a
+ * reusable Uint8Array of at least `len` bytes.
+ */
+export function xxh32Masked(u8, off, len, words, scratch) {
+  if (!words || !words.length) return xxh32(u8, off, len);
+  const s = scratch.subarray(0, len);
+  s.set(u8.subarray(off, off + len));
+  for (const w of words) s.fill(0, 4 * w, 4 * w + 4);
+  return xxh32(s, 0, len);
+}
+
+/**
  * Exports that do not write kernel memory (getters; padic_ultrametric_val is a
  * leaf xor/clz). Their calls carry no digests. CHRONOS_TRACE_STRICT=1 plus
  * CHRONOS_TRACE_MEMDIGEST=1 verifies this on recorded sessions.
@@ -382,7 +421,8 @@ export function isPureExport(name) {
 // ---------------------------------------------------------------------------
 export const MAGIC = 'CSTRACE\0';
 export const VERSION_MAJOR = 1;
-export const VERSION_MINOR = 0;
+// 1.1: region digests are computed with the words listed in meta.digestMask zeroed.
+export const VERSION_MINOR = 1;
 export const TAG = { WRITE: 0x57, UNMAPPED: 0x55, RESET: 0x52, CALL: 0x43, END: 0x45 };
 export const FFLAG = { POINTER_RESULT: 1, PURE: 2 };
 export const HFLAG = { STRICT: 1, MEMDIGEST: 2 };
