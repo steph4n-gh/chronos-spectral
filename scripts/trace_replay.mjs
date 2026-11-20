@@ -19,7 +19,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DEFAULT_WASM, END_REASON, FFLAG, RFLAG, TraceReader, decodeValues, fmtValue, xxh32 } from './trace_lib.mjs';
+import { DEFAULT_WASM, END_REASON, FFLAG, RFLAG, TraceReader, decodeValues, fmtValue, xxh32, xxh32Masked } from './trace_lib.mjs';
 
 // If trace_hook.mjs was preloaded, use the unpatched API so the replay itself is not recorded.
 const WA = globalThis[Symbol.for('chronos.trace.originals')] || WebAssembly;
@@ -69,6 +69,16 @@ function replay(file) {
     return (r.hasArg ? g(r.arg) : g()) >>> 0;
   };
   const digested = h.digested.map((ri) => h.regions[ri]);
+  // Format 1.1: the recorder zeroed these platform-descriptive words before hashing.
+  const mask = h.meta.digestMask || {};
+  for (const [rn, words] of Object.entries(mask)) {
+    const r = h.regions.find((x) => x.name === rn);
+    if (!r || r.elem === 1 || !words.every((w) => Number.isInteger(w) && w >= 0 && 4 * w + 4 <= r.byteLen)) {
+      throw new Error(`${name}: invalid meta.digestMask entry ${rn}: ${JSON.stringify(words)}`);
+    }
+  }
+  const maskWords = digested.map((r) => mask[r.name] || null);
+  const maskScratch = new Uint8Array(Math.max(0, ...digested.filter((r, i) => maskWords[i]).map((r) => r.byteLen)));
   // Digest cache: a region's hash is reused while its bytes are unchanged.
   const prevBytes = digested.map(() => null);
   const prevHash = new Uint32Array(digested.length);
@@ -129,7 +139,7 @@ function replay(file) {
           let hash;
           if (prevBytes[i] && Buffer.compare(prevBytes[i], cur) === 0) hash = prevHash[i];
           else {
-            hash = xxh32(mem, a, r.byteLen);
+            hash = xxh32Masked(mem, a, r.byteLen, maskWords[i], maskScratch);
             prevBytes[i] = Buffer.from(cur);
             prevHash[i] = hash;
           }
