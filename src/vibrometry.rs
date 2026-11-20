@@ -3,9 +3,9 @@
 //! Pure `#![no_std]`, zero host imports, zero heap allocation inside static `VibrometryState`.
 
 use crate::simd::{
-    f32x4, f32x4_add, f32x4_max, f32x4_min, f32x4_mul, f32x4_splat, i16x8_add,
-    i16x8_lt, i16x8_narrow_i32x4, i16x8_splat, i32x4_trunc_sat_f32x4, u64x2, u64x2_extract_lane,
-    v128, v128_or,
+    f32x4, f32x4_add, f32x4_convert_u32x4, f32x4_extract_lane, f32x4_max, f32x4_min, f32x4_mul,
+    f32x4_splat, f32x4_sub, i16x8_add, i16x8_lt, i16x8_narrow_i32x4, i16x8_splat,
+    i32x4_trunc_sat_f32x4, u32x4_extend_low_u16x8, u64x2, u64x2_extract_lane, v128, v128_or,
 };
 
 pub const VIBRO_BANDS: usize = 16;
@@ -1265,36 +1265,16 @@ impl VibrometryState {
                     } else {
                         0.0
                     };
-                    let mut s_xx = 0.0f32;
-                    let mut s_xy = 0.0f32;
-                    let mut s_yy = 0.0f32;
-                    let mut b_x = 0.0f32;
-                    let mut b_y = 0.0f32;
-                    let mut ex = bx0;
-                    while ex < bx1 {
-                        let cur_c = luma[r + ex];
-                        let ref_c = (self.ref_luma_q16[r + ex] as f32) * REF_INV;
-                        let di = cur_c - ref_c;
-
-                        let cur_dx = luma[r + ex + 1] - luma[r + ex - 1];
-                        let ref_dx = ((self.ref_luma_q16[r + ex + 1] as f32)
-                            - (self.ref_luma_q16[r + ex - 1] as f32))
-                            * REF_INV;
-                        let gx = 0.25 * (cur_dx + ref_dx);
-
-                        let cur_dy = luma[rp + ex] - luma[rm + ex];
-                        let ref_dy = ((self.ref_luma_q16[rp + ex] as f32)
-                            - (self.ref_luma_q16[rm + ex] as f32))
-                            * REF_INV;
-                        let gy = dy_half * (cur_dy + ref_dy);
-
-                        s_xx += gx * gx;
-                        s_xy += gx * gy;
-                        s_yy += gy * gy;
-                        b_x -= gx * di;
-                        b_y -= gy * di;
-                        ex += 1;
-                    }
+                    let (s_xx, s_xy, s_yy, b_x, b_y) = band_row_sums(
+                        luma,
+                        &self.ref_luma_q16,
+                        r,
+                        rm,
+                        rp,
+                        bx0,
+                        bx1,
+                        dy_half,
+                    );
 
                     let tr = s_xx + s_yy;
                     if ncols > 0 && tr >= row_floor {
@@ -2915,6 +2895,183 @@ mod warmup_accumulate_tests {
                 accumulate_ref_q12(&mut a, &luma, n, first);
                 reference(&mut b, &luma, n, first);
                 assert_eq!(a, b, "first = {first}, fill = {fill}");
+            }
+        }
+    }
+}
+
+/// One row of `extract_signed_band_displacements` (scan along `ey`): over `ex` in `bx0..bx1`, in
+/// that order, `s_xx += gx * gx`, `s_xy += gx * gy`, `s_yy += gy * gy`, `b_x -= gx * di` and
+/// `b_y -= gy * di`, with the row's `di`, `gx` and `gy` (`r`, `rm`, `rp`: the row and its clamped
+/// neighbours; `bx0 >= 1` and `bx1 <= frame_w - 1`).
+///
+/// The per-pixel terms are computed four columns at a time with the same expressions (vector
+/// loads through fixed-size row views, `u16` to `f32` conversions, then the same `f32` operations
+/// in the same order), and each sum then takes its four lanes one by one in column order, so
+/// every sum sees the same additions in the same order as the scalar loop.
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
+fn band_row_sums(
+    luma: &[f32],
+    q: &[u16],
+    r: usize,
+    rm: usize,
+    rp: usize,
+    bx0: usize,
+    bx1: usize,
+    dy_half: f32,
+) -> (f32, f32, f32, f32, f32) {
+    const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
+    #[inline(always)]
+    fn ld4(a: &[f32], i: usize) -> v128 {
+        f32x4(a[i], a[i + 1], a[i + 2], a[i + 3])
+    }
+    // `q[i..i + 4]` as `f32x4` (exact: the values are below 2^16).
+    #[inline(always)]
+    fn cvt4(q: &[u16], i: usize) -> v128 {
+        let lo = (q[i] as u64)
+            | ((q[i + 1] as u64) << 16)
+            | ((q[i + 2] as u64) << 32)
+            | ((q[i + 3] as u64) << 48);
+        f32x4_convert_u32x4(u32x4_extend_low_u16x8(u64x2(lo, 0)))
+    }
+    let quarter = f32x4_splat(0.25);
+    let inv = f32x4_splat(REF_INV);
+    let dyh = f32x4_splat(dy_half);
+    let mut s_xx = 0.0f32;
+    let mut s_xy = 0.0f32;
+    let mut s_yy = 0.0f32;
+    let mut b_x = 0.0f32;
+    let mut b_y = 0.0f32;
+    let mut ex = bx0;
+    while ex + 4 <= bx1 {
+        let lc: &[f32; 6] = luma[r + ex - 1..r + ex + 5].try_into().unwrap();
+        let lp: &[f32; 4] = luma[rp + ex..rp + ex + 4].try_into().unwrap();
+        let lm: &[f32; 4] = luma[rm + ex..rm + ex + 4].try_into().unwrap();
+        let qc: &[u16; 6] = q[r + ex - 1..r + ex + 5].try_into().unwrap();
+        let qp: &[u16; 4] = q[rp + ex..rp + ex + 4].try_into().unwrap();
+        let qm: &[u16; 4] = q[rm + ex..rm + ex + 4].try_into().unwrap();
+
+        let cur_c = ld4(lc, 1);
+        let ref_c = f32x4_mul(cvt4(qc, 1), inv);
+        let di = f32x4_sub(cur_c, ref_c);
+
+        let cur_dx = f32x4_sub(ld4(lc, 2), ld4(lc, 0));
+        let ref_dx = f32x4_mul(f32x4_sub(cvt4(qc, 2), cvt4(qc, 0)), inv);
+        let gx = f32x4_mul(quarter, f32x4_add(cur_dx, ref_dx));
+
+        let cur_dy = f32x4_sub(ld4(lp, 0), ld4(lm, 0));
+        let ref_dy = f32x4_mul(f32x4_sub(cvt4(qp, 0), cvt4(qm, 0)), inv);
+        let gy = f32x4_mul(dyh, f32x4_add(cur_dy, ref_dy));
+
+        let pxx = f32x4_mul(gx, gx);
+        let pxy = f32x4_mul(gx, gy);
+        let pyy = f32x4_mul(gy, gy);
+        let pbx = f32x4_mul(gx, di);
+        let pby = f32x4_mul(gy, di);
+        macro_rules! lane {
+            ($l:literal) => {
+                s_xx += f32x4_extract_lane::<$l>(pxx);
+                s_xy += f32x4_extract_lane::<$l>(pxy);
+                s_yy += f32x4_extract_lane::<$l>(pyy);
+                b_x -= f32x4_extract_lane::<$l>(pbx);
+                b_y -= f32x4_extract_lane::<$l>(pby);
+            };
+        }
+        lane!(0);
+        lane!(1);
+        lane!(2);
+        lane!(3);
+        ex += 4;
+    }
+    while ex < bx1 {
+        let cur_c = luma[r + ex];
+        let ref_c = (q[r + ex] as f32) * REF_INV;
+        let di = cur_c - ref_c;
+
+        let cur_dx = luma[r + ex + 1] - luma[r + ex - 1];
+        let ref_dx = ((q[r + ex + 1] as f32) - (q[r + ex - 1] as f32)) * REF_INV;
+        let gx = 0.25 * (cur_dx + ref_dx);
+
+        let cur_dy = luma[rp + ex] - luma[rm + ex];
+        let ref_dy = ((q[rp + ex] as f32) - (q[rm + ex] as f32)) * REF_INV;
+        let gy = dy_half * (cur_dy + ref_dy);
+
+        s_xx += gx * gx;
+        s_xy += gx * gy;
+        s_yy += gy * gy;
+        b_x -= gx * di;
+        b_y -= gy * di;
+        ex += 1;
+    }
+    (s_xx, s_xy, s_yy, b_x, b_y)
+}
+
+#[cfg(test)]
+mod band_row_sums_tests {
+    extern crate std;
+    use super::*;
+    use std::vec::Vec;
+
+    /// The scalar row loop `band_row_sums` replaced (from `extract_signed_band_displacements`).
+    #[allow(clippy::too_many_arguments)]
+    fn reference(
+        luma: &[f32],
+        q: &[u16],
+        r: usize,
+        rm: usize,
+        rp: usize,
+        bx0: usize,
+        bx1: usize,
+        dy_half: f32,
+    ) -> (f32, f32, f32, f32, f32) {
+        const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
+        let (mut s_xx, mut s_xy, mut s_yy, mut b_x, mut b_y) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let mut ex = bx0;
+        while ex < bx1 {
+            let cur_c = luma[r + ex];
+            let ref_c = (q[r + ex] as f32) * REF_INV;
+            let di = cur_c - ref_c;
+            let cur_dx = luma[r + ex + 1] - luma[r + ex - 1];
+            let ref_dx = ((q[r + ex + 1] as f32) - (q[r + ex - 1] as f32)) * REF_INV;
+            let gx = 0.25 * (cur_dx + ref_dx);
+            let cur_dy = luma[rp + ex] - luma[rm + ex];
+            let ref_dy = ((q[rp + ex] as f32) - (q[rm + ex] as f32)) * REF_INV;
+            let gy = dy_half * (cur_dy + ref_dy);
+            s_xx += gx * gx;
+            s_xy += gx * gy;
+            s_yy += gy * gy;
+            b_x -= gx * di;
+            b_y -= gy * di;
+            ex += 1;
+        }
+        (s_xx, s_xy, s_yy, b_x, b_y)
+    }
+
+    #[test]
+    fn simd_row_sums_match_scalar() {
+        let (w, h) = (640usize, 8usize);
+        let mut state = 0x9e37_79b9u32;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state
+        };
+        let luma: Vec<f32> = (0..w * h).map(|_| next() as f32 / u32::MAX as f32).collect();
+        let q: Vec<u16> = (0..w * h).map(|_| (next() % 65_521) as u16).collect();
+        let bits = |t: (f32, f32, f32, f32, f32)| [t.0.to_bits(), t.1.to_bits(), t.2.to_bits(), t.3.to_bits(), t.4.to_bits()];
+        for ey in 0..h {
+            let (em, ep) = (ey.saturating_sub(1), (ey + 1).min(h - 1));
+            let dy_half = if ep > em { 0.5 / ((ep - em) as f32) } else { 0.0 };
+            // Band column ranges of every width modulo 4, at both frame edges.
+            for (bx0, bx1) in [(1, 39), (40, 79), (1, 2), (1, 5), (600, 639), (17, 30), (3, 3), (5, 4)] {
+                let (r, rm, rp) = (ey * w, em * w, ep * w);
+                assert_eq!(
+                    bits(band_row_sums(&luma, &q, r, rm, rp, bx0, bx1, dy_half)),
+                    bits(reference(&luma, &q, r, rm, rp, bx0, bx1, dy_half)),
+                    "ey = {ey}, bx0 = {bx0}, bx1 = {bx1}"
+                );
             }
         }
     }
