@@ -18,6 +18,15 @@
 //!   --in-process              replay every trace in this process (default: one child per trace)
 //!   --list-allowlist          print the platform-word allowlist and exit
 //!
+//! Timing mode (native/replay/bench.rs; docs/VERIFICATION_AND_BENCHMARKS.md, "Native vs wasm
+//! kernel timing"): digests off, return values still checked, in-process, one trace at a time.
+//!   --bench                   time every kernel call (host writes untimed) instead of verifying
+//!   --warmup=N                discarded passes per trace (default 2)
+//!   --passes=N                measured passes per trace (default 5)
+//!   --bench-reconcile=K       K untimed and K apply-only passes (wall-clock cross-check)
+//!   --bench-verbose           per-export table for every trace
+//!   --json=FILE               machine-readable results (scripts/bench_native_vs_wasm.mjs reads it)
+//!
 //! Result per trace: PASS (every record replayed, 0 mismatches), PREFIX (the trace reached a
 //! raw-address write a native build cannot follow; everything before it matched), TRAP (a
 //! recorded trap; native kernel functions abort on panic, so it cannot be replayed in-process),
@@ -25,6 +34,7 @@
 //! failed (and, with --require-full, none stopped early), 1 otherwise, 2 on usage errors.
 
 mod allowlist;
+mod bench;
 mod json;
 mod kernel;
 mod replayer;
@@ -50,12 +60,14 @@ struct Cli {
     in_process: bool,
     child: bool,
     passthrough: Vec<String>,
+    bench: Option<bench::BenchOptions>,
 }
 
 fn usage() -> ExitCode {
     eprintln!(
         "usage: chronos_replay [--max-errors=N] [--dump-dir=DIR] [--dump-at=CALL:REGION[,REGION]] [--require-full]\n\
-         \x20                     [--wasm-sha256=HEX] [--no-mask] [--info] [--in-process] [--list-allowlist] <trace|dir>..."
+         \x20                     [--wasm-sha256=HEX] [--no-mask] [--info] [--in-process] [--list-allowlist] <trace|dir>...\n\
+         \x20      chronos_replay --bench [--warmup=N] [--passes=N] [--bench-reconcile=K] [--bench-verbose] [--json=FILE] <trace|dir>..."
     );
     ExitCode::from(2)
 }
@@ -75,7 +87,16 @@ fn parse_cli() -> Result<Cli, String> {
         in_process: false,
         child: false,
         passthrough: Vec::new(),
+        bench: None,
     };
+    let mut b = bench::BenchOptions {
+        warmup: 2,
+        passes: 5,
+        reconcile: 0,
+        json: None,
+        verbose: false,
+    };
+    let mut bench_on = false;
     for a in std::env::args().skip(1) {
         let (k, v) = match a.split_once('=') {
             Some((k, v)) => (k.to_owned(), Some(v.to_owned())),
@@ -100,6 +121,19 @@ fn parse_cli() -> Result<Cli, String> {
             ("--info", None) => cli.opts.info = true,
             ("--in-process", None) => cli.in_process = true,
             ("--child", None) => cli.child = true,
+            ("--bench", None) => bench_on = true,
+            ("--warmup", Some(v)) => b.warmup = v.parse().map_err(|_| format!("bad {a}"))?,
+            ("--passes", Some(v)) => {
+                b.passes = v.parse().map_err(|_| format!("bad {a}"))?;
+                if b.passes == 0 {
+                    return Err(format!("bad {a}"));
+                }
+            }
+            ("--bench-reconcile", Some(v)) => {
+                b.reconcile = v.parse().map_err(|_| format!("bad {a}"))?
+            }
+            ("--bench-verbose", None) => b.verbose = true,
+            ("--json", Some(v)) => b.json = Some(PathBuf::from(v)),
             ("--list-allowlist", None) => {
                 for w in allowlist::PLATFORM_WORDS {
                     println!(
@@ -117,6 +151,9 @@ fn parse_cli() -> Result<Cli, String> {
         if pass {
             cli.passthrough.push(a);
         }
+    }
+    if bench_on {
+        cli.bench = Some(b);
     }
     Ok(cli)
 }
@@ -288,6 +325,20 @@ fn main() -> ExitCode {
     };
     let overflow_checks = overflow_checks_enabled();
     install_panic_hook();
+
+    if let Some(b) = &cli.bench {
+        let build = format!(
+            "native kernel {} / simd backend {}, profile {} (opt-level {}, overflow checks {}, debug assertions {}), target-cpu {}",
+            std::env::consts::ARCH,
+            chronos_spectral::simd::BACKEND_NAME,
+            env!("CHRONOS_PROFILE"),
+            env!("CHRONOS_OPT_LEVEL"),
+            if overflow_checks { "on" } else { "off" },
+            if cfg!(debug_assertions) { "on" } else { "off" },
+            env!("CHRONOS_TARGET_CPU"),
+        );
+        return ExitCode::from(bench::run(&files, &cli.opts, b, &build) as u8);
+    }
 
     // Child: exactly one trace, outcome in the exit status.
     if cli.child {
