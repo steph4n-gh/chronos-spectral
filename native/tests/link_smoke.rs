@@ -9,7 +9,7 @@ use chronos_spectral::simd::{f32x4, f32x4_add, f32x4_extract_lane, f32x4_sqrt};
 #[test]
 fn kernel_links_initialises_and_simd_layer_runs() {
     // The SIMD layer is reachable as a library API (here: the native backend selected by
-    // `crate::simd`, the scalar reference until a NEON / SSE backend lands).
+    // `crate::simd`: NEON on aarch64, SSE on x86_64, the scalar reference elsewhere).
     let v = f32x4_sqrt(f32x4_add(
         f32x4(1.0, 3.0, 8.0, 15.0),
         f32x4(0.0, 1.0, 1.0, 1.0),
