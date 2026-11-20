@@ -10,6 +10,12 @@
 //
 // Usage:
 //   node scripts/trace_replay.mjs [--wasm=<path>] [--stats] [--portable] [--max-errors=N] <trace|dir>...
+//   node scripts/trace_replay.mjs --bench [--warmup=N] [--passes=N] [--bench-reconcile=K]
+//        [--bench-verbose] [--json=FILE] [--bench-cpu-prof=FILE] [--wasm=<path>] <trace|dir>...
+//
+// --bench times the kernel calls instead of verifying them, measuring exactly
+// what `chronos_replay --bench` measures natively (see benchTrace below and
+// docs/VERIFICATION_AND_BENCHMARKS.md, "Native vs wasm kernel timing").
 //
 // Exit status: 0 when every trace replays with 0 mismatches, 1 otherwise.
 // UNMAPPED (raw-address) host writes are applied and reported as non-portable;
@@ -18,6 +24,7 @@
 
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import inspector from 'node:inspector';
 import path from 'node:path';
 import { DEFAULT_WASM, END_REASON, FFLAG, RFLAG, TraceReader, decodeValues, fmtValue, xxh32, xxh32Masked } from './trace_lib.mjs';
 
@@ -30,6 +37,11 @@ const maxErrors = Number((args.find((a) => a.startsWith('--max-errors=')) || '--
 const showStats = args.includes('--stats');
 const requirePortable = args.includes('--portable');
 const inputs = args.filter((a) => !a.startsWith('--'));
+const optVal = (k, d) => {
+  const a = args.find((x) => x.startsWith(`--${k}=`));
+  return a === undefined ? d : a.slice(k.length + 3);
+};
+const benchMode = args.includes('--bench');
 if (!inputs.length) {
   console.error('usage: node scripts/trace_replay.mjs [--wasm=<path>] [--stats] [--max-errors=N] <trace|dir>...');
   process.exit(2);
@@ -194,6 +206,309 @@ function replay(file) {
   }
   return ok;
 }
+
+// ----------------------------------------------------------------------------
+// --bench: per-call kernel timing (the wasm side of scripts/bench_native_vs_wasm.mjs).
+//
+// Mirrors native/replay/bench.rs record for record:
+//  * Load (untimed): records are read once into memory. Loading stops where a
+//    native replay must stop, at the first UNMAPPED (raw-address) write or the
+//    first recorded trap, so both sides time the identical call sequence.
+//  * Each pass restores the fresh-instance image (as a RESET record does) and
+//    replays every op. Host writes are applied untimed; each kernel call is
+//    timed alone with performance.now() (the monotonic clock: on macOS the same
+//    24 MHz mach timebase as the native Instant). Return values are compared
+//    with the recording outside the timed region; digests are not computed.
+//  * --warmup passes are discarded (they also let V8 tier the hot functions up
+//    from Liftoff to TurboFan); --passes passes are measured.
+//  * --bench-reconcile=K: K passes without per-call timers and K passes that
+//    apply the writes but make no call; their wall-clock difference must agree
+//    with the summed per-call times.
+// The mean empty-interval cost of the timer is measured at start-up and
+// subtracted from every sample (clamped at 0).
+// ----------------------------------------------------------------------------
+
+function calibrateTimer() {
+  const N = 200000;
+  let sum = 0;
+  let minNz = Infinity;
+  for (let rep = 0; rep < 2; rep++) {
+    sum = 0;
+    for (let i = 0; i < N; i++) {
+      const t0 = performance.now();
+      const t1 = performance.now();
+      const d = (t1 - t0) * 1e6;
+      sum += d;
+      if (d > 0 && d < minNz) minNz = d;
+    }
+  }
+  return { overheadNs: sum / N, resolutionNs: minNz };
+}
+
+function benchLoad(file) {
+  const rd = new TraceReader(file);
+  const h = rd.header;
+  const ops = [];
+  let calls = 0;
+  let writes = 0;
+  let writeBytes = 0;
+  let stop = 'end';
+  for (const rec of rd.records()) {
+    if (rec.tag === 'W') {
+      ops.push({ k: 0, region: rec.region, offset: rec.offset, data: rec.data });
+      writes++;
+      writeBytes += rec.data.length;
+    } else if (rec.tag === 'R') {
+      ops.push({ k: 1 });
+    } else if (rec.tag === 'U') {
+      stop = `prefix@${calls} (UNMAPPED write)`;
+      break;
+    } else if (rec.tag === 'C') {
+      if (rec.status !== 0) {
+        stop = `prefix@${calls} (recorded trap)`;
+        break;
+      }
+      const f = h.funcs[rec.func];
+      ops.push({
+        k: 2,
+        func: rec.func,
+        args: decodeValues(rec.args, f.params),
+        result: rec.result ? decodeValues(rec.result, f.results)[0] : undefined,
+        isF32: f.results[0] === 0x7d,
+      });
+      calls++;
+    }
+  }
+  rd.close();
+  return { h, ops, calls, writes, writeBytes, stop };
+}
+
+function invokeExport(fn, a) {
+  switch (a.length) {
+    case 0: return fn();
+    case 1: return fn(a[0]);
+    case 2: return fn(a[0], a[1]);
+    case 3: return fn(a[0], a[1], a[2]);
+    case 4: return fn(a[0], a[1], a[2], a[3]);
+    case 5: return fn(a[0], a[1], a[2], a[3], a[4]);
+    case 6: return fn(a[0], a[1], a[2], a[3], a[4], a[5]);
+    default: return fn(...a);
+  }
+}
+
+const MODE_TIMED = 0;
+const MODE_UNTIMED = 1;
+const MODE_APPLY_ONLY = 2;
+
+function benchPass(ctx, ld, mode, overheadNs, samples) {
+  const { mem, pristine, fns, regionAddr } = ctx;
+  const ops = ld.ops;
+  let kernelNs = 0;
+  let mismatches = 0;
+  mem.set(pristine);
+  const w0 = performance.now();
+  for (let i = 0; i < ops.length; i++) {
+    const op = ops[i];
+    if (op.k === 0) {
+      mem.set(op.data, regionAddr(op.region) + op.offset);
+    } else if (op.k === 1) {
+      mem.set(pristine);
+    } else {
+      if (mode === MODE_APPLY_ONLY) continue;
+      const fn = fns[op.func];
+      let r;
+      if (mode === MODE_TIMED) {
+        const t0 = performance.now();
+        r = invokeExport(fn, op.args);
+        const t1 = performance.now();
+        let ns = (t1 - t0) * 1e6 - overheadNs;
+        if (ns < 0) ns = 0;
+        kernelNs += ns;
+        if (samples) samples[op.func].push(ns);
+      } else {
+        r = invokeExport(fn, op.args);
+      }
+      if (op.result !== undefined) {
+        const same = op.isF32 ? Object.is(r, op.result) || (Number.isNaN(r) && Number.isNaN(op.result)) : (r | 0) === op.result;
+        if (!same) mismatches++;
+      }
+    }
+  }
+  return { wallNs: (performance.now() - w0) * 1e6, kernelNs, mismatches };
+}
+
+function quantile(sorted, q) {
+  if (!sorted.length) return 0;
+  const pos = q * (sorted.length - 1);
+  const lo = Math.floor(pos);
+  const hi = Math.ceil(pos);
+  return sorted[lo] + (sorted[hi] - sorted[lo]) * (pos - lo);
+}
+const medianOf = (v) => quantile([...v].sort((a, b) => a - b), 0.5);
+
+function benchMain() {
+  const warmup = Number(optVal('warmup', '2'));
+  const passes = Number(optVal('passes', '5'));
+  const reconcile = Number(optVal('bench-reconcile', '0'));
+  const verbose = args.includes('--bench-verbose');
+  const jsonOut = optVal('json', null);
+  if (!(passes >= 1) || !(warmup >= 0) || !(reconcile >= 0)) {
+    console.error('bad --passes / --warmup / --bench-reconcile');
+    process.exit(2);
+  }
+  const { overheadNs, resolutionNs } = calibrateTimer();
+  const engine = `node ${process.version} (V8 ${process.versions.v8})${process.execArgv.length ? ` ${process.execArgv.join(' ')}` : ''}`;
+  console.log(
+    `trace_replay --bench: wasm ${wasmSha.slice(0, 16)} on ${engine}; warmup ${warmup} + ${passes} measured pass(es) per trace; ` +
+      `timer: performance.now(), empty-interval mean ${overheadNs.toFixed(1)} ns (subtracted per call), resolution ${resolutionNs.toFixed(1)} ns`
+  );
+  const out = [];
+  let failed = false;
+  for (const file of files) {
+    const name = path.basename(file);
+    const tl = performance.now();
+    const ld = benchLoad(file);
+    const loadS = (performance.now() - tl) / 1e3;
+    const h = ld.h;
+    if (h.wasmSha256 !== wasmSha) {
+      console.log(`[FAIL] ${name}: trace was recorded against wasm ${h.wasmSha256}, replay wasm is ${wasmSha}`);
+      failed = true;
+      continue;
+    }
+    const E = new WA.Instance(wasmModule, {}).exports;
+    const mem = new Uint8Array(E.memory.buffer);
+    const pristine = Uint8Array.from(mem);
+    const fns = h.funcs.map((f) => E[f.name]);
+    const getters = h.regions.map((r) => {
+      const g = fns[r.getterIndex];
+      return r.hasArg ? () => g(r.arg) >>> 0 : () => g() >>> 0;
+    });
+    const ctx = { mem, pristine, fns, regionAddr: (ri) => getters[ri]() };
+    const samples = h.funcs.map(() => []);
+    // --bench-cpu-prof: V8 CPU profile of the measured passes only (after tier-up).
+    const cpuProf = optVal('bench-cpu-prof', null);
+    let session = null;
+    const passKernel = [];
+    const passWall = [];
+    const warmKernel = [];
+    let mismatches = 0;
+    for (let p = 0; p < warmup + passes; p++) {
+      if (typeof globalThis.gc === 'function') globalThis.gc();
+      const measured = p >= warmup;
+      if (cpuProf && p === warmup) {
+        session = new inspector.Session();
+        session.connect();
+        // The inspector answers synchronously while the main thread is busy in post().
+        session.post('Profiler.enable');
+        session.post('Profiler.setSamplingInterval', { interval: Number(optVal('bench-cpu-prof-interval', '100')) });
+        session.post('Profiler.start');
+      }
+      const o = benchPass(ctx, ld, MODE_TIMED, overheadNs, measured ? samples : null);
+      mismatches += o.mismatches;
+      if (measured) {
+        passKernel.push(o.kernelNs);
+        passWall.push(o.wallNs);
+      } else warmKernel.push(o.kernelNs);
+    }
+    if (session) {
+      session.post('Profiler.stop', (e, r) => {
+        if (e) throw e;
+        fs.writeFileSync(files.length > 1 ? `${cpuProf}.${name}.cpuprofile` : cpuProf, JSON.stringify(r.profile));
+      });
+      session.disconnect();
+      session = null;
+    }
+    const recUntimed = [];
+    const recApply = [];
+    for (let k = 0; k < reconcile; k++) {
+      if (typeof globalThis.gc === 'function') globalThis.gc();
+      const u = benchPass(ctx, ld, MODE_UNTIMED, overheadNs, null);
+      mismatches += u.mismatches;
+      recUntimed.push(u.wallNs);
+      if (typeof globalThis.gc === 'function') globalThis.gc();
+      recApply.push(benchPass(ctx, ld, MODE_APPLY_ONLY, overheadNs, null).wallNs);
+    }
+    if (mismatches) failed = true;
+    const km = medianOf(passKernel);
+    const wm = medianOf(passWall);
+    console.log(
+      `[${mismatches ? 'FAIL ' : 'BENCH'}] ${name}: ${ld.calls} calls, ${ld.writes} host writes (${(ld.writeBytes / 1e6).toFixed(1)} MB), ` +
+        `stop=${ld.stop}, loaded in ${loadS.toFixed(1)} s; kernel ${(km / 1e6).toFixed(3)} ms/pass (median of ${passKernel.length}; ` +
+        `min ${(Math.min(...passKernel) / 1e6).toFixed(3)}, max ${(Math.max(...passKernel) / 1e6).toFixed(3)}), pass wall ${(wm / 1e6).toFixed(3)} ms, ` +
+        `return mismatches ${mismatches}`
+    );
+    if (reconcile) {
+      const u = medianOf(recUntimed);
+      const a = medianOf(recApply);
+      console.log(
+        `    reconcile: untimed pass ${(u / 1e6).toFixed(3)} ms - apply-only pass ${(a / 1e6).toFixed(3)} ms = ${((u - a) / 1e6).toFixed(3)} ms ` +
+          `kernel by wall-clock vs ${(km / 1e6).toFixed(3)} ms summed per call (${(km - (u - a) >= 0 ? '+' : '') + ((100 * (km - (u - a))) / Math.max(1, u - a)).toFixed(1)}%); ` +
+          `timed pass wall ${(wm / 1e6).toFixed(3)} ms`
+      );
+    }
+    const exportsOut = [];
+    samples.forEach((s, fi) => {
+      if (!s.length) return;
+      s.sort((a, b) => a - b);
+      const n = s.length;
+      const sum = s.reduce((a, b) => a + b, 0);
+      exportsOut.push({
+        name: h.funcs[fi].name,
+        count: Math.floor(n / passes),
+        median_ns: quantile(s, 0.5),
+        p95_ns: quantile(s, 0.95),
+        mean_ns: sum / n,
+        total_ns_per_pass: sum / passes,
+        min_ns: s[0],
+        max_ns: s[n - 1],
+        // Every measured sample (sorted), so statistics can be pooled exactly across traces and runs.
+        samples_ns: s.map((x) => Math.round(x)),
+      });
+    });
+    exportsOut.sort((a, b) => b.total_ns_per_pass - a.total_ns_per_pass);
+    if (verbose) {
+      console.log(`    ${'export'.padEnd(36)} ${'calls'.padStart(8)} ${'median us'.padStart(12)} ${'p95 us'.padStart(12)} ${'mean us'.padStart(12)} ${'share'.padStart(9)}`);
+      for (const e of exportsOut) {
+        console.log(
+          `    ${e.name.padEnd(36)} ${String(e.count).padStart(8)} ${(e.median_ns / 1e3).toFixed(3).padStart(12)} ${(e.p95_ns / 1e3).toFixed(3).padStart(12)} ` +
+            `${(e.mean_ns / 1e3).toFixed(3).padStart(12)} ${((100 * e.total_ns_per_pass) / Math.max(1, km)).toFixed(1).padStart(8)}%`
+        );
+      }
+    }
+    out.push({
+      name,
+      calls: ld.calls,
+      writes: ld.writes,
+      write_bytes: ld.writeBytes,
+      stop: ld.stop,
+      mismatches,
+      warmup_kernel_ns: warmKernel,
+      pass_kernel_ns: passKernel,
+      pass_wall_ns: passWall,
+      reconcile_untimed_ns: recUntimed,
+      reconcile_apply_ns: recApply,
+      exports: exportsOut,
+    });
+  }
+  if (jsonOut) {
+    fs.writeFileSync(
+      jsonOut,
+      JSON.stringify({
+        side: 'wasm',
+        backend: 'wasm-simd128',
+        engine,
+        wasm_sha256: wasmSha,
+        timer: { clock: 'performance.now', overhead_ns: overheadNs, resolution_ns: resolutionNs },
+        warmup,
+        passes,
+        traces: out,
+      }) + '\n'
+    );
+  }
+  process.exit(failed ? 1 : 0);
+}
+
+if (benchMode) benchMain();
 
 let allOk = true;
 for (const f of files) {

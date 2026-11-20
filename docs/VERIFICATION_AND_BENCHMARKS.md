@@ -243,6 +243,9 @@ Whole-kernel parity between the wasm build and a native build is checked by reco
 | [src/native.rs](../src/native.rs) | Native-only kernel support for the driver: `reset_to_pristine()` (the `RESET` record) and the native layout of every region (`regions()`). Not compiled for wasm32. |
 | [scripts/trace_region_diff.mjs](../scripts/trace_region_diff.mjs) | Replays a trace on the wasm up to call N, dumps a region, and diffs it element by element against the driver's native dump of the same region. |
 | [scripts/gate_native_parity.mjs](../scripts/gate_native_parity.mjs) | `Gate N`: fresh bounded recording, native replay, negative control. |
+| [native/replay/bench.rs](../native/replay/bench.rs) | `chronos_replay --bench`: times every native kernel call on a trace (see [Native vs wasm kernel timing](#native-vs-wasm-kernel-timing)). `trace_replay.mjs --bench` is the wasm side. |
+| [scripts/bench_native_vs_wasm.mjs](../scripts/bench_native_vs_wasm.mjs) | One command for the native/wasm comparison over trace directories: interleaved rounds, medians, spread, ratios. |
+| [scripts/bench_profile.mjs](../scripts/bench_profile.mjs) | Where the time goes on one trace: xctrace (native, by function, inlined source line, SIMD layer op and instruction) and V8's CPU profiler (wasm, by function). |
 
 ```bash
 # Record one harness
@@ -358,7 +361,7 @@ native/target/<host>/release/chronos_replay [options] <trace.cstrace | dir>...
 cargo build --profile checked --manifest-path native/Cargo.toml --target host-tuple --bin chronos_replay
 ```
 
-Options: `--max-errors=N` (divergent calls reported per trace before it stops, default `1`), `--dump-dir=DIR` (native region dumps, default `target/replay-dumps`), `--dump-at=CALL:REGION[,REGION]` (also dump regions after a matching call), `--require-full` (a portable-prefix or recorded-trap stop fails), `--wasm-sha256=HEX` (every trace must come from this wasm binary), `--info` (print each header), `--no-mask` (hash raw regions, for 1.0 traces), `--in-process` (default: one child process per trace), `--list-allowlist`.
+Options: `--max-errors=N` (divergent calls reported per trace before it stops, default `1`), `--dump-dir=DIR` (native region dumps, default `target/replay-dumps`), `--dump-at=CALL:REGION[,REGION]` (also dump regions after a matching call), `--require-full` (a portable-prefix or recorded-trap stop fails), `--wasm-sha256=HEX` (every trace must come from this wasm binary), `--info` (print each header), `--no-mask` (hash raw regions, for 1.0 traces), `--in-process` (default: one child process per trace), `--list-allowlist`. `--bench` switches to the timing mode described in [Native vs wasm kernel timing](#native-vs-wasm-kernel-timing).
 
 Per trace:
 
@@ -507,3 +510,318 @@ Each digest-checked call hashes 12.7 MB of regions, which takes about 4 minutes 
 **What this does not cover.** Only the paths these runs execute are checked: init, the parameter and ingest setters, and the SD per-frame pipeline in the default modes (swarm, Hodge, BOS, vibrometry and conservation off, `lab_mode = 0`), on the scalar backend, for 2 to 3 frames. HD resolution, the swarm and continuum path, Hodge, BOS, vibrometry and audio, conservation, `chronos_reset_tracks`, the inspect calls and `native::reset_to_pristine` were not run under Miri. Neither was the NEON backend. Nor was any long-run state, such as ring wraparound or track lifetimes.
 
 **CI.** The `miri-scalar` job runs the first two commands on `ubuntu-latest` (x86_64) with Stacked Borrows, and is non-blocking (`continue-on-error: true`, `timeout-minutes: 75`). Expected runtime is about 30 to 45 minutes: 6 + 16 minutes measured here, and GitHub's runners are slower per core than an M4 Pro.
+
+## Native vs wasm kernel timing
+
+The native build exists to be faster than the wasm in V8 on every workload, so it is timed against the wasm on identical inputs: the canonical CSTRACE set (`canon-v11`, the 29 traces of [Canonical set (measured)](#canonical-set-measured)), replayed call for call on both. Parity is checked separately (the 29-trace replay with digests, [Native parity results](#native-parity-results-measured)); a timing run checks only return values.
+
+### What is timed, and how the two sides are kept equal
+
+| | wasm in V8 (`node scripts/trace_replay.mjs --bench`) | native (`chronos_replay --bench`) |
+| :--- | :--- | :--- |
+| Input | the trace, read into memory once before timing | the same |
+| Call sequence | every `C` record up to the first `U` (raw-address) record or recorded trap | the same: a native replay cannot follow a `U` write, so both stop there (`bos` at call 209, `ingest_roi` instances 2 and 6 at calls 58 and 710) |
+| Each pass | fresh-instance state (the pristine memory image), then every record | fresh-instance state (`native::reset_to_pristine`), then every record |
+| Timed | each kernel call alone: `performance.now()` before and after | each kernel call alone: `Instant::now()` before and after |
+| Not timed | host writes (`W`), resets, region getters, record decoding | the same |
+| Included in a call | V8's JS-to-wasm wrapper and argument conversion (the app pays it too) | the dispatch adapter that decodes the recorded argument bits (a few ns) |
+| Checks | return values compared with the recording outside the timed region; digests off | the same |
+
+Both clocks are monotonic and, on macOS, read the same 24 MHz `mach_absolute_time` timebase: 41.7 ns resolution. The mean empty interval (`t1 - t0` with nothing between) is measured at start-up, 13-15 ns native and 8-18 ns in V8, and subtracted from every sample (clamped at 0). Calls under about 1 µs (getters, setters) are resolution-limited and their medians are quantised; the tick and solver exports take 20 µs to 9 ms, where neither effect matters.
+
+Fairness:
+
+- **Warm-up**: each process discards `--warmup` passes (2 below). V8 compiles every function with Liftoff first and tiers hot ones up to TurboFan during them. Check: V8 with `--no-liftoff` (TurboFan from the first call) gives the same steady state (table under [Sanity checks](#sanity-checks)); the first, cold pass is 1.2 to 1.8 times slower and the second is already within 1% of steady state.
+- **Repetition and drift**: `--passes` measured passes per process (3), `--rounds` processes per workload and side (5). Every round runs every workload on every side, side order alternating (`wasm, neon, scalar`, then `scalar, neon, wasm`), so slow drift on a shared machine affects every side alike.
+- **Statistics**: per workload, the median of the 15 per-pass kernel totals. *Spread* is the range of the 5 per-round medians relative to the median. The ratio's *round range* is the minimum and maximum of the 5 per-round ratios (each side's median from the same round), which cancels drift between rounds; the headline ratio is of the pooled medians, so it can fall just outside that range. Per export: median, p95 and mean over every call of every measured pass of every round (raw samples are in the JSON).
+- **Integrity**: `bench_native_vs_wasm.mjs` fails unless every side replayed the identical sequence (per trace: call and write counts and stop point; per export: call counts) with 0 return-value mismatches, in every round.
+- **Machine**: Apple M4 Pro (12 cores), macOS 27.3, Node 26.9.0 (V8 14.6.202.34), Rust 1.99.0. Another agent was running CI and Miri jobs during every measurement (load average 5 to 7 on 12 cores). xctrace recorded 99.8% of the profiled samples on performance cores, and the spreads below show how much noise remained.
+
+### Commands
+
+```bash
+# Timed binary (release profile), the scalar reference, and the same code with line tables for profiling
+cargo build --release --manifest-path native/Cargo.toml --target host-tuple --bin chronos_replay
+cargo build --release --features simd-force-scalar --manifest-path native/Cargo.toml --target host-tuple \
+    --bin chronos_replay --target-dir target/native-scalar
+cargo build --profile profiling --manifest-path native/Cargo.toml --target host-tuple --bin chronos_replay
+R=native/target/aarch64-apple-darwin
+
+# One side on one trace or directory: per-trace totals, per-export table, wall-clock reconciliation
+$R/release/chronos_replay --bench --warmup=2 --passes=5 --bench-reconcile=1 --bench-verbose <trace|dir>...
+node scripts/trace_replay.mjs --bench --warmup=2 --passes=5 --bench-reconcile=1 --bench-verbose <trace|dir>...
+
+# The comparison below (40 min here with the scalar side; --out=DIR keeps every per-run JSON and log)
+node scripts/bench_native_vs_wasm.mjs --native=neon=$R/release/chronos_replay \
+    --native=scalar=target/native-scalar/aarch64-apple-darwin/release/chronos_replay \
+    --rounds=5 --warmup=2 --passes=3 --reconcile=1 <canon-v11>/*/
+
+# Build profiles side by side (no wasm); V8 tiering check
+node scripts/bench_native_vs_wasm.mjs --no-wasm --native=a=<bin> --native=b=<bin> ... <dirs>
+node scripts/bench_native_vs_wasm.mjs --wasm-variant=wasm= --wasm-variant=wasm-turbofan=--no-liftoff --native=neon=<bin> <dirs>
+
+# Where the time goes on one trace (macOS with Xcode)
+node scripts/bench_profile.mjs --bin=$R/profiling/chronos_replay --trace=<file.cstrace> --seconds=20 --wasm-passes=100
+node scripts/bench_profile.mjs --same-code $R/release/chronos_replay $R/profiling/chronos_replay
+```
+
+### Results: native NEON vs wasm in V8 (measured)
+
+Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` (sha256 `7ba36a5b...`) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
+
+| Workload | Frames | wasm ms/pass | NEON ms/pass | NEON / wasm (round range) | scalar ms/pass | scalar / wasm | spread wasm / NEON / scalar |
+| :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- |
+| `hero_sd` | 232 | 23.34 | 20.84 | **0.893** (0.865-0.918) | 113.4 | 4.86 | 5.3% / 2.9% / 2.0% |
+| `hero_hd` | 232 | 68.49 | 62.07 | **0.906** (0.882-0.931) | 372.7 | 5.44 | 7.5% / 5.6% / 3.4% |
+| `hero_suite` | 8,430 | 1,665 | 1,508 | **0.906** (0.903-0.912) | 9,856 | 5.92 | 1.4% / 0.4% / 1.7% |
+| `mp4_occlusion` | 255 | 39.82 | 35.17 | **0.883** (0.861-0.905) | 213.8 | 5.37 | 3.6% / 3.0% / 2.1% |
+| `swarm_1200` | 138 | 167.3 | 140.5 | **0.840** (0.824-0.851) | 816.8 | 4.88 | 5.5% / 4.8% / 4.2% |
+| `bos` | 29 | 125.9 | 105.0 | **0.834** (0.825-0.846) | 521.6 | 4.14 | 1.7% / 1.9% / 3.3% |
+| `hodge` | 44 | 80.56 | 70.00 | **0.869** (0.857-0.944) | 251.2 | 3.12 | 6.0% / 11.6% / 4.2% |
+| `rs_vibrometry` | 1,322 | 1,101 | 816.6 | **0.742** (0.741-0.754) | 3,183 | 2.89 | 2.5% / 2.5% / 4.5% |
+| `conservation` | 460 | 46.31 | 41.19 | **0.889** (0.868-0.911) | 243.0 | 5.25 | 3.2% / 2.7% / 5.3% |
+| `covariance` | 518 | 248.7 | 214.8 | **0.864** (0.847-0.890) | 1,345 | 5.41 | 5.7% / 4.0% / 5.0% |
+| `ingest_roi` | 1,321 | 13,460 | 10,836 | **0.805** (0.787-0.819) | 31,893 | 2.37 | 4.2% / 4.6% / 4.0% |
+| sum | | 17,026 | 13,851 | 0.813 (geomean 0.856) | 48,810 | 2.87 (geomean 4.34) | |
+
+**Native NEON is faster than the wasm in V8 on every workload, in every round.**
+
+- **Sparse tracking gains least:** `hero_sd`, `hero_hd`, `hero_suite` and `mp4_occlusion` run at 0.88 to 0.91, so 10 to 13% less kernel time.
+- **Dense workloads gain more:** swarm 0.84, BOS 0.83, covariance 0.86, ingest/ROI 0.81.
+- **Rolling-shutter vibrometry gains most:** 0.74.
+- **Whole canonical set:** the native kernel needs 13.9 s where the wasm needs 17.0 s (0.813).
+- **Worst case:** the worst single round of any workload is 0.944, on `hodge`, the noisiest workload (11.6% spread on the native side).
+- **No workload is slower natively.**
+
+The scalar backend is 2.4 to 5.9 times slower than the wasm (geomean 4.3). So the NEON backend buys a factor of 2.9 to 6.5 over portable scalar code. It buys least where the kernel is mostly scalar already (`ingest_roi`, `rs_vibrometry`, `hodge`).
+
+Per export, per call (µs; pooled over all 15 measured passes of each side):
+
+| Workload | Export | Calls/pass | wasm µs median / p95 / mean | NEON µs median / p95 / mean | NEON / wasm median | scalar µs median |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| `hero_sd` | `pre_tick` | 232 | 73.77 / 84.44 / 74.20 | 68.07 / 79.53 / 68.98 | 0.923 | 364.6 |
+| `hero_sd` | `post_tick` | 232 | 22.82 / 46.61 / 24.75 | 18.28 / 35.37 / 19.51 | 0.801 | 104.9 |
+| `hero_sd` | `solve_fiedler_lanczos` | 232 | 0.273 / 1.315 / 0.441 | 0.151 / 0.777 / 0.220 | 0.553 | 1.068 |
+| `hero_hd` | `pre_tick` | 232 | 248.2 / 293.1 / 250.8 | 229.4 / 271.5 / 233.2 | 0.924 | 1,373 |
+| `hero_hd` | `post_tick` | 232 | 39.69 / 72.84 / 42.49 | 30.57 / 56.03 / 33.26 | 0.770 | 202.7 |
+| `hero_hd` | `solve_fiedler_lanczos` | 232 | 0.359 / 2.275 / 0.763 | 0.153 / 1.402 / 0.456 | 0.426 | 1.278 |
+| `hero_suite` | `pre_tick` | 8430 | 80.07 / 313.3 / 157.7 | 73.99 / 289.3 / 145.5 | 0.924 | 395.6 |
+| `hero_suite` | `post_tick` | 8430 | 33.27 / 81.81 / 38.49 | 27.98 / 68.90 / 32.31 | 0.841 | 214.7 |
+| `mp4_occlusion` | `pre_tick` | 255 | 81.57 / 106.7 / 84.91 | 75.11 / 97.90 / 78.65 | 0.921 | 399.0 |
+| `mp4_occlusion` | `post_tick` | 255 | 61.03 / 119.4 / 66.21 | 51.36 / 99.15 / 55.77 | 0.842 | 344.1 |
+| `mp4_occlusion` | `solve_fiedler_lanczos` | 255 | 3.277 / 6.402 / 3.543 | 2.903 / 5.694 / 3.161 | 0.886 | 24.69 |
+| `swarm_1200` | `pre_tick` | 138 | 263.1 / 377.0 / 279.9 | 238.9 / 337.5 / 255.1 | 0.908 | 1,424 |
+| `swarm_1200` | `post_tick` | 138 | 951.3 / 1,180 / 928.4 | 782.7 / 968.6 / 761.5 | 0.823 | 4,631 |
+| `swarm_1200` | `solve_fiedler_lanczos` | 138 | 0.736 / 3.231 / 1.227 | 0.360 / 2.402 / 0.745 | 0.489 | 2.465 |
+| `bos` | `tick` | 29 | 3,700 / 6,607 / 3,703 | 3,059 / 5,467 / 3,093 | 0.827 | 10,252 |
+| `bos` | `bos_solve_manufactured_test` | 22 | 313.6 / 2,071 / 680.2 | 229.3 / 1,735 / 580.4 | 0.731 | 7,397 |
+| `hodge` | `tick` | 44 | 1,267 / 2,965 / 1,541 | 1,035 / 3,100 / 1,393 | 0.817 | 5,793 |
+| `hodge` | `hodge_solve_injected` | 23 | 570.6 / 1,172 / 514.2 | 509.7 / 1,002 / 427.6 | 0.893 | 553.4 |
+| `rs_vibrometry` | `pre_tick` | 1322 | 269.0 / 473.5 / 290.6 | 243.6 / 444.0 / 268.8 | 0.906 | 1,448 |
+| `rs_vibrometry` | `post_tick` | 1322 | 418.1 / 1,070 / 533.6 | 134.4 / 848.9 / 342.7 | 0.322 | 137.7 |
+| `rs_vibrometry` | `push_audio_block` | 1254 | 1.276 / 2.858 / 1.591 | 0.861 / 2.360 / 1.167 | 0.675 | 0.985 |
+| `conservation` | `tick` | 460 | 97.85 / 128.4 / 98.14 | 86.98 / 114.8 / 88.27 | 0.889 | 481.7 |
+| `conservation` | `eval_occluded_pair` | 22 | 0.901 / 4.504 / 1.139 | 0.276 / 0.770 / 0.312 | 0.306 | 13.11 |
+| `covariance` | `tick` | 518 | 469.9 / 650.1 / 478.7 | 400.9 / 564.3 / 414.4 | 0.853 | 2,592 |
+| `ingest_roi` | `pre_tick` | 1320 | 291.4 / 348.8 / 283.3 | 262.3 / 329.6 / 258.7 | 0.900 | 1,418 |
+| `ingest_roi` | `post_tick` | 1319 | 11,243 / 12,004 / 9,972 | 8,940 / 9,563 / 7,942 | 0.795 | 25,768 |
+| `ingest_roi` | `solve_fiedler_lanczos` | 1318 | 2.527 / 4.568 / 2.545 | 1.151 / 2.985 / 1.329 | 0.455 | 3.193 |
+
+- **`pre_tick`** (pixel ingest, pooling, the static/motion grid) gains 8 to 10%.
+- **`post_tick`** (tracking, physics, metrology) gains 16 to 23%.
+- **The small solver and query exports** gain more, because V8's JS-to-wasm call costs about 0.1 to 0.6 µs that the native call does not pay.
+- **Two exports are about 3 times faster natively.** `rs_vibrometry` `post_tick` is 418 µs median in the wasm, 134 µs NEON and even 138 µs scalar: a V8-side slowdown (see the profile). `conservation` `eval_occluded_pair` is the other.
+
+### Sanity checks
+
+**Per-call times add up to the wall-clock.** In every process of the final run, two extra passes ran: one replayed the trace with no per-call timer (one wall-clock reading around the pass), and one applied every host write but made no kernel call. Their difference is the kernel's share of the wall-clock, measured without per-call timers. It agrees with the summed per-call times within -1.4% to +1.2% on all 11 workloads and all three sides. For example, `hero_hd`: wasm 68.49 ms summed vs 67.71 ms by wall-clock, NEON 62.07 vs 62.72. `ingest_roi`: wasm 13,460 vs 13,457, NEON 10,836 vs 10,842. So the timing mode measures the kernel, not the harness, and the timer correction is right.
+
+**The wasm numbers agree with the kernel's own gates.** Here the wasm's sparse-tracking frame costs 0.101 ms (SD) and 0.295 ms (HD) of kernel time. `calibrate_mp4.mjs` reports about 0.13 ms and 0.33 ms per tick, but it also times its JavaScript Lanczos solve (`createLanczosSolver`) inside the tick. That solve is host code, so in the trace it appears as host writes and is not kernel time. Likewise the swarm frame costs 1.21 ms here against about 1.5 ms in `benchmark_1000.mjs` (Q1), which also includes its JavaScript solve.
+
+**Warm-up reaches V8's steady state.** Same harness: the wasm with default tiering (Liftoff, then TurboFan) against the wasm with `--no-liftoff` (TurboFan from the first call), interleaved with NEON, 3 rounds x 3 passes after 2 warm-up passes:
+
+| Workload | wasm ms | wasm `--no-liftoff` ms | ratio (round range) | wasm first pass (cold) ms | second pass ms |
+| :--- | ---: | ---: | :--- | ---: | ---: |
+| `hero_sd` | 23.81 | 23.40 | 0.983 (0.962-0.995) | 42.7 | 25.2 |
+| `hero_hd` | 70.00 | 70.36 | 1.005 (0.985-1.000) | 91.1 | 70.9 |
+| `mp4_occlusion` | 40.98 | 40.59 | 0.991 (0.935-1.004) | | |
+| `swarm_1200` | 171.2 | 171.2 | 1.000 (0.987-1.014) | 204.5 | 172.8 |
+| `bos` | 125.2 | 125.2 | 1.000 (0.991-1.003) | 149.5 | 126.3 |
+| `hodge` | 81.74 | 81.19 | 0.993 (0.968-1.004) | 106.4 | 81.5 |
+| `conservation` | 46.56 | 46.34 | 0.995 (0.995-1.006) | | |
+| `covariance` | 249.2 | 248.2 | 0.996 (0.989-0.997) | | |
+| `rs_vibrometry` (2 rounds x 2 passes) | 1,082 | 1,085 | 1.003 (1.002-1.003) | | |
+
+**Timer cost.** The empty-interval mean subtracted per call was 13 to 15 ns natively and 8 to 19 ns in V8 (`performance.now()`; `process.hrtime.bigint()` would cost 35 ns). Against a 70 µs `pre_tick` that is 0.02%.
+
+**Parity of what was timed.** Every binary these numbers come from passes the 29-trace parity replay with digests on (26 pass, 3 portable prefix, 0 mismatches): the final NEON and scalar binaries, the five build-profile variants and the pre-change NEON build. The timing runs check every return value as well (0 mismatches in every round).
+
+**What is not measured.** x86-64 is not timed. On this machine the SSE backend runs under Rosetta 2, an emulator, so its timings would say nothing about x86 hardware. The SSE backend's parity under Rosetta is covered by the replay results, not by this section.
+
+### Native build configuration (measured)
+
+Five configurations of the NEON build, timed against each other (native only, 11 workloads, 3 interleaved rounds x 3 passes, before the `i32x4_dot_i16x8` change below). Every one passes the 29-trace parity replay with digests (26 pass, 3 portable prefix, 0 mismatches).
+
+| Configuration | Settings | Sum of medians | Geomean vs default | Per-workload ratio range |
+| :--- | :--- | ---: | ---: | :--- |
+| default `release` | `opt-level = 3`, `lto = false` (thin-local), `codegen-units = 16`, `panic = "unwind"` | 13,852 ms | 1.000 | |
+| `cgu1` | + `codegen-units = 1` | 13,992 ms | 1.004 | 0.993 (`hero_hd`) to 1.022 (`swarm_1200`) |
+| `fat` | + `lto = "fat"`, `codegen-units = 1` | 13,945 ms | 1.005 | 0.995 (`bos`) to 1.023 (`swarm_1200`) |
+| `fatabort` (the wasm's profile) | + `panic = "abort"` | 13,947 ms | 1.005 | 0.986 (`bos`) to 1.032 (`hodge`, noisiest workload) |
+| `fatabort` + `-C target-cpu=native` (`apple-m4`) | | 13,955 ms | 1.006 | 0.992 (`bos`) to 1.022 (`swarm_1200`) |
+
+Nothing beats Cargo's default release profile. The wasm's own profile is 0.5% slower in geometric mean and 2.2% slower on the 1,200-target swarm in every round (round range 1.022 to 1.035); `target-cpu=native` gains nothing: the default target's features are `apple-m1`'s, `native` (`apple-m4`) adds only `bf16`, `bti` and `i8mm`, none of which the backend uses, and fused multiply-add is never allowed. `native/Cargo.toml` therefore spells the defaults out explicitly as `[profile.release]`, with this measurement in a comment. `[profile.profiling]` adds line tables and a `.dSYM`; `bench_profile.mjs --same-code` confirms that its kernel instructions are those of `release` (504,491 instructions in 702 kernel functions: same opcodes and registers, only address operands differ because the profile name changes Cargo's metadata hash and with it the layout).
+
+### Native profile: where the time goes
+
+`scripts/bench_profile.mjs` profiles one trace on both sides.
+
+**Native side.** It runs the `profiling` build (the timed kernel code plus line tables) under `chronos_replay --bench` and attaches the macOS Time Profiler (`xcrun xctrace record --attach`, 1 kHz, 20 s) once the measured passes start.
+
+- Samples count as kernel time when a kernel export is on the stack.
+- Each sampled PC is attributed to its physical function through the binary's symbol table. xctrace's own frame names follow inlining once a dSYM is present, so they are not used for this.
+- Each PC is then mapped through `atos -i`, the inline chain from the dSYM, to three things: the SIMD layer op (`src/simd/neon.rs` frame), the innermost kernel function, and its source line. It is also looked up in an `otool` disassembly.
+
+**Wasm side.** The same trace runs under `trace_replay.mjs --bench --bench-cpu-prof`, which profiles only the measured passes with V8's sampler (`node:inspector`, 100 µs requested, about 160 µs effective). Functions are named from the wasm name section.
+
+**Absolute times.** Shares become milliseconds per pass through a short `--bench` run of each side on the same trace.
+
+Profiles of the final build, on the five main workloads (self time: time in the function body, after inlining):
+
+**hero_hd** (native 61.9 ms/pass, wasm 66.8 ms/pass; 16981 native / 92040 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `stat_fused_hd40_grid_loop<true, true>` | 50.7 | 31.4 | 48.4 | 32.3 | 0.97 | v128_load 21%, v128_store 18%, v128_bitselect 16% |
+| `rgba_to_planar_and_pool160_simd128` | 21.2 | 13.1 | 21.7 | 14.5 | 0.90 | i32x4_dot_i16x8 41%, v128_load 33%, v128_store 17% |
+| `eca_fit_affine_params_ex_simd128` | 4.6 | 2.8 | 4.3 | 2.9 | 0.99 | scalar 26%, f32x4_add 16%, v128_and 13% |
+| `stat_fused_hd40_grid_loop<false, true>` | 3.5 | 2.2 | 3.6 | 2.4 | 0.90 | v128_store 31%, v128_load 23%, scalar 9% |
+| `compute_row_luma_means_simd128` | 3.4 | 2.1 | 3.0 | 2.0 | 1.05 | v128_load 79%, scalar 12%, f32x4_add 9% |
+| `render_eulerian_pip_subpx_impl<false, true>` | 2.0 | 1.2 | 2.6 | 1.7 | 0.72 | i16x8_q15mulr_sat 23%, shuffle 12%, i16x8_add 11% |
+| `sad_patch_zm_half_st1_ring_hd_simd128` | 1.4 | 0.9 | 1.5 | 1.0 | 0.88 | scalar 41%, v128_load 31%, f32x4_add 12% |
+
+**swarm_1200** (native 140.3 ms/pass, wasm 163.4 ms/pass; 18761 native / 112618 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `extract_phase1a_raw` | 15.5 | 21.7 | 15.9 | 25.9 | 0.84 | scalar 43%, v128_any_true 37%, f32x4_mul 9% |
+| `stat_fused_hd40_grid_loop<true, true>` | 12.4 | 17.4 | 10.9 | 17.8 | 0.98 | v128_store 19%, v128_load 19%, v128_bitselect 17% |
+| `build_sparse_knn_graph` | 6.0 | 8.4 | 6.0 | 9.9 | 0.85 | scalar 90%, f32x4_extract_lane 4%, f32x4_splat 2% |
+| `rgba_to_planar_and_pool160_simd128` | 5.7 | 8.0 | 5.6 | 9.1 | 0.88 | i32x4_dot_i16x8 43%, v128_load 29%, v128_store 16% |
+| `eval_lk_patch_wasm<true, true>` | 4.2 | 5.9 | 3.3 | 5.4 | 1.10 | f32x4_pmin 48%, scalar 26%, f32x4_mul 14% |
+| `extract_phase1a_3x3_max` | 3.8 | 5.3 | 4.2 | 6.9 | 0.77 | scalar 77%, i32x4_bitmask 8%, v128_any_true 7% |
+| `gather_csr_stage1_track<true>` | 3.8 | 5.3 | 3.7 | 6.0 | 0.88 | scalar 100%, v128_any_true 0%, f32x4_splat 0% |
+
+**bos** (native 104.5 ms/pass, wasm 124.7 ms/pass; 19679 native / 126742 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `build_ref_patch_8x8` | 42.0 | 43.9 | 44.8 | 55.8 | 0.79 | scalar 99%, f32x4_mul 1%, f32x4 0% |
+| `eval_cur_patch_8x8` | 21.9 | 22.9 | 22.7 | 28.3 | 0.81 | scalar 89%, f32x4_add 8%, f32x4_max 3% |
+| `accumulate_warmup_node_noise` | 5.3 | 5.5 | 3.0 | 3.8 | 1.47 | scalar 100% |
+| `apply_laplacian_p_to_lp` | 3.4 | 3.6 | 1.7 | 2.2 | 1.65 | scalar 100% |
+| `extract_dense_lk` | 3.2 | 3.3 | 2.2 | 2.8 | 1.20 | scalar 100% |
+| `project_comp_zero_mean` | 3.1 | 3.2 | 2.9 | 3.6 | 0.89 | scalar 100% |
+| `dct3_2d_solve_z` | 2.3 | 2.4 | 2.6 | 3.3 | 0.72 | scalar 92%, f64x2_add 4%, f64x2_sub 2% |
+
+**rs_vibrometry** (native 814.4 ms/pass, wasm 1100.5 ms/pass; 19370 native / 133560 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `extract_signed_band_displacements` | 31.0 | 252.7 | 32.4 | 356.9 | 0.71 | scalar 100% |
+| `eval_segment_optical_quadrature` | 12.9 | 104.8 | 10.5 | 115.6 | 0.91 | scalar 100% |
+| `stat_fused_hd40_grid_loop<true, true>` | 11.7 | 94.9 | 9.2 | 101.4 | 0.94 | v128_load 21%, v128_store 18%, v128_bitselect 17% |
+| `rgba_to_planar_and_pool160_simd128` | 9.7 | 79.0 | 8.1 | 89.4 | 0.88 | i32x4_dot_i16x8 40%, v128_load 34%, v128_store 17% |
+| `stat_fused_hd40_grid_loop<false, true>` | 4.4 | 36.2 | 3.9 | 42.8 | 0.84 | v128_store 26%, v128_load 25%, scalar 11% |
+| `warmup_accumulate_and_lock` | 3.2 | 26.0 | 14.2 | 156.6 | 0.17 | scalar 100% |
+| `eca_fit_affine_params_ex_simd128` | 2.1 | 17.3 | 1.4 | 15.2 | 1.14 | scalar 44%, f32x4_add 13%, f32x4_mul 12% |
+
+**ingest_roi** (native 9074.7 ms/pass, wasm 11539.1 ms/pass; 19966 native / 156068 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `solve_bench_loo_residuals` | 30.5 | 2767.5 | 33.9 | 3911.3 | 0.71 | scalar 100%, f64x2_sqrt 0% |
+| `build_ref_patch_8x8` | 21.2 | 1920.7 | 21.2 | 2445.8 | 0.79 | scalar 99%, f32x4_mul 1%, f32x4 0% |
+| `eval_cur_patch_8x8` | 15.7 | 1429.0 | 15.1 | 1745.0 | 0.82 | scalar 92%, f32x4_add 5%, f32x4_max 3% |
+| `extract_dense_lk` | 3.2 | 293.2 | 2.0 | 227.7 | 1.29 | scalar 100% |
+| `apply_laplacian_p_to_lp` | 2.7 | 242.3 | 1.4 | 166.2 | 1.46 | scalar 100% |
+| `dct2_2d_solve_z` | 2.6 | 231.8 | 2.9 | 338.3 | 0.69 | scalar 88%, f64x2_add 6%, f64x2_mul 5% |
+| `dct3_2d_solve_z` | 2.5 | 225.4 | 2.8 | 327.9 | 0.69 | scalar 90%, f64x2_add 5%, f64x2_sub 3% |
+
+How to read the per-function ratios:
+
+- **Inlining differs between the builds.** LLVM inlines differently for aarch64 and for wasm32, and V8 inlines small wasm functions too (`--wasm-inlining`, on by default). A function's *self* time therefore only compares cleanly when it is a leaf on both sides.
+- **Inlining artifacts.** In `bos`, `accumulate_warmup_node_noise` (self 1.47) and `extract_dense_lk` (self 1.20) look slower natively, but their *inclusive* shares are equal (40.0% vs 40.5%, 30.8% vs 30.5%). In milliseconds both are faster natively; only the split between the function and its callees differs.
+- **Tail call.** Natively `chronos_tick` tail-calls `chronos_post_tick`, so its frame disappears from native stacks.
+
+What the profiles say:
+
+- **Sparse tracking (`hero_*`, `mp4_occlusion`).** About 75% of HD kernel time is two streaming passes over the frame in `chronos_pre_tick`: `stat_fused_hd40_grid_loop` (51%) and `rgba_to_planar_and_pool160_simd128` (21%).
+  - The grid loop is memory-bound. 41% of its samples are on vector loads and stores to frame-sized buffers, and its 1,322 instructions include only 38 vector spills. The rest is `v128_bitselect` (the background-rate selection, 16%), `u8x16_sub_sat` and `i16x8_narrow_i32x4`.
+  - It runs at 0.97 of V8's time: both compilers are close to the memory system's limit. The pooling function was the native loss before the dot-product change and is now 0.90.
+- **Swarm.** The time is spread out:
+  - `extract_phase1a_raw` (15.5%): the per-pixel candidate scan. Its `v128_any_true` tests take 37% of its samples, the loads they wait on included.
+  - The grid loop (12%), the k-NN graph build (6%, scalar) and the LK patch evaluation.
+  - `eval_lk_patch_wasm` is the one hot SIMD function still slower natively (1.10). Its samples sit on the `fcmgt` of `f32x4_pmin`, waiting on the loads and the subtract/abs chain. V8 lowers `pmin` to the same two instructions.
+- **BOS, ingest/ROI, vibrometry: mostly scalar code.**
+  - Samples with no SIMD layer op on the stack make up 85% of `bos`, 82% of `ingest_roi` instance 1 and 54% of `rs_vibrometry`.
+  - The hot functions there are scalar f64 loops: `build_ref_patch_8x8` and `eval_cur_patch_8x8` (64% of `bos`), `solve_bench_loo_residuals` (31% of `ingest_roi` instance 1), and `extract_signed_band_displacements` (31% of `rs_vibrometry`).
+  - Native wins most here (0.71 to 0.82), from LLVM's aarch64 code generation against V8's.
+  - Native also wins where LLVM auto-vectorises plain Rust loops for aarch64 but not for wasm32: `warmup_accumulate_and_lock` has 52 `fmul.4s` natively and no SIMD instruction in the wasm, and runs 6 times faster. That is exact, because LLVM vectorises only element-wise float work, never reductions. The same ratio holds with `--no-liftoff`, so it is not V8 tiering.
+- **`ingest_roi` instance 1 dominates the set.** It is 9.1 of the 13.9 s of native kernel time in the canonical set, and almost all of it is `chronos_post_tick`: `solve_bench_loo_residuals` (2.8 s per pass) and the BOS dense-LK node loop.
+
+Which SIMD ops matter, by share of all kernel samples. This is aggregated over the 14 hottest functions of each workload, before the dot-product change:
+
+- **`i32x4_dot_i16x8`** 12.9% of `hero_hd`, 5.9% of `rs_vibrometry`, 3.4% of the swarm. Now `smull` + `smull2` + `addp` as written.
+- **Shuffles** up to 8.1%: mostly the `uzp1`/`uzp2` pairs after the dot products, since folded into `addp`.
+- **`v128_any_true`** 5.5% of the swarm.
+- **Narrows** up to 2.1%.
+- **`i32x4_bitmask`** 0.8% at most.
+- **`v128_bitselect`** 7.6% of `hero_hd`.
+
+Except for the dot product, each of these lowers to the same instructions V8 emits for the wasm op, and no cheaper NEON sequence gives the exact wasm result for every input.
+
+**Non-inlined helpers with `v128` arguments.** On Rust 1.99 a `v128` passed by value to a non-inlined Rust function goes through memory. 112 kernel functions take or return `v128`. 99 are `#[inline(always)]`. Of the 13 `#[inline(never)]` ones, 7 take `v128` by value (none returns one): `subpx_row_blk_chunk` (7 values), `pan_hd40_band`, `subpx_hd40_band_fused`, `pan_subpx_fused_hd40_no_scratch` (2 each), `pan_fused_grid_le40_row`, `pan_subpx_fused_grid_fallback` (15 each) and `eval_cand_4px` (6). They are called per band, row or edge candidate, never per pixel. Their whole bodies account for 0% (`hero_hd`, swarm, `ingest_roi`), 0.35% (`bos`) and 2.1% (`rs_vibrometry`) of native kernel time. They load 0 to 9 `q` registers from argument pointers per call. Removing the `#[inline(never)]` would buy well under 0.1%.
+
+### NEON backend change: `i32x4_dot_i16x8`
+
+Before this change the profile showed `rgba_to_planar_and_pool160_simd128` (the RGBA-to-planar pooling in `chronos_pre_tick`) 1.16 to 1.27 times slower natively than in V8 (now 0.88 to 0.90), with 45% of its samples on `i32x4_dot_i16x8`. Given `vmull_s16` + `vmull_high_s16` + `vpaddq_s32`, LLVM saw that the constant weight vector's two halves are equal and rewrote the per-4-pixel luma step (`u8` pixels widened to `i16`, two dot products, then `i32x4_shuffle::<0, 2, 4, 6>` + `<1, 3, 5, 7>` + add) into `mov d, v[1]` + `umull` pairs and extra `uzp1` shuffles: 19 instructions per 4 pixels. `src/simd/neon.rs` now emits the same three instructions as inline assembly, which LLVM keeps as written and then folds the shuffle-and-add into one `addp`: 13 instructions per 4 pixels, and the function shrinks from 2,004 to 1,538 instructions. The per-op conformance suite (including the heavy NEON run, 6.4 min) and the 29-trace parity replay pass with 0 mismatches.
+
+Before and after (native only, 3 interleaved rounds x 3 passes):
+
+| Workload | before ms/pass | after ms/pass | after / before | round range |
+| :--- | ---: | ---: | ---: | :--- |
+| `hero_sd` | 22.63 | 20.81 | 0.920 | 0.913-0.932 |
+| `hero_hd` | 67.98 | 62.07 | 0.913 | 0.906-0.919 |
+| `hero_suite` | 1647.2 | 1519.2 | 0.922 | 0.918-0.930 |
+| `mp4_occlusion` | 37.31 | 35.30 | 0.946 | 0.945-0.947 |
+| `swarm_1200` | 146.4 | 142.1 | 0.970 | 0.953-0.972 |
+| `bos` | 106.1 | 104.9 | 0.988 | 0.976-1.005 |
+| `hodge` | 76.09 | 74.68 | 0.981 | 0.969-1.004 |
+| `rs_vibrometry` | 856.2 | 815.9 | 0.953 | 0.949-0.963 |
+| `conservation` | 44.89 | 41.63 | 0.927 | 0.902-0.946 |
+| `covariance` | 227.2 | 214.4 | 0.943 | 0.938-0.943 |
+| `ingest_roi` | 10647.9 | 10638.2 | 0.999 | 0.997-0.999 |
+| geomean | | | 0.951 | |
+
+`chronos_pre_tick` alone is 9 to 10% faster on every tick workload (for example `hero_hd` 255.7 -> 231.1 µs median); no workload got slower.
+
+### Optimisation opportunities, ranked (for the next sprint)
+
+Shares are of native kernel time on the workload named, from the profiles above. "Exact" means the change can keep every result bit-identical to the wasm. Every change except the backend one is a kernel change, so it would also rebuild `web/chronos_spectral.wasm`.
+
+| # | What | Where | Measured share | Expected gain | Exact? |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | **Threads for the independent per-item loops** (native only). Per node: the BOS dense-LK and warm-up node loops. Per track: `solve_bench_loo_residuals` and the swarm candidate and LK loops. Per band/cell: the vibrometry loops (their independence is not yet checked). Per row band: the grid loop. Each item is computed exactly as now; cross-item sums (`disp2_sum`, `acc_err2`/`acc_sig2`, ...) are added afterwards in the original order. | `bos.rs` `extract_dense_lk` / `accumulate_warmup_node_noise`; `continuum_physics.rs:11547`; `vibrometry.rs`; `simd_ops.rs` grid loop | `ingest_roi` i001: 31% LOO + 36-39% dense LK. `bos`: 71% (warm-up + dense LK). `rs_vibrometry`: 31% + 13%. `hero_hd`: 51% (grid loop) | Up to the core count on those loops (8 P-cores here). Plausibly 2 to 4 times on `bos` and `ingest_roi`, less on sparse tracking, where frames take 0.09-0.27 ms and thread hand-off costs microseconds | Yes, with fixed partitioning and ordered reductions. Costs: per-thread scratch in the arena (the patch buffers are shared today) and a thread source for a `no_std` kernel (host callback or `std` feature). The wasm stays single-threaded (wasm threads need cross-origin isolation) |
+| 2 | **Vectorise the BOS patch builders.** Bilinear sampling, gradients and residuals per pixel in `f32x4`. f64 sums stay scalar, in index order | `bos.rs:504` `build_ref_patch_8x8`, `bos.rs:776` `eval_cur_patch_8x8` | `bos` 42% + 22%; `ingest_roi` i001 21% + 16%. 89-99% scalar code today | Estimate 1.5 to 3 times on these functions (most of their arithmetic is element-wise); not measured | Yes, if the f64 accumulation order is kept. Helps the wasm too |
+| 3 | **Reuse reference patches.** `build_ref_patch_8x8` depends only on `ref_luma` and the node. Today it is rebuilt for every node every frame (dense LK, warm-up) and three times per anchor per candidate in `eval_anchor_mse_at` | `bos.rs:1642`, `1778`, `3551`, `1531-1587` | Up to the `build_ref_patch_8x8` share above (42% `bos`, 21% `ingest_roi` i001) while the reference is unchanged | Up to those shares; depends on how often reference maintenance (`bos.rs:1983`, `3382`) rewrites `ref_luma`, which was not measured | Yes, reused values are identical, but validity needs per-node invalidation. All 8,192 `PatchRefData` (~1.4 KB each, 11.5 MB) do not fit the wasm's ~6.6 MB of free memory, so it is native-only or a subset |
+| 4 | **Fuse the two streaming passes of `chronos_pre_tick`.** The RGBA-to-planar pooling and the static/motion grid each read the full RGBA frame | `simd_ops.rs` `rgba_to_planar_and_pool160_simd128`, `stat_fused_hd40_grid_loop` | `hero_hd` 21% + 51%; swarm 6% + 12%; `rs_vibrometry` 10% + 16% | One fewer pass over 2 x 0.9 MB of RGBA per HD frame in a memory-bound loop; estimate 10-20% of `pre_tick`, not measured | Yes (per-pixel arithmetic unchanged) |
+| 5 | NEON `i32x4_dot_i16x8` as `smull` + `smull2` + `addp` | `src/simd/neon.rs` | was 12.9% of `hero_hd` | **Done**: `pre_tick` 9-10% faster on every tick workload, geomean 0.951 | Yes (conformance + parity pass) |
+| 6 | Fewer `v128_any_true` exits in the candidate scan: OR 16-32 pixels of hit masks before one test | `soa_tracks.rs` `extract_phase1a_raw` | swarm 15.5% (any_true 37% of it) | Small, estimate under 5% of the swarm | Yes (control flow only) |
+| 7 | Find why `apply_laplacian_p_to_lp` is slower natively | `bos.rs:2681` | 2.7-3.4% of `bos`/`ingest_roi`, 1.46-1.65 times V8 | 1-3% of those workloads | Yes. A leaf on both sides with the same branch and load/store structure as V8's TurboFan code (checked with `--print-wasm-code-function-index=392`); suspected memory dependence on `lp[u + 1]` across iterations, so measure with CPU counters first |
+| 8 | Remove `#[inline(never)]` from the 7 by-value-`v128` helpers | `simd_ops.rs`, `soa_tracks.rs:3629` | at most 2.1% including their bodies | Under 0.1% | Yes. Not worth a wasm rebuild |
+| 9 | Other multi-instruction NEON ops (`any_true`, `pmin`/`pmax`, narrows, bitmasks) | `src/simd/neon.rs` | 0.8-5.5% each, as V8 | None found: each is already the shortest exact sequence and matches V8's lowering | |
+| 10 | 256-bit SIMD | | | None on Apple Silicon: NEON is 128-bit and there is no SVE. SME's streaming SVE needs a mode switch and is not general-purpose; M4 P-cores already issue up to four 128-bit vector ops per cycle. On x86-64, AVX2 would need the kernel to issue two `v128` ops per 256-bit op (or a 256-bit layer). It is exact only with lane-wise identical op sequences, no FMA and unchanged reduction order. Not measurable here (Rosetta) | Possible on x86 with those rules |
+| 11 | Build flags: fat LTO, `codegen-units = 1`, `panic = "abort"`, `target-cpu=native` | `native/Cargo.toml` | | **None** (measured, table above) | Yes |
+
+For the wasm itself the profile suggests one more item: LLVM does not auto-vectorise for wasm32 the loops it vectorises for aarch64 (`warmup_accumulate_and_lock`, 6 times slower in V8). Hand-written `f32x4` code there would help the shipped wasm. It would not help native.
