@@ -98,7 +98,7 @@ For slower shared cloud virtual machines, set `CHRONOS_CI_BUDGET_SCALE=3.5` (mat
 
 ## Static binary and safety invariants
 
-Measured directly on `web/chronos_spectral.wasm` (`2,474,879 B`):
+Measured directly on `web/chronos_spectral.wasm` (`2,475,310 B`):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |
@@ -592,7 +592,7 @@ node scripts/bench_profile.mjs --same-code $R/release/chronos_replay $R/profilin
 
 ### Results: native NEON vs wasm in V8 (measured)
 
-Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` (sha256 `7ba36a5b...`) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
+Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` as of v3.0.0 (sha256 `7ba36a5b...`; not re-measured for v3.1.0) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
 
 | Workload | Frames | wasm ms/pass | NEON ms/pass | NEON / wasm (round range) | scalar ms/pass | scalar / wasm | spread wasm / NEON / scalar |
 | :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- |
