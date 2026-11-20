@@ -17,6 +17,7 @@
 //   node scripts/bench_profile.mjs --bin=PATH --trace=FILE [--seconds=20]
 //        [--wasm-passes=10] [--top=20] [--lines=8] [--out=DIR] [--no-wasm]
 //        [--reuse]   (re-analyse the recordings already in --out)
+//        [--allow-wasm-mismatch]   (profile traces recorded on another wasm build)
 //   node scripts/bench_profile.mjs --demangle <symbol>...
 //   node scripts/bench_profile.mjs --same-code <binary A> <binary B>
 //
@@ -326,6 +327,7 @@ const lineN = Number(opt('lines', '8'));
 const withWasm = !argv.includes('--no-wasm');
 const withNative = !argv.includes('--no-native');
 const reuse = argv.includes('--reuse');
+const wasmMismatch = argv.includes('--allow-wasm-mismatch') ? ['--allow-wasm-mismatch'] : [];
 if (!trace || (withNative && !bin)) {
   console.error('usage: node scripts/bench_profile.mjs --bin=PATH --trace=FILE [--seconds=20] [--wasm-passes=10] [--top=20] [--lines=8] [--out=DIR] [--no-wasm] [--no-native]');
   process.exit(2);
@@ -582,7 +584,7 @@ function recordWasm() {
   const prof = path.join(outDir, 'wasm.cpuprofile');
   const r = spawnSync(
     process.execPath,
-    ['--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', '--warmup=2', `--passes=${wasmPasses}`, `--bench-cpu-prof=${prof}`, trace],
+    ['--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', ...wasmMismatch, '--warmup=2', `--passes=${wasmPasses}`, `--bench-cpu-prof=${prof}`, trace],
     { encoding: 'utf8', maxBuffer: 1 << 28 }
   );
   if (r.status !== 0) throw new Error(`wasm bench failed: ${r.stdout}${r.stderr}`);
@@ -643,7 +645,7 @@ function benchKernelMs(side) {
     const [cmd, args] =
       side === 'native'
         ? [bin, ['--bench', '--warmup=1', '--passes=3', `--json=${json}`, trace]]
-        : [process.execPath, ['--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', '--warmup=2', '--passes=3', `--json=${json}`, trace]];
+        : [process.execPath, ['--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', ...wasmMismatch, '--warmup=2', '--passes=3', `--json=${json}`, trace]];
     const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
     if (r.status !== 0) throw new Error(`${side} bench failed: ${r.stdout}${r.stderr}`);
   }
