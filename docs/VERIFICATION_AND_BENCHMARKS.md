@@ -12,7 +12,7 @@ Ensure Rust (`wasm32-unknown-unknown`), Node.js (`v22+`), and `python3` are inst
 ./build.sh --check
 ```
 
-Runs nine sequential offline stages:
+Runs ten sequential offline stages:
 1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`).
 2. `wasm-objdump` binary audit (`76` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
 3. Mathematical counterexample gates (`Gates A-P`, including `N1` and `N2`).
@@ -20,8 +20,9 @@ Runs nine sequential offline stages:
 5. `Gate Q` high-density `1,000+` target swarm and continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
 6. Wave-1 gates (`gate_i0_i4_ingest.mjs`, `gate_i1_cov_residual.mjs`, `gate_i5_bos.mjs`).
 7. Wave-2 gates (`gate_i2_rs_welch.mjs`, `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs`).
-8. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
-9. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `104 MB` trace set from the wasm (real-MP4 sparse tracking, Hodge, conservation, the first `24 MiB` of the `1,200`-target swarm; `3,088` calls) and replays it on the native build with overflow checks on: every return value and every region digest must match bit for bit, and a corrupted copy of one trace must be rejected at the right call (see [Native replay driver](#native-replay-driver-nativereplay)).
+8. `Gate X` adversarial C-ABI fuzz (`scripts/gate_abi_fuzz.mjs`): random export calls with hostile arguments, pixels and staging buffers, `0` traps required (see [Adversarial C-ABI fuzz](#adversarial-c-abi-fuzz-gate-x)).
+9. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
+10. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `104 MB` trace set from the wasm (real-MP4 sparse tracking, Hodge, conservation, the first `24 MiB` of the `1,200`-target swarm; `3,088` calls) and replays it on the native build with overflow checks on: every return value and every region digest must match bit for bit, and a corrupted copy of one trace must be rejected at the right call (see [Native replay driver](#native-replay-driver-nativereplay)).
 
 ### Full end-to-end pipeline (CI entrypoint)
 
@@ -37,7 +38,7 @@ Runs everything in `--check`, plus Gate `I6` physical capture fixtures (`scripts
 ./build.sh --native-check
 ```
 
-Runs stages 1, 2, 8 and 9 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 7). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
+Runs stages 1, 2, 9 and 10 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 8). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
 
 The scalar reference backend at kernel level (what CI runs with `simd-force-scalar`; drop `--scenarios` when `ffmpeg` is installed):
 
@@ -74,6 +75,9 @@ node scripts/gate_i6_captures.mjs
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+
+# Adversarial C-ABI fuzz (Gate X); --trials, --frames, --timeout, --wasm
+node scripts/gate_abi_fuzz.mjs
 
 # SIMD layer conformance: Wasm SIMD128 (V8) vs simd::scalar, then the native host suite
 node scripts/gate_simd_conformance.mjs
@@ -214,6 +218,16 @@ Key measured deltas:
 | `I2` | [scripts/gate_i2_rs_welch.mjs](../scripts/gate_i2_rs_welch.mjs) | Rolling-shutter `D4` scan inversion, sinc exposure equalization and `EXPOSURE_NULL` (`0x40`) guard, optical Nyquist aliasing guard, `K = 1` vs `K >= 8` Bonferroni Welch trap, and fail-closed `CLOCK_SKEW` / `NO_PTS` / `NO_SCAN_DIR` / `NOT_NATIVE_1TO1` / `AXIS_TRANSPOSED` refusals. |
 | `I3` | [scripts/gate_i3_hodge.mjs](../scripts/gate_i3_hodge.mjs) | `40x22` mesh Hodge `2`-complex (`(880, 1698, 819)`), orthogonal exact/coexact/harmonic solves (`orthEcRel < 1e-6`), enclosed-hole `beta_1` vs open-port flooding, and `UNCONV` non-convergence gating. |
 | `I5b` | [scripts/gate_i5b_conservation.mjs](../scripts/gate_i5b_conservation.mjs) | Non-circular four-branch (`H0_KEEP`, `H0_SWAP`, `H1_KEEP`, `H1_SWAP`) occluded pair conservation distinguishing `UNIQUE`, `AMBIGUOUS`, and `VIOLATED`. |
+
+## Adversarial C-ABI fuzz (`Gate X`)
+
+[scripts/gate_abi_fuzz.mjs](../scripts/gate_abi_fuzz.mjs) drives `web/chronos_spectral.wasm` the way a careless or hostile host could. Each trial is a fresh instance: `chronos_init`, SD or HD, then 48 frames. Every frame writes pixels into the ingest slot (random noise, black, white, a black/white strobe, alpha-0 stripes, or moving discs on texture), then on a random fraction of frames calls 1 to 4 random exports (every function except the four tick/init exports and the pointer getters, the test hook included) with arguments drawn from a hostile pool (`0`, `-1`, `2^31 - 1`, `2^31`, `2^32 - 1`, frame sizes and slot counts `+-1`, `NaN`, `+-Infinity`, `+-1e-38`, `1e-45`, `+-1e38`, `3.4e38`, audio rates, ...), after filling a random staging buffer (audio, Hodge injection, conservation input, Laplacian or Fiedler vector) with `NaN`, `+-1e30` noise or pool values. It then ticks with `chronos_tick`, `pre_tick` + `post_tick`, the two out of order, or all three, mostly at `1/30 s` and otherwise at a hostile step (`0`, negative, `NaN`, `+-Infinity`, `1e-40`, `1e9`), and finally calls every pointer getter (`chronos_get_ring_slot_ptr` with a pool argument) and reads the `f32` views `telemetry`, `swarm_telemetry`, `conservation_telemetry` and `slot_meta`.
+
+- **Gate:** `0` traps. A trap is a wasm trap or JS exception thrown by any export call, or a change of the fixed `448`-page memory size. Each one is printed with its trial and the 12 calls before it.
+- **Reported, not gated:** every non-finite value in those views, by slot, with its first occurrence.
+- **Deterministic and bounded:** trial `k` draws everything from its own seeded PRNG, so a given wasm makes the same calls on every run. The default `300` trials x `48` frames run in a worker thread under a `300 s` watchdog, so a call that never returns fails the gate, naming the trial and call count reached.
+
+Measured on the v3.1.0 wasm (Apple M4 Pro): `14,400` frames ticked, `37,202` export calls, `0` traps, `0` non-finite values, about `13 s`. The v3.0.0 wasm gives the same result (it lacks the test hook, so `37,101` calls).
 
 ## Headless Chrome CDP full-stack E2E (`scripts/e2e_browser.mjs`)
 

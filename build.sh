@@ -218,10 +218,10 @@ fi
 echo "  [PASS] Emitted instructions: ${V128_COUNT} SIMD128 ops, ${CLZ_COUNT} i32.clz ops, ${COPYSIGN_COUNT} f32.copysign ops"
 
 # --native-check: the build, the static audit, Gate S and Gate N only (the native-backend CI jobs,
-# e.g. macOS arm64 for NEON). Steps 3, Q, W1 and W2 exercise the Wasm alone and run in --check.
+# e.g. macOS arm64 for NEON). Steps 3, Q, W1, W2 and X exercise the Wasm alone and run in --check.
 if [ "${1:-}" = "--native-check" ]; then
   echo ""
-  echo "[3/5] --native-check: skipping the Wasm-only suites (step 3, Gates Q, W1, W2; run them with --check)"
+  echo "[3/5] --native-check: skipping the Wasm-only suites (step 3, Gates Q, W1, W2, X; run them with --check)"
 else
 echo ""
 echo "[3/5] Running Mathematical Counterexample & Ablation Audit Suite..."
@@ -2993,6 +2993,10 @@ echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+
+echo ""
+echo "[Gate X] Running Adversarial C-ABI Fuzz (random exports with hostile arguments, pixels and staging buffers; 0 traps)..."
+node scripts/gate_abi_fuzz.mjs
 fi
 
 echo ""

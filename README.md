@@ -91,7 +91,7 @@ Compile `web/chronos_spectral.wasm`, run all offline verification gates (`--chec
 ./build.sh
 ```
 
-Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite), and `Gate N` (native/wasm whole-kernel parity) without launching a server:
+Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), `Gate X` (adversarial C-ABI fuzz: random exports with hostile arguments, pixels and staging buffers, `0` traps), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite), and `Gate N` (native/wasm whole-kernel parity) without launching a server:
 
 ```bash
 ./build.sh --check
