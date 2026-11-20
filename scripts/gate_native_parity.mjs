@@ -10,7 +10,9 @@
 //      (calibrate_mp4.mjs, juggling_ballistic, SD), discrete Hodge (gate_i3_hodge.mjs),
 //      occluded-pair conservation (gate_i5b_conservation.mjs) and the first 24 MiB of the
 //      1,200-target vortex swarm (benchmark_1000.mjs --only=Q1).
-//   3. Replays every trace on the native kernel: every return value and every per-region
+//   3. Replays every trace on the native kernel and checks that the driver runs the SIMD backend
+//      this host and feature set must select (neon on aarch64, sse on x86_64, scalar with
+//      simd-force-scalar or elsewhere): every return value and every per-region
 //      XXH32 digest must match bit for bit (only the documented platform words of
 //      PLATFORM_WORDS in scripts/trace_lib.mjs are masked, on both sides). Each scenario must
 //      reach a minimum number of calls, so a harness that records little cannot pass vacuously.
@@ -19,10 +21,14 @@
 //
 // Usage:
 //   node scripts/gate_native_parity.mjs [--no-build] [--keep] [--out=<dir>] [--features=<list>]
+//                                       [--scenarios=<ids>]
 //
-//   --out       trace directory (default target/native-parity; removed after a pass unless --keep)
-//   --features  cargo features for the native build (default: none, i.e. the backend
-//               `crate::simd` selects for the host; e.g. --features=simd-force-scalar)
+//   --out        trace directory (default target/native-parity; removed after a pass unless --keep)
+//   --features   cargo features for the native build (default: none, i.e. the backend
+//                `crate::simd` selects for the host; e.g. --features=simd-force-scalar)
+//   --scenarios  comma-separated subset of the scenario ids below (default: all). `hodge` is
+//                always required (negative control). `./build.sh --native-check` drops hero_sd
+//                on hosts without ffmpeg; every other caller runs all four.
 // ============================================================================
 
 import crypto from 'node:crypto';
@@ -45,6 +51,7 @@ const OUT = path.resolve(argValue('out') ?? path.join(ROOT, 'target', 'native-pa
 const KEEP = args.includes('--keep');
 const BUILD = !args.includes('--no-build');
 const FEATURES = argValue('features') ?? '';
+const SCENARIO_IDS = argValue('scenarios')?.split(',').filter(Boolean);
 
 // Each scenario runs one existing harness unmodified. `minCalls` is the least number of
 // replayed kernel calls the scenario must contribute.
@@ -54,6 +61,15 @@ const SCENARIOS = [
   { id: 'conservation', argv: ['scripts/gate_i5b_conservation.mjs'], capMiB: 32, minCalls: 1000 },
   { id: 'swarm', argv: ['scripts/benchmark_1000.mjs', '--only=Q1'], maxInstances: 1, capMiB: 24, minCalls: 300 },
 ];
+
+if (SCENARIO_IDS) {
+  const unknown = SCENARIO_IDS.filter((id) => !SCENARIOS.some((s) => s.id === id));
+  if (unknown.length || !SCENARIO_IDS.includes('hodge')) {
+    console.error(`  [FAIL] Gate N: --scenarios must name known ids and include hodge (known: ${SCENARIOS.map((s) => s.id).join(', ')})`);
+    process.exit(2);
+  }
+  SCENARIOS.splice(0, SCENARIOS.length, ...SCENARIOS.filter((s) => SCENARIO_IDS.includes(s.id)));
+}
 
 function fail(msg) {
   console.error(`  [FAIL] Gate N: ${msg}`);
@@ -70,15 +86,22 @@ const secs = (t) => ((Date.now() - t) / 1000).toFixed(1);
 const host = spawnSync('rustc', ['-vV'], { encoding: 'utf8' }).stdout?.match(/^host: (.+)$/m)?.[1];
 if (!host) fail('cannot determine the host target (rustc -vV)');
 const driver = path.join(ROOT, 'native', 'target', host, 'checked', process.platform === 'win32' ? 'chronos_replay.exe' : 'chronos_replay');
+// The backend `crate::simd` must select (src/simd/mod.rs); the driver names the one it runs.
+const EXPECTED_BACKEND = FEATURES.split(/[ ,]+/).includes('simd-force-scalar')
+  ? 'scalar'
+  : ({ aarch64: 'neon', x86_64: 'sse' })[host.split('-')[0]] ?? 'scalar';
 if (BUILD) {
   const tb = Date.now();
-  const cargoArgs = ['build', '--quiet', '--manifest-path', 'native/Cargo.toml', '--target', host, '--profile', 'checked', '--bin', 'chronos_replay'];
+  // `-D warnings` goes in as a `target.<cfg>.rustflags` entry, which Cargo joins with the ones in
+  // .cargo/config.toml. A RUSTFLAGS (or CARGO_ENCODED_RUSTFLAGS) variable would replace them,
+  // dropping the x86_64 SSSE3/SSE4.1 flags so that x86_64 hosts would silently replay on
+  // simd::scalar instead of simd::sse (the backend check below catches that).
+  const cargoArgs = ['build', '--quiet', '--config', "target.'cfg(all())'.rustflags = ['-D', 'warnings']", '--manifest-path', 'native/Cargo.toml', '--target', host, '--profile', 'checked', '--bin', 'chronos_replay'];
   if (FEATURES) cargoArgs.push('--features', FEATURES);
-  const r = spawnSync('cargo', cargoArgs, {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, RUSTFLAGS: '-D warnings' },
-  });
+  const env = { ...process.env };
+  delete env.RUSTFLAGS;
+  delete env.CARGO_ENCODED_RUSTFLAGS;
+  const r = spawnSync('cargo', cargoArgs, { cwd: ROOT, stdio: 'inherit', env });
   if (r.status !== 0) fail('native replay driver build failed');
   console.log(`  [PASS] Native replay driver built for ${host} (profile checked${FEATURES ? `, features ${FEATURES}` : ''}) in ${secs(tb)} s`);
 }
@@ -148,8 +171,10 @@ const rep = runDriver(['--require-full', ...SCENARIOS.map((s) => path.join(OUT, 
 process.stdout.write(rep.stdout.replace(/^/gm, '    '));
 if (rep.stderr) process.stderr.write(rep.stderr.replace(/^/gm, '    '));
 if (rep.status !== 0) fail('native replay diverged from the wasm recording (first divergence and region dumps above)');
+const backend = rep.stdout.match(/simd backend (\w+)/)?.[1];
+if (backend !== EXPECTED_BACKEND) fail(`replay ran on simd backend ${backend ?? '?'}, expected ${EXPECTED_BACKEND} for ${host}${FEATURES ? ` with features ${FEATURES}` : ''}`);
 const digestChecks = [...rep.stdout.matchAll(/(\d+) region digests/g)].reduce((a, m) => a + Number(m[1]), 0);
-console.log(`  [PASS] Native kernel matches wasm bit for bit: ${totalCalls} calls, ${digestChecks} region digests, 0 mismatches (replay ${secs(tp)} s)`);
+console.log(`  [PASS] Native kernel (${host}, simd backend ${backend}) matches wasm bit for bit: ${totalCalls} calls, ${digestChecks} region digests, 0 mismatches (replay ${secs(tp)} s)`);
 
 // ----------------------------------------------------------------------------
 // 4. Negative control
@@ -169,4 +194,4 @@ const region = neg.stdout.match(/region (\S+): native/)?.[1] ?? '?';
 console.log(`  [PASS] Negative control detected: ${mut.stdout.trim()}; driver reports call #${at}, region ${region}`);
 
 if (!KEEP) fs.rmSync(OUT, { recursive: true, force: true });
-console.log(`  [PASS] Gate N: native/wasm whole-kernel parity verified (${secs(t0)} s total, ${(totalBytes / 1e6).toFixed(1)} MB of traces)`);
+console.log(`  [PASS] Gate N: native/wasm whole-kernel parity verified on simd backend ${backend} (${SCENARIOS.map((s) => s.id).join(', ')}; ${secs(t0)} s total, ${(totalBytes / 1e6).toFixed(1)} MB of traces)`);

@@ -9,6 +9,21 @@ on:
 permissions:
   contents: read
 
+# Jobs and what each one proves (docs/VERIFICATION_AND_BENCHMARKS.md, "Continuous integration"):
+#   verify-wasm-simd128-and-e2e  Linux x86_64: the full pipeline (./build.sh --e2e) against the
+#                                committed Wasm; Gates S and N on the SSE backend.
+#   native-macos-arm64           Apple Silicon: ./build.sh --native-check (build, static audit,
+#                                Gates S and N) on the NEON backend, then scalar at kernel level.
+#   native-scalar-linux-x86_64   Linux x86_64: the scalar reference backend at kernel level, the
+#                                full Gate N scenario set included.
+#   miri-scalar                  Miri over the SIMD layer tests and a short kernel run, scalar
+#                                backend. Non-blocking (continue-on-error).
+# pages.yml deploys only when this whole workflow concludes `success`, i.e. when every blocking
+# job above passed.
+#
+# Native jobs never set RUSTFLAGS: it replaces `target.*.rustflags` from .cargo/config.toml and
+# would silently drop the x86_64 SSSE3/SSE4.1 flags (build.sh Gate S uses `cargo --config`).
+
 jobs:
   verify-wasm-simd128-and-e2e:
     name: Build Wasm32 SIMD128, Math Audit, MP4 Calibration & Chrome E2E
@@ -67,3 +82,152 @@ jobs:
           CI: "1"
           CHRONOS_VERIFY_COMMITTED_WASM: "1"
         run: ./build.sh --e2e
+
+  native-macos-arm64:
+    name: Native NEON backend on Apple Silicon (build, audit, Gates S and N; scalar parity)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Require an arm64 runner (the NEON backend needs real Apple Silicon)
+        run: |
+          uname -sm
+          test "$(uname -m)" = arm64
+
+      - name: Install wabt (wasm-objdump)
+        run: brew install wabt
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          PINNED="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$PINNED" --profile minimal --target wasm32-unknown-unknown --no-self-update
+          rustc -vV
+
+      # Cargo decides freshness of this zero-dependency crate by file mtimes, and a checkout makes
+      # every source newer than any cached artifact, so a cache only helps when the sources are
+      # byte-identical (hence the source hash in the key, and no restore-keys) and their mtimes
+      # are then moved behind the cached artifacts.
+      - name: Cache target/ and native/target/ (exact source match only)
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            native/target/
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**') }}
+
+      - name: Mark sources older than the cached artifacts (exact cache hit only)
+        if: steps.build-cache.outputs.cache-hit == 'true'
+        run: git ls-files -z | xargs -0 touch -t 200001010000
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build, static Wasm audit, Gate S and Gate N on the NEON backend
+        env:
+          CI: "1"
+          CHRONOS_VERIFY_COMMITTED_WASM: "1"
+        run: ./build.sh --native-check
+
+      - name: Scalar reference backend at kernel level (aarch64)
+        run: |
+          DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
+          cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
+          cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
+          node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm
+
+  native-scalar-linux-x86_64:
+    name: Scalar reference backend at kernel level on Linux x86_64 (every Gate N scenario)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install ffmpeg (Gate N's real-MP4 scenario)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends ffmpeg
+
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          PINNED="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$PINNED" --profile minimal --target wasm32-unknown-unknown --no-self-update
+          rustc -vV
+
+      - name: Cache target/ and native/target/ (exact source match only)
+        id: build-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/
+            native/target/
+          key: native-scalar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**') }}
+
+      - name: Mark sources older than the cached artifacts (exact cache hit only)
+        if: steps.build-cache.outputs.cache-hit == 'true'
+        run: git ls-files -z | xargs -0 touch -t 200001010000
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Native test suites and Gate N with simd-force-scalar
+        run: |
+          DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
+          cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
+          cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
+          node scripts/gate_native_parity.mjs --features=simd-force-scalar
+
+  miri-scalar:
+    name: Miri (non-blocking) over the SIMD layer tests and a short kernel run, scalar backend
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    # Non-blocking while the findings in docs/VERIFICATION_AND_BENCHMARKS.md ("Miri") are open:
+    # a failure shows on the job but the workflow still concludes `success`, so neither the
+    # other checks nor pages.yml are held back by it.
+    continue-on-error: true
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: "0"
+      MIRI_TOOLCHAIN: nightly-2026-10-19
+      # Stacked Borrows (Miri's default aliasing model, the stricter of the two). Nothing else.
+      MIRIFLAGS: ""
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install the pinned nightly with Miri (Miri only; everything else uses rust-toolchain.toml)
+        run: |
+          rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
+          cargo "+$MIRI_TOOLCHAIN" miri --version
+          cargo "+$MIRI_TOOLCHAIN" miri setup
+
+      - name: Miri, SIMD layer tests (scalar backend; conformance, scalar math, negative controls)
+        run: |
+          HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
+          cargo "+$MIRI_TOOLCHAIN" miri test --target "$HOST" --features simd-force-scalar
+
+      - name: Miri, kernel (chronos_init, then two SD frames through chronos_tick)
+        if: ${{ !cancelled() }}
+        run: |
+          HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
+          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
