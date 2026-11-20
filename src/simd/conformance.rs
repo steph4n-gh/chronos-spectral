@@ -1606,6 +1606,8 @@ mod tests {
 
     backend_table!(selected_table, crate::simd);
     backend_table!(scalar_table, crate::simd::scalar);
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3", target_feature = "sse4.1"))]
+    backend_table!(sse_table, crate::simd::sse);
 
     const SEED: u64 = 0x5EED_C0DE_2026_1119;
     const N_RANDOM: u32 = 4096;
@@ -1620,8 +1622,13 @@ mod tests {
 
     /// Runs `a` against `b` and panics with every recorded mismatch if they disagree.
     pub fn assert_pair_matches(a: &[OpEntry], b: &[OpEntry]) {
+        assert_pair_matches_n(a, b, N_RANDOM);
+    }
+
+    /// [`assert_pair_matches`] with `n_random` random vectors per entry.
+    pub fn assert_pair_matches_n(a: &[OpEntry], b: &[OpEntry], n_random: u32) {
         let mut report = Box::new(Report::new());
-        run_pair(a, b, SEED, N_RANDOM, &mut report).expect("tables must have the same shape");
+        run_pair(a, b, SEED, n_random, &mut report).expect("tables must have the same shape");
         let details: Vec<String> = report.records[..report.recorded as usize]
             .iter()
             .map(|r| describe(a, r))
@@ -1715,6 +1722,41 @@ mod tests {
             0,
             "conformance mismatches:\n{}",
             details.join("\n")
+        );
+    }
+
+    /// Heavy one-off run, a million random vectors per entry:
+    /// `cargo test --release --target <triple> -- --ignored --nocapture heavy`.
+    #[test]
+    #[ignore]
+    fn heavy_selected_backend_matches_scalar_reference() {
+        assert_pair_matches_n(selected_table::TABLE, scalar_table::TABLE, 1_000_000);
+    }
+
+    /// `simd::sse` against the reference also when `simd-force-scalar` selects `simd::scalar`.
+    #[cfg(all(target_arch = "x86_64", target_feature = "ssse3", target_feature = "sse4.1"))]
+    #[test]
+    fn sse_backend_matches_scalar_reference() {
+        assert_pair_matches(sse_table::TABLE, scalar_table::TABLE);
+    }
+
+    /// `.cargo/config.toml` enables SSSE3 and SSE4.1 for every x86_64 target, so unless
+    /// `simd-force-scalar` is on, an x86_64 build must run `simd::sse`. Landing on `simd::scalar`
+    /// means the flags were lost, typically to a `RUSTFLAGS` variable, which replaces
+    /// `target.*.rustflags` (see Gate S in `build.sh`).
+    #[cfg(all(target_arch = "x86_64", not(feature = "simd-force-scalar")))]
+    #[test]
+    fn x86_64_builds_select_the_sse_backend() {
+        assert!(
+            cfg!(all(target_feature = "ssse3", target_feature = "sse4.1")),
+            "x86_64 build without SSSE3/SSE4.1 selects the scalar backend; were the \
+             `.cargo/config.toml` rustflags replaced by a RUSTFLAGS variable?"
+        );
+        #[cfg(all(target_feature = "ssse3", target_feature = "sse4.1"))]
+        assert!(
+            core::any::TypeId::of::<crate::simd::v128>()
+                == core::any::TypeId::of::<crate::simd::sse::v128>(),
+            "SSSE3/SSE4.1 are enabled but the layer did not select simd::sse"
         );
     }
 

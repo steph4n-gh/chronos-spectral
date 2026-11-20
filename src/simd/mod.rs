@@ -16,8 +16,8 @@
 //! | target                                      | selected backend           | status        |
 //! |---------------------------------------------|----------------------------|---------------|
 //! | `wasm32`                                    | `core::arch::wasm32`       | shipped       |
-//! | `aarch64` (NEON)                            | `simd::neon`               | slot, not yet |
-//! | `x86_64` with `sse4.1` + `ssse3` enabled    | `simd::sse`                | slot, not yet |
+//! | `aarch64` (NEON)                            | `simd::neon`               | implemented   |
+//! | `x86_64` with `sse4.1` + `ssse3` enabled    | `simd::sse`                | implemented   |
 //! | any other native target, or the             | `simd::scalar`             | implemented   |
 //! | `simd-force-scalar` feature                 |                            |               |
 //!
@@ -134,7 +134,8 @@ pub mod scalar;
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
 pub mod neon;
-// Slot: `#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3"))] pub mod sse;`
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3"))]
+pub mod sse;
 
 #[cfg(any(test, feature = "simd-conformance"))]
 pub mod conformance;
@@ -148,12 +149,14 @@ layer_items!(reexport_layer!(core::arch::wasm32));
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")))]
 layer_items!(reexport_layer!(self::neon));
-// Slot (sse):  `#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")))]`
-//              `layer_items!(reexport_layer!(self::sse));`
-// When a slot is filled, add its condition to the `not(any(..))` of the scalar line.
 
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")))]
+layer_items!(reexport_layer!(self::sse));
+
+// The scalar line excludes every condition above, so exactly one selection applies.
 #[cfg(not(any(
     target_arch = "wasm32",
     all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")),
+    all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")),
 )))]
 layer_items!(reexport_layer!(self::scalar));
