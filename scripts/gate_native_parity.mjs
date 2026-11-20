@@ -72,13 +72,16 @@ if (!host) fail('cannot determine the host target (rustc -vV)');
 const driver = path.join(ROOT, 'native', 'target', host, 'checked', process.platform === 'win32' ? 'chronos_replay.exe' : 'chronos_replay');
 if (BUILD) {
   const tb = Date.now();
-  const cargoArgs = ['build', '--quiet', '--manifest-path', 'native/Cargo.toml', '--target', host, '--profile', 'checked', '--bin', 'chronos_replay'];
+  // Deny warnings through `--config`, never through RUSTFLAGS: a RUSTFLAGS variable REPLACES the
+  // `target.*.rustflags` in .cargo/config.toml, which on x86_64 silently drops +ssse3,+sse4.1 and
+  // makes this gate test the scalar backend instead of SSE (see Gate S in build.sh).
+  const cargoArgs = ['build', '--quiet', '--config', "target.'cfg(all())'.rustflags = ['-D', 'warnings']",
+    '--manifest-path', 'native/Cargo.toml', '--target', host, '--profile', 'checked', '--bin', 'chronos_replay'];
   if (FEATURES) cargoArgs.push('--features', FEATURES);
-  const r = spawnSync('cargo', cargoArgs, {
-    cwd: ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, RUSTFLAGS: '-D warnings' },
-  });
+  const buildEnv = { ...process.env };
+  delete buildEnv.RUSTFLAGS;
+  delete buildEnv.CARGO_ENCODED_RUSTFLAGS;
+  const r = spawnSync('cargo', cargoArgs, { cwd: ROOT, stdio: 'inherit', env: buildEnv });
   if (r.status !== 0) fail('native replay driver build failed');
   console.log(`  [PASS] Native replay driver built for ${host} (profile checked${FEATURES ? `, features ${FEATURES}` : ''}) in ${secs(tb)} s`);
 }
@@ -146,6 +149,13 @@ const runDriver = (extra) =>
 const tp = Date.now();
 const rep = runDriver(['--require-full', ...SCENARIOS.map((s) => path.join(OUT, s.id))]);
 process.stdout.write(rep.stdout.replace(/^/gm, '    '));
+// The gate must exercise the backend this platform is meant to ship, not a silent fallback.
+const forcedScalar = FEATURES.split(',').includes('simd-force-scalar');
+const expectedBackend = forcedScalar ? 'scalar' : host.startsWith('aarch64') ? 'neon' : host.startsWith('x86_64') ? 'sse' : 'scalar';
+const actualBackend = rep.stdout.match(/simd backend (\w+)/)?.[1];
+if (actualBackend !== expectedBackend) {
+  fail(`native driver ran simd backend ${actualBackend ?? '(unknown)'}, expected ${expectedBackend} for ${host}${FEATURES ? ` with features ${FEATURES}` : ''}`);
+}
 if (rep.stderr) process.stderr.write(rep.stderr.replace(/^/gm, '    '));
 if (rep.status !== 0) fail('native replay diverged from the wasm recording (first divergence and region dumps above)');
 const digestChecks = [...rep.stdout.matchAll(/(\d+) region digests/g)].reduce((a, m) => a + Number(m[1]), 0);
