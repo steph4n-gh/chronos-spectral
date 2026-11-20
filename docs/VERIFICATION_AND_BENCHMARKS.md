@@ -286,25 +286,29 @@ There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_r
 
 ### Canonical set (measured)
 
-`record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 46 s (including replay) on Apple Silicon. Replaying all 29 takes 39 s with 0 mismatches. Re-recorded in format 1.1 (digest mask), the set has identical call and host-write counts, and all 29 again replay against the wasm with 0 mismatches.
+`record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 51 s on Apple Silicon (v3.1.0 wasm, format 1.1). Replaying all 29 against the wasm takes about 40 s with 0 mismatches, also with `--portable` (no `UNMAPPED` record). Compared with the v3.0.0 recording, every scenario has identical call and host-write counts except `bos` (+1 call) and `ingest_roi` (+3 calls): the test-hook calls that replace the raw-address writes (see below).
 
 | Scenario | Harness | Traces | Calls | Host writes | Size |
 | :--- | :--- | ---: | ---: | ---: | ---: |
 | `hero_sd` | `calibrate_mp4.mjs --clip=juggling_ballistic` (SD) | 2 | 1,126 | 145,042 + 1 reset | 45.2 MB |
 | `hero_hd` | `calibrate_mp4.mjs --hd --clip=juggling_ballistic` | 2 | 1,126 | 613,215 + 1 reset | 162.8 MB |
-| `hero_suite` | build.sh `[3/5]` Gates A-P + SD/HD pillar trials | 1 | 31,371 | 754,082 | 677.6 MB |
+| `hero_suite` | build.sh `[3/5]` Gates A-P + SD/HD pillar trials | 1 | 31,371 | 754,082 | 677.0 MB |
 | `mp4_occlusion` | `calibrate_mp4.mjs --clip=roundabout_occlusion` | 2 | 1,241 | 821 + 1 reset | 58.9 MB |
 | `swarm_1200` | `benchmark_1000.mjs --only=Q1` | 1 | 719 | 636,687 | 50.0 MB |
-| `bos` | `gate_i5_bos.mjs` | 1 | 2,464 | 109,002 + 1 unmapped | 110.2 MB |
+| `bos` | `gate_i5_bos.mjs` | 1 | 2,465 | 109,002 | 110.2 MB |
 | `hodge` | `gate_i3_hodge.mjs` | 1 | 175 | 95,067 | 19.2 MB |
 | `rs_vibrometry` | `gate_i2_rs_welch.mjs` | 1 | 6,739 | 401,893 | 1,054.8 MB |
 | `conservation` | `gate_i5b_conservation.mjs` | 1 | 1,424 | 15,662 | 14.8 MB |
 | `covariance` | `gate_i1_cov_residual.mjs` (10 of 406 instances) | 10 | 4,742 | 338,512 | 127.5 MB |
-| `ingest_roi` | `gate_i0_i4_ingest.mjs` | 7 | 7,707 | 351,051 + 3 unmapped | 221.0 MB |
+| `ingest_roi` | `gate_i0_i4_ingest.mjs` | 7 | 7,710 | 351,051 | 221.0 MB |
 
 Each `calibrate_mp4.mjs` scenario also has a 0-call trace for its probe instance. Recording costs about 4 ms per kernel call (SD hero tick `0.12 -> 4.1 ms`, Q1 swarm tick `1.3 -> 5.7 ms`). Strict mode with `--memdigest=1` takes about 2.4 times as long as default recording.
 
 Portable frame-counter writes: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` test frame-index wraparound by moving the private `Arena` fields `ring_cursor` and `frame_idx` to just before `u32::MAX`. Up to v3.0.0 they overwrote those fields by raw address (found by scanning memory), which the hook records as `UNMAPPED`, so a native build could follow three canonical traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Since v3.1.0 they make exactly the same change through the test-hook export `chronos_test_hook_set_frame_counters(frame_idx, ring_cursor_lo, ring_cursor_hi)`, which a trace records as an ordinary call, and the canonical set has no `UNMAPPED` record. The native driver still stops a trace that has one at that call and reports `portable prefix ended at call N`, which is distinct from both a pass and a failure.
+
+### Sessions recorded on v3.0.0, replayed on v3.1.0
+
+v3.1.0 is the first change of the shipped wasm since the canonical set was recorded, so the v3.0.0 recording (sha256 `7ba36a5b...`, the 29 traces of the table above as they were before this release: `bos` 2,464 calls, `ingest_roi` 7,707, with the four raw-address writes) was replayed on the v3.1.0 wasm (sha256 `f4ad7ce5...`) with `node scripts/trace_replay.mjs --allow-wasm-mismatch`: 29 traces, 58,834 calls, 44,307 digest-checked calls, 1,993,815 region digests, **0 mismatches**. Every return value matched, pointer results included: all 36 region getters return the same addresses in both builds (the release changes no `Arena` field, and the static data ends at the same address, `22,704,064`), so the four raw-address writes still land on `ring_cursor` and `frame_idx`. That is the expected result. The frame-index fix changes results only when a window loop runs past `u32::MAX` with fewer samples than its count bound. The sessions that tick through `u32::MAX` (`bos` and `ingest_roi` instances 2 and 6) never do: the only window loop that reaches that frame is in `bos` at call `#263`, and it has a full 64-frame window, which the old loop also ended on its count bound. The collapsed padding changes only panic locations, and no session panics.
 
 ### Format
 
@@ -419,7 +423,7 @@ That is 16 bytes exempt per digest-checked call, out of 12,715,152 bytes hashed 
 
 ### Native parity results (measured)
 
-The canonical set re-recorded in format 1.1 was replayed on the native scalar build (`simd::scalar`, the only native backend so far), Apple Silicon (aarch64), release profile: 66.6 s for 2.54 GB.
+The v3.1.0 canonical set (format 1.1, recorded from the v3.1.0 wasm) replayed in full on the native build with Gate N's settings (`checked` profile: overflow checks and debug assertions, including core's UB precondition checks; `--require-full --wasm-sha256=<web wasm>`), Apple M4 Pro (aarch64), on the NEON backend (39.6 s for 2.54 GB) and on the scalar reference (`--features simd-force-scalar`, 99.4 s). Both give the same table:
 
 | Scenario | Traces | Calls replayed | Digest-checked calls | Region digests | Result |
 | :--- | ---: | ---: | ---: | ---: | :--- |
@@ -428,15 +432,15 @@ The canonical set re-recorded in format 1.1 was replayed on the native scalar bu
 | `hero_suite` | 1 | 31,371 | 25,927 | 1,166,715 | pass |
 | `mp4_occlusion` | 2 | 1,241 | 1,026 | 46,170 | pass |
 | `swarm_1200` | 1 | 719 | 604 | 27,180 | pass |
-| `bos` | 1 | 209 | 172 | 7,740 | portable prefix ended at call 209 |
+| `bos` | 1 | 2,465 | 1,685 | 75,825 | pass |
 | `hodge` | 1 | 175 | 125 | 5,625 | pass |
 | `rs_vibrometry` | 1 | 6,739 | 5,413 | 243,585 | pass |
 | `conservation` | 1 | 1,424 | 958 | 43,110 | pass |
 | `covariance` | 10 | 4,742 | 1,086 | 48,870 | pass |
-| `ingest_roi` | 7 | 7,525 | 5,556 | 250,020 | 5 pass; instance 2: portable prefix ended at call 58; instance 6: at call 710 |
-| **total** | **29** | **56,397** | **42,735** | **1,923,075** | **0 mismatches** (26 pass, 3 portable prefix) |
+| `ingest_roi` | 7 | 7,710 | 5,619 | 252,855 | pass |
+| **total** | **29** | **58,838** | **44,311** | **1,993,995** | **0 mismatches** (29 pass, 0 portable prefix, 0 fail) |
 
-The `checked` profile (overflow checks and debug assertions, including core's UB precondition checks) gives the same result on all 29 traces with no panic. The unoptimised `dev` profile gives the same result on the subset it was run on (`hero_sd`, `swarm_1200`, `mp4_occlusion`, `bos`, `hodge`, `conservation`, two `covariance` and two `ingest_roi` instances).
+The v3.0.0 set gave the same result up to the three portable prefixes (`bos` at call `#209`, `ingest_roi` instance 2 at `#58`, instance 6 at `#710`: 56,397 calls, 26 pass and 3 portable prefix) on the scalar build in the release profile, on `checked` too, and on the unoptimised `dev` profile for the subset it was run on (`hero_sd`, `swarm_1200`, `mp4_occlusion`, `bos`, `hodge`, `conservation`, two `covariance` and two `ingest_roi` instances).
 
 Expected divergence sources that turned out not to diverge, and why:
 
@@ -445,7 +449,7 @@ Expected divergence sources that turned out not to diverge, and why:
 - **`usize` fields** change the arena layout (`22,644,848` vs `22,651,136` bytes), but nothing reads the arena as bytes except `chronos_init`'s zeroing and the size words in the allowlist.
 - **Scalar backend and NaN payloads.** No scalar-backend op disagreed with V8's SIMD128 on any trace. A NaN census of every digested `f32` region at every digest-checked call (an instrumented throwaway build) found that the kernel never writes a NaN into an output region in the canonical set. The only NaNs present are host-written invalid-input tests (`hodge_inject`, `conservation_input`, `0x7fc00000`), which the driver copies byte for byte. So the payload of generated NaNs, which differs between aarch64 (`0x7fc00000`) and x86 (`0xffc00000`), cannot affect these traces.
 
-**Overflow checks beyond the portable prefix** (an experiment in a throwaway copy, not part of the driver). The three `U` writes set `ring_cursor` and `frame_idx` to `2^32 - 18`, `2^32 - 3` and `2^32 - 2` to test frame-index wraparound, so the prefixes stop just before the arithmetic most likely to wrap. Mapping those 16 bytes onto the native fields (`ring_cursor: u64, res_mode: u32, frame_idx: u32`, contiguous in the `repr(C)` arena on both targets) let all three traces continue under the `checked` profile. Both `ingest_roi` traces then replay to the end bit for bit (83 and 867 calls). `bos` hits exactly one overflow: `src/physics_id.rs:2713` `f += 1` (`u32`) in `extract_compensated_window_from_ring`, once, at `f == u32::MAX` (call `#263`). Treating that one increment as wrapping, the whole `bos` trace (2,464 calls) replays bit for bit. v3.1.0 fixes that loop: see "Frame-index wraparound in physics-ID window loops" below.
+**Overflow checks across the frame-index wrap.** The `bos` and `ingest_roi` traces move `ring_cursor` and `frame_idx` to `2^32 - 18` and `2^32 - 3` and tick through the wrap, so with the `checked` profile they are the canonical test of frame arithmetic at `u32::MAX`. On v3.0.0 they could not be followed natively past the raw-address writes; an experiment in a throwaway copy that mapped those writes onto the native fields found exactly one overflow, `src/physics_id.rs:2713` `f += 1` in `extract_compensated_window_from_ring` at `f == u32::MAX` (`bos`, call `#263`). On v3.1.0 the traces are portable and pass in full under `checked` (table above). The same v3.1.0 `bos` trace replayed on a driver built from the v3.1.0 sources with only `src/physics_id.rs` reverted to v3.0.0 aborts at call `#264` (`chronos_tick`) with `attempt to add with overflow` at that line. See "Frame-index wraparound in physics-ID window loops" below.
 
 #### Frame-index wraparound in physics-ID window loops (fixed in v3.1.0)
 
