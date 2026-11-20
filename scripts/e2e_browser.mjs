@@ -5289,17 +5289,17 @@ async function main() {
                   rmSel.value = '2';
                   rmSel.dispatchEvent(new Event('change', { bubbles: true }));
                 }
-                const deadline = performance.now() + 3200;
+                const deadline = performance.now() + 4500;
                 while (performance.now() < deadline && nativePushMsgs.length < 40) {
                   await new Promise((r) => setTimeout(r, 40));
                 }
-                await new Promise((r) => setTimeout(r, 60));
-                const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
                 nativeCapturing = false;
                 const ackDeadline = performance.now() + 2500;
                 while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
                   await new Promise((r) => setTimeout(r, 15));
                 }
+                await new Promise((r) => setTimeout(r, 40));
+                const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
                 if (rmSel) {
                   rmSel.value = '0';
                   rmSel.dispatchEvent(new Event('change', { bubbles: true }));
