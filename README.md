@@ -47,7 +47,7 @@ Everything compiles into one `2.36 MiB` (`2,474,879 B`) `#![no_std]` Rust WebAss
 
 Most video perception stacks split into two camps: heavy neural detectors (`YOLO`/`SAM` paired with `ByteTrack`) that fail outside their training distribution and demand gigabytes of VRAM, or classical causal filters (`OpenCV` optical flow + Kalman) that smooth away sharp impacts, lag during phase estimation, and swap IDs whenever identical objects cross behind clutter. CHRONOS-SPECTRAL occupies the third quadrant: a deterministic visual physics instrument in `2.36 MiB` of portable WebAssembly.
 
-| Capability | Neural Detector + Sort (`YOLO`/`SAM`) | Classical Causal (`OpenCV` + Kalman) | CHRONOS-SPECTRAL (`v3.0.0`) |
+| Capability | Neural Detector + Sort (`YOLO`/`SAM`) | Classical Causal (`OpenCV` + Kalman) | CHRONOS-SPECTRAL (`v3.1.0`) |
 | :--- | :--- | :--- | :--- |
 | Object taxonomy and training | Requires labeled classes and weights | Class-agnostic blobs | Zero ML, zero weights: arbitrary unknown targets on frame 1 |
 | Auto-exposure and camera flicker | Vulnerable without domain augmentation | Thresholding breaks on exposure steps | Orthogonal Rank-2 ECA subspace (`36-64 dB` background suppression) |
