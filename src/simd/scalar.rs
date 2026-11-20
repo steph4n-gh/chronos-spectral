@@ -1194,6 +1194,15 @@ mod tests {
         (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()
     }
 
+    /// Pattern stride of the sampled f32 tests. Miri interprets every operation, so under Miri
+    /// (`cargo miri test`, see docs/VERIFICATION_AND_BENCHMARKS.md) the sweeps are thinned to
+    /// about 1,700 inputs; they still cross every exponent range and every dense window.
+    const STEP: u32 = if cfg!(miri) { 4_000_037 } else { 9973 };
+    /// Length of each dense window in [`f32_patterns`].
+    const WINDOW: u32 = if cfg!(miri) { 0x80 } else { 0x1000 };
+    /// Random inputs of `sqrt_f64_matches_std_correct_rounding`.
+    const F64_SAMPLES: u64 = if cfg!(miri) { 4_000 } else { 2_000_000 };
+
     /// Visits every `step`-th f32 bit pattern, plus dense windows around subnormals, 0.5, 1.0
     /// and 2^23 (where rounding and normalisation change behaviour).
     fn f32_patterns(step: u32, mut f: impl FnMut(f32)) {
@@ -1205,7 +1214,7 @@ mod tests {
                 None => break,
             }
         }
-        for b in 0..=0x0000_1000u32 {
+        for b in 0..=WINDOW {
             f(f32::from_bits(b)); // smallest subnormals
             f(f32::from_bits(b | 0x8000_0000));
             f(f32::from_bits(0x3F80_0000 + b)); // just above 1.0
@@ -1216,7 +1225,7 @@ mod tests {
 
     #[test]
     fn sqrt_f32_matches_std_correct_rounding() {
-        f32_patterns(9973, |x| {
+        f32_patterns(STEP, |x| {
             assert!(
                 same_f32(sqrt_f32(x), x.sqrt()),
                 "sqrt({x:e}) bits {:#010x}",
@@ -1253,7 +1262,7 @@ mod tests {
     #[test]
     fn sqrt_f64_matches_std_correct_rounding() {
         let mut s = 0x9E37_79B9_7F4A_7C15u64;
-        for i in 0..2_000_000u64 {
+        for i in 0..F64_SAMPLES {
             s ^= s << 13;
             s ^= s >> 7;
             s ^= s << 17;
@@ -1287,7 +1296,7 @@ mod tests {
 
     #[test]
     fn floor_and_nearest_match_std() {
-        f32_patterns(9973, |x| {
+        f32_patterns(STEP, |x| {
             assert!(same_f32(floor_f32(x), x.floor()), "floor({x:e})");
             assert!(
                 same_f32(nearest_f32(x), x.round_ties_even()),

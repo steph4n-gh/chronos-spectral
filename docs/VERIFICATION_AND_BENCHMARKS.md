@@ -31,6 +31,23 @@ Runs nine sequential offline stages:
 
 Runs everything in `--check`, plus Gate `I6` physical capture fixtures (`scripts/gate_i6_captures.mjs`), SD and HD H.264 MP4 calibration gates (`scripts/calibrate_mp4.mjs`), and headless Chromium CDP full-stack UI and audio/video verification (`scripts/e2e_browser.mjs` Steps `1-10e`).
 
+### Native backends only (`--native-check`)
+
+```bash
+./build.sh --native-check
+```
+
+Runs stages 1, 2, 8 and 9 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 7). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
+
+The scalar reference backend at kernel level (what CI runs with `simd-force-scalar`; drop `--scenarios` when `ffmpeg` is installed):
+
+```bash
+DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
+cargo test --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
+cargo test --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
+node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm
+```
+
 ### Standalone calibration, Wave-1/2 gates, ablation, and media regeneration
 
 ```bash
@@ -419,9 +436,74 @@ Expected divergence sources that turned out not to diverge, and why:
 
 [scripts/gate_native_parity.mjs](../scripts/gate_native_parity.mjs) needs no pre-recorded traces and makes no platform assumptions:
 
-1. Builds `chronos_replay` for the host with the `checked` profile and `-D warnings`.
+1. Builds `chronos_replay` for the host with the `checked` profile and `-D warnings`. The flag goes in through `cargo --config "target.'cfg(all())'.rustflags = [...]"`, and `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS` are removed from the build's environment. Until this was fixed the gate set `RUSTFLAGS=-D warnings`, which replaces the `target.*.rustflags` of `.cargo/config.toml`. On x86_64 Linux (the CI job) that dropped `+ssse3,+sse4.1`, so Gate N there replayed on `simd::scalar` instead of `simd::sse`. `cargo check -v --target x86_64-unknown-linux-gnu` shows the rustc command line with `target-feature=+ssse3,+sse4.1` when `RUSTFLAGS` is unset and without it when `RUSTFLAGS='-D warnings'`.
 2. Records, from `web/chronos_spectral.wasm` and in parallel, four existing harnesses under the hook into `target/native-parity/` (removed after a pass; `--keep` keeps it). The scenarios are `calibrate_mp4.mjs --clip=juggling_ballistic` (real-MP4 sparse hero tracking at SD, with a pooled-instance `RESET`), `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs` and `benchmark_1000.mjs --only=Q1` capped at 24 MiB. Measured: 5 traces, 3,088 calls, 104.0 MB, 3.1 s. Each scenario must reach a minimum call count, and none may contain a `U` record.
-3. Replays them with `--require-full --wasm-sha256=<web wasm>`: 3,088 calls, 102,375 region digests, 0 mismatches required (2.4 s).
+3. Replays them with `--require-full --wasm-sha256=<web wasm>`: 3,088 calls, 102,375 region digests, 0 mismatches required (2.4 s). The driver's banner names the SIMD backend it runs, and the gate fails unless that is the one the host and features must select: `neon` on aarch64, `sse` on x86_64, and `scalar` with `simd-force-scalar` or on any other host.
 4. Negative control: one byte of a host write in the Hodge trace flipped (`trace_tool.mjs mutate-write`). The driver must fail at or after the call that write precedes (measured: call `#97`, region `ring_slot[9]`).
 
-The swarm scenario is there because it is the one that catches a subtle scalar-backend bug: `f32x4.nearest` rounding ties away from zero passes Hodge, conservation and SD hero tracking, and is caught at swarm call `#148`. The gate takes 121 s on Apple Silicon, almost all of it the native build (115 s; a cached build takes under a second). `--features=...` passes cargo features (for example `simd-force-scalar` once an arch backend exists), and it already depends on `ffmpeg` like `gate_i1_cov_residual.mjs`.
+The swarm scenario is there because it is the one that catches a subtle scalar-backend bug: `f32x4.nearest` rounding ties away from zero passes Hodge, conservation and SD hero tracking, and is caught at swarm call `#148`. The gate takes 121 s on Apple Silicon, almost all of it the native build (115 s; a cached build takes under a second). `--features=...` passes cargo features (`--features=simd-force-scalar` replays on the scalar reference; CI runs it on Linux x86_64 and macOS arm64). `--scenarios=<ids>` runs a subset, which must include `hodge` (the negative control). The `hero_sd` scenario depends on `ffmpeg`, like `gate_i1_cov_residual.mjs`.
+
+## Continuous integration
+
+[.github/workflows/ci.yml](../.github/workflows/ci.yml) runs on every push to and pull request against `main`. Every job installs the toolchain pinned in `rust-toolchain.toml` (the Miri job also installs one pinned nightly) and none sets `RUSTFLAGS`, which would replace the `target.*.rustflags` of `.cargo/config.toml` (see Gate N above).
+
+| Job | Runner | Runs | Proves |
+| :--- | :--- | :--- | :--- |
+| `verify-wasm-simd128-and-e2e` | `ubuntu-latest` (x86_64) | `./build.sh --e2e` with `CHRONOS_VERIFY_COMMITTED_WASM=1` | The full pipeline against the committed Wasm; Gates S and N natively on the SSE backend. |
+| `native-macos-arm64` | `macos-latest` (Apple Silicon; the job fails if `uname -m` is not `arm64`) | `./build.sh --native-check` with `CHRONOS_VERIFY_COMMITTED_WASM=1`, then the scalar commands under [Native backends only](#native-backends-only---native-check) | NEON on real hardware: conformance against the scalar reference and whole-kernel parity with the Wasm (Hodge, conservation, swarm; no `ffmpeg` on the runner). The scalar reference at kernel level on aarch64. The Wasm builds byte-identically on macOS too. |
+| `native-scalar-linux-x86_64` | `ubuntu-latest` | Both native test suites and Gate N with `simd-force-scalar`, all four scenarios | The scalar reference at kernel level on x86_64, real-MP4 tracking included. |
+| `miri-scalar` | `ubuntu-latest` | `cargo miri test` over the SIMD layer, then `native/tests/kernel_ticks.rs` (see [Miri](#miri)) | No undefined behaviour Miri can detect in that scope. Non-blocking (`continue-on-error: true`). |
+
+A scalar backend that diverges fails both scalar jobs. The conformance suite compares it with NEON or SSE and with `std` math, and Gate N compares the whole kernel with the Wasm call by call. Measured with a deliberately broken scalar `f32x4_nearest` (ties away from zero) and `simd-force-scalar` on aarch64, the scalar step fails three ways. `cargo test` fails `neon_backend_matches_scalar_reference` and `floor_and_nearest_match_std` (on x86_64, `sse_backend_matches_scalar_reference` takes the place of the NEON test). Gate N fails at swarm call `#148` (`chronos_post_tick`, 4 of 45 region digests differ), while Hodge and conservation still pass.
+
+**Caching.** The kernel has no dependencies, so the only thing a native job builds is the crate itself, and Cargo decides its freshness by file mtimes. A checkout makes every source newer than any cached artifact, so a cache restored on a partial key would be rebuilt anyway. Worse, moving the mtimes back after such a restore could make stale artifacts look fresh. The native jobs therefore cache `target/` and `native/target/` under a key that hashes the toolchain file, both lock files, both manifests, `.cargo/config.toml` and every Rust source (`src/**`, `native/replay/**`, `native/tests/**`), with no `restore-keys`. Only on an exact hit do they set every tracked file's mtime to 2000-01-01, so Cargo reuses artifacts built from byte-identical inputs. That covers re-runs and commits that touch only docs, scripts or `web/`, and skips Gate N's native build (about 40 s of its 43 s on Apple Silicon). The full-pipeline job keeps its original cache and always rebuilds the crate, as the deployment gate should.
+
+**Pages.** [.github/workflows/pages.yml](../.github/workflows/pages.yml) runs on `workflow_run` completion of this workflow and deploys only if `github.event.workflow_run.conclusion == 'success'` (for a push to `main` of a public repository). A workflow run concludes `success` only when every job does, so any failing blocking job prevents deployment. The Miri job has `continue-on-error: true`: its failure shows on the job but does not change the run's conclusion, so it cannot block (or permit) a deployment. A cancelled or timed-out run concludes `cancelled` or `failure` and does not deploy either.
+
+## Miri
+
+[Miri](https://github.com/rust-lang/miri) interprets the kernel's MIR and reports undefined behaviour it can observe: out-of-bounds or misaligned raw-pointer accesses, uninitialised reads, invalid values, data races, and aliasing violations under Stacked Borrows (the default) or Tree Borrows. It needs a nightly toolchain, so it uses `nightly-2026-10-19` (with the `miri` and `rust-src` components) for this only; everything else keeps `rust-toolchain.toml`. It cannot interpret most NEON intrinsics, so every Miri run uses `simd-force-scalar`. On x86_64 it does interpret the SSE intrinsics, so there `sse_backend_matches_scalar_reference` runs the SSE backend under Miri too.
+
+```bash
+rustup toolchain install nightly-2026-10-19 --profile minimal --component miri,rust-src
+HOST="$(rustc +nightly-2026-10-19 -vV | sed -n 's/^host: //p')"   # cargo miri does not accept `host-tuple`
+# SIMD layer tests
+cargo +nightly-2026-10-19 miri test --target "$HOST" --features simd-force-scalar
+# Kernel: chronos_init, chronos_set_params (look-ahead K = 1), two SD frames through chronos_tick
+cargo +nightly-2026-10-19 miri test --manifest-path native/Cargo.toml --target "$HOST" \
+    --features simd-force-scalar --test kernel_ticks -- --nocapture
+# Replay driver on a short recorded trace (reads the trace file, hence no isolation)
+MIRIFLAGS=-Zmiri-disable-isolation cargo +nightly-2026-10-19 miri run --manifest-path native/Cargo.toml \
+    --target "$HOST" --features simd-force-scalar --bin chronos_replay -- --in-process --require-full <trace>
+```
+
+Under `cfg(miri)` the tests run reduced versions of themselves:
+- The conformance tests use 4 random vectors per entry instead of 4,096; the edge vectors still run in full.
+- The negative-control test runs 1 of its 9 controls.
+- The scalar-vs-`std` sweeps cover about 1,700 `f32` inputs and 4,000 `f64` inputs.
+- The SSE random-shuffle test uses 500 iterations instead of 100,000.
+- `kernel_ticks` runs 2 frames instead of 24.
+
+Two tests are ignored under Miri: `every_kernel_const_generic_instantiation_is_in_the_table` (it reads `src/` from disk) and `neon_backend_matches_scalar_reference` (NEON intrinsics; the first one hit is `llvm.aarch64.neon.fmin.v4f32`).
+
+### Results (Apple M4 Pro, at most two Miri processes running at once)
+
+| Scope | Target | Aliasing model | Result | Wall time |
+| :--- | :--- | :--- | :--- | ---: |
+| SIMD layer tests (13 run) | `aarch64-apple-darwin` | Stacked Borrows | pass, no UB reported | 2 min 57 s |
+| SIMD layer tests (13 run) | `aarch64-apple-darwin` | Tree Borrows | pass, no UB reported | 3 min 55 s |
+| SIMD layer tests (13 run, SSE backend included) | `x86_64-unknown-linux-gnu` (cross-interpreted, as in CI) | Stacked Borrows | pass, no UB reported | 6 min 07 s (sysroot build included) |
+| `kernel_ticks`: init + 3 SD frames, K = 8 | `aarch64-apple-darwin` | Stacked Borrows | pass, no UB reported | 26 min 28 s |
+| `kernel_ticks`: init + 3 SD frames, K = 1 (display stage reached) | `aarch64-apple-darwin` | Stacked Borrows | pass, no UB reported; init 33 s, frames 340 s, 611 s, 617 s | 26 min 42 s |
+| `kernel_ticks`: init + 2 SD frames, K = 1 (the CI configuration) | `x86_64-unknown-linux-gnu` | Stacked Borrows | pass, no UB reported; init 33 s, frames 346 s, 601 s | 16 min 25 s |
+| `chronos_replay --in-process` on a 9-call trace recorded from the wasm (init, set_resolution, set_params, two frames with ingest meta and `chronos_tick`) | `aarch64-apple-darwin` | Stacked Borrows | PASS bit for bit (7 digest-checked calls, 315 region digests); 2 warnings, below | 39 min 35 s |
+
+Each digest-checked call hashes 12.7 MB of regions, which takes about 4 minutes under Miri, so the replay scope stays a local experiment. The trace was recorded by a small throwaway Node script under `scripts/trace_hook.mjs`; it is not in the repository.
+
+**Findings.** Miri reported no undefined behaviour in any scope above, under either aliasing model where both were run (Tree Borrows was run on the SIMD layer; the kernel and replay runs used Stacked Borrows, the stricter of the two). In particular, the re-entrant `arena_mut()` pattern (a function holding `let a = arena_mut()` while calling another kernel function that calls `arena_mut()` again) did not produce a Stacked Borrows violation on the paths these runs execute. That pattern is only UB if the outer reference is used again after the inner call has retagged the arena. The only diagnostics were two warnings in the replay driver, not the kernel:
+
+- `native/replay/replayer.rs:406` (`std::slice::from_raw_parts(p as *const u8, len)` in `check_digests`) and `native/replay/replayer.rs:344` (`(p + offset as usize) as *mut u8` in `apply_write`): `warning: integer-to-pointer cast`. The driver keeps region addresses as `usize` (from `Ret::Ptr(self as usize)` in `native/replay/kernel.rs`) and casts them back. Under Rust's exposed-provenance rules that is defined behaviour, so these are not hazards. But Miri can then check those accesses less precisely ("Miri might miss pointer bugs"). Keeping the getter results as `*mut u8` would let the driver run under `-Zmiri-strict-provenance`.
+
+**What this does not cover.** Only the paths these runs execute are checked: init, the parameter and ingest setters, and the SD per-frame pipeline in the default modes (swarm, Hodge, BOS, vibrometry and conservation off, `lab_mode = 0`), on the scalar backend, for 2 to 3 frames. HD resolution, the swarm and continuum path, Hodge, BOS, vibrometry and audio, conservation, `chronos_reset_tracks`, the inspect calls and `native::reset_to_pristine` were not run under Miri. Neither was the NEON backend. Nor was any long-run state, such as ring wraparound or track lifetimes.
+
+**CI.** The `miri-scalar` job runs the first two commands on `ubuntu-latest` (x86_64) with Stacked Borrows, and is non-blocking (`continue-on-error: true`, `timeout-minutes: 75`). Expected runtime is about 30 to 45 minutes: 6 + 16 minutes measured here, and GitHub's runners are slower per core than an M4 Pro.

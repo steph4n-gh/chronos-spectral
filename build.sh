@@ -217,6 +217,12 @@ if [ "$V128_COUNT" -lt 20 ] || [ "$CLZ_COUNT" -lt 1 ] || [ "$COPYSIGN_COUNT" -lt
 fi
 echo "  [PASS] Emitted instructions: ${V128_COUNT} SIMD128 ops, ${CLZ_COUNT} i32.clz ops, ${COPYSIGN_COUNT} f32.copysign ops"
 
+# --native-check: the build, the static audit, Gate S and Gate N only (the native-backend CI jobs,
+# e.g. macOS arm64 for NEON). Steps 3, Q, W1 and W2 exercise the Wasm alone and run in --check.
+if [ "${1:-}" = "--native-check" ]; then
+  echo ""
+  echo "[3/5] --native-check: skipping the Wasm-only suites (step 3, Gates Q, W1, W2; run them with --check)"
+else
 echo ""
 echo "[3/5] Running Mathematical Counterexample & Ablation Audit Suite..."
 if command -v sysctl >/dev/null 2>&1; then
@@ -2987,6 +2993,7 @@ echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+fi
 
 echo ""
 echo "[Gate S] Running SIMD Layer Conformance (simd::scalar vs Wasm SIMD128 in V8, native host suite, negative controls)..."
@@ -3003,19 +3010,26 @@ echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance su
 
 echo ""
 echo "[Gate N] Running Native/Wasm Whole-Kernel Parity (fresh CSTRACE recording replayed bit for bit on the native build, negative control)..."
-node scripts/gate_native_parity.mjs
+if [ "${1:-}" = "--native-check" ] && ! command -v ffmpeg >/dev/null 2>&1; then
+  # The real-MP4 scenario decodes its clip with ffmpeg; --native-check also runs on hosts
+  # without it (the macOS CI job). --check and --e2e always run every scenario.
+  echo "  [SKIP] Gate N scenario hero_sd (real MP4): ffmpeg not on PATH (--native-check only)"
+  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm
+else
+  node scripts/gate_native_parity.mjs
+fi
 
 CERT_PARTIAL=0
 if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
   CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")
 fi
 
-if [ "${1:-}" = "--check" ]; then
+if [ "${1:-}" = "--check" ] || [ "${1:-}" = "--native-check" ]; then
   echo ""
   if [ "$CERT_PARTIAL" = "1" ]; then
-    echo "[5/5] [PARTIAL - SCALED BUDGET scale=${CHRONOS_CI_BUDGET_SCALE}] --check mode complete. Exiting cleanly."
+    echo "[5/5] [PARTIAL - SCALED BUDGET scale=${CHRONOS_CI_BUDGET_SCALE}] ${1} mode complete. Exiting cleanly."
   else
-    echo "[5/5] --check mode complete. Exiting cleanly."
+    echo "[5/5] ${1} mode complete. Exiting cleanly."
   fi
   exit 0
 fi

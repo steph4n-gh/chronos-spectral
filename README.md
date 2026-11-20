@@ -91,10 +91,16 @@ Compile `web/chronos_spectral.wasm`, run all offline verification gates (`--chec
 ./build.sh
 ```
 
-Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite) without launching a server:
+Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite), and `Gate N` (native/wasm whole-kernel parity) without launching a server:
 
 ```bash
 ./build.sh --check
+```
+
+Run only the build, the static audit, `Gate S` and `Gate N`, which is what the macOS arm64 CI job runs to prove the native NEON backend (it needs no Chrome, and no `ffmpeg` unless you want Gate N's real-MP4 scenario):
+
+```bash
+./build.sh --native-check
 ```
 
 Run the complete verification pipeline (`--check`, Gate `I6` physical capture fixtures, SD/HD MP4 CLEAR-MOT and physics calibration gates, and headless Chrome CDP Steps `1-10e` covering the full Command Deck, Showcase Split-Wipe surface, live fMP4 `MediaSource` camera-cut recovery, Wave-1/Wave-2 HUD overlays, and native + mocked webcam/WebAudio clock-skew gating):
@@ -191,7 +197,7 @@ In paired sparse-mode parity testing across all 13 non-swarm sample clips (`52/5
 - [src/simd_ops.rs](./src/simd_ops.rs): `v128` SIMD kernels (`0` `MaybeUninit`) for RGBA unpacking, row-luma ingest reductions, Rank-2 ECA projection, sub-pixel Catmull-Rom pan advection, Shi-Tomasi cornerness, `i32.clz` Haar-Morton wavelets, zero-mean gain-invariant patch SAD, and IC-LK refinement.
 - [web/](./web/): Interactive Split-Wipe Showcase and Command Deck UI ([web/index.html](./web/index.html), [web/deck.html](./web/deck.html)), Worker + WebGL2 field compositor ([web/worker.js](./web/worker.js)), prebuilt `web/chronos_spectral.wasm`, and `17` H.264 MP4 clips (`14` open-licensed real-camera clips + `3` semi-synthetic Wave-1 physical fixtures, [web/samples/ATTRIBUTION.md](./web/samples/ATTRIBUTION.md)).
 - [scripts/](./scripts/): Static/math/E2E gates ([build.sh](./build.sh), [scripts/e2e_browser.mjs](./scripts/e2e_browser.mjs), [scripts/calibrate_mp4.mjs](./scripts/calibrate_mp4.mjs), [scripts/benchmark_1000.mjs](./scripts/benchmark_1000.mjs), and `scripts/gate_i*.mjs` Wave-1/Wave-2 suites), HTTP 206 / fMP4 live relay server ([scripts/dev_server.mjs](./scripts/dev_server.mjs)), and documentation media generator ([scripts/capture_docs_media.mjs](./scripts/capture_docs_media.mjs)).
-- [.github/workflows/ci.yml](./.github/workflows/ci.yml) and [.github/workflows/pages.yml](./.github/workflows/pages.yml): Full `./build.sh --e2e` verification CI pipeline plus automatic GitHub Pages static deployment of [web/](./web/) for public builds.
+- [.github/workflows/ci.yml](./.github/workflows/ci.yml) and [.github/workflows/pages.yml](./.github/workflows/pages.yml): CI over all three native SIMD backends (SSE, NEON, scalar) on Linux x86_64 and macOS arm64, plus automatic GitHub Pages static deployment of [web/](./web/) for public builds. Linux x86_64 runs the full `./build.sh --e2e` pipeline against the committed Wasm (native Gates S and N on the SSE backend). macOS arm64 runs `./build.sh --native-check` (build, static audit, Gates S and N on the NEON backend). The scalar reference backend runs the native suites and Gate N with `simd-force-scalar` on both Linux x86_64 and macOS arm64. A non-blocking Miri job covers the SIMD layer tests and a short kernel run. Pages deploys only when every blocking job passed ([details](./docs/VERIFICATION_AND_BENCHMARKS.md#continuous-integration)).
 
 ## Scope limits
 
