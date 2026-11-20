@@ -12,7 +12,7 @@ Ensure Rust (`wasm32-unknown-unknown`), Node.js (`v22+`), and `python3` are inst
 ./build.sh --check
 ```
 
-Runs seven sequential offline stages:
+Runs eight sequential offline stages:
 1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`).
 2. `wasm-objdump` binary audit (`75` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
 3. Mathematical counterexample gates (`Gates A-P`, including `N1` and `N2`).
@@ -20,6 +20,7 @@ Runs seven sequential offline stages:
 5. `Gate Q` high-density `1,000+` target swarm and continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
 6. Wave-1 gates (`gate_i0_i4_ingest.mjs`, `gate_i1_cov_residual.mjs`, `gate_i5_bos.mjs`).
 7. Wave-2 gates (`gate_i2_rs_welch.mjs`, `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs`).
+8. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
 
 ### Full end-to-end pipeline (CI entrypoint)
 
@@ -55,6 +56,11 @@ node scripts/gate_i6_captures.mjs
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+
+# SIMD layer conformance: Wasm SIMD128 (V8) vs simd::scalar, then the native host suite
+node scripts/gate_simd_conformance.mjs
+cargo test --target host-tuple
+cargo test --manifest-path native/Cargo.toml --target host-tuple
 
 # Regenerate all Command Deck screenshots (docs/assets/panels/) and 4 demo GIFs (docs/assets/demos/)
 node scripts/capture_docs_media.mjs

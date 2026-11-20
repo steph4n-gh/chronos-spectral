@@ -2988,6 +2988,15 @@ node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
 
+echo ""
+echo "[Gate S] Running SIMD Layer Conformance (simd::scalar vs Wasm SIMD128 in V8, native host suite, negative controls)..."
+node scripts/gate_simd_conformance.mjs
+# Native host: the same conformance table (selected backend vs simd::scalar), scalar math vs std,
+# negative controls and coverage checks; then the native rlib build linked into a std test binary.
+RUSTFLAGS="-D warnings" cargo test --quiet --target host-tuple
+RUSTFLAGS="-D warnings" cargo test --quiet --manifest-path native/Cargo.toml --target host-tuple
+echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance suite & native library link verified with zero warnings"
+
 CERT_PARTIAL=0
 if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
   CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")

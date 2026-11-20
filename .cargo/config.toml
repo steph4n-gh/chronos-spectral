@@ -1,5 +1,11 @@
 [build]
+# wasm32 stays the default target, so a bare `cargo build --release` still produces the shipped
+# Wasm. Native builds pass `--target host-tuple` (or an explicit triple).
 target = "wasm32-unknown-unknown"
+
+# SIMD128 and the fixed linear-memory / shadow-stack layout belong to the Wasm artifact only.
+# Scoped to wasm32 so native (`--target host-tuple`) builds and tests do not inherit them.
+[target.wasm32-unknown-unknown]
 rustflags = [
   "-C", "target-feature=+simd128",
   "-C", "link-arg=-zstack-size=16384",
