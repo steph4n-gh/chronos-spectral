@@ -2702,15 +2702,18 @@ pub fn extract_compensated_window_from_ring(
     let min_ring = head_f.saturating_sub((HIST_RING_LEN - 1) as u32);
     let lower = if min_ring > start_f { min_ring } else { start_f };
     let mut cnt = 0usize;
-    let mut f = lower;
-    while f <= head_f && cnt < HIST_RING_LEN {
+    // `lower..=head_f` ends after `head_f` without computing `head_f + 1`, which would wrap to
+    // frame 0 when `head_f == u32::MAX` (the frame counter wraps; see `chronos_post_tick`).
+    for f in lower..=head_f {
+        if cnt == HIST_RING_LEN {
+            break;
+        }
         let slot = (f as usize) & HIST_MASK;
         out_x[cnt] = arc_raw_x[slot] + (hist_cam_x[slot] - cam_hx);
         out_y[cnt] = arc_raw_y[slot] + (hist_cam_y[slot] - cam_hy);
         out_t[cnt] = hist_t_sec[slot];
         out_vis[cnt] = arc_vis[slot];
         cnt += 1;
-        f += 1;
     }
     let mut k = cnt;
     while k < HIST_RING_LEN {
@@ -2745,8 +2748,11 @@ fn extract_compensated_vis_to_scratch(
     let mut nv = 0usize;
     let mut t0_sec = 0.0f64;
     let mut has_t0 = false;
-    let mut f = lower;
-    while f <= head_f && nv < HIST_RING_LEN {
+    // Inclusive range: no `head_f + 1`, which wraps at `u32::MAX`.
+    for f in lower..=head_f {
+        if nv == HIST_RING_LEN {
+            break;
+        }
         let slot = (f as usize) & HIST_MASK;
         if arc_vis[slot] != 0 {
             let wx = arc_raw_x[slot] + (hist_cam_x[slot] - cam_hx);
@@ -2763,7 +2769,6 @@ fn extract_compensated_vis_to_scratch(
                 nv += 1;
             }
         }
-        f += 1;
     }
     nv
 }
@@ -5788,8 +5793,12 @@ fn collect_window_samples(
         return 0;
     }
     let mut count = 0usize;
-    let mut f = fs;
-    while f <= fe && count < 10 {
+    // Inclusive range: no `fe + 1`, which wraps at `u32::MAX` (`fe` is the newest frame when the
+    // window ends at `a.frame_idx`).
+    for f in fs..=fe {
+        if count == 10 {
+            break;
+        }
         let slot = (f as usize) & HIST_RING_MASK;
         if t.arc_vis[slot] != 0 {
             let tau = (a.hist_t_sec[slot] - t_ref_sec) as f32;
@@ -5799,7 +5808,6 @@ fn collect_window_samples(
             out[count] = SamplePt { tau, wx, wy };
             count += 1;
         }
-        f += 1;
     }
     count
 }
@@ -7103,9 +7111,10 @@ pub fn analyze_two_body_collisions(
                     continue;
                 }
                 let mut near = false;
-                let mut f = f_lo;
                 let scan_hi = (f_hi + BLUR_HALF_WIN).min(arena.frame_idx);
-                while f <= scan_hi {
+                // Frame-index loops use inclusive ranges, which never compute `bound + 1` (that
+                // wraps at `u32::MAX`). Here both bounds stay below `frame_idx - 5` anyway.
+                for f in f_lo..=scan_hi {
                     let sf = (f as usize) & HIST_RING_MASK;
                     if ti.arc_vis[sf] != 0 && tj.arc_vis[sf] != 0 {
                         let dx = tj.arc_raw_x[sf] - ti.arc_raw_x[sf];
@@ -7115,7 +7124,6 @@ pub fn analyze_two_body_collisions(
                             break;
                         }
                     }
-                    f += 1;
                 }
                 if !near {
                     let dfx = tj.disp_world_x - ti.disp_world_x;
@@ -7126,15 +7134,13 @@ pub fn analyze_two_body_collisions(
                 }
 
                 let mut pair_best = CollisionPairEvent::zeroed();
-                let mut fc = f_lo;
-                while fc <= f_hi {
+                for fc in f_lo..=f_hi {
                     if !pair_in_cooldown(st, ti.track_id, tj.track_id, fc) {
                         let ev = evaluate_pair_at_frame_ref(arena, ti, tj, i, j, fc);
                         if ev.valid != 0 && (pair_best.valid == 0 || ev.score > pair_best.score) {
                             pair_best = ev;
                         }
                     }
-                    fc += 1;
                 }
                 if pair_best.valid != 0 && pair_best.event_frame < f_hi && (best_ev.valid == 0 || pair_best.score > best_ev.score) {
                     best_ev = pair_best;
@@ -7216,3 +7222,130 @@ pub fn analyze_two_body_collisions(
     out
 }
 
+// The engine frame counter is a `u32` that `chronos_post_tick` advances with `wrapping_add`, so
+// `u32::MAX` is an ordinary frame index. Every window loop over `[lo, hi]` must stop at `hi`, also
+// when `hi == u32::MAX`, instead of wrapping to frame 0 and reading ring slots from outside the
+// window. These tests fail on `while f <= hi { ...; f += 1 }`: with overflow checks (the test
+// profile) the increment panics, without them the loop reads the wrapped frames.
+#[cfg(test)]
+mod frame_wrap_tests {
+    extern crate std;
+    use super::*;
+
+    const LAST: u32 = u32::MAX;
+
+    /// 64-slot history in which every value names its slot, so a sample from any frame outside the
+    /// requested window shows up in the output. Frame `f` lives in slot `f & 63`; for the frames
+    /// `u32::MAX - 63 ..= u32::MAX` that is slots `0 ..= 63` in order.
+    struct Ring {
+        x: [f32; 64],
+        y: [f32; 64],
+        vis: [u8; 64],
+        cam_x: [f32; 64],
+        cam_y: [f32; 64],
+        t_sec: [f64; 64],
+    }
+
+    fn ring() -> Ring {
+        Ring {
+            x: core::array::from_fn(|s| s as f32),
+            y: core::array::from_fn(|s| 1000.0 + s as f32),
+            vis: [1; 64],
+            cam_x: [0.0; 64],
+            cam_y: [0.0; 64],
+            t_sec: core::array::from_fn(|s| s as f64 / 30.0),
+        }
+    }
+
+    #[test]
+    fn compensated_window_ends_at_u32_max() {
+        let r = ring();
+        let (mut ox, mut oy, mut ot, mut ov) = ([0.0f32; 64], [0.0f32; 64], [0.0f64; 64], [9u8; 64]);
+        // A track born 5 frames before the counter wraps: the window is [MAX - 4, MAX].
+        let n = extract_compensated_window_from_ring(
+            &r.x, &r.y, &r.vis, &r.cam_x, &r.cam_y, &r.t_sec, LAST, LAST - 4, &mut ox, &mut oy, &mut ot, &mut ov,
+        );
+        assert_eq!(n, 5);
+        for k in 0..5 {
+            assert_eq!((ox[k], oy[k], ov[k]), ((59 + k) as f32, (1059 + k) as f32, 1));
+        }
+        assert!(ov[5..].iter().all(|&v| v == 0), "samples past u32::MAX: {:?}", &ov[5..]);
+        // A full 64-frame window ending at u32::MAX.
+        let n = extract_compensated_window_from_ring(
+            &r.x, &r.y, &r.vis, &r.cam_x, &r.cam_y, &r.t_sec, LAST, 0, &mut ox, &mut oy, &mut ot, &mut ov,
+        );
+        assert_eq!(n, 64);
+        assert!((0..64).all(|k| ox[k] == k as f32));
+    }
+
+    #[test]
+    fn compensated_vis_window_ends_at_u32_max() {
+        let r = ring();
+        let mut sc = std::boxed::Box::new(PhysicsIdScratch::zeroed());
+        let n = extract_compensated_vis_to_scratch(&r.x, &r.y, &r.vis, &r.cam_x, &r.cam_y, &r.t_sec, LAST, LAST - 4, 1.0, &mut sc);
+        assert_eq!(n, 5);
+        assert!((0..5).all(|k| sc.xs_v[k] == (59 + k) as f32));
+    }
+
+    fn arena_view(r: &Ring) -> CollisionArenaView<'_> {
+        CollisionArenaView {
+            frame_idx: LAST,
+            continuity_epoch: 0,
+            lookahead_k: 2,
+            scene_gravity_conf: 0.0,
+            scene_gravity_px_s2: 0.0,
+            frame_w: 320.0,
+            frame_h: 180.0,
+            scale_s: 1.0,
+            hist_t_sec: &r.t_sec,
+            hist_cam_x: &r.cam_x,
+            hist_cam_y: &r.cam_y,
+        }
+    }
+
+    fn track_view(r: &Ring, track_id: u32) -> CollisionTrackView<'_> {
+        CollisionTrackView {
+            active: (track_id != 0) as u8,
+            confirmed: (track_id != 0) as u8,
+            is_ballistic: 0,
+            pivot_valid: 0,
+            coasting: 0,
+            track_id,
+            birth_frame: LAST - 60,
+            orig_birth_frame: LAST - 60,
+            last_discont_frame: 0,
+            disp_world_x: 63.0,
+            disp_world_y: 1063.0,
+            disp_vx: 30.0,
+            disp_vy: 30.0,
+            arc_raw_x: &r.x,
+            arc_raw_y: &r.y,
+            arc_vis: &r.vis,
+        }
+    }
+
+    #[test]
+    fn collision_window_samples_end_at_u32_max() {
+        let r = ring();
+        let a = arena_view(&r);
+        let t = track_view(&r, 1);
+        let mut out = [SamplePt { tau: 0.0, wx: 0.0, wy: 0.0 }; 10];
+        // The post-impact window of a candidate at f_c = MAX - 8 ends on the newest frame.
+        let n = collect_window_samples(&a, &t, LAST - 5, LAST, 0.0, 0.0, &mut out);
+        assert_eq!(n, 6);
+        assert!((0..6).all(|k| out[k].wx == (58 + k) as f32), "samples past u32::MAX");
+    }
+
+    #[test]
+    fn two_body_analysis_at_u32_max() {
+        // Two confirmed tracks on top of each other when the counter reads u32::MAX: the pair scan
+        // evaluates candidates up to f_c = MAX - 8, whose post-impact window ends at u32::MAX.
+        let r = ring();
+        let a = arena_view(&r);
+        let tracks: [CollisionTrackView<'_>; MAX_TARGETS] =
+            core::array::from_fn(|m| track_view(&r, if m < 2 { m as u32 + 1 } else { 0 }));
+        let mut st = std::boxed::Box::new(CollisionAnalyzerState::zeroed());
+        let out = analyze_two_body_collisions(&a, &tracks, &mut st);
+        assert_eq!(out.has_pair_event, 0);
+    }
+}
