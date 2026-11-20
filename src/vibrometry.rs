@@ -2,6 +2,12 @@
 //!
 //! Pure `#![no_std]`, zero host imports, zero heap allocation inside static `VibrometryState`.
 
+use crate::simd::{
+    f32x4, f32x4_add, f32x4_max, f32x4_min, f32x4_mul, f32x4_splat, i16x8_add,
+    i16x8_lt, i16x8_narrow_i32x4, i16x8_splat, i32x4_trunc_sat_f32x4, u64x2, u64x2_extract_lane,
+    v128, v128_or,
+};
+
 pub const VIBRO_BANDS: usize = 16;
 pub const VIBRO_MAX_ROWS: usize = 360;
 pub const VIBRO_MAX_PIXELS: usize = 640 * 360; // 230,400
@@ -1077,20 +1083,7 @@ impl VibrometryState {
     fn warmup_accumulate_and_lock(&mut self, luma: &[f32], frame_w: usize, frame_h: usize) {
         let need_px = frame_w * frame_h;
         let warm_idx = self.ref_warm_frames;
-        let mut p = 0usize;
-        if warm_idx == 0 {
-            while p < need_px {
-                let q = (luma[p].clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
-                self.ref_luma_q16[p] = q;
-                p += 1;
-            }
-        } else {
-            while p < need_px {
-                let q = (luma[p].clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
-                self.ref_luma_q16[p] = self.ref_luma_q16[p].saturating_add(q);
-                p += 1;
-            }
-        }
+        accumulate_ref_q12(&mut self.ref_luma_q16, luma, need_px, warm_idx == 0);
         self.ref_warm_frames = warm_idx + 1;
         self.hist_cursor = 0;
         self.hist_count = 0;
@@ -2798,5 +2791,131 @@ impl VibrometryState {
     #[inline(always)]
     pub fn planes_ptr(&self) -> *const f32 {
         self.planes.as_ptr()
+    }
+}
+
+/// The warm-up reference accumulation: `dst[p] = q(luma[p])` on the first warm-up frame, else
+/// `dst[p] = dst[p].saturating_add(q(luma[p]))`, with `q(v) = (v.clamp(0.0, 1.0) * 4095.0 + 0.5)
+/// as u16`, for `p < n`.
+///
+/// Eight pixels per step in the SIMD layer (LLVM vectorises the scalar loop for aarch64 but not
+/// for wasm32). Same results for every input: `max(v, 0)` then `min(.., 1)` differs from `clamp`
+/// only for `-0.0` (`+0.0`; both give `0.5` after `* 4095.0 + 0.5`) and in NaN payloads;
+/// `i32x4_trunc_sat_f32x4` truncates like `as u16` on `[0.5, 4095.5]` and maps NaN to `0` as the
+/// cast does; the narrowing is exact for `0..=4095`; and the saturating add is a wrapping add
+/// whose unsigned overflow (`sum < old`) sets the lane to `0xFFFF`. Rows go through fixed-size
+/// array views, so the loads and stores need no `unsafe`.
+#[inline(never)]
+fn accumulate_ref_q12(dst: &mut [u16], luma: &[f32], n: usize, first: bool) {
+    let zero = f32x4_splat(0.0);
+    let one = f32x4_splat(1.0);
+    let scale = f32x4_splat(4095.0);
+    let half = f32x4_splat(0.5);
+    let flip = i16x8_splat(i16::MIN);
+    #[inline(always)]
+    fn quantize(v: v128, zero: v128, one: v128, scale: v128, half: v128) -> v128 {
+        i32x4_trunc_sat_f32x4(f32x4_add(f32x4_mul(f32x4_min(f32x4_max(v, zero), one), scale), half))
+    }
+    #[inline(always)]
+    fn pack4(d: &[u16]) -> u64 {
+        (d[0] as u64) | ((d[1] as u64) << 16) | ((d[2] as u64) << 32) | ((d[3] as u64) << 48)
+    }
+    let mut p = 0usize;
+    while p + 8 <= n {
+        let l: &[f32; 8] = luma[p..p + 8].try_into().unwrap();
+        let d: &mut [u16; 8] = (&mut dst[p..p + 8]).try_into().unwrap();
+        let q = i16x8_narrow_i32x4(
+            quantize(f32x4(l[0], l[1], l[2], l[3]), zero, one, scale, half),
+            quantize(f32x4(l[4], l[5], l[6], l[7]), zero, one, scale, half),
+        );
+        let v = if first {
+            q
+        } else {
+            let old = u64x2(pack4(&d[0..4]), pack4(&d[4..8]));
+            let sum = i16x8_add(old, q);
+            // Unsigned `sum < old` as a signed compare with the top bits flipped.
+            let ovf = i16x8_lt(i16x8_add(sum, flip), i16x8_add(old, flip));
+            v128_or(sum, ovf)
+        };
+        let lo = u64x2_extract_lane::<0>(v);
+        let hi = u64x2_extract_lane::<1>(v);
+        d[0] = lo as u16;
+        d[1] = (lo >> 16) as u16;
+        d[2] = (lo >> 32) as u16;
+        d[3] = (lo >> 48) as u16;
+        d[4] = hi as u16;
+        d[5] = (hi >> 16) as u16;
+        d[6] = (hi >> 32) as u16;
+        d[7] = (hi >> 48) as u16;
+        p += 8;
+    }
+    while p < n {
+        let q = (luma[p].clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+        dst[p] = if first { q } else { dst[p].saturating_add(q) };
+        p += 1;
+    }
+}
+
+#[cfg(test)]
+mod warmup_accumulate_tests {
+    extern crate std;
+    use super::*;
+    use std::vec::Vec;
+
+    /// The scalar loop `accumulate_ref_q12` replaced.
+    fn reference(dst: &mut [u16], luma: &[f32], n: usize, first: bool) {
+        for p in 0..n {
+            let q = (luma[p].clamp(0.0, 1.0) * 4095.0 + 0.5) as u16;
+            dst[p] = if first { q } else { dst[p].saturating_add(q) };
+        }
+    }
+
+    #[test]
+    fn simd_accumulation_matches_scalar() {
+        // Special values among a pseudo-random sweep over [-0.2, 1.2), and accumulators up to
+        // u16::MAX so the saturating path runs (the warm-up itself never reaches it:
+        // 16 x 4095 < 65535). 1003 pixels: the scalar tail runs too.
+        let specials = [
+            f32::NAN,
+            -f32::NAN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            -0.0,
+            0.0,
+            -1e-30,
+            1e-30,
+            0.5,
+            1.0,
+            1.000_000_1,
+            0.999_999_94,
+            -0.5,
+            2.0,
+            1.0 / 8190.0,
+            3.0 / 8190.0,
+        ];
+        let n = 1003;
+        let mut state = 0x1234_5678u32;
+        let luma: Vec<f32> = (0..n)
+            .map(|i| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                if i % 7 == 0 {
+                    specials[(i / 7) % specials.len()]
+                } else {
+                    (state as f32 / u32::MAX as f32) * 1.4 - 0.2
+                }
+            })
+            .collect();
+        for first in [true, false] {
+            for fill in [0u16, 30_000, 61_500, 65_000, 65_535] {
+                let mut a: Vec<u16> =
+                    (0..n).map(|i| fill.wrapping_sub((i as u16).wrapping_mul(7) % 600)).collect();
+                let mut b = a.clone();
+                accumulate_ref_q12(&mut a, &luma, n, first);
+                reference(&mut b, &luma, n, first);
+                assert_eq!(a, b, "first = {first}, fill = {fill}");
+            }
+        }
     }
 }
