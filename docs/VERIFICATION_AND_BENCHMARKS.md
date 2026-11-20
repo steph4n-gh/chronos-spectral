@@ -77,7 +77,7 @@ Measured directly on `web/chronos_spectral.wasm` (`2,474,879 B`):
 | Static data end (`dualStaticEnd`) | `22,704,064 B` | `<= 24,248,320 B` |
 | Max DFS shadow stack | `13,776 B` (`0` call cycles, `0` `call_indirect`) | `<= 14,336 B` soft bound, `<= 16,384 B` hardware bound |
 | Emitted vector / bitwise ops | `101,655` SIMD128 ops, `8` `i32.clz` ops | Non-zero SIMD128 & hardware CLZ |
-| Source memory hygiene | `0` `MaybeUninit` blocks across `src/*.rs`; `0` `unsafe` in [src/continuum_physics.rs](../src/continuum_physics.rs) | Audited across all modules |
+| Source memory hygiene | `0` `MaybeUninit` blocks across `src/*.rs`; exactly `6` `unsafe` tokens in [src/continuum_physics.rs](../src/continuum_physics.rs) (one SIMD128 `k`-NN scan) | Enforced by the `build.sh` source hygiene gate |
 
 ## Mathematical counterexample gates (`Gates A-P`)
 

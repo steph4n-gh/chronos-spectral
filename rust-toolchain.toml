@@ -1,0 +1,7 @@
+# Pinned so the committed web/chronos_spectral.wasm (the binary GitHub Pages ships) is
+# reproducible byte-for-byte. Bump deliberately: rebuild, re-run ./build.sh --e2e, and commit
+# the new binary in the same change.
+[toolchain]
+channel = "1.99.0"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"
