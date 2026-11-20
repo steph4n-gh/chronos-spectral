@@ -36,6 +36,19 @@ fn linked_static_end_bytes() -> u32 {
         0
     }
 }
+
+/// Region addresses are part of the audited ABI. `ARENA` is the wasm's only `.bss` symbol and
+/// the linker places it directly after `.rodata`, so its address (`59,216`, unchanged since
+/// v3.0.0) is `16,384 + size of .rodata`. Kernel changes add or remove panic `Location`s and
+/// strings, which changes `.rodata`; this padding keeps it at exactly `42,832` bytes. `build.sh`
+/// fails if the `.rodata` end is not `59,216` and prints the size to set here. Not used by any
+/// code; `#[used]` keeps it in the binary.
+#[cfg(target_arch = "wasm32")]
+const RODATA_PAD_BYTES: usize = 0;
+#[cfg(target_arch = "wasm32")]
+#[used]
+static RODATA_PAD: [u8; RODATA_PAD_BYTES] = [0xA5; RODATA_PAD_BYTES];
+
 pub use simd_ops::padic_ultrametric_val;
 use simd_ops::{
     advect_bg_subpixel_simd128, build_tpl_ic_lk_cache, cam_pyr_tile_4x6x8_simd128,

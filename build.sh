@@ -205,6 +205,16 @@ if [ "$STACK_INDIRECT" -ne 0 ] || [ "$STACK_CYCLE" -ne 0 ] || [ "$STACK_MAX_PATH
   exit 1
 fi
 echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 24248320 <= 29294592 B)"
+# ARENA, the only .bss symbol, starts at the .rodata end; every region getter's address depends on
+# it, and recorded traces compare those addresses. Keep it where v3.0.0 put it (src/lib.rs
+# RODATA_PAD_BYTES absorbs code changes that add or remove panic locations and strings).
+RODATA_END_EXPECTED=59216
+if [ "$RODATA_END" -ne "$RODATA_END_EXPECTED" ]; then
+  echo "FAIL: .rodata ends at ${RODATA_END}, not ${RODATA_END_EXPECTED}: every region address would move." >&2
+  echo "      Set RODATA_PAD_BYTES in src/lib.rs to its current value + $((RODATA_END_EXPECTED - RODATA_END)) and rebuild." >&2
+  exit 1
+fi
+echo "  [PASS] .rodata end = ${RODATA_END} B: ARENA and every region at their v3.0.0 addresses"
 echo "  [PASS] Wasm call-graph max live shadow stack: ${STACK_MAX_PATH} / 16384 B (indirect=${STACK_INDIRECT}, cycles=${STACK_CYCLE})"
 
 V128_COUNT="$(echo "$DISASM" | grep -cE "v128\.|f32x4\.|u32x4\.|i32x4\.")"
