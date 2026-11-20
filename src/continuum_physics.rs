@@ -7348,59 +7348,6 @@ fn fit_cand_ftle_weighted_2x2(
                 f32x4_extract_lane::<3>(v_y0),
             )
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     };
     if cnt < MIN_RIGID_MEMBERS || w_sum <= 1e-6 {
         return (false, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
@@ -7634,7 +7581,6 @@ fn try_ftle_loo_drop(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -7661,18 +7607,6 @@ fn try_ftle_loo_drop(
                 bi += 1;
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
         return (true, median_and_q80_r2(&cs.ftle_cands_res, m, false).0);
     }
     (false, med0_r2_in)
@@ -7753,7 +7687,6 @@ fn try_solve_cell_ftle(
         let dus = &mut cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &mut cs.cand_dv[..FIELD_CAND_CAP];
 
-
         let (mut v_lin, mut v_dx_row, mut v_dy_row, mut v_tt) = {
             use crate::simd::f32x4;
             (
@@ -7779,7 +7712,6 @@ fn try_solve_cell_ftle(
                 dys[ms_idx] = dy;
                 dus[ms_idx] = du;
                 dvs[ms_idx] = dv;
-
                 {
                     use crate::simd::*;
                     let v_xyuv = f32x4(dx, dy, du, dv);
@@ -7791,23 +7723,6 @@ fn try_solve_cell_ftle(
                         f32x4_mul(f32x4(du, du, dv, 0.0), f32x4(du, dv, dv, 0.0)),
                     );
                 }
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
                 m += 1;
             }};
         }
@@ -7868,7 +7783,6 @@ fn try_solve_cell_ftle(
                 k += 1;
             }
         }
-
         {
             use crate::simd::f32x4_extract_lane;
             sx0 = f32x4_extract_lane::<0>(v_lin);
@@ -7970,7 +7884,6 @@ fn try_solve_cell_ftle(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8018,30 +7931,6 @@ fn try_solve_cell_ftle(
             }
             max_r2_0 = hmax_f32x4(vmax_r2);
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
 
     // Exact-affine shortcut: sub-0.75px residual -> OLS F_0 satisfies conditioning & inlier checks
@@ -8073,7 +7962,6 @@ fn try_solve_cell_ftle(
         // with median <= 0.75*q, so skip LOO & Cauchy IRLS and run Pass 2 + verification.
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8092,15 +7980,6 @@ fn try_solve_cell_ftle(
                 bi += 1;
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
         return finish_ftle_pass2(cs, m, m, clean_patch, min_eig_px2, q, t_sec);
     }
 
@@ -8169,7 +8048,6 @@ fn try_solve_cell_ftle_fallback(
     let mut cnt0_le_s0 = 0usize;
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8197,26 +8075,6 @@ fn try_solve_cell_ftle_fallback(
                 bi += 1;
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
 
     if (m >= 7 && cnt0_le_4q2 * 2 <= m) || (m == 6 && cnt0_le_4q2 < 5) {
@@ -8282,7 +8140,6 @@ fn try_solve_cell_ftle_fallback(
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8300,14 +8157,6 @@ fn try_solve_cell_ftle_fallback(
                 bi += 1;
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
     }
 
     // Pass 1: IRLS refit -> bounded residual threshold -> hard-trim >=80% inliers (H7)
@@ -8334,7 +8183,6 @@ fn try_solve_cell_ftle_fallback(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8385,33 +8233,6 @@ fn try_solve_cell_ftle_fallback(
             }
             max_r2_1 = hmax_f32x4(vmax_r2);
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
     if cnt_le_cap < MIN_RIGID_MEMBERS || cnt_le_cap * 5 < m * 4 {
         return (false, false, true, 0.0, 0, false);
@@ -8433,7 +8254,6 @@ fn try_solve_cell_ftle_fallback(
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-
         {
             use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8476,20 +8296,6 @@ fn try_solve_cell_ftle_fallback(
                 }
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
     }
     if inliers < MIN_RIGID_MEMBERS || inliers * 5 < m * 4 {
         return (false, false, false, 0.0, 0, false);
@@ -8530,7 +8336,6 @@ fn finish_ftle_pass2(
             let dys = &cs.cand_dy[..FIELD_CAND_CAP];
             let dus = &cs.cand_du[..FIELD_CAND_CAP];
             let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
-
             {
                 use crate::simd::*;
                 let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
@@ -8587,36 +8392,6 @@ fn finish_ftle_pass2(
                 max_le_65 = hmax_f32x4(vmax);
                 min_gt_65 = hmin_f32x4(vmin);
             }
-            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         }
         if in_cnt == 0 || !ss_in.is_finite() {
             return (false, true, false, 0.0, 0, false);
@@ -8759,7 +8534,6 @@ fn gather_3x3_flat_le24(
     let gti = &cs.field_grid_ti[..MAX_MICRO];
     let c_ti = &mut cs.cell_cands_ti[..FIELD_CAND_CAP];
     let c_d2 = &mut cs.cell_cands_d2[..FIELD_CAND_CAP];
-
     let (vxc, vyc, vrmax2) = {
         use crate::simd::f32x4_splat;
         (f32x4_splat(xc), f32x4_splat(yc), f32x4_splat(r_max2))
@@ -8776,7 +8550,6 @@ fn gather_3x3_flat_le24(
         if s < e {
             let mut p = s;
             let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
-
             {
                 use crate::simd::*;
                 while p + 4 <= e_lim {
@@ -8891,7 +8664,6 @@ fn gather_wide_le24(
                 let s = (row_start[idx_a] as usize).min(e);
                 let mut p = s;
                 let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
-
                 while p + 4 <= e_lim {
                     use crate::simd::*;
                     let ps = p.min(MAX_MICRO - 4);

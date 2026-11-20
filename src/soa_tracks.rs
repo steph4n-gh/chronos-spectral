@@ -6073,112 +6073,6 @@ fn eval_lk_patch_wasm<const NEED_GRAD: bool, const ROWS4: bool>(
 
 /// Evaluates 8x8 bilinearly warped patch at `(cx, cy)` and accumulates true Huber IRLS
 /// objective, L1 mean residual, Hessian `(H_xx, H_xy, H_yy)`, and gradient residual `(b_x, b_y)`.
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 /// Runs 2-iteration SIMD128 Huber IC-LK sub-pixel refinement on `luma` using `ms.tracks.tpl8_i8[ti]`
 /// and arena-resident `lk_*` scratch (zero stack buffers >= 64 B). Enforces zero-mean projected
 /// template gradients, monotonic true-Huber-loss atomic checkpointing with final-step verification,
@@ -6202,7 +6096,6 @@ fn refine_ic_lk_8x8_2iter(
     fast_lk: bool,
     metrology_active: bool,
 ) -> (f32, f32, f32, f32, bool) {
-
     {
         let tr = refine_ic_lk_8x8_2iter_wasm(
             luma,
@@ -6228,25 +6121,7 @@ fn refine_ic_lk_8x8_2iter(
             tr > 0.0,
         )
     }
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
-
 
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
@@ -6281,7 +6156,6 @@ fn refine_ic_lk_8x8_2iter_wasm(
         ),
     }
 }
-
 
 #[inline(always)]
 unsafe fn prep_ic_lk_tpl<const FAST_4X8: bool>(
@@ -6534,7 +6408,6 @@ unsafe fn prep_ic_lk_tpl<const FAST_4X8: bool>(
     out_stats[3] = (hsum_f32x4(vh_yy) - n_pix * mgy * mgy).max(0.0);
 }
 
-
 #[inline(never)]
 unsafe fn prep_ic_lk_tpl_8x8(
     tpl_i8: &[i8; 64],
@@ -6545,7 +6418,6 @@ unsafe fn prep_ic_lk_tpl_8x8(
 ) {
     prep_ic_lk_tpl::<false>(tpl_i8, lk_tpl_f, lk_gx, lk_gy, out_stats);
 }
-
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -6775,250 +6647,6 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool, const METROLOGY_ACTIVE
     }
     if FAST_4X8 { 2.0 * tr_b } else { tr_b }
 }
-
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 #[inline(always)]
 unsafe fn apply_coast_or_retire_raw(
@@ -7526,7 +7154,6 @@ pub fn update_step1_matched(
                     + 0.72 * vy_prior * safe_dt;
                 let e_osc2 = (nx - ex_osc) * (nx - ex_osc) + (ny - ey_osc) * (ny - ey_osc);
 
-
                 {
                     let x = f32x4_mul(
                         f32x4_splat(-inv_2sig2),
@@ -7606,31 +7233,6 @@ pub fn update_step1_matched(
                         };
                     }
                 }
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
                 let prev_confirmed_mature = was_coasting == 0
                     && *state_ptr.add(ti) == MICRO_STATE_CONFIRMED
                     && *age_ptr.add(ti) >= 4;
@@ -7709,7 +7311,6 @@ pub fn update_step1_matched(
 
                 // Symmetric truncation-toward-zero template refresh ONLY when IC-LK accepted cleanly
                 if ok && lk_res < 0.14 && !chr_shock {
-
                     {
                         let dp = (*tpl8_ptr.add(ti)).as_mut_ptr() as *mut v128;
                         let sp = (*peak_tpl8_ptr.add(pi)).as_ptr() as *const v128;
@@ -7736,17 +7337,6 @@ pub fn update_step1_matched(
                             c += 1;
                         }
                     }
-                    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
                 }
             }
             ord_i += 1;
@@ -8305,7 +7895,6 @@ pub fn update_step2_coast_merge_direct(
             let r_merge2 = r_merge * r_merge;
             let dv_lim = 4.0 * q * inv_dt;
             let dv_lim2 = dv_lim * dv_lim;
-
             let vr_merge2 = f32x4_splat(r_merge2);
 
             ord_i = 0;
@@ -8318,7 +7907,6 @@ pub fn update_step2_coast_merge_direct(
                     let x_hi = cell_coord(px + r_merge, inv_fcw, CSR_CELL_W - 1);
                     let y_lo = cell_coord(py - r_merge, inv_fch, CSR_CELL_H - 1);
                     let y_hi = cell_coord(py + r_merge, inv_fch, CSR_CELL_H - 1);
-
                     let (v_px, v_py) = (f32x4_splat(px), f32x4_splat(py));
                     let mut dup = false;
                     let mut cy = y_lo;
@@ -8327,7 +7915,6 @@ pub fn update_step2_coast_merge_direct(
                         let s_seg = *cell_off_ptr.add(row_off + x_lo) as usize;
                         let e_seg = (*cell_off_ptr.add(row_off + x_hi + 1) as usize).min(MAX_MICRO);
                         let mut k = s_seg;
-
 
                         while k < e_seg {
                             let dx = f32x4_sub(
@@ -8371,35 +7958,6 @@ pub fn update_step2_coast_merge_direct(
                             }
                             k += 4;
                         }
-
-                        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
                         cy += 1;
                     }
@@ -8730,7 +8288,6 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
             && ms.tracks.ftle_val.len() >= MAX_MICRO
     );
 
-
     let vzero = f32x4_splat(0.0);
     let exp_ptr = ms.export_micro.as_mut_ptr();
     let state_p = ms.tracks.state.as_mut_ptr();
@@ -8776,23 +8333,11 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                 }
             }
             if st == MICRO_STATE_INACTIVE {
-
                 {
                     let ep = exp_ptr.add(base) as *mut v128;
                     core::ptr::write_unaligned(ep, vzero);
                     core::ptr::write_unaligned(ep.add(1), vzero);
                 }
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
             } else {
                 act_cnt += 1;
                 if st == MICRO_STATE_CONFIRMED {
@@ -8809,7 +8354,6 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                     *ftle_val_p.add(i) = FTLE_INVALID_VAL;
                     FTLE_INVALID_VAL
                 };
-
                 {
                     let ep = exp_ptr.add(base) as *mut v128;
                     core::ptr::write_unaligned(
@@ -8831,17 +8375,6 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                         ),
                     );
                 }
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
             }
             i += 1;
         }
