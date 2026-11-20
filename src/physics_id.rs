@@ -9,13 +9,13 @@
 //! - Section C: Causal Two-Body Elastic/Inelastic Collision & Momentum/Energy Conservation Analyzer
 //!   (`JUMP_COLLISION = 4`, `PHYS_REGIME_IMPULSIVE = 7`, inverse mass ratio, restitution `e_n`).
 
-#[cfg(target_arch = "wasm32")]
-use core::arch::wasm32::{
+
+use crate::simd::{
     f32x4, f32x4_add, f32x4_extract_lane, f32x4_gt, f32x4_lt, f32x4_mul, f32x4_nearest,
     f32x4_splat, f32x4_sub, f64x2_extract_lane, f64x2_splat, f64x2_sqrt, v128, v128_bitselect,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use core::arch::wasm32::{f64x2_extract_lane, f64x2_splat, f64x2_sqrt};
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
 
 #[allow(unused_imports)]
 use crate::{
@@ -1059,7 +1059,7 @@ fn build_weak_weights(sc: &mut PhysicsIdScratch, n: usize, center_t: f32, half_h
     if amp < 1.0e-6 { None } else { Some((i0, i1, amp)) }
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 fn fast_sin4_wasm(vx: v128) -> v128 {
     use core::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -1092,7 +1092,7 @@ fn fast_sin4_wasm(vx: v128) -> v128 {
     f32x4_mul(a, poly)
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 fn hsum_f32x4_f64(v: v128) -> f64 {
     (f32x4_extract_lane::<0>(v) as f64)
@@ -1118,7 +1118,7 @@ fn eval_sinusoid_single(
         return (0.0, 999.0, 0.0);
     }
     let mut i = 0usize;
-    #[cfg(target_arch = "wasm32")]
+
     let (mut sc_sum, mut ss_sum, mut scc_sum, mut scs_sum, mut sss_sum, mut b1_sum, mut b2_sum) = {
         let v_omega = f32x4_splat(omega);
         let v_hpi = f32x4_splat(core::f32::consts::FRAC_PI_2);
@@ -1154,9 +1154,9 @@ fn eval_sinusoid_single(
             hsum_f32x4_f64(v_b2),
         )
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    let (mut sc_sum, mut ss_sum, mut scc_sum, mut scs_sum, mut sss_sum, mut b1_sum, mut b2_sum) =
-        (0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64, 0.0f64);
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
 
     while i < lim {
         let (s_p, c_p) = fast_sin_cos(omega * t_arr[i]);

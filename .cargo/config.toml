@@ -1,8 +1,25 @@
 [build]
+# wasm32 stays the default target, so a bare `cargo build --release` still produces the shipped
+# Wasm. Native builds pass `--target host-tuple` (or an explicit triple).
 target = "wasm32-unknown-unknown"
+
+# SIMD128 and the fixed linear-memory / shadow-stack layout belong to the Wasm artifact only.
+# Scoped to wasm32 so native (`--target host-tuple`) builds and tests do not inherit them.
+[target.wasm32-unknown-unknown]
 rustflags = [
   "-C", "target-feature=+simd128",
   "-C", "link-arg=-zstack-size=16384",
   "-C", "link-arg=--initial-memory=29360128",
   "-C", "link-arg=--max-memory=29360128",
 ]
+
+# x86_64 native builds: SSE2 + SSSE3 + SSE4.1, the fixed floor of the `simd::sse` backend
+# (`src/simd/sse.rs`; no runtime detection). x86_64-unknown-linux-gnu (CI) is SSE2-only by
+# default; x86_64-apple-darwin already has both. Deliberately no AVX/AVX2/FMA: a fused
+# multiply-add changes float results, and results must match the Wasm bit for bit.
+# A RUSTFLAGS (or CARGO_ENCODED_RUSTFLAGS) environment variable REPLACES every
+# `target.*.rustflags` here and silently selects the scalar backend; add flags with
+# `cargo --config "target.'cfg(all())'.rustflags = [...]"` instead, which Cargo joins with
+# these (build.sh Gate S does this for `-D warnings`).
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-feature=+ssse3,+sse4.1"]
