@@ -44,7 +44,7 @@ fn linked_static_end_bytes() -> u32 {
 /// fails if the `.rodata` end is not `59,216` and prints the size to set here. Not used by any
 /// code; `#[used]` keeps it in the binary.
 #[cfg(target_arch = "wasm32")]
-const RODATA_PAD_BYTES: usize = 624;
+const RODATA_PAD_BYTES: usize = 608;
 #[cfg(target_arch = "wasm32")]
 #[used]
 static RODATA_PAD: [u8; RODATA_PAD_BYTES] = [0xA5; RODATA_PAD_BYTES];
@@ -1023,6 +1023,9 @@ pub struct Arena {
     pub swarm_telem_zeroed: u8,
     pub last_scene_cut: u8,
     pub pre_tick_seen: u8,
+    /// BOS reference-patch reductions per node (`bos::BosRefCache`, 655,376 B). Last, so every
+    /// earlier field (all regions included) keeps its v3.1.0 offset.
+    pub bos_ref_cache: bos::BosRefCache,
 }
 
 // Compile-time structural bound: Arena + Wave1 + Wave2 state <= 24,117,248 B (23.00 MiB) within 448 pages (29,360,128 B)
@@ -17857,6 +17860,7 @@ pub unsafe extern "C" fn chronos_post_tick(dt_sec: f32) -> u32 {
             meta.frame_gap_flag,
             ext_pan_or_cut,
             ext_scene_cut,
+            &mut a.bos_ref_cache,
         )
     } else {
         false

@@ -315,7 +315,11 @@ pub struct BosCtrl {
     pub initialized: u8,
     pub _pad: [u8; 2],
     pub anchor_node_idx: [u16; BOS_MAX_ANCHORS],
-    pub _reserved: [u32; 14],
+    /// Generation of `BosState::ref_luma`: advanced (never to 0) by every change of it, and kept
+    /// across `init_in_place`, so `BosRefCache` entries tagged with an older value are never reused.
+    /// `0` only in a zeroed arena, where the cache is empty too.
+    pub ref_gen: u32,
+    pub _reserved: [u32; 13],
 }
 
 const _: () = assert!(core::mem::size_of::<BosCtrl>() == 128);
@@ -507,6 +511,68 @@ impl PatchRefData {
     }
 }
 
+#[inline(always)]
+fn next_gen(g: u32) -> u32 {
+    let n = g.wrapping_add(1);
+    if n == 0 {
+        1
+    } else {
+        n
+    }
+}
+
+/// What `ref_patch_restore` needs to rebuild one node's `PatchRefData` without the reductions.
+#[repr(C, align(16))]
+#[derive(Clone, Copy)]
+pub struct BosRefCacheEntry {
+    mu_t: f64,
+    var_sum_t: f64,
+    mean_gx: f64,
+    mean_gy: f64,
+    a_gx: f64,
+    a_gy: f64,
+    h_xx: f64,
+    h_xy: f64,
+    h_yy: f64,
+    /// `BosCtrl::ref_gen` the entry was computed for (`0`: empty).
+    gen: u32,
+    /// The result of the reference-patch checks (`0`: the node has no usable reference patch).
+    ok: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<BosRefCacheEntry>() == 80);
+
+/// Per-node reference-patch reductions (`build_ref_patch_node`), `655,376 B`. Lives at the end of
+/// the `Arena`, after every region, so adding it moved none of them. All-zero is the empty cache.
+#[repr(C, align(16))]
+pub struct BosRefCache {
+    entries: [BosRefCacheEntry; BOS_NODES],
+    /// Largest `ref_gen` seen; a smaller one means the counter wrapped, so every tag is cleared.
+    last_gen: u32,
+    /// Frame geometry the entries were computed for (node centres depend on it).
+    frame_w: u32,
+    frame_h: u32,
+    _pad: u32,
+}
+
+const _: () = assert!(core::mem::size_of::<BosRefCache>() == 655_376);
+
+impl BosRefCache {
+    #[inline(always)]
+    fn sync(&mut self, ref_gen: u32, w: usize, h: usize) {
+        if ref_gen < self.last_gen || self.frame_w != w as u32 || self.frame_h != h as u32 {
+            let mut n = 0usize;
+            while n < BOS_NODES {
+                self.entries[n].gen = 0;
+                n += 1;
+            }
+            self.frame_w = w as u32;
+            self.frame_h = h as u32;
+        }
+        self.last_gen = ref_gen;
+    }
+}
+
 struct CurPatchFit {
     gain: f64,
     offset: f64,
@@ -519,17 +585,19 @@ struct CurPatchFit {
     cnt: usize,
 }
 
-/// Evaluates an `8x8` reference patch centered at `(cx, cy)`, builds the `[T, 1]`-orthogonal
-/// spatial gradient basis, and checks contrast and `kappa(H) <= 30` conditioning.
-#[inline(never)]
-fn build_ref_patch_8x8(
+/// First phase of the reference patch at `(cx, cy)`: samples the `8x8` patch and its central
+/// differences into `out` (`m_cnt`, `valid_flag`, `t`, `gx_raw`, `gy_raw`). With `WITH_SUM` it
+/// also returns `sum_t`, the sum of the valid samples in pixel order (a sequential `f64` chain;
+/// skipped when the cached reductions are reused).
+#[inline(always)]
+fn ref_patch_samples<const WITH_SUM: bool>(
     ref_luma: &[f32],
     w: usize,
     h: usize,
     cx: f32,
     cy: f32,
     out: &mut PatchRefData,
-) -> bool {
+) -> f64 {
     out.m_cnt = 0;
     let fast_in_bounds = cx >= 5.0
         && cx <= ((w - 6) as f32)
@@ -621,7 +689,7 @@ fn build_ref_patch_8x8(
                 out.valid_flag[k + 2] = (m >> 2) & 1;
                 out.valid_flag[k + 3] = (m >> 3) & 1;
                 out.m_cnt += m.count_ones() as usize;
-                {
+                if WITH_SUM {
                     // In pixel order, valid pixels only: the same additions as before.
                     if (m & 1) != 0 {
                         sum_t += f32x4_extract_lane::<0>(tv) as f64;
@@ -662,7 +730,9 @@ fn build_ref_patch_8x8(
                         out.t[k] = tc;
                         out.gx_raw[k] = 0.5 * (txp - txm);
                         out.gy_raw[k] = 0.5 * (typ - tym);
-                        sum_t += tc as f64;
+                        if WITH_SUM {
+                            sum_t += tc as f64;
+                        }
                         out.m_cnt += 1;
                         ok = true;
                     }
@@ -678,7 +748,14 @@ fn build_ref_patch_8x8(
             py += 1;
         }
     }
+    sum_t
+}
 
+/// Second phase: the order-dependent `f64` reductions over the samples (`mu_t`, the variance,
+/// gradient means and `T`-projections, then `H` of the `[T, 1]`-orthogonal gradients) and the
+/// contrast and conditioning checks. Records every value `ref_patch_restore` needs in `e`.
+#[inline(always)]
+fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry) -> bool {
     if out.m_cnt < 40 {
         return false;
     }
@@ -686,6 +763,7 @@ fn build_ref_patch_8x8(
     let inv_m = 1.0 / (out.m_cnt as f64);
     let mu_t = sum_t * inv_m;
     out.mu_t = mu_t;
+    e.mu_t = mu_t;
 
     let mut var_sum_t = 0.0f64;
     let mut mean_gx = 0.0f64;
@@ -718,6 +796,11 @@ fn build_ref_patch_8x8(
     mean_gy *= inv_m;
     let a_gx = dot_tgx / var_sum_t;
     let a_gy = dot_tgy / var_sum_t;
+    e.var_sum_t = var_sum_t;
+    e.mean_gx = mean_gx;
+    e.mean_gy = mean_gy;
+    e.a_gx = a_gx;
+    e.a_gy = a_gy;
 
     let mut h_xx = 0.0f64;
     let mut h_xy = 0.0f64;
@@ -760,7 +843,80 @@ fn build_ref_patch_8x8(
     out.h_yy = h_yy;
     out.det = det;
     out.tr = tr;
+    e.h_xx = h_xx;
+    e.h_xy = h_xy;
+    e.h_yy = h_yy;
     true
+}
+
+/// Second phase from a cache entry recorded by `ref_patch_reduce` for the same node and the same
+/// `ref_luma`: the same `out` with no reduction. The per-pixel values are recomputed with the
+/// expressions of `ref_patch_reduce`, the scalars are the recorded ones, and `ref_var`, `tr` and
+/// `det` are recomputed from them with the same operations, so `out` is bit-identical.
+#[inline(always)]
+fn ref_patch_restore(out: &mut PatchRefData, e: &BosRefCacheEntry) -> bool {
+    let inv_m = 1.0 / (out.m_cnt as f64);
+    let mu_t = e.mu_t;
+    out.mu_t = mu_t;
+    out.var_sum_t = e.var_sum_t;
+    out.ref_var = e.var_sum_t * inv_m;
+    let (mean_gx, mean_gy, a_gx, a_gy) = (e.mean_gx, e.mean_gy, e.a_gx, e.a_gy);
+    let mut k = 0usize;
+    while k < 64 {
+        if out.valid_flag[k] != 0 {
+            let dt = (out.t[k] as f64) - mu_t;
+            let gxp = (out.gx_raw[k] as f64) - mean_gx - a_gx * dt;
+            let gyp = (out.gy_raw[k] as f64) - mean_gy - a_gy * dt;
+            out.gx_perp[k] = gxp as f32;
+            out.gy_perp[k] = gyp as f32;
+        } else {
+            out.gx_perp[k] = 0.0;
+            out.gy_perp[k] = 0.0;
+        }
+        k += 1;
+    }
+    let (h_xx, h_xy, h_yy) = (e.h_xx, e.h_xy, e.h_yy);
+    out.h_xx = h_xx;
+    out.h_xy = h_xy;
+    out.h_yy = h_yy;
+    out.det = h_xx * h_yy - h_xy * h_xy;
+    out.tr = h_xx + h_yy;
+    true
+}
+
+/// The reference patch of BOS node `node` (`PatchRefData` as above; `false` when it fails the
+/// contrast or conditioning checks, in which case callers read nothing from `out`).
+///
+/// The patch depends only on `ref_luma`, the frame geometry and the node, so the results of the
+/// reductions are kept per node in `cache`, tagged with `ref_gen` (`BosCtrl::ref_gen`, advanced on
+/// every change of `ref_luma`). A tagged entry skips the three sequential `f64` reductions, which
+/// dominate the cost; everything else is recomputed exactly. `ref_gen == 0` disables reuse.
+#[inline(never)]
+fn build_ref_patch_node(
+    cache: &mut BosRefCache,
+    ref_gen: u32,
+    ref_luma: &[f32],
+    w: usize,
+    h: usize,
+    node: usize,
+    out: &mut PatchRefData,
+) -> bool {
+    cache.sync(ref_gen, w, h);
+    let (cx, cy) = node_coord(node % BOS_GRID_W, node / BOS_GRID_W, w, h);
+    let e = &mut cache.entries[node];
+    if ref_gen != 0 && e.gen == ref_gen {
+        if e.ok == 0 {
+            return false;
+        }
+        ref_patch_samples::<false>(ref_luma, w, h, cx, cy, out);
+        ref_patch_restore(out, e)
+    } else {
+        let sum_t = ref_patch_samples::<true>(ref_luma, w, h, cx, cy, out);
+        let ok = ref_patch_reduce(out, sum_t, e);
+        e.gen = ref_gen;
+        e.ok = ok as u32;
+        ok
+    }
 }
 
 /// Samples current `8x8` patch at `(cx + dx, cy + dy)` and solves one affine-invariant IC-LK
@@ -1048,7 +1204,14 @@ fn eval_cur_patch_8x8(
 }
 
 impl BosState {
+    /// Advances `ctrl.ref_gen` after `ref_luma` changed (skipping `0`, which means "no cache").
+    #[inline(always)]
+    fn bump_ref_gen(&mut self) {
+        self.ctrl.ref_gen = next_gen(self.ctrl.ref_gen);
+    }
+
     pub fn init_in_place(&mut self) {
+        let next_ref_gen = next_gen(self.ctrl.ref_gen);
         self.solve_x.fill(0.0);
         self.solve_b.fill(0.0);
         self.solve_r.fill(0.0);
@@ -1086,7 +1249,8 @@ impl BosState {
             initialized: 1,
             _pad: [0; 2],
             anchor_node_idx: [0; BOS_MAX_ANCHORS],
-            _reserved: [0; 14],
+            ref_gen: next_ref_gen,
+            _reserved: [0; 13],
         };
         self.telem[0] = 1;
         self.telem[1] = BOS_MODE_OFF;
@@ -1281,7 +1445,7 @@ impl BosState {
     /// Deterministically selects `8..=16` spatially distributed high-contrast anchor patches
     /// inside the declared `gauge_roi` on `ref_luma`.
     #[inline(never)]
-    fn select_anchors_in_gauge(&mut self, frame_w: usize, frame_h: usize) -> usize {
+    fn select_anchors_in_gauge(&mut self, cache: &mut BosRefCache, frame_w: usize, frame_h: usize) -> usize {
         let gx0 = self.ctrl.gauge_x0 as usize;
         let gy0 = self.ctrl.gauge_y0 as usize;
         let gx1 = self.ctrl.gauge_x1 as usize;
@@ -1327,7 +1491,7 @@ impl BosState {
                             && cy >= 5.0
                             && cy <= ((frame_h - 6) as f32)
                         {
-                            if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref)
+                            if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, j * BOS_GRID_W + i, &mut p_ref)
                                 && p_ref.m_cnt == 64
                             {
                                 let disc = sqrt_f64(
@@ -1380,7 +1544,7 @@ impl BosState {
                             && cx <= ((frame_w - 6) as f32)
                             && cy >= 5.0
                             && cy <= ((frame_h - 6) as f32)
-                            && build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref)
+                            && build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node as usize, &mut p_ref)
                             && p_ref.m_cnt == 64
                         {
                             let disc = sqrt_f64(
@@ -1461,6 +1625,7 @@ impl BosState {
     #[inline(never)]
     fn eval_anchor_mse_at(
         &self,
+        cache: &mut BosRefCache,
         cur_luma: &[f32],
         frame_w: usize,
         frame_h: usize,
@@ -1479,7 +1644,7 @@ impl BosState {
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
             let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
-            if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, p_r) {
+            if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
                 {
@@ -1507,7 +1672,7 @@ impl BosState {
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
             let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
-            if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, p_r) {
+            if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
                 {
@@ -1535,7 +1700,7 @@ impl BosState {
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
             let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
-            if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, p_r) {
+            if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
                 {
@@ -1559,6 +1724,7 @@ impl BosState {
     #[inline(never)]
     fn evaluate_frozen_anchors(
         &self,
+        cache: &mut BosRefCache,
         cur_luma: &[f32],
         frame_w: usize,
         frame_h: usize,
@@ -1590,7 +1756,7 @@ impl BosState {
             while a < k_cnt {
                 let node = self.ctrl.anchor_node_idx[a] as usize;
                 let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
-                if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref) {
+                if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, &mut p_ref) {
                     if let Some(fit) = eval_cur_patch_8x8(
                         cur_luma,
                         frame_w,
@@ -1641,6 +1807,7 @@ impl BosState {
 
         // Final joint gain/offset and MSE evaluation at converged (dx, dy)
         let (mut mse, mut gain_final, n_tot) = self.eval_anchor_mse_at(
+            cache,
             cur_luma,
             frame_w,
             frame_h,
@@ -1666,6 +1833,7 @@ impl BosState {
                 while ox <= 4 {
                     if ox != 0 || oy != 0 {
                         let (cmse, cg, cn) = self.eval_anchor_mse_at(
+                            cache,
                             cur_luma,
                             frame_w,
                             frame_h,
@@ -1700,6 +1868,7 @@ impl BosState {
     #[inline(never)]
     fn extract_dense_lk(
         &mut self,
+        cache: &mut BosRefCache,
         cur_luma: &[f32],
         frame_w: usize,
         frame_h: usize,
@@ -1726,7 +1895,7 @@ impl BosState {
                 let mut accepted = false;
                 let mut node_clear_ok = false;
 
-                if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref) {
+                if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, idx, &mut p_ref) {
                     let mut ex = 0.0f32;
                     let mut ey = 0.0f32;
                     let mut last_gain = 1.0f64;
@@ -1902,6 +2071,7 @@ impl BosState {
         let k_cnt = self.ctrl.anchor_count as usize;
         let inv_hx = 1.0 / hx;
         let inv_hy = 1.0 / hy;
+        let mut ref_changed = false;
 
         let mut py = py0;
         while py < py1 {
@@ -1932,11 +2102,15 @@ impl BosState {
                     {
                         let idx = row_off + px;
                         self.ref_luma[idx] += (cur_luma[idx] - self.ref_luma[idx]) * BOS_MAINT_ALPHA;
+                        ref_changed = true;
                     }
                 }
                 px += 1;
             }
             py += 1;
+        }
+        if ref_changed {
+            self.bump_ref_gen();
         }
     }
 
@@ -3171,6 +3345,7 @@ impl BosState {
         frame_gap_flag: u32,
         ext_pan_or_cut: bool,
         ext_scene_cut: bool,
+        cache: &mut BosRefCache,
     ) -> bool {
         if self.ctrl.initialized == 0 {
             self.init_in_place();
@@ -3261,10 +3436,11 @@ impl BosState {
 
             if self.ctrl.warmup_count == 0 {
                 self.ref_luma[..need_px].copy_from_slice(&cur_luma[..need_px]);
+                self.bump_ref_gen();
                 self.ref_noise_var.fill(0.0);
                 self.clear_streak.fill(0);
                 self.ctrl.anchor_base_mse = 0.0;
-                let n_anch = self.select_anchors_in_gauge(frame_w, frame_h);
+                let n_anch = self.select_anchors_in_gauge(cache, frame_w, frame_h);
                 if n_anch < BOS_MIN_ANCHORS {
                     self.ctrl.warmup_count = 0;
                     self.ctrl.anchor_count = 0;
@@ -3282,7 +3458,7 @@ impl BosState {
 
             // Warmup frames 1..15: verify stability against running mean before averaging
             let (sx, sy, amse, again, a_ok) =
-                self.evaluate_frozen_anchors(cur_luma, frame_w, frame_h);
+                self.evaluate_frozen_anchors(cache, cur_luma, frame_w, frame_h);
             let s_mag = sqrt_f32(sx * sx + sy * sy);
             self.telem[19] = if sx.is_finite() { sx.to_bits() } else { 0 };
             self.telem[20] = if sy.is_finite() { sy.to_bits() } else { 0 };
@@ -3323,7 +3499,7 @@ impl BosState {
             }
 
             // Accumulate per-node clear noise baseline before updating ref_luma
-            self.accumulate_warmup_node_noise(cur_luma, frame_w, frame_h);
+            self.accumulate_warmup_node_noise(cache, cur_luma, frame_w, frame_h);
             self.ctrl.anchor_base_mse += amse;
 
             let n_next = self.ctrl.warmup_count + 1;
@@ -3333,6 +3509,7 @@ impl BosState {
                 self.ref_luma[p] += (cur_luma[p] - self.ref_luma[p]) * alpha;
                 p += 1;
             }
+            self.bump_ref_gen();
             self.ctrl.warmup_count = n_next;
             self.telem[10] = n_next;
 
@@ -3343,7 +3520,7 @@ impl BosState {
                     self.ref_noise_var[u] *= 1.0 / 15.0;
                     u += 1;
                 }
-                let n_anch = self.select_anchors_in_gauge(frame_w, frame_h);
+                let n_anch = self.select_anchors_in_gauge(cache, frame_w, frame_h);
                 if n_anch < BOS_MIN_ANCHORS {
                     self.ctrl.warmup_count = 0;
                     self.ctrl.anchor_count = 0;
@@ -3361,7 +3538,7 @@ impl BosState {
         // 2. Active Tripod Stability Guard over Frozen Anchors
         self.telem[10] = self.ctrl.warmup_count;
         let (sx, sy, amse, again, a_ok) =
-            self.evaluate_frozen_anchors(cur_luma, frame_w, frame_h);
+            self.evaluate_frozen_anchors(cache, cur_luma, frame_w, frame_h);
         let s_mag = sqrt_f32(sx * sx + sy * sy);
         let mse_thresh = (4.0 * self.ctrl.anchor_base_mse).max(1e-4);
 
@@ -3399,7 +3576,7 @@ impl BosState {
         // 3. Dense 128x64 Subpixel Refractive Displacement Extraction
         let maint_mode = self.ctrl.requested_mode == BOS_MODE_MAINT;
         let (valid_disp, rms_disp) =
-            self.extract_dense_lk(cur_luma, frame_w, frame_h, maint_mode);
+            self.extract_dense_lk(cache, cur_luma, frame_w, frame_h, maint_mode);
         let valid_frac = (valid_disp as f32) * (1.0 / (BOS_NODES as f32));
         if !valid_frac.is_finite() || !rms_disp.is_finite() {
             self.ctrl.clear_consec_frames = 0;
@@ -3489,7 +3666,13 @@ impl BosState {
     }
 
     #[inline(never)]
-    fn accumulate_warmup_node_noise(&mut self, cur_luma: &[f32], frame_w: usize, frame_h: usize) {
+    fn accumulate_warmup_node_noise(
+        &mut self,
+        cache: &mut BosRefCache,
+        cur_luma: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+    ) {
         let mut p_ref = PatchRefData::empty();
         let mut cur_buf = [0.0f32; 64];
         let mut cur_mask = [0u8; 64];
@@ -3499,7 +3682,7 @@ impl BosState {
             while i < BOS_GRID_W {
                 let idx = j * BOS_GRID_W + i;
                 let (cx, cy) = node_coord(i, j, frame_w, frame_h);
-                if build_ref_patch_8x8(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref) {
+                if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, idx, &mut p_ref) {
                     if let Some(fit) = eval_cur_patch_8x8(
                         cur_luma,
                         frame_w,
