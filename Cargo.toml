@@ -1,6 +1,6 @@
 [package]
 name = "chronos_spectral"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 authors = ["steph4n-gh"]
 description = "Zero-ML, zero-allocation #![no_std] Wasm32 SIMD128 visual physics, 1,500-target swarm, BOS Schlieren, Hodge & vibrometry kernel"

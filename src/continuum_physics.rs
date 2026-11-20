@@ -10923,6 +10923,15 @@ pub fn solve_bench_loo_residuals(
         let gxi = clamped_grid_coord(xi, inv_fw, FIELD_GRID_W - 1) as isize;
         let gyi = clamped_grid_coord(yi, inv_fh, FIELD_GRID_H - 1) as isize;
 
+        // The `BENCH_MAX_NB` nearest candidates, ordered by `d2` and, among equal `d2`, by scan
+        // order (a bounded insertion sort). Each is kept as one key `d2 bits << 32 | p`: `d2` is
+        // `>= +0.0` (a sum of squares; NaN fails `d2 <= r2_lim`), so its bits order like its
+        // value, and the CSR index `p` increases along the scan (rows `cy` ascending, each a
+        // contiguous run of cells), so comparing keys is comparing `(d2, scan order)`. A new key
+        // never ties an old one, so `key < old` is exactly `d2 < old d2`: the same candidates
+        // end up in the same order as when the six candidate arrays were shifted per insertion,
+        // and those arrays are then filled once per pass with the same values.
+        let mut keys = [0u64; BENCH_MAX_NB];
         let mut cand_cnt = 0usize;
         let mut pass = 0usize;
         while pass < 2 {
@@ -10948,37 +10957,39 @@ pub fn solve_bench_loo_residuals(
                         let dx = cs.field_grid_x[p] - xi;
                         let dy = cs.field_grid_y[p] - yi;
                         let d2 = dx * dx + dy * dy;
-                        if d2 <= r2_lim
-                            && (cand_cnt < BENCH_MAX_NB || d2 < cs.cand_buf_d2[BENCH_MAX_NB - 1])
-                        {
-                            let mut ins = if cand_cnt < BENCH_MAX_NB {
-                                cand_cnt
-                            } else {
-                                BENCH_MAX_NB - 1
-                            };
-                            while ins > 0 && d2 < cs.cand_buf_d2[ins - 1] {
-                                cs.cand_buf_ti[ins] = cs.cand_buf_ti[ins - 1];
-                                cs.cand_buf_d2[ins] = cs.cand_buf_d2[ins - 1];
-                                cs.cand_buf_dx[ins] = cs.cand_buf_dx[ins - 1];
-                                cs.cand_buf_dy[ins] = cs.cand_buf_dy[ins - 1];
-                                cs.ftle_cands_w[ins] = cs.ftle_cands_w[ins - 1];
-                                cs.cand_du[ins] = cs.cand_du[ins - 1];
-                                ins -= 1;
-                            }
-                            cs.cand_buf_ti[ins] = tj as u16;
-                            cs.cand_buf_d2[ins] = d2;
-                            cs.cand_buf_dx[ins] = dx;
-                            cs.cand_buf_dy[ins] = dy;
-                            cs.ftle_cands_w[ins] = cs.field_grid_aux[p][0];
-                            cs.cand_du[ins] = cs.field_grid_aux[p][1];
-                            if cand_cnt < BENCH_MAX_NB {
-                                cand_cnt += 1;
+                        if d2 <= r2_lim {
+                            let key = ((d2.to_bits() as u64) << 32) | (p as u64);
+                            if cand_cnt < BENCH_MAX_NB || key < keys[BENCH_MAX_NB - 1] {
+                                let mut ins = if cand_cnt < BENCH_MAX_NB {
+                                    cand_cnt
+                                } else {
+                                    BENCH_MAX_NB - 1
+                                };
+                                while ins > 0 && key < keys[ins - 1] {
+                                    keys[ins] = keys[ins - 1];
+                                    ins -= 1;
+                                }
+                                keys[ins] = key;
+                                if cand_cnt < BENCH_MAX_NB {
+                                    cand_cnt += 1;
+                                }
                             }
                         }
                     }
                     p += 1;
                 }
                 cy += 1;
+            }
+            let mut m = 0usize;
+            while m < cand_cnt {
+                let p = (keys[m] & 0xffff_ffff) as usize;
+                cs.cand_buf_ti[m] = cs.field_grid_ti[p];
+                cs.cand_buf_d2[m] = f32::from_bits((keys[m] >> 32) as u32);
+                cs.cand_buf_dx[m] = cs.field_grid_x[p] - xi;
+                cs.cand_buf_dy[m] = cs.field_grid_y[p] - yi;
+                cs.ftle_cands_w[m] = cs.field_grid_aux[p][0];
+                cs.cand_du[m] = cs.field_grid_aux[p][1];
+                m += 1;
             }
             if cand_cnt >= 6 {
                 break;

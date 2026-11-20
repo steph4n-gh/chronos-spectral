@@ -390,8 +390,8 @@ function benchMain() {
     const ld = benchLoad(file);
     const loadS = (performance.now() - tl) / 1e3;
     const h = ld.h;
-    if (h.wasmSha256 !== wasmSha) {
-      console.log(`[FAIL] ${name}: trace was recorded against wasm ${h.wasmSha256}, replay wasm is ${wasmSha}`);
+    if (h.wasmSha256 !== wasmSha && !allowWasmMismatch) {
+      console.log(`[FAIL] ${name}: trace was recorded against wasm ${h.wasmSha256}, replay wasm is ${wasmSha} (--allow-wasm-mismatch times it anyway)`);
       failed = true;
       continue;
     }

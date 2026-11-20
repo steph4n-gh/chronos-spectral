@@ -4,7 +4,7 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `3.1.x` (`main`, `v3.1.0`) | Yes |
+| `3.1.x` (`main`, `v3.1.1`) | Yes |
 | `< 3.1` | No |
 
 ## Architecture & Threat Boundary

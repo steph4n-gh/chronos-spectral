@@ -10,7 +10,7 @@
 #   cargo test --manifest-path native/Cargo.toml --target host-tuple
 [package]
 name = "chronos_spectral_native"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 license = "Apache-2.0"
 publish = false

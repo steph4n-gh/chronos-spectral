@@ -2,6 +2,24 @@
 
 use crate::simd::*;
 
+/// `[a[0], a[1], a[2], a[3]]` as one unaligned vector load. `f32x4(a[0], a[1], a[2], a[3])` is
+/// the same vector, and aarch64 already compiles it to one load, but LLVM's wasm32 backend builds
+/// it lane by lane (an `f32.load` and an `f32x4.replace_lane` per element after the first).
+#[inline(always)]
+pub(crate) fn load_f32x4(a: &[f32; 4]) -> v128 {
+    // SAFETY: `a` is 16 valid, initialised bytes; `v128_load` is an unaligned load on every
+    // backend (wasm `v128.load`, `read_unaligned`, `_mm_loadu_si128`); any bits are a valid `v128`.
+    unsafe { v128_load(a.as_ptr() as *const v128) }
+}
+
+/// Stores the four lanes of `v` to `a` with one unaligned vector store (the counterpart of
+/// `load_f32x4`; storing the four `f32x4_extract_lane` values is the same bytes).
+#[inline(always)]
+pub(crate) fn store_f32x4(a: &mut [f32; 4], v: v128) {
+    // SAFETY: `a` is 16 writable bytes; `v128_store` is an unaligned store on every backend.
+    unsafe { v128_store(a.as_mut_ptr() as *mut v128, v) }
+}
+
 #[inline(always)]
 pub fn morton2d_4x4(bx: usize, by: usize) -> usize {
     let px = (bx & 1) | ((bx & 2) << 1);
