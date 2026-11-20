@@ -15,9 +15,9 @@
 //!   fabricates uncalibrated gas density or temperature without external optical/Gladstone-Dale constants.
 
 use crate::simd::{
-    f32x4, f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_max, f32x4_min, f32x4_mul,
-    f32x4_splat, f32x4_sqrt, f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat,
-    f64x2_sqrt, f64x2_sub,
+    f32x4, f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_gt, f32x4_lt, f32x4_max, f32x4_min,
+    f32x4_mul, f32x4_splat, f32x4_sqrt, f32x4_sub, f64x2, f64x2_add, f64x2_extract_lane,
+    f64x2_mul, f64x2_splat, f64x2_sqrt, f64x2_sub, i32x4_bitmask, v128, v128_and,
 };
 
 pub const BOS_GRID_W: usize = 128;
@@ -445,6 +445,27 @@ fn is_unsaturated(v: f32) -> bool {
     v.is_finite() && v > 0.008 && v < 0.992
 }
 
+/// `img[start..start + N]` as an array: one bounds check, after which constant indices need none.
+#[inline(always)]
+fn row_n<const N: usize>(img: &[f32], start: usize) -> &[f32; N] {
+    img[start..start + N].try_into().unwrap()
+}
+
+/// `[a[i], a[i + 1], a[i + 2], a[i + 3]]` as one vector (a single unaligned vector load).
+#[inline(always)]
+fn ld4<const N: usize>(a: &[f32; N], i: usize) -> v128 {
+    f32x4(a[i], a[i + 1], a[i + 2], a[i + 3])
+}
+
+/// Stores the four lanes of `v` to `a[i..i + 4]`.
+#[inline(always)]
+fn st4<const N: usize>(a: &mut [f32; N], i: usize, v: v128) {
+    a[i] = f32x4_extract_lane::<0>(v);
+    a[i + 1] = f32x4_extract_lane::<1>(v);
+    a[i + 2] = f32x4_extract_lane::<2>(v);
+    a[i + 3] = f32x4_extract_lane::<3>(v);
+}
+
 struct PatchRefData {
     t: [f32; 64],
     gx_raw: [f32; 64],
@@ -529,95 +550,50 @@ fn build_ref_patch_8x8(
         let w01 = f32x4_splat((1.0 - fx) * fy);
         let w11 = f32x4_splat(fx * fy);
 
+        // Bilinear 10x10 window. Each source row is read through an 11-element array (one bounds
+        // check per row), so every `ld4` of four consecutive elements is a single vector load.
         let mut win10 = [0.0f32; 100];
-        let mut all_unsat = true;
         let mut ry = 0usize;
         while ry < 10 {
             let r0 = (iy + ry) * w + ix;
-            let r1 = r0 + w;
+            let a = row_n::<11>(ref_luma, r0);
+            let b = row_n::<11>(ref_luma, r0 + w);
             // Columns 0..4
-            let a0 = f32x4(
-                ref_luma[r0],
-                ref_luma[r0 + 1],
-                ref_luma[r0 + 2],
-                ref_luma[r0 + 3],
-            );
-            let a1 = f32x4(
-                ref_luma[r0 + 1],
-                ref_luma[r0 + 2],
-                ref_luma[r0 + 3],
-                ref_luma[r0 + 4],
-            );
-            let a2 = f32x4(
-                ref_luma[r1],
-                ref_luma[r1 + 1],
-                ref_luma[r1 + 2],
-                ref_luma[r1 + 3],
-            );
-            let a3 = f32x4(
-                ref_luma[r1 + 1],
-                ref_luma[r1 + 2],
-                ref_luma[r1 + 3],
-                ref_luma[r1 + 4],
-            );
             let v_lo = f32x4_add(
-                f32x4_add(f32x4_mul(w00, a0), f32x4_mul(w10, a1)),
-                f32x4_add(f32x4_mul(w01, a2), f32x4_mul(w11, a3)),
+                f32x4_add(f32x4_mul(w00, ld4(a, 0)), f32x4_mul(w10, ld4(a, 1))),
+                f32x4_add(f32x4_mul(w01, ld4(b, 0)), f32x4_mul(w11, ld4(b, 1))),
             );
-
             // Columns 4..8
-            let b0 = f32x4(
-                ref_luma[r0 + 4],
-                ref_luma[r0 + 5],
-                ref_luma[r0 + 6],
-                ref_luma[r0 + 7],
-            );
-            let b1 = f32x4(
-                ref_luma[r0 + 5],
-                ref_luma[r0 + 6],
-                ref_luma[r0 + 7],
-                ref_luma[r0 + 8],
-            );
-            let b2 = f32x4(
-                ref_luma[r1 + 4],
-                ref_luma[r1 + 5],
-                ref_luma[r1 + 6],
-                ref_luma[r1 + 7],
-            );
-            let b3 = f32x4(
-                ref_luma[r1 + 5],
-                ref_luma[r1 + 6],
-                ref_luma[r1 + 7],
-                ref_luma[r1 + 8],
-            );
             let v_hi = f32x4_add(
-                f32x4_add(f32x4_mul(w00, b0), f32x4_mul(w10, b1)),
-                f32x4_add(f32x4_mul(w01, b2), f32x4_mul(w11, b3)),
+                f32x4_add(f32x4_mul(w00, ld4(a, 4)), f32x4_mul(w10, ld4(a, 5))),
+                f32x4_add(f32x4_mul(w01, ld4(b, 4)), f32x4_mul(w11, ld4(b, 5))),
             );
 
             let dst = ry * 10;
-            win10[dst] = f32x4_extract_lane::<0>(v_lo);
-            win10[dst + 1] = f32x4_extract_lane::<1>(v_lo);
-            win10[dst + 2] = f32x4_extract_lane::<2>(v_lo);
-            win10[dst + 3] = f32x4_extract_lane::<3>(v_lo);
-            win10[dst + 4] = f32x4_extract_lane::<0>(v_hi);
-            win10[dst + 5] = f32x4_extract_lane::<1>(v_hi);
-            win10[dst + 6] = f32x4_extract_lane::<2>(v_hi);
-            win10[dst + 7] = f32x4_extract_lane::<3>(v_hi);
+            st4(&mut win10, dst, v_lo);
+            st4(&mut win10, dst + 4, v_hi);
 
-            let c8 = (1.0 - fx) * (1.0 - fy) * ref_luma[r0 + 8]
-                + fx * (1.0 - fy) * ref_luma[r0 + 9]
-                + (1.0 - fx) * fy * ref_luma[r1 + 8]
-                + fx * fy * ref_luma[r1 + 9];
-            let c9 = (1.0 - fx) * (1.0 - fy) * ref_luma[r0 + 9]
-                + fx * (1.0 - fy) * ref_luma[r0 + 10]
-                + (1.0 - fx) * fy * ref_luma[r1 + 9]
-                + fx * fy * ref_luma[r1 + 10];
+            let c8 = (1.0 - fx) * (1.0 - fy) * a[8]
+                + fx * (1.0 - fy) * a[9]
+                + (1.0 - fx) * fy * b[8]
+                + fx * fy * b[9];
+            let c9 = (1.0 - fx) * (1.0 - fy) * a[9]
+                + fx * (1.0 - fy) * a[10]
+                + (1.0 - fx) * fy * b[9]
+                + fx * fy * b[10];
             win10[dst + 8] = c8;
             win10[dst + 9] = c9;
             ry += 1;
         }
 
+        // Centre samples, central differences and the saturation mask, four pixels at a time.
+        // `v > 0.008 && v < 0.992` is false for NaN and both infinities, exactly as
+        // `is_unsaturated`. Invalid pixels get `gx_raw = gy_raw = +0.0` (the mask clears every
+        // bit); their `t` slot is written too, but `t[k]` is only ever read where `valid_flag[k]`
+        // is set (directly, or through a current-patch mask that is only set there).
+        let half = f32x4_splat(0.5);
+        let sat_lo = f32x4_splat(0.008);
+        let sat_hi = f32x4_splat(0.992);
         let mut k = 0usize;
         let mut py = 0usize;
         while py < 8 {
@@ -626,26 +602,45 @@ fn build_ref_patch_8x8(
             let r_next = (py + 2) * 10;
             let mut px = 0usize;
             while px < 8 {
-                let tv = win10[r_curr + px + 1];
-                if !is_unsaturated(tv) {
-                    all_unsat = false;
-                    out.valid_flag[k] = 0;
-                    out.gx_raw[k] = 0.0;
-                    out.gy_raw[k] = 0.0;
-                } else {
-                    out.valid_flag[k] = 1;
-                    out.t[k] = tv;
-                    out.gx_raw[k] = 0.5 * (win10[r_curr + px + 2] - win10[r_curr + px]);
-                    out.gy_raw[k] = 0.5 * (win10[r_next + px + 1] - win10[r_prev + px + 1]);
-                    sum_t += tv as f64;
-                    out.m_cnt += 1;
+                let tv = ld4(&win10, r_curr + px + 1);
+                let gx = f32x4_mul(
+                    half,
+                    f32x4_sub(ld4(&win10, r_curr + px + 2), ld4(&win10, r_curr + px)),
+                );
+                let gy = f32x4_mul(
+                    half,
+                    f32x4_sub(ld4(&win10, r_next + px + 1), ld4(&win10, r_prev + px + 1)),
+                );
+                let ok = v128_and(f32x4_gt(tv, sat_lo), f32x4_lt(tv, sat_hi));
+                st4(&mut out.t, k, tv);
+                st4(&mut out.gx_raw, k, v128_and(gx, ok));
+                st4(&mut out.gy_raw, k, v128_and(gy, ok));
+                let m = i32x4_bitmask(ok);
+                out.valid_flag[k] = m & 1;
+                out.valid_flag[k + 1] = (m >> 1) & 1;
+                out.valid_flag[k + 2] = (m >> 2) & 1;
+                out.valid_flag[k + 3] = (m >> 3) & 1;
+                out.m_cnt += m.count_ones() as usize;
+                {
+                    // In pixel order, valid pixels only: the same additions as before.
+                    if (m & 1) != 0 {
+                        sum_t += f32x4_extract_lane::<0>(tv) as f64;
+                    }
+                    if (m & 2) != 0 {
+                        sum_t += f32x4_extract_lane::<1>(tv) as f64;
+                    }
+                    if (m & 4) != 0 {
+                        sum_t += f32x4_extract_lane::<2>(tv) as f64;
+                    }
+                    if (m & 8) != 0 {
+                        sum_t += f32x4_extract_lane::<3>(tv) as f64;
+                    }
                 }
-                k += 1;
-                px += 1;
+                k += 4;
+                px += 4;
             }
             py += 1;
         }
-        let _ = all_unsat;
     } else {
         let mut k = 0usize;
         let mut py = 0usize;
@@ -812,75 +807,31 @@ fn eval_cur_patch_8x8(
         let mut acc_i = f32x4_splat(0.0);
         let mut py = 0usize;
         while py < 8 {
+            // Rows read through 9-element arrays: one bounds check per row, vector loads.
             let r0 = (iy + py) * w + ix;
-            let r1 = r0 + w;
-            let a0 = f32x4(
-                cur_luma[r0],
-                cur_luma[r0 + 1],
-                cur_luma[r0 + 2],
-                cur_luma[r0 + 3],
-            );
-            let a1 = f32x4(
-                cur_luma[r0 + 1],
-                cur_luma[r0 + 2],
-                cur_luma[r0 + 3],
-                cur_luma[r0 + 4],
-            );
-            let a2 = f32x4(
-                cur_luma[r1],
-                cur_luma[r1 + 1],
-                cur_luma[r1 + 2],
-                cur_luma[r1 + 3],
-            );
-            let a3 = f32x4(
-                cur_luma[r1 + 1],
-                cur_luma[r1 + 2],
-                cur_luma[r1 + 3],
-                cur_luma[r1 + 4],
-            );
+            let ra = row_n::<9>(cur_luma, r0);
+            let rb = row_n::<9>(cur_luma, r0 + w);
+            let a0 = ld4(ra, 0);
+            let a1 = ld4(ra, 1);
+            let a2 = ld4(rb, 0);
+            let a3 = ld4(rb, 1);
             let v_lo = f32x4_add(
                 f32x4_add(f32x4_mul(w00, a0), f32x4_mul(w10, a1)),
                 f32x4_add(f32x4_mul(w01, a2), f32x4_mul(w11, a3)),
             );
 
-            let b0 = f32x4(
-                cur_luma[r0 + 4],
-                cur_luma[r0 + 5],
-                cur_luma[r0 + 6],
-                cur_luma[r0 + 7],
-            );
-            let b1 = f32x4(
-                cur_luma[r0 + 5],
-                cur_luma[r0 + 6],
-                cur_luma[r0 + 7],
-                cur_luma[r0 + 8],
-            );
-            let b2 = f32x4(
-                cur_luma[r1 + 4],
-                cur_luma[r1 + 5],
-                cur_luma[r1 + 6],
-                cur_luma[r1 + 7],
-            );
-            let b3 = f32x4(
-                cur_luma[r1 + 5],
-                cur_luma[r1 + 6],
-                cur_luma[r1 + 7],
-                cur_luma[r1 + 8],
-            );
+            let b0 = ld4(ra, 4);
+            let b1 = ld4(ra, 5);
+            let b2 = ld4(rb, 4);
+            let b3 = ld4(rb, 5);
             let v_hi = f32x4_add(
                 f32x4_add(f32x4_mul(w00, b0), f32x4_mul(w10, b1)),
                 f32x4_add(f32x4_mul(w01, b2), f32x4_mul(w11, b3)),
             );
 
             let base = py * 8;
-            out_cur[base] = f32x4_extract_lane::<0>(v_lo);
-            out_cur[base + 1] = f32x4_extract_lane::<1>(v_lo);
-            out_cur[base + 2] = f32x4_extract_lane::<2>(v_lo);
-            out_cur[base + 3] = f32x4_extract_lane::<3>(v_lo);
-            out_cur[base + 4] = f32x4_extract_lane::<0>(v_hi);
-            out_cur[base + 5] = f32x4_extract_lane::<1>(v_hi);
-            out_cur[base + 6] = f32x4_extract_lane::<2>(v_hi);
-            out_cur[base + 7] = f32x4_extract_lane::<3>(v_hi);
+            st4(out_cur, base, v_lo);
+            st4(out_cur, base + 4, v_hi);
 
             let row_lo = f32x4_min(
                 f32x4_min(a0, b0),

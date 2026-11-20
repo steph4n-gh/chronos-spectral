@@ -44,7 +44,7 @@ fn linked_static_end_bytes() -> u32 {
 /// fails if the `.rodata` end is not `59,216` and prints the size to set here. Not used by any
 /// code; `#[used]` keeps it in the binary.
 #[cfg(target_arch = "wasm32")]
-const RODATA_PAD_BYTES: usize = 0;
+const RODATA_PAD_BYTES: usize = 624;
 #[cfg(target_arch = "wasm32")]
 #[used]
 static RODATA_PAD: [u8; RODATA_PAD_BYTES] = [0xA5; RODATA_PAD_BYTES];
