@@ -341,6 +341,8 @@ Replay rules (what [scripts/trace_replay.mjs](../scripts/trace_replay.mjs) does,
 5. A `U` record is a raw-address write. It replays only against the identical wasm binary. For a native build, the trace is portable up to the call that follows the first `U` record.
 6. A file without an `E` record (process killed) replays up to its last whole record.
 
+The JS replayer refuses a trace recorded against a different wasm build unless given `--allow-wasm-mismatch`, which replays sessions recorded on one release against another (see [Sessions recorded on v3.0.0, replayed on v3.1.0](#sessions-recorded-on-v300-replayed-on-v310)). It still checks everything, pointer results included: equal pointers show that every region is where it was, which `U` records rely on. Whole-memory digests cover the data section too, so they are skipped and counted.
+
 ### Digest hash: `XXH32`, seed `0`
 
 The digest is standard `XXH32` (xxHash 32-bit) over the region's raw bytes, seed `0`. With all arithmetic mod 2^32, `rotl` = rotate left, and `P1 = 0x9E3779B1`, `P2 = 0x85EBCA77`, `P3 = 0xC2B2AE3D`, `P4 = 0x27D4EB2F`, `P5 = 0x165667B1`:
