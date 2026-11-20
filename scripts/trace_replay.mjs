@@ -39,6 +39,10 @@ const files = inputs.flatMap((p) =>
     ? fs.readdirSync(p).filter((f) => f.endsWith('.cstrace')).sort().map((f) => path.join(p, f))
     : [p]
 );
+if (!files.length) {
+  console.error(`FAIL: no .cstrace files found in: ${inputs.join(', ')} (pass each scenario directory or trace file)`);
+  process.exit(2);
+}
 
 const wasmBytes = fs.readFileSync(wasmPath);
 const wasmSha = crypto.createHash('sha256').update(wasmBytes).digest('hex');
