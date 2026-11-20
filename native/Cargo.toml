@@ -41,6 +41,32 @@ native-lib = []
 simd-force-scalar = []
 simd-conformance = []
 
+# Native release profile, chosen by measurement (docs/VERIFICATION_AND_BENCHMARKS.md, "Native
+# build configuration"): these are Cargo's defaults, spelled out so the choice is explicit. On
+# Apple M4 Pro over the 11 canonical workloads (3 interleaved rounds x 3 passes), the wasm's own
+# profile (fat LTO, codegen-units = 1, panic = "abort") was 0.5% slower in geometric mean and 2.2%
+# slower on the 1,200-target swarm in every round; codegen-units = 1 alone and
+# `-C target-cpu=native` gave no gain either (within +-1.4% per workload). None of these settings
+# changes results: Rust never contracts or reorders float operations at any opt-level or CPU, and
+# every configuration measured passes the 29-trace parity replay with 0 mismatches.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = "unwind"
+debug = false
+
+# The `release` code plus line tables and a .dSYM, for sampling profilers
+# (scripts/bench_profile.mjs). Debug info does not change code generation: every kernel function
+# has the same instructions as in `release` (same opcodes and registers; only addresses differ,
+# because a different profile changes Cargo's metadata hash and with it the code layout).
+# `node scripts/bench_profile.mjs --same-code <release bin> <profiling bin>` checks this.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
+
 # Overflow checks and debug assertions (including core's UB precondition checks) on: arithmetic
 # that silently wraps in the release wasm panics here instead. `opt-level = 1` builds in about
 # two thirds of the release time and replays traces about as fast (`dev` is ~100x slower);
