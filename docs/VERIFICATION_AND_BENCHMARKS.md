@@ -98,17 +98,17 @@ For slower shared cloud virtual machines, set `CHRONOS_CI_BUDGET_SCALE=3.5` (mat
 
 ## Static binary and safety invariants
 
-Measured directly on `web/chronos_spectral.wasm` (`2,475,310 B`):
+Measured directly on `web/chronos_spectral.wasm` (`2,479,630 B`, v3.1.1):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |
 | Export count & host imports | `76` exports (`memory` and `75` functions, one of them the test hook `chronos_test_hook_set_frame_counters`), `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
 | Wasm linear memory | `initial=448 max=448` (`29,360,128 B`) | `448` fixed pages, `0` `memory.grow` |
-| Arena size | `22,644,848 B` | `<= 24,117,248 B` (`Arena` static bound) |
-| Static `.rodata` end | `59,216 B` | Unchanged `.rodata` ceiling |
-| Static data end (`dualStaticEnd`) | `22,704,064 B` | `<= 24,248,320 B` |
+| Arena size | `23,300,224 B` (v3.1.0: `22,644,848 B`; v3.1.1 appends the `655,376 B` BOS reference-patch cache, `bos::BosRefCache`, after every region) | `<= 24,117,248 B` (`Arena` static bound) |
+| Static `.rodata` end | `59,216 B` | Exactly `59,216 B` (`build.sh`): `ARENA` is the only `.bss` symbol and starts there, so every region getter keeps its v3.0.0 address. `RODATA_PAD_BYTES` in [src/lib.rs](../src/lib.rs) absorbs kernel changes that add or remove panic locations, and `build.sh` prints the value to set |
+| Static data end (`dualStaticEnd`) | `23,359,440 B` | `<= 24,248,320 B` |
 | Max DFS shadow stack | `13,776 B` (`0` call cycles, `0` `call_indirect`) | `<= 14,336 B` soft bound, `<= 16,384 B` hardware bound |
-| Emitted vector / bitwise ops | `101,655` SIMD128 ops, `8` `i32.clz` ops | Non-zero SIMD128 & hardware CLZ |
+| Emitted vector / bitwise ops | `101,901` SIMD128 ops, `8` `i32.clz` ops | Non-zero SIMD128 & hardware CLZ |
 | Source memory hygiene | `0` `MaybeUninit` blocks across `src/*.rs`; exactly `6` `unsafe` tokens in [src/continuum_physics.rs](../src/continuum_physics.rs) (one SIMD128 `k`-NN scan) | Enforced by the `build.sh` source hygiene gate |
 
 ## Mathematical counterexample gates (`Gates A-P`)
@@ -286,6 +286,8 @@ There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_r
 
 ### Canonical set (measured)
 
+Re-recorded on v3.1.1 as `canon-v13` (sha256 `c62846a7...`, 3 min on the same machine): every scenario and every instance has exactly the same call count, host-write count, digest-checked call count and file size as `canon-v12` below (29 traces, 58,838 calls, 3,461,034 host writes, 2,541,506,704 bytes), as expected of a release that changes no output. Replaying all 29 against the v3.1.1 wasm gives 0 mismatches. The table and notes below are of the v3.1.0 recording (`canon-v12`).
+
 `record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 51 s on Apple Silicon (v3.1.0 wasm, format 1.1). Replaying all 29 against the wasm takes about 40 s with 0 mismatches, also with `--portable` (no `UNMAPPED` record). Compared with the v3.0.0 recording, every scenario has identical call and host-write counts except `bos` (+1 call) and `ingest_roi` (+3 calls): the test-hook calls that replace the raw-address writes (see below).
 
 | Scenario | Harness | Traces | Calls | Host writes | Size |
@@ -309,6 +311,14 @@ Portable frame-counter writes: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` tes
 ### Sessions recorded on v3.0.0, replayed on v3.1.0
 
 v3.1.0 is the first change of the shipped wasm since the canonical set was recorded, so the v3.0.0 recording (sha256 `7ba36a5b...`, the 29 traces of the table above as they were before this release: `bos` 2,464 calls, `ingest_roi` 7,707, with the four raw-address writes) was replayed on the v3.1.0 wasm (sha256 `f4ad7ce5...`) with `node scripts/trace_replay.mjs --allow-wasm-mismatch`: 29 traces, 58,834 calls, 44,307 digest-checked calls, 1,993,815 region digests, **0 mismatches**. Every return value matched, pointer results included: all 36 region getters return the same addresses in both builds (the release changes no `Arena` field, and the static data ends at the same address, `22,704,064`), so the four raw-address writes still land on `ring_cursor` and `frame_idx`. That is the expected result. The frame-index fix changes results only when a window loop runs past `u32::MAX` with fewer samples than its count bound. The sessions that tick through `u32::MAX` (`bos` and `ingest_roi` instances 2 and 6) never do: the only window loop that reaches that frame is in `bos` at call `#263`, and it has a full 64-frame window, which the old loop also ended on its count bound. The collapsed padding changes only panic locations, and no session panics.
+
+### Sessions recorded on v3.1.0, replayed on v3.1.1
+
+v3.1.1 changes kernel code for speed only (see [Native vs wasm kernel timing](#native-vs-wasm-kernel-timing)), plus one behaviour change at the frame-counter wrap, so the whole `canon-v12` set (29 traces recorded on v3.1.0, sha256 `f4ad7ce5...`) must replay on it unchanged. `node scripts/trace_replay.mjs --allow-wasm-mismatch` on the v3.1.1 wasm (sha256 `c62846a7...`): 29 traces, 58,838 calls, 44,311 digest-checked calls, 1,993,995 region digests, **0 mismatches**, pointer results included. Every commit of the release was checked the same way before it landed (wasm, NEON and `simd-force-scalar`, 29 traces each), and each commit message names its evidence.
+
+- **Region addresses.** `ARENA` is the wasm's only `.bss` symbol and the linker places it directly after `.rodata`, so its address is `16,384 +` the size of `.rodata`. The first v3.1.1 kernel change removed 39 bounds checks, `.rodata` shrank by 624 bytes, and every pointer result of the replay differed from the recording. `RODATA_PAD` in [src/lib.rs](../src/lib.rs) (a `#[used]`, wasm-only byte array) now keeps `.rodata` at exactly 42,832 bytes, and `build.sh` fails unless it ends at `59,216` and prints the `RODATA_PAD_BYTES` value that restores it. All 36 region getters return their v3.0.0 addresses.
+- **Memory layout.** v3.1.1 adds one `Arena` field, `bos_ref_cache` (`bos::BosRefCache`, 655,376 B), after every existing field (`Arena` is `repr(C)`), so no region moves. `size_of::<Arena>()` grows from 22,644,848 to 23,300,224 B (native: 22,651,136 to 23,306,512) and the static data end from 22,704,064 to 23,359,440 B, inside the 24,117,248 and 24,248,320 B bounds and the 448 pages. Those sizes appear only in the [platform words](#platform-word-allowlist), which are masked. `BosCtrl` turns one reserved word into `ref_gen` and stays 128 bytes.
+- **Frame-wrap fix.** Two comparisons in [src/physics_id.rs](../src/physics_id.rs), `f_c < last_discont_frame + 5` and `birth_frame + 2 < f_c`, overflowed `u32` within five (two) frames of `u32::MAX`; they are now made in `u64`. The first is reachable at `frame_idx == u32::MAX` from the pair scan, but the event it guards is invalid either way, and the second is not reachable from the exports (its caller requires four post-impact samples of the born track first). So no session can change; the regression tests are `pair_candidate_after_discontinuity_near_u32_max` and `stationary_birth_partner_born_near_u32_max` in `physics_id::frame_wrap_tests`.
 
 ### Format
 
@@ -414,16 +424,18 @@ Exactly four 32-bit words are exempt from the comparison. Each describes the bui
 
 | Word | wasm32 value | native (aarch64) value | Why it differs |
 | :--- | ---: | ---: | :--- |
-| `telemetry[20]` | `22644848.0` | `22651136.0` | `size_of::<Arena>() as f32`: the arena holds `usize` fields (for example `LanczosScratch::act_idx: [usize; 32]`), so its size depends on pointer width. |
-| `wave1_telemetry[1]` | `22644848` | `22651136` | `size_of::<Arena>() as u32`, as above. |
-| `wave1_telemetry[12]` | `22704064` | `0` | `linked_static_end_bytes()`: the wasm linker's `__heap_base`. A native build has no linear memory. |
-| `wave2_telemetry[1]` | `22644848` | `22651136` | `size_of::<Arena>() as u32`, as above. |
+| `telemetry[20]` | `23300224.0` | `23306512.0` | `size_of::<Arena>() as f32`: the arena holds `usize` fields (for example `LanczosScratch::act_idx: [usize; 32]`), so its size depends on pointer width. |
+| `wave1_telemetry[1]` | `23300224` | `23306512` | `size_of::<Arena>() as u32`, as above. |
+| `wave1_telemetry[12]` | `23359440` | `0` | `linked_static_end_bytes()`: the wasm linker's `__heap_base`. A native build has no linear memory. |
+| `wave2_telemetry[1]` | `23300224` | `23306512` | `size_of::<Arena>() as u32`, as above. |
 
 That is 16 bytes exempt per digest-checked call, out of 12,715,152 bytes hashed (0.000126%): 4 of 6,272 bytes of `telemetry`, 8 of 768 of `wave1_telemetry`, 4 of 256 of `wave2_telemetry`, and none of the other 42 regions. These were the only differences on the first native replay (the masked words, diffed with `trace_region_diff.mjs`). No other word differs anywhere in the canonical set.
 
 ### Native parity results (measured)
 
-The v3.1.0 canonical set (format 1.1, recorded from the v3.1.0 wasm) replayed in full on the native build with Gate N's settings (`checked` profile: overflow checks and debug assertions, including core's UB precondition checks; `--require-full --wasm-sha256=<web wasm>`), Apple M4 Pro (aarch64), on the NEON backend (39.6 s for 2.54 GB) and on the scalar reference (`--features simd-force-scalar`, 99.4 s). Both give the same table:
+**v3.1.1.** The v3.1.1 canonical set (`canon-v13`, recorded from the v3.1.1 wasm) replays in full with Gate N's settings on the NEON backend (28.8 s) and on the scalar reference (80.5 s): 29 pass, 0 portable prefix, 0 fail, with the same calls, digest-checked calls and region digests as the table below. The SSE backend (an `x86_64-apple-darwin` build, `+ssse3,+sse4.1`, run under Rosetta 2) replays the v3.1.0 set (`canon-v12`) with the same result: 29 pass. So do NEON and the scalar reference in the `release` profile, before every commit of the release.
+
+**v3.1.0.** The v3.1.0 canonical set (format 1.1, recorded from the v3.1.0 wasm) replayed in full on the native build with Gate N's settings (`checked` profile: overflow checks and debug assertions, including core's UB precondition checks; `--require-full --wasm-sha256=<web wasm>`), Apple M4 Pro (aarch64), on the NEON backend (39.6 s for 2.54 GB) and on the scalar reference (`--features simd-force-scalar`, 99.4 s). Both give the same table:
 
 | Scenario | Traces | Calls replayed | Digest-checked calls | Region digests | Result |
 | :--- | ---: | ---: | ---: | ---: | :--- |
@@ -446,7 +458,7 @@ Expected divergence sources that turned out not to diverge, and why:
 
 - **`isize` clamps** (`(x + d).min(N - 1) as usize` at `src/soa_tracks.rs` 2945, 2947, 8444, 8446 and `src/continuum_physics.rs` 5488, 5498, 5692, 5711, 8639, 8660). A negative value would give a different `usize` on 32 and 64 bits, but none can be negative. In `soa_tracks.rs` the base is `cell_coord(..)`, which is clamped to `[0, max_cell]`. In `continuum_physics.rs`, `row_s + d_max` has `row >= 0` and `dy_cells` clamped to `[1, FIELD_GRID_H - 1]` by `compute_row_dx_spans`, and every `col + dx_c` is behind a `dx_c >= 0` guard.
 - **`src/simd_ops.rs:10504`** aligns the `roi_luma` scratch pointer up to 16 bytes, so the h-cache starts at a different offset in the scratch on each target. That is harmless: the cache keys (`cached_sy`, `cached_fused_sy`) are per-call locals initialised to `i32::MIN`, so every cache row is written before it is read in the same call. The other `roi_luma` users fill their window before reading it. The extent used, at most a few KiB plus 15 bytes of slack, is far inside the 36,864-byte buffer.
-- **`usize` fields** change the arena layout (`22,644,848` vs `22,651,136` bytes), but nothing reads the arena as bytes except `chronos_init`'s zeroing and the size words in the allowlist.
+- **`usize` fields** change the arena layout (`23,300,224` vs `23,306,512` bytes in v3.1.1; `22,644,848` vs `22,651,136` in v3.1.0), but nothing reads the arena as bytes except `chronos_init`'s zeroing and the size words in the allowlist.
 - **Scalar backend and NaN payloads.** No scalar-backend op disagreed with V8's SIMD128 on any trace. A NaN census of every digested `f32` region at every digest-checked call (an instrumented throwaway build) found that the kernel never writes a NaN into an output region in the canonical set. The only NaNs present are host-written invalid-input tests (`hodge_inject`, `conservation_input`, `0x7fc00000`), which the driver copies byte for byte. So the payload of generated NaNs, which differs between aarch64 (`0x7fc00000`) and x86 (`0xffc00000`), cannot affect these traces.
 
 **Overflow checks across the frame-index wrap.** The `bos` and `ingest_roi` traces move `ring_cursor` and `frame_idx` to `2^32 - 18` and `2^32 - 3` and tick through the wrap, so with the `checked` profile they are the canonical test of frame arithmetic at `u32::MAX`. On v3.0.0 they could not be followed natively past the raw-address writes; an experiment in a throwaway copy that mapped those writes onto the native fields found exactly one overflow, `src/physics_id.rs:2713` `f += 1` in `extract_compensated_window_from_ring` at `f == u32::MAX` (`bos`, call `#263`). On v3.1.0 the traces are portable and pass in full under `checked` (table above). The same v3.1.0 `bos` trace replayed on a driver built from the v3.1.0 sources with only `src/physics_id.rs` reverted to v3.0.0 aborts at call `#264` (`chronos_tick`) with `attempt to add with overflow` at that line. See "Frame-index wraparound in physics-ID window loops" below.
@@ -542,14 +554,14 @@ Each digest-checked call hashes 12.7 MB of regions, which takes about 4 minutes 
 
 ## Native vs wasm kernel timing
 
-The native build exists to be faster than the wasm in V8 on every workload, so it is timed against the wasm on identical inputs: the canonical CSTRACE set (`canon-v11`, the 29 traces of [Canonical set (measured)](#canonical-set-measured)), replayed call for call on both. Parity is checked separately (the 29-trace replay with digests, [Native parity results](#native-parity-results-measured)); a timing run checks only return values.
+The native build exists to be faster than the wasm in V8 on every workload, so it is timed against the wasm on identical inputs: the canonical CSTRACE set (`canon-v12`, the 29 traces recorded on v3.1.0, see [Canonical set (measured)](#canonical-set-measured)), replayed call for call on both. The same harness times one kernel build against another (`--wasm-bin`), which is how every v3.1.1 change was measured. Parity is checked separately (the 29-trace replay with digests, [Native parity results](#native-parity-results-measured)); a timing run checks only return values.
 
 ### What is timed, and how the two sides are kept equal
 
 | | wasm in V8 (`node scripts/trace_replay.mjs --bench`) | native (`chronos_replay --bench`) |
 | :--- | :--- | :--- |
 | Input | the trace, read into memory once before timing | the same |
-| Call sequence | every `C` record up to the first `U` (raw-address) record or recorded trap | the same: a native replay cannot follow a `U` write, so both stop there (`bos` at call 209, `ingest_roi` instances 2 and 6 at calls 58 and 710) |
+| Call sequence | every `C` record up to the first `U` (raw-address) record or recorded trap | the same: a native replay cannot follow a `U` write, so both stop there. `canon-v12` has none, so every session runs in full (the v3.0.0 numbers, on `canon-v11`, stopped `bos` at call 209 and `ingest_roi` instances 2 and 6 at calls 58 and 710: `bos` was 126 ms per pass then and is 4.0 s now) |
 | Each pass | fresh-instance state (the pristine memory image), then every record | fresh-instance state (`native::reset_to_pristine`), then every record |
 | Timed | each kernel call alone: `performance.now()` before and after | each kernel call alone: `Instant::now()` before and after |
 | Not timed | host writes (`W`), resets, region getters, record decoding | the same |
@@ -561,10 +573,10 @@ Both clocks are monotonic and, on macOS, read the same 24 MHz `mach_absolute_tim
 Fairness:
 
 - **Warm-up**: each process discards `--warmup` passes (2 below). V8 compiles every function with Liftoff first and tiers hot ones up to TurboFan during them. Check: V8 with `--no-liftoff` (TurboFan from the first call) gives the same steady state (table under [Sanity checks](#sanity-checks)); the first, cold pass is 1.2 to 1.8 times slower and the second is already within 1% of steady state.
-- **Repetition and drift**: `--passes` measured passes per process (3), `--rounds` processes per workload and side (5). Every round runs every workload on every side, side order alternating (`wasm, neon, scalar`, then `scalar, neon, wasm`), so slow drift on a shared machine affects every side alike.
+- **Repetition and drift**: `--passes` measured passes per process (3), `--rounds` processes per workload and side (5). Every round runs every workload on every side, side order alternating (`A, B, C, D`, then `D, C, B, A`), so slow drift on a shared machine affects every side alike.
 - **Statistics**: per workload, the median of the 15 per-pass kernel totals. *Spread* is the range of the 5 per-round medians relative to the median. The ratio's *round range* is the minimum and maximum of the 5 per-round ratios (each side's median from the same round), which cancels drift between rounds; the headline ratio is of the pooled medians, so it can fall just outside that range. Per export: median, p95 and mean over every call of every measured pass of every round (raw samples are in the JSON).
 - **Integrity**: `bench_native_vs_wasm.mjs` fails unless every side replayed the identical sequence (per trace: call and write counts and stop point; per export: call counts) with 0 return-value mismatches, in every round.
-- **Machine**: Apple M4 Pro (12 cores), macOS 27.3, Node 26.9.0 (V8 14.6.202.34), Rust 1.99.0. Another agent was running CI and Miri jobs during every measurement (load average 5 to 7 on 12 cores). xctrace recorded 99.8% of the profiled samples on performance cores, and the spreads below show how much noise remained.
+- **Machine**: Apple M4 Pro (12 cores), macOS 27.3, Node 26.9.0 (V8 14.6.202.34), Rust 1.99.0. For v3.1.1 no other agent ran, but system processes (a FileProvider check service at ~85% of one core, a backup agent, the editor) kept the load average at 3 to 5 throughout; xctrace recorded 98.6 to 99.5% of the profiled samples on performance cores, and the spreads below show how much noise remained. (The v3.0.0 measurements ran beside another agent's CI and Miri jobs, load average 5 to 7.)
 
 ### Commands
 
@@ -580,10 +592,15 @@ R=native/target/aarch64-apple-darwin
 $R/release/chronos_replay --bench --warmup=2 --passes=5 --bench-reconcile=1 --bench-verbose <trace|dir>...
 node scripts/trace_replay.mjs --bench --warmup=2 --passes=5 --bench-reconcile=1 --bench-verbose <trace|dir>...
 
-# The comparison below (40 min here with the scalar side; --out=DIR keeps every per-run JSON and log)
+# The comparison below: two kernel builds, each as wasm and NEON (about 65 min; --out=DIR keeps every
+# per-run JSON and log). --wasm-bin replays with --allow-wasm-mismatch; return values are still checked.
+node scripts/bench_native_vs_wasm.mjs --wasm-bin=wasm-v310=<v3.1.0 wasm> --wasm-bin=wasm-v311=web/chronos_spectral.wasm \
+    --native=neon-v310=<v3.1.0 chronos_replay> --native=neon-v311=$R/release/chronos_replay \
+    --rounds=5 --warmup=2 --passes=3 <canon-v12>/*/
+# The scalar reference as a third native side, and wall-clock reconciliation
 node scripts/bench_native_vs_wasm.mjs --native=neon=$R/release/chronos_replay \
     --native=scalar=target/native-scalar/aarch64-apple-darwin/release/chronos_replay \
-    --rounds=5 --warmup=2 --passes=3 --reconcile=1 <canon-v11>/*/
+    --rounds=5 --warmup=2 --passes=3 --reconcile=1 <canon-v12>/*/
 
 # Build profiles side by side (no wasm); V8 tiering check
 node scripts/bench_native_vs_wasm.mjs --no-wasm --native=a=<bin> --native=b=<bin> ... <dirs>
@@ -594,74 +611,111 @@ node scripts/bench_profile.mjs --bin=$R/profiling/chronos_replay --trace=<file.c
 node scripts/bench_profile.mjs --same-code $R/release/chronos_replay $R/profiling/chronos_replay
 ```
 
-### Results: native NEON vs wasm in V8 (measured)
+### Results: v3.1.1 against v3.1.0, wasm in V8 and native NEON (measured)
 
-Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` as of v3.0.0 (sha256 `7ba36a5b...`; not re-measured for v3.1.0) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
+v3.1.0 (`web/chronos_spectral.wasm` sha256 `f4ad7ce5...`, and its NEON `chronos_replay` in the `release` profile) against v3.1.1 (sha256 `c62846a7...` and its NEON build), all four interleaved: 5 rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls per pass. The run took 33 min, load average 3.3 to 5.8 (the system processes above).
 
-| Workload | Frames | wasm ms/pass | NEON ms/pass | NEON / wasm (round range) | scalar ms/pass | scalar / wasm | spread wasm / NEON / scalar |
-| :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- |
-| `hero_sd` | 232 | 23.34 | 20.84 | **0.893** (0.865-0.918) | 113.4 | 4.86 | 5.3% / 2.9% / 2.0% |
-| `hero_hd` | 232 | 68.49 | 62.07 | **0.906** (0.882-0.931) | 372.7 | 5.44 | 7.5% / 5.6% / 3.4% |
-| `hero_suite` | 8,430 | 1,665 | 1,508 | **0.906** (0.903-0.912) | 9,856 | 5.92 | 1.4% / 0.4% / 1.7% |
-| `mp4_occlusion` | 255 | 39.82 | 35.17 | **0.883** (0.861-0.905) | 213.8 | 5.37 | 3.6% / 3.0% / 2.1% |
-| `swarm_1200` | 138 | 167.3 | 140.5 | **0.840** (0.824-0.851) | 816.8 | 4.88 | 5.5% / 4.8% / 4.2% |
-| `bos` | 29 | 125.9 | 105.0 | **0.834** (0.825-0.846) | 521.6 | 4.14 | 1.7% / 1.9% / 3.3% |
-| `hodge` | 44 | 80.56 | 70.00 | **0.869** (0.857-0.944) | 251.2 | 3.12 | 6.0% / 11.6% / 4.2% |
-| `rs_vibrometry` | 1,322 | 1,101 | 816.6 | **0.742** (0.741-0.754) | 3,183 | 2.89 | 2.5% / 2.5% / 4.5% |
-| `conservation` | 460 | 46.31 | 41.19 | **0.889** (0.868-0.911) | 243.0 | 5.25 | 3.2% / 2.7% / 5.3% |
-| `covariance` | 518 | 248.7 | 214.8 | **0.864** (0.847-0.890) | 1,345 | 5.41 | 5.7% / 4.0% / 5.0% |
-| `ingest_roi` | 1,321 | 13,460 | 10,836 | **0.805** (0.787-0.819) | 31,893 | 2.37 | 4.2% / 4.6% / 4.0% |
-| sum | | 17,026 | 13,851 | 0.813 (geomean 0.856) | 48,810 | 2.87 (geomean 4.34) | |
+| Workload | Frames | wasm v3.1.0 ms/pass | wasm v3.1.1 ms/pass | wasm v3.1.1 / v3.1.0 (round range) | NEON v3.1.0 ms/pass | NEON v3.1.1 ms/pass | NEON v3.1.1 / v3.1.0 (round range) | NEON / wasm, v3.1.1 (round range) | spread wasm 3.1.0 / 3.1.1 / NEON 3.1.0 / 3.1.1 |
+| :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- | :--- | :--- |
+| `hero_sd` | 232 | 23.06 | 22.90 | **0.993** (0.985-1.023) | 19.93 | 20.42 | **1.025** (0.991-1.032) | 0.892 (0.880-0.907) | 6.5% / 6.8% / 9.2% / 7.1% |
+| `hero_hd` | 232 | 66.30 | 66.51 | **1.003** (0.999-1.016) | 60.89 | 60.84 | **0.999** (0.994-1.005) | 0.915 (0.909-0.934) | 4.4% / 5.5% / 6.8% / 5.9% |
+| `hero_suite` | 8,430 | 1,643.5 | 1,641.5 | **0.999** (0.998-1.003) | 1,486.3 | 1,487.8 | **1.001** (0.995-1.002) | 0.906 (0.901-0.909) | 5.4% / 5.8% / 5.3% / 4.9% |
+| `mp4_occlusion` | 255 | 39.00 | 39.01 | **1.000** (0.995-1.007) | 34.49 | 34.71 | **1.006** (0.982-1.058) | 0.890 (0.873-0.919) | 4.7% / 3.5% / 2.4% / 8.7% |
+| `swarm_1200` | 138 | 161.1 | 161.9 | **1.005** (0.994-1.006) | 137.5 | 137.5 | **1.000** (0.997-1.028) | 0.849 (0.851-0.882) | 2.7% / 3.5% / 3.9% / 6.2% |
+| `bos` | 772 | 4,099.7 | 3,353.9 | **0.818** (0.814-0.833) | 3,417.9 | 2,799.4 | **0.819** (0.811-0.821) | 0.835 (0.832-0.839) | 5.1% / 3.8% / 5.2% / 4.1% |
+| `hodge` | 44 | 76.99 | 76.86 | **0.998** (0.981-1.010) | 67.00 | 70.06 | **1.046** (0.997-1.084) | 0.912 (0.867-0.930) | 3.9% / 3.5% / 6.1% / 8.5% |
+| `rs_vibrometry` | 1,322 | 1,091.8 | 792.4 | **0.726** (0.715-0.732) | 806.2 | 714.9 | **0.887** (0.885-0.888) | 0.902 (0.895-0.918) | 3.5% / 5.8% / 3.2% / 3.3% |
+| `conservation` | 460 | 45.20 | 45.37 | **1.004** (1.002-1.017) | 40.75 | 41.02 | **1.007** (1.002-1.043) | 0.904 (0.897-0.912) | 3.1% / 3.9% / 1.4% / 4.3% |
+| `covariance` | 518 | 243.7 | 243.7 | **1.000** (0.994-1.008) | 209.0 | 208.1 | **0.995** (0.994-1.004) | 0.854 (0.849-0.878) | 3.5% / 3.4% / 5.9% / 6.2% |
+| `ingest_roi` | 1,336 | 13,238.0 | 9,900.3 | **0.748** (0.745-0.752) | 10,330.8 | 8,242.0 | **0.798** (0.741-0.798) | 0.833 (0.802-0.836) | 4.4% / 4.8% / 8.0% / 1.1% |
+| sum | | 20,728.3 | 16,344.3 | 0.789 (geomean 0.929) | 16,610.7 | 13,816.8 | 0.832 (geomean 0.958) | 0.845 (geomean 0.880) | |
 
-**Native NEON is faster than the wasm in V8 on every workload, in every round.**
-
-- **Sparse tracking gains least:** `hero_sd`, `hero_hd`, `hero_suite` and `mp4_occlusion` run at 0.88 to 0.91, so 10 to 13% less kernel time.
-- **Dense workloads gain more:** swarm 0.84, BOS 0.83, covariance 0.86, ingest/ROI 0.81.
-- **Rolling-shutter vibrometry gains most:** 0.74.
-- **Whole canonical set:** the native kernel needs 13.9 s where the wasm needs 17.0 s (0.813).
-- **Worst case:** the worst single round of any workload is 0.944, on `hodge`, the noisiest workload (11.6% spread on the native side).
-- **No workload is slower natively.**
-
-The scalar backend is 2.4 to 5.9 times slower than the wasm (geomean 4.3). So the NEON backend buys a factor of 2.9 to 6.5 over portable scalar code. It buys least where the kernel is mostly scalar already (`ingest_roi`, `rs_vibrometry`, `hodge`).
+- **wasm in V8, the primary number.** The three workloads that run changed code: `bos` 0.818, `ingest_roi` 0.748 and `rs_vibrometry` 0.726 of their v3.1.0 time, in every round. The whole canonical set needs 16.3 s where v3.1.0 needed 20.7 s (0.789).
+- **Native NEON.** `bos` 0.819, `ingest_roi` 0.798, `rs_vibrometry` 0.887; the whole set 13.8 s instead of 16.6 s (0.832).
+- **Per export.** `bos` `chronos_tick` 5.57 to 4.30 ms median in V8 (0.772); `ingest_roi` `chronos_post_tick` 11.1 to 8.24 ms (0.741); `rs_vibrometry` `chronos_post_tick` 413 to 235 µs (0.568).
+- **The other eight workloads run no changed code**, and measure 0.993 to 1.005 in V8. On NEON this run shows `hodge` 1.046 (0.997-1.084), `hero_sd` 1.025 (0.991-1.032) and `conservation` 1.007 (1.002-1.043), with spreads up to 9%. A re-check of the four small ones, v3.1.0 and v3.1.1 interleaved over 9 rounds x 5 passes, gives (wasm / NEON) `conservation` 1.006 / 0.998, `hero_sd` 1.001 / 1.005, `hodge` 0.995 / 1.012 and `mp4_occlusion` 0.991 / 0.999, every round range straddling 1. A bisect over all eight intermediate NEON builds (7 rounds x 5 passes on `mp4_occlusion`, `hero_sd` and `hodge`) showed no step either. No workload is measurably slower.
+- **Native NEON is still faster than the wasm in V8 on every workload, in every round:** NEON / wasm 0.835 to 0.915 (geomean 0.880). The gap narrowed most on `rs_vibrometry` (0.902, was 0.742 in v3.0.0), because two of the changes give the wasm what LLVM's aarch64 auto-vectoriser already did natively.
 
 Per export, per call (µs; pooled over all 15 measured passes of each side):
 
-| Workload | Export | Calls/pass | wasm µs median / p95 / mean | NEON µs median / p95 / mean | NEON / wasm median | scalar µs median |
-| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
-| `hero_sd` | `pre_tick` | 232 | 73.77 / 84.44 / 74.20 | 68.07 / 79.53 / 68.98 | 0.923 | 364.6 |
-| `hero_sd` | `post_tick` | 232 | 22.82 / 46.61 / 24.75 | 18.28 / 35.37 / 19.51 | 0.801 | 104.9 |
-| `hero_sd` | `solve_fiedler_lanczos` | 232 | 0.273 / 1.315 / 0.441 | 0.151 / 0.777 / 0.220 | 0.553 | 1.068 |
-| `hero_hd` | `pre_tick` | 232 | 248.2 / 293.1 / 250.8 | 229.4 / 271.5 / 233.2 | 0.924 | 1,373 |
-| `hero_hd` | `post_tick` | 232 | 39.69 / 72.84 / 42.49 | 30.57 / 56.03 / 33.26 | 0.770 | 202.7 |
-| `hero_hd` | `solve_fiedler_lanczos` | 232 | 0.359 / 2.275 / 0.763 | 0.153 / 1.402 / 0.456 | 0.426 | 1.278 |
-| `hero_suite` | `pre_tick` | 8430 | 80.07 / 313.3 / 157.7 | 73.99 / 289.3 / 145.5 | 0.924 | 395.6 |
-| `hero_suite` | `post_tick` | 8430 | 33.27 / 81.81 / 38.49 | 27.98 / 68.90 / 32.31 | 0.841 | 214.7 |
-| `mp4_occlusion` | `pre_tick` | 255 | 81.57 / 106.7 / 84.91 | 75.11 / 97.90 / 78.65 | 0.921 | 399.0 |
-| `mp4_occlusion` | `post_tick` | 255 | 61.03 / 119.4 / 66.21 | 51.36 / 99.15 / 55.77 | 0.842 | 344.1 |
-| `mp4_occlusion` | `solve_fiedler_lanczos` | 255 | 3.277 / 6.402 / 3.543 | 2.903 / 5.694 / 3.161 | 0.886 | 24.69 |
-| `swarm_1200` | `pre_tick` | 138 | 263.1 / 377.0 / 279.9 | 238.9 / 337.5 / 255.1 | 0.908 | 1,424 |
-| `swarm_1200` | `post_tick` | 138 | 951.3 / 1,180 / 928.4 | 782.7 / 968.6 / 761.5 | 0.823 | 4,631 |
-| `swarm_1200` | `solve_fiedler_lanczos` | 138 | 0.736 / 3.231 / 1.227 | 0.360 / 2.402 / 0.745 | 0.489 | 2.465 |
-| `bos` | `tick` | 29 | 3,700 / 6,607 / 3,703 | 3,059 / 5,467 / 3,093 | 0.827 | 10,252 |
-| `bos` | `bos_solve_manufactured_test` | 22 | 313.6 / 2,071 / 680.2 | 229.3 / 1,735 / 580.4 | 0.731 | 7,397 |
-| `hodge` | `tick` | 44 | 1,267 / 2,965 / 1,541 | 1,035 / 3,100 / 1,393 | 0.817 | 5,793 |
-| `hodge` | `hodge_solve_injected` | 23 | 570.6 / 1,172 / 514.2 | 509.7 / 1,002 / 427.6 | 0.893 | 553.4 |
-| `rs_vibrometry` | `pre_tick` | 1322 | 269.0 / 473.5 / 290.6 | 243.6 / 444.0 / 268.8 | 0.906 | 1,448 |
-| `rs_vibrometry` | `post_tick` | 1322 | 418.1 / 1,070 / 533.6 | 134.4 / 848.9 / 342.7 | 0.322 | 137.7 |
-| `rs_vibrometry` | `push_audio_block` | 1254 | 1.276 / 2.858 / 1.591 | 0.861 / 2.360 / 1.167 | 0.675 | 0.985 |
-| `conservation` | `tick` | 460 | 97.85 / 128.4 / 98.14 | 86.98 / 114.8 / 88.27 | 0.889 | 481.7 |
-| `conservation` | `eval_occluded_pair` | 22 | 0.901 / 4.504 / 1.139 | 0.276 / 0.770 / 0.312 | 0.306 | 13.11 |
-| `covariance` | `tick` | 518 | 469.9 / 650.1 / 478.7 | 400.9 / 564.3 / 414.4 | 0.853 | 2,592 |
-| `ingest_roi` | `pre_tick` | 1320 | 291.4 / 348.8 / 283.3 | 262.3 / 329.6 / 258.7 | 0.900 | 1,418 |
-| `ingest_roi` | `post_tick` | 1319 | 11,243 / 12,004 / 9,972 | 8,940 / 9,563 / 7,942 | 0.795 | 25,768 |
-| `ingest_roi` | `solve_fiedler_lanczos` | 1318 | 2.527 / 4.568 / 2.545 | 1.151 / 2.985 / 1.329 | 0.455 | 3.193 |
+| Workload | Export | Calls/pass | wasm v3.1.0 µs median | wasm v3.1.1 µs median / p95 / mean | NEON v3.1.1 µs median / p95 / mean | wasm 3.1.1 / 3.1.0 median | NEON / wasm median (v3.1.1) |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `hero_sd` | `pre_tick` | 232 | 72.23 | 72.27 / 88.19 / 72.88 | 66.57 / 81.20 / 67.42 | 1.001 | 0.921 |
+| `hero_sd` | `post_tick` | 232 | 21.89 | 21.94 / 44.44 / 23.82 | 17.40 / 34.86 / 19.09 | 1.002 | 0.793 |
+| `hero_sd` | `solve_fiedler_lanczos` | 232 | 0.235 | 0.234 / 1.23 / 0.404 | 0.148 / 0.777 / 0.212 | 0.996 | 0.632 |
+| `hero_hd` | `pre_tick` | 232 | 241.6 | 242.1 / 302.9 / 245.0 | 224.6 / 294.2 / 231.9 | 1.002 | 0.928 |
+| `hero_hd` | `post_tick` | 232 | 36.59 | 36.77 / 65.24 / 39.34 | 28.13 / 52.41 / 31.02 | 1.005 | 0.765 |
+| `hero_hd` | `solve_fiedler_lanczos` | 232 | 0.318 | 0.315 / 1.90 / 0.664 | 0.153 / 1.45 / 0.414 | 0.989 | 0.486 |
+| `hero_suite` | `pre_tick` | 8,430 | 81.24 | 81.32 / 327.1 / 156.7 | 74.94 / 308.5 / 144.5 | 1.001 | 0.922 |
+| `hero_suite` | `post_tick` | 8,430 | 32.35 | 32.40 / 83.77 / 37.83 | 27.07 / 70.57 / 31.56 | 1.001 | 0.836 |
+| `mp4_occlusion` | `pre_tick` | 255 | 80.48 | 80.32 / 107.1 / 83.73 | 73.86 / 98.96 / 77.63 | 0.998 | 0.920 |
+| `mp4_occlusion` | `post_tick` | 255 | 59.15 | 59.73 / 117.5 / 64.99 | 49.99 / 99.06 / 55.26 | 1.010 | 0.837 |
+| `mp4_occlusion` | `solve_fiedler_lanczos` | 255 | 3.15 | 3.15 / 6.35 / 3.47 | 2.82 / 5.65 / 3.10 | 0.999 | 0.895 |
+| `swarm_1200` | `pre_tick` | 138 | 253.4 | 253.5 / 361.6 / 272.4 | 230.5 / 334.0 / 249.2 | 1.000 | 0.909 |
+| `swarm_1200` | `post_tick` | 138 | 922.8 | 924.7 / 1,151 / 895.2 | 752.0 / 1,068 / 748.1 | 1.002 | 0.813 |
+| `swarm_1200` | `solve_fiedler_lanczos` | 138 | 0.486 | 0.524 / 2.82 / 1.04 | 0.236 / 2.19 / 0.651 | 1.078 | 0.450 |
+| `bos` | `tick` | 772 | 5,571 | 4,298 / 5,648 / 4,338 | 3,429 / 5,029 / 3,625 | 0.772 | 0.798 |
+| `bos` | `bos_solve_manufactured_test` | 22 | 307.2 | 307.8 / 2,006 / 673.8 | 226.8 / 1,698 / 569.4 | 1.002 | 0.737 |
+| `hodge` | `tick` | 44 | 1,211 | 1,249 / 2,869 / 1,490 | 1,027 / 2,961 / 1,351 | 1.031 | 0.823 |
+| `hodge` | `hodge_solve_injected` | 23 | 547.7 | 552.2 / 1,064 / 481.8 | 492.2 / 1,020 / 435.1 | 1.008 | 0.891 |
+| `rs_vibrometry` | `pre_tick` | 1,322 | 261.6 | 259.7 / 459.2 / 284.8 | 234.8 / 431.3 / 263.2 | 0.993 | 0.904 |
+| `rs_vibrometry` | `post_tick` | 1,322 | 413.0 | 234.8 / 798.3 / 308.0 | 126.1 / 724.5 / 272.4 | 0.568 | 0.537 |
+| `rs_vibrometry` | `push_audio_block` | 1,254 | 1.15 | 1.11 / 2.73 / 1.51 | 0.778 / 2.28 / 1.08 | 0.964 | 0.701 |
+| `conservation` | `tick` | 460 | 94.64 | 94.98 / 132.3 / 96.58 | 84.94 / 120.2 / 87.58 | 1.004 | 0.894 |
+| `conservation` | `eval_occluded_pair` | 22 | 0.819 | 0.820 / 3.67 / 0.974 | 0.236 / 0.550 / 0.269 | 1.001 | 0.288 |
+| `covariance` | `tick` | 518 | 456.1 | 453.9 / 642.4 / 467.8 | 384.1 / 580.0 / 402.4 | 0.995 | 0.846 |
+| `ingest_roi` | `pre_tick` | 1,335 | 264.3 | 262.2 / 354.0 / 264.2 | 234.8 / 292.9 / 233.4 | 0.992 | 0.896 |
+| `ingest_roi` | `post_tick` | 1,334 | 11,119 | 8,236 / 8,924 / 7,271 | 6,757 / 7,143 / 5,950 | 0.741 | 0.820 |
+| `ingest_roi` | `solve_fiedler_lanczos` | 1,333 | 1.40 | 1.07 / 3.40 / 1.48 | 0.527 / 2.40 / 0.811 | 0.763 | 0.493 |
 
-- **`pre_tick`** (pixel ingest, pooling, the static/motion grid) gains 8 to 10%.
-- **`post_tick`** (tracking, physics, metrology) gains 16 to 23%.
-- **The small solver and query exports** gain more, because V8's JS-to-wasm call costs about 0.1 to 0.6 µs that the native call does not pay.
-- **Two exports are about 3 times faster natively.** `rs_vibrometry` `post_tick` is 418 µs median in the wasm, 134 µs NEON and even 138 µs scalar: a V8-side slowdown (see the profile). `conservation` `eval_occluded_pair` is the other.
+The scalar backend was not re-timed for v3.1.1 (it is a reference, not a product; in v3.0.0 it was 2.4 to 5.9 times slower than the wasm). Its parity is covered by the replays in [Native parity results](#native-parity-results-measured).
+
+### What changed in v3.1.1 (measured one change at a time)
+
+Six commits speed the kernel up; each was measured against the commit before it with `bench_native_vs_wasm.mjs --wasm-bin` on the workloads whose code it changes (5 interleaved rounds x 3 measured passes after 1 warm-up pass), and each passed the 29-session replay on the wasm (pointer results included), NEON and `simd-force-scalar`, and Gate S, before it was committed. Ratios are new / old; the round range is the minimum and maximum of the per-round ratios.
+
+| Change | What it does | Workload | wasm in V8 | NEON |
+| :--- | :--- | :--- | :--- | :--- |
+| BOS patch sampling | `build_ref_patch_8x8` / `eval_cur_patch_8x8` read each window row through a fixed-size array view (one bounds check per row instead of four per `f32x4`; on aarch64 the four loads then merge into one vector load, on wasm32 they did not until the vector-load change below); the reference patch's samples, differences and saturation mask four pixels at a time | `bos` | 0.971 (0.966-0.979) | 0.970 (0.968-0.974) |
+| | | `ingest_roi` | 0.995 (0.992-1.000) | 0.986 (0.945-0.987) |
+| BOS reference-patch reuse | the reductions of each node's reference patch (`mu_t`, variance, gradient means and projections, `H`) are kept per node in `BosRefCache`, tagged with a generation that every change of `ref_luma` advances; a hit rebuilds the patch without the three sequential `f64` reductions | `bos` | 0.910 (0.906-0.921) | 0.857 (0.852-0.865) |
+| | | `ingest_roi` | 0.934 (0.930-0.939) | 0.900 (0.898-0.901) |
+| LOO neighbour keys | `solve_bench_loo_residuals` keeps its 24 nearest neighbours as one `u64` key each (`d2` bits, CSR index) instead of shifting six parallel arrays per insertion | `ingest_roi` | 0.838 (0.834-0.841) | 0.901 (0.899-0.906) |
+| | | `covariance` | 1.005 (0.996-1.007) | 1.003 (0.995-1.006) |
+| Vibrometry warm-up | the reference accumulation eight pixels per step in the SIMD layer (LLVM vectorised it for aarch64 only) | `rs_vibrometry` | 0.884 (0.884-0.886) | 0.993 (0.993-0.999) |
+| Band displacement rows | per-pixel terms four columns at a time, each sum taking its lanes in column order | `rs_vibrometry` | 0.844 (0.842-0.848) | 0.899 (0.898-0.900) |
+| Vector loads on wasm32 | `simd_ops::load_f32x4` / `store_f32x4`: one `v128_load` / `v128_store` for four consecutive `f32` (LLVM's wasm32 backend built `f32x4(a[i], ..)` with one `f32.load` + `replace_lane` per lane) | `bos` | 0.923 (0.923-0.929) | 0.984 (0.986-0.989) |
+| | | `ingest_roi` | 0.964 (0.941-0.971) | 0.992 (0.984-0.999) |
+| | | `rs_vibrometry` | 0.977 (0.970-1.021) | 0.993 (0.992-1.015) |
+| Frame-wrap fix | `u64` comparisons for `last_discont_frame + 5` and `birth_frame + 2` | all | not a speed change | |
+
+Why each is exact: the arithmetic of every output value is the same sequence of IEEE operations as before. Sums keep their order (each lane of a vector is added on its own, in index order), masked-out terms are never added, reused values are the values that were computed, and replaced selection or saturation logic is equal for every input (the commit messages give the argument for each). Two paths that no recorded session reaches have unit tests against the replaced scalar code: the saturating warm-up accumulation (`vibrometry::warmup_accumulate_tests`) and the band row sums (`vibrometry::band_row_sums_tests`).
+
+Tried and not landed:
+
+- **Branch-free masked sums in the Hodge PCG** (`project_zero_mean`, the `pap` dot products: inactive vertices add `+0.0`, exact because the sums start at `+0.0`; the running component sum in a register). 15 rounds x 5 passes on `hodge`: NEON 0.965 (0.889-0.979), wasm 0.993 (0.932-1.055). Inside the noise in V8, so dropped.
+- **Fusing `chronos_pre_tick`'s two frame passes.** Not attempted after analysis. The grid pass needs the pan estimate (from the pooled pyramid) and the ECA affine fit (a reduction over the whole `luma` plane) before its first pixel, so one pass would need speculative per-pixel work. And its cost is not the second read of the frame: per 16 pixels it issues about 157 vector ALU operations and 31 loads and stores, about 40 cycles at four vector operations per cycle, which predicts about 128 µs per HD frame against 137 µs measured (inferred from an operation count and the measured time, not from CPU counters).
+
+### Proposals that change output (measured, not landed)
+
+Most of what is left in `bos`, `ingest_roi` and `rs_vibrometry` is sequential floating-point sums: every term waits for the previous add (3 to 4 cycles), and the order of the adds cannot change without changing the last bits of the result. A prototype on a scratch copy, not on any branch, reassociated two of them:
+
+- `eval_cur_patch_8x8`, fast path: `sum_ti`, `bx` and `by` as two partial sums each (even and odd pixels, in `f64x2` lanes), added together at the end.
+- `band_row_sums`: the five row sums as four-lane partial sums (`f32x4`), added together after the row.
+
+It was timed against v3.1.1 before the vector-load change (3 interleaved rounds x 2 passes after 1 warm-up pass; return values are not affected, so the call sequence is the same):
+
+| Workload | wasm in V8 | NEON |
+| :--- | :--- | :--- |
+| `bos` | 0.912 (rounds 0.912-0.916) | 0.920 (0.918-0.922) |
+| `ingest_roi` instance 1 | 0.965 (0.963-0.965) | 0.974 (0.949-0.977) |
+| `rs_vibrometry` | 0.951 (0.948-0.954) | 0.916 (0.917-0.923) |
+
+Results change, as expected: the first differing region digest is `bos_telemetry` at `bos` call `#219` and `vibro_planes` at `rs_vibrometry` call `#103`. Native/wasm parity would be unaffected (every backend reproduces the `f64x2`/`f32x4` lane ops exactly), but every session that runs BOS or vibrometry would change in its last bits and the canonical set would have to be re-recorded. Whether that is worth about 9% of `bos`, 3 to 4% of `ingest_roi` and 5 to 8% of `rs_vibrometry` is the owner's call; more partial sums (four instead of two in BOS, the dense-LK residual, the reference-patch reductions on a cache miss) would gain more and were not measured.
 
 ### Sanity checks
+
+Measured on v3.0.0 (the harness is unchanged since; the `--no-liftoff` check and the wall-clock reconciliation were not repeated for v3.1.1).
 
 **Per-call times add up to the wall-clock.** In every process of the final run, two extra passes ran: one replayed the trace with no per-call timer (one wall-clock reading around the pass), and one applied every host write but made no kernel call. Their difference is the kernel's share of the wall-clock, measured without per-call timers. It agrees with the summed per-call times within -1.4% to +1.2% on all 11 workloads and all three sides. For example, `hero_hd`: wasm 68.49 ms summed vs 67.71 ms by wall-clock, NEON 62.07 vs 62.72. `ingest_roi`: wasm 13,460 vs 13,457, NEON 10,836 vs 10,842. So the timing mode measures the kernel, not the harness, and the timer correction is right.
 
@@ -687,7 +741,7 @@ Per export, per call (µs; pooled over all 15 measured passes of each side):
 
 **What is not measured.** x86-64 is not timed. On this machine the SSE backend runs under Rosetta 2, an emulator, so its timings would say nothing about x86 hardware. The SSE backend's parity under Rosetta is covered by the replay results, not by this section.
 
-### Native build configuration (measured)
+### Native build configuration (measured on v3.0.0)
 
 Five configurations of the NEON build, timed against each other (native only, 11 workloads, 3 interleaved rounds x 3 passes, before the `i32x4_dot_i16x8` change below). Every one passes the 29-trace parity replay with digests (26 pass, 3 portable prefix, 0 mismatches).
 
@@ -715,67 +769,67 @@ Nothing beats Cargo's default release profile. The wasm's own profile is 0.5% sl
 
 **Absolute times.** Shares become milliseconds per pass through a short `--bench` run of each side on the same trace.
 
-Profiles of the final build, on the five main workloads (self time: time in the function body, after inlining):
+Profiles of v3.1.1 on the five main workloads (self time: time in the function body, after inlining). `hero_hd` and `swarm_1200` run no code that v3.1.1 changed, so their profiles are of v3.1.0 (taken for this release, with the same harness); `bos`, `rs_vibrometry` and `ingest_roi` instance 1 are profiles of the v3.1.1 build:
 
-**hero_hd** (native 61.9 ms/pass, wasm 66.8 ms/pass; 16981 native / 92040 V8 samples)
-
-| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
-| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `stat_fused_hd40_grid_loop<true, true>` | 50.7 | 31.4 | 48.4 | 32.3 | 0.97 | v128_load 21%, v128_store 18%, v128_bitselect 16% |
-| `rgba_to_planar_and_pool160_simd128` | 21.2 | 13.1 | 21.7 | 14.5 | 0.90 | i32x4_dot_i16x8 41%, v128_load 33%, v128_store 17% |
-| `eca_fit_affine_params_ex_simd128` | 4.6 | 2.8 | 4.3 | 2.9 | 0.99 | scalar 26%, f32x4_add 16%, v128_and 13% |
-| `stat_fused_hd40_grid_loop<false, true>` | 3.5 | 2.2 | 3.6 | 2.4 | 0.90 | v128_store 31%, v128_load 23%, scalar 9% |
-| `compute_row_luma_means_simd128` | 3.4 | 2.1 | 3.0 | 2.0 | 1.05 | v128_load 79%, scalar 12%, f32x4_add 9% |
-| `render_eulerian_pip_subpx_impl<false, true>` | 2.0 | 1.2 | 2.6 | 1.7 | 0.72 | i16x8_q15mulr_sat 23%, shuffle 12%, i16x8_add 11% |
-| `sad_patch_zm_half_st1_ring_hd_simd128` | 1.4 | 0.9 | 1.5 | 1.0 | 0.88 | scalar 41%, v128_load 31%, f32x4_add 12% |
-
-**swarm_1200** (native 140.3 ms/pass, wasm 163.4 ms/pass; 18761 native / 112618 V8 samples)
+**hero_hd** (native 63.6 ms/pass, wasm 71.4 ms/pass; 17261 native / 48063 V8 samples)
 
 | function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
 | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `extract_phase1a_raw` | 15.5 | 21.7 | 15.9 | 25.9 | 0.84 | scalar 43%, v128_any_true 37%, f32x4_mul 9% |
-| `stat_fused_hd40_grid_loop<true, true>` | 12.4 | 17.4 | 10.9 | 17.8 | 0.98 | v128_store 19%, v128_load 19%, v128_bitselect 17% |
-| `build_sparse_knn_graph` | 6.0 | 8.4 | 6.0 | 9.9 | 0.85 | scalar 90%, f32x4_extract_lane 4%, f32x4_splat 2% |
-| `rgba_to_planar_and_pool160_simd128` | 5.7 | 8.0 | 5.6 | 9.1 | 0.88 | i32x4_dot_i16x8 43%, v128_load 29%, v128_store 16% |
-| `eval_lk_patch_wasm<true, true>` | 4.2 | 5.9 | 3.3 | 5.4 | 1.10 | f32x4_pmin 48%, scalar 26%, f32x4_mul 14% |
-| `extract_phase1a_3x3_max` | 3.8 | 5.3 | 4.2 | 6.9 | 0.77 | scalar 77%, i32x4_bitmask 8%, v128_any_true 7% |
-| `gather_csr_stage1_track<true>` | 3.8 | 5.3 | 3.7 | 6.0 | 0.88 | scalar 100%, v128_any_true 0%, f32x4_splat 0% |
+| `stat_fused_hd40_grid_loop<true, true>` | 50.2% | 31.9 | 47.9% | 34.2 | 0.93 | v128_load 20.1%, v128_store 17.3%, v128_bitselect 17.0% |
+| `rgba_to_planar_and_pool160_simd128` | 21.0% | 13.4 | 21.7% | 15.5 | 0.86 | i32x4_dot_i16x8 41.2%, v128_load 32.3%, v128_store 16.8% |
+| `eca_fit_affine_params_ex_simd128` | 4.9% | 3.12 | 4.4% | 3.14 | 0.99 | scalar 21.4%, f32x4_add 14.4%, v128_any_true 12.4% |
+| `compute_row_luma_means_simd128` | 3.4% | 2.14 | 3.1% | 2.20 | 0.97 | v128_load 79.5%, scalar 10.7%, f32x4_add 9.8% |
+| `stat_fused_hd40_grid_loop<false, true>` | 3.4% | 2.13 | 3.6% | 2.60 | 0.82 | v128_store 29.4%, v128_load 26.9%, scalar 11.4% |
+| `render_eulerian_pip_subpx_impl<false, true>` | 2.1% | 1.30 | 2.5% | 1.75 | 0.74 | i16x8_q15mulr_sat 21.8%, shuffle 13.8%, i32x4_dot_i16x8 11.3% |
+| `sad_patch_zm_half_st1_ring_hd_simd128` | 1.6% | 1.00 | 1.5% | 1.04 | 0.96 | scalar 38.7%, v128_load 31.0%, f32x4_add 14.4% |
 
-**bos** (native 104.5 ms/pass, wasm 124.7 ms/pass; 19679 native / 126742 V8 samples)
-
-| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
-| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `build_ref_patch_8x8` | 42.0 | 43.9 | 44.8 | 55.8 | 0.79 | scalar 99%, f32x4_mul 1%, f32x4 0% |
-| `eval_cur_patch_8x8` | 21.9 | 22.9 | 22.7 | 28.3 | 0.81 | scalar 89%, f32x4_add 8%, f32x4_max 3% |
-| `accumulate_warmup_node_noise` | 5.3 | 5.5 | 3.0 | 3.8 | 1.47 | scalar 100% |
-| `apply_laplacian_p_to_lp` | 3.4 | 3.6 | 1.7 | 2.2 | 1.65 | scalar 100% |
-| `extract_dense_lk` | 3.2 | 3.3 | 2.2 | 2.8 | 1.20 | scalar 100% |
-| `project_comp_zero_mean` | 3.1 | 3.2 | 2.9 | 3.6 | 0.89 | scalar 100% |
-| `dct3_2d_solve_z` | 2.3 | 2.4 | 2.6 | 3.3 | 0.72 | scalar 92%, f64x2_add 4%, f64x2_sub 2% |
-
-**rs_vibrometry** (native 814.4 ms/pass, wasm 1100.5 ms/pass; 19370 native / 133560 V8 samples)
+**swarm_1200** (native 143.2 ms/pass, wasm 170.6 ms/pass; 18936 native / 70149 V8 samples)
 
 | function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
 | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `extract_signed_band_displacements` | 31.0 | 252.7 | 32.4 | 356.9 | 0.71 | scalar 100% |
-| `eval_segment_optical_quadrature` | 12.9 | 104.8 | 10.5 | 115.6 | 0.91 | scalar 100% |
-| `stat_fused_hd40_grid_loop<true, true>` | 11.7 | 94.9 | 9.2 | 101.4 | 0.94 | v128_load 21%, v128_store 18%, v128_bitselect 17% |
-| `rgba_to_planar_and_pool160_simd128` | 9.7 | 79.0 | 8.1 | 89.4 | 0.88 | i32x4_dot_i16x8 40%, v128_load 34%, v128_store 17% |
-| `stat_fused_hd40_grid_loop<false, true>` | 4.4 | 36.2 | 3.9 | 42.8 | 0.84 | v128_store 26%, v128_load 25%, scalar 11% |
-| `warmup_accumulate_and_lock` | 3.2 | 26.0 | 14.2 | 156.6 | 0.17 | scalar 100% |
-| `eca_fit_affine_params_ex_simd128` | 2.1 | 17.3 | 1.4 | 15.2 | 1.14 | scalar 44%, f32x4_add 13%, f32x4_mul 12% |
+| `extract_phase1a_raw` | 15.8% | 22.6 | 15.8% | 26.9 | 0.84 | scalar 43.0%, v128_any_true 35.5%, f32x4_mul 9.9% |
+| `stat_fused_hd40_grid_loop<true, true>` | 11.9% | 17.1 | 10.8% | 18.4 | 0.93 | v128_load 20.2%, v128_store 18.4%, v128_bitselect 17.9% |
+| `build_sparse_knn_graph` | 6.0% | 8.60 | 6.0% | 10.2 | 0.84 | scalar 90.2%, f32x4_splat 3.2%, f32x4_extract_lane 2.9% |
+| `rgba_to_planar_and_pool160_simd128` | 5.5% | 7.91 | 5.5% | 9.46 | 0.84 | i32x4_dot_i16x8 43.2%, v128_load 30.1%, v128_store 15.4% |
+| `eval_lk_patch_wasm<true, true>` | 4.2% | 5.97 | 3.3% | 5.57 | 1.07 | f32x4_pmin 48.5%, scalar 24.3%, f32x4_mul 16.8% |
+| `refine_ic_lk_8x8_2iter_wasm_impl<true, false>` | 4.0% | 5.74 | 3.7% | 6.39 | 0.90 | scalar 78.5%, f32x4_mul 10.0%, f32x4_add 3.3% |
+| `gather_csr_stage1_track<true>` | 3.8% | 5.47 | 3.8% | 6.46 | 0.85 | scalar 99.9%, f32x4_extract_lane 0.1% |
 
-**ingest_roi** (native 9074.7 ms/pass, wasm 11539.1 ms/pass; 19966 native / 156068 V8 samples)
+**bos** (native 2779.7 ms/pass, wasm 3340.1 ms/pass; 20218 native / 455473 V8 samples)
 
 | function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
 | :--- | ---: | ---: | ---: | ---: | ---: | :--- |
-| `solve_bench_loo_residuals` | 30.5 | 2767.5 | 33.9 | 3911.3 | 0.71 | scalar 100%, f64x2_sqrt 0% |
-| `build_ref_patch_8x8` | 21.2 | 1920.7 | 21.2 | 2445.8 | 0.79 | scalar 99%, f32x4_mul 1%, f32x4 0% |
-| `eval_cur_patch_8x8` | 15.7 | 1429.0 | 15.1 | 1745.0 | 0.82 | scalar 92%, f32x4_add 5%, f32x4_max 3% |
-| `extract_dense_lk` | 3.2 | 293.2 | 2.0 | 227.7 | 1.29 | scalar 100% |
-| `apply_laplacian_p_to_lp` | 2.7 | 242.3 | 1.4 | 166.2 | 1.46 | scalar 100% |
-| `dct2_2d_solve_z` | 2.6 | 231.8 | 2.9 | 338.3 | 0.69 | scalar 88%, f64x2_add 6%, f64x2_mul 5% |
-| `dct3_2d_solve_z` | 2.5 | 225.4 | 2.8 | 327.9 | 0.69 | scalar 90%, f64x2_add 5%, f64x2_sub 3% |
+| `eval_cur_patch_8x8` | 35.4% | 985.1 | 35.3% | 1180.1 | 0.83 | scalar 83.7%, f32x4_max 6.8%, v128_load 4.7% |
+| `build_ref_patch_node` | 34.6% | 962.8 | 37.9% | 1264.7 | 0.76 | scalar 79.7%, v128_store 7.6%, v128_load 7.0% |
+| `extract_dense_lk` | 9.6% | 267.0 | 6.6% | 219.2 | 1.22 | scalar 100.0% |
+| `stat_fused_hd40_grid_loop<true, true>` | 3.5% | 98.2 | 3.2% | 106.6 | 0.92 | v128_load 20.6%, v128_store 19.3%, v128_bitselect 16.7% |
+| `apply_laplacian_p_to_lp` | 2.2% | 62.1 | 1.1% | 38.4 | 1.62 | scalar 100.0% |
+| `rgba_to_planar_and_pool160_simd128` | 1.8% | 50.7 | 1.8% | 59.6 | 0.85 | i32x4_dot_i16x8 43.1%, v128_load 29.8%, v128_store 17.1% |
+| `compute_curl_and_assemble_neumann` | 1.7% | 47.4 | 2.1% | 70.8 | 0.67 | scalar 100.0% |
+
+**rs_vibrometry** (native 712.0 ms/pass, wasm 792.6 ms/pass; 19375 native / 43189 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `extract_signed_band_displacements` | 22.9% | 163.3 | 23.5% | 186.6 | 0.87 | scalar 74.3%, f32x4_extract_lane 13.3%, f32x4_mul 6.5% |
+| `eval_segment_optical_quadrature` | 14.8% | 105.2 | 14.3% | 113.3 | 0.93 | scalar 100.0% |
+| `stat_fused_hd40_grid_loop<true, true>` | 13.1% | 93.5 | 12.7% | 100.4 | 0.93 | v128_load 19.2%, v128_store 17.8%, v128_bitselect 16.5% |
+| `rgba_to_planar_and_pool160_simd128` | 10.5% | 75.1 | 11.0% | 86.9 | 0.86 | i32x4_dot_i16x8 43.3%, v128_load 31.3%, v128_store 17.5% |
+| `stat_fused_hd40_grid_loop<false, true>` | 5.1% | 36.0 | 5.3% | 41.9 | 0.86 | v128_store 25.9%, v128_load 24.1%, scalar 11.7% |
+| `accumulate_ref_q12` | 2.3% | 16.6 | 2.6% | 20.3 | 0.82 | scalar 93.8%, f32x4_min 3.1%, v128_or 1.6% |
+| `subpx_pan_streak_row_exact<false, false, true, true, true, true, 2>` | 2.2% | 15.6 | 2.5% | 19.9 | 0.78 | shuffle 39.9%, u16x8_extmul_high_u8x16 9.2%, scalar 8.3% |
+
+**ingest_roi** (native 7074.1 ms/pass, wasm 8431.6 ms/pass; 19941 native / 172319 V8 samples)
+
+| function (self time) | native % | native ms | wasm % | wasm ms | native / wasm | what dominates natively |
+| :--- | ---: | ---: | ---: | ---: | ---: | :--- |
+| `solve_bench_loo_residuals` | 27.6% | 1952.9 | 25.5% | 2150.0 | 0.91 | scalar 100.0% |
+| `eval_cur_patch_8x8` | 18.3% | 1295.2 | 18.4% | 1554.8 | 0.83 | scalar 89.5%, f32x4_max 4.1%, v128_load 3.0% |
+| `build_ref_patch_node` | 13.3% | 942.9 | 16.4% | 1381.0 | 0.68 | scalar 78.3%, v128_load 8.4%, v128_store 8.1% |
+| `extract_dense_lk` | 4.0% | 280.6 | 2.6% | 221.3 | 1.27 | scalar 100.0% |
+| `apply_laplacian_p_to_lp` | 3.6% | 251.2 | 2.1% | 174.0 | 1.44 | scalar 100.0% |
+| `solve_poisson_and_pin_gauge` | 3.1% | 220.3 | 3.4% | 287.4 | 0.77 | scalar 100.0% |
+| `dct2_2d_solve_z` | 3.1% | 218.9 | 3.9% | 327.7 | 0.67 | scalar 87.8%, f64x2_add 6.2%, f64x2_mul 4.4% |
 
 How to read the per-function ratios:
 
@@ -785,21 +839,14 @@ How to read the per-function ratios:
 
 What the profiles say:
 
-- **Sparse tracking (`hero_*`, `mp4_occlusion`).** About 75% of HD kernel time is two streaming passes over the frame in `chronos_pre_tick`: `stat_fused_hd40_grid_loop` (51%) and `rgba_to_planar_and_pool160_simd128` (21%).
-  - The grid loop is memory-bound. 41% of its samples are on vector loads and stores to frame-sized buffers, and its 1,322 instructions include only 38 vector spills. The rest is `v128_bitselect` (the background-rate selection, 16%), `u8x16_sub_sat` and `i16x8_narrow_i32x4`.
-  - It runs at 0.97 of V8's time: both compilers are close to the memory system's limit. The pooling function was the native loss before the dot-product change and is now 0.90.
-- **Swarm.** The time is spread out:
-  - `extract_phase1a_raw` (15.5%): the per-pixel candidate scan. Its `v128_any_true` tests take 37% of its samples, the loads they wait on included.
-  - The grid loop (12%), the k-NN graph build (6%, scalar) and the LK patch evaluation.
-  - `eval_lk_patch_wasm` is the one hot SIMD function still slower natively (1.10). Its samples sit on the `fcmgt` of `f32x4_pmin`, waiting on the loads and the subtract/abs chain. V8 lowers `pmin` to the same two instructions.
-- **BOS, ingest/ROI, vibrometry: mostly scalar code.**
-  - Samples with no SIMD layer op on the stack make up 85% of `bos`, 82% of `ingest_roi` instance 1 and 54% of `rs_vibrometry`.
-  - The hot functions there are scalar f64 loops: `build_ref_patch_8x8` and `eval_cur_patch_8x8` (64% of `bos`), `solve_bench_loo_residuals` (31% of `ingest_roi` instance 1), and `extract_signed_band_displacements` (31% of `rs_vibrometry`).
-  - Native wins most here (0.71 to 0.82), from LLVM's aarch64 code generation against V8's.
-  - Native also wins where LLVM auto-vectorises plain Rust loops for aarch64 but not for wasm32: `warmup_accumulate_and_lock` has 52 `fmul.4s` natively and no SIMD instruction in the wasm, and runs 6 times faster. That is exact, because LLVM vectorises only element-wise float work, never reductions. The same ratio holds with `--no-liftoff`, so it is not V8 tiering.
-- **`ingest_roi` instance 1 dominates the set.** It is 9.1 of the 13.9 s of native kernel time in the canonical set, and almost all of it is `chronos_post_tick`: `solve_bench_loo_residuals` (2.8 s per pass) and the BOS dense-LK node loop.
+- **Sparse tracking (`hero_*`, `mp4_occlusion`) is unchanged.** About 75% of HD kernel time is two streaming passes over the frame in `chronos_pre_tick`: `stat_fused_hd40_grid_loop` (50%) and `rgba_to_planar_and_pool160_simd128` (21%).
+  - The grid loop runs at 0.93 of V8's time. Its samples sit on vector loads and stores (37%) and `v128_bitselect` (17%), but by operation count it is close to the vector ALUs' limit (see "Tried and not landed" above), so a second pass over the frame is not what it waits on.
+- **Swarm is unchanged.** `extract_phase1a_raw` (16%: the per-pixel candidate scan, 36% of its samples on `v128_any_true` and the loads it waits on), the grid loop (12%), the k-NN graph build (6%, scalar) and the LK patch evaluation. `eval_lk_patch_wasm` is the one hot SIMD function slower natively (1.07). Its samples sit on the `fcmgt` of `f32x4_pmin`, waiting on the loads and the subtract/abs chain, and V8 lowers `pmin` to the same two instructions.
+- **BOS and ingest/ROI: what is left is mostly sequential `f64` sums.** `eval_cur_patch_8x8` and `build_ref_patch_node` are 73% (V8) / 70% (native) of `bos` and 35% / 32% of `ingest_roi` instance 1. `eval_cur_patch_8x8` waits on its three sequential `f64` sums (64 adds each, 3 to 4 cycles per add). `build_ref_patch_node` is now mostly the cache-hit path: sampling the window and rebuilding the per-pixel arrays (element-wise `f64`) without the reductions. `solve_bench_loo_residuals` is still 26% of `ingest_roi` instance 1 (2.15 s per pass in V8, down from 3.87 s): the neighbour search over the CSR grid, and its insertion sort, now one `u64` per step.
+- **Vibrometry.** `extract_signed_band_displacements` fell from 32% to 24% of `rs_vibrometry` in V8; its five row sums stay sequential. The warm-up accumulation, 14% of the wasm's time in v3.1.0, is 2.6%.
+- **Native wins most on scalar code** (0.67 to 0.91 here), from LLVM's aarch64 code generation against V8's, and on loops LLVM auto-vectorises for aarch64 but not for wasm32 (v3.1.1 hand-vectorised the two that showed up: the vibrometry warm-up and the band rows). `apply_laplacian_p_to_lp` and `extract_dense_lk` remain slower natively in self time (1.22 to 1.62), as before.
 
-Which SIMD ops matter, by share of all kernel samples. This is aggregated over the 14 hottest functions of each workload, before the dot-product change:
+Which SIMD ops matter, by share of all kernel samples (v3.0.0 profiles, before the dot-product change; aggregated over the 14 hottest functions of each workload):
 
 - **`i32x4_dot_i16x8`** 12.9% of `hero_hd`, 5.9% of `rs_vibrometry`, 3.4% of the swarm. Now `smull` + `smull2` + `addp` as written.
 - **Shuffles** up to 8.1%: mostly the `uzp1`/`uzp2` pairs after the dot products, since folded into `addp`.
@@ -810,9 +857,9 @@ Which SIMD ops matter, by share of all kernel samples. This is aggregated over t
 
 Except for the dot product, each of these lowers to the same instructions V8 emits for the wasm op, and no cheaper NEON sequence gives the exact wasm result for every input.
 
-**Non-inlined helpers with `v128` arguments.** On Rust 1.99 a `v128` passed by value to a non-inlined Rust function goes through memory. 112 kernel functions take or return `v128`. 99 are `#[inline(always)]`. Of the 13 `#[inline(never)]` ones, 7 take `v128` by value (none returns one): `subpx_row_blk_chunk` (7 values), `pan_hd40_band`, `subpx_hd40_band_fused`, `pan_subpx_fused_hd40_no_scratch` (2 each), `pan_fused_grid_le40_row`, `pan_subpx_fused_grid_fallback` (15 each) and `eval_cand_4px` (6). They are called per band, row or edge candidate, never per pixel. Their whole bodies account for 0% (`hero_hd`, swarm, `ingest_roi`), 0.35% (`bos`) and 2.1% (`rs_vibrometry`) of native kernel time. They load 0 to 9 `q` registers from argument pointers per call. Removing the `#[inline(never)]` would buy well under 0.1%.
+**Non-inlined helpers with `v128` arguments** (measured on v3.0.0). On Rust 1.99 a `v128` passed by value to a non-inlined Rust function goes through memory. 112 kernel functions take or return `v128`. 99 are `#[inline(always)]`. Of the 13 `#[inline(never)]` ones, 7 take `v128` by value (none returns one): `subpx_row_blk_chunk` (7 values), `pan_hd40_band`, `subpx_hd40_band_fused`, `pan_subpx_fused_hd40_no_scratch` (2 each), `pan_fused_grid_le40_row`, `pan_subpx_fused_grid_fallback` (15 each) and `eval_cand_4px` (6). They are called per band, row or edge candidate, never per pixel. Their whole bodies account for 0% (`hero_hd`, swarm, `ingest_roi`), 0.35% (`bos`) and 2.1% (`rs_vibrometry`) of native kernel time. They load 0 to 9 `q` registers from argument pointers per call. Removing the `#[inline(never)]` would buy well under 0.1%.
 
-### NEON backend change: `i32x4_dot_i16x8`
+### NEON backend change: `i32x4_dot_i16x8` (v3.0.0)
 
 Before this change the profile showed `rgba_to_planar_and_pool160_simd128` (the RGBA-to-planar pooling in `chronos_pre_tick`) 1.16 to 1.27 times slower natively than in V8 (now 0.88 to 0.90), with 45% of its samples on `i32x4_dot_i16x8`. Given `vmull_s16` + `vmull_high_s16` + `vpaddq_s32`, LLVM saw that the constant weight vector's two halves are equal and rewrote the per-4-pixel luma step (`u8` pixels widened to `i16`, two dot products, then `i32x4_shuffle::<0, 2, 4, 6>` + `<1, 3, 5, 7>` + add) into `mov d, v[1]` + `umull` pairs and extra `uzp1` shuffles: 19 instructions per 4 pixels. `src/simd/neon.rs` now emits the same three instructions as inline assembly, which LLVM keeps as written and then folds the shuffle-and-add into one `addp`: 13 instructions per 4 pixels, and the function shrinks from 2,004 to 1,538 instructions. The per-op conformance suite (including the heavy NEON run, 6.4 min) and the 29-trace parity replay pass with 0 mismatches.
 
@@ -835,22 +882,18 @@ Before and after (native only, 3 interleaved rounds x 3 passes):
 
 `chronos_pre_tick` alone is 9 to 10% faster on every tick workload (for example `hero_hd` 255.7 -> 231.1 µs median); no workload got slower.
 
-### Optimisation opportunities, ranked (for the next sprint)
+### Optimisation opportunities, ranked (after v3.1.1)
 
-Shares are of native kernel time on the workload named, from the profiles above. "Exact" means the change can keep every result bit-identical to the wasm. Every change except the backend one is a kernel change, so it would also rebuild `web/chronos_spectral.wasm`.
+Shares are of v3.1.1 kernel time from the profiles above. "Exact" means the change can keep every result bit-identical to the wasm. Excluded by design and not ranked: threads (they would change the memory model and the zero-import design) and wider vectors, AVX or FMA (every backend must reproduce SIMD128 exactly). Done in v3.1.1: reference-patch reuse (was #3), the BOS patch sampling (part of #2: the builders turned out to be bound by their sequential `f64` sums, not by sampling), and three changes that were not on the list (LOO neighbour keys, vibrometry warm-up and band rows).
 
-| # | What | Where | Measured share | Expected gain | Exact? |
+| # | What | Where | Measured share (v3.1.1) | Expected gain | Exact? |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Threads for the independent per-item loops** (native only). Per node: the BOS dense-LK and warm-up node loops. Per track: `solve_bench_loo_residuals` and the swarm candidate and LK loops. Per band/cell: the vibrometry loops (their independence is not yet checked). Per row band: the grid loop. Each item is computed exactly as now; cross-item sums (`disp2_sum`, `acc_err2`/`acc_sig2`, ...) are added afterwards in the original order. | `bos.rs` `extract_dense_lk` / `accumulate_warmup_node_noise`; `continuum_physics.rs:10820`; `vibrometry.rs`; `simd_ops.rs` grid loop | `ingest_roi` i001: 31% LOO + 36-39% dense LK. `bos`: 71% (warm-up + dense LK). `rs_vibrometry`: 31% + 13%. `hero_hd`: 51% (grid loop) | Up to the core count on those loops (8 P-cores here). Plausibly 2 to 4 times on `bos` and `ingest_roi`, less on sparse tracking, where frames take 0.09-0.27 ms and thread hand-off costs microseconds | Yes, with fixed partitioning and ordered reductions. Costs: per-thread scratch in the arena (the patch buffers are shared today) and a thread source for a `no_std` kernel (host callback or `std` feature). The wasm stays single-threaded (wasm threads need cross-origin isolation) |
-| 2 | **Vectorise the BOS patch builders.** Bilinear sampling, gradients and residuals per pixel in `f32x4`. f64 sums stay scalar, in index order | `bos.rs:504` `build_ref_patch_8x8`, `bos.rs:776` `eval_cur_patch_8x8` | `bos` 42% + 22%; `ingest_roi` i001 21% + 16%. 89-99% scalar code today | Estimate 1.5 to 3 times on these functions (most of their arithmetic is element-wise); not measured | Yes, if the f64 accumulation order is kept. Helps the wasm too |
-| 3 | **Reuse reference patches.** `build_ref_patch_8x8` depends only on `ref_luma` and the node. Today it is rebuilt for every node every frame (dense LK, warm-up) and three times per anchor per candidate in `eval_anchor_mse_at` | `bos.rs:1642`, `1778`, `3551`, `1531-1587` | Up to the `build_ref_patch_8x8` share above (42% `bos`, 21% `ingest_roi` i001) while the reference is unchanged | Up to those shares; depends on how often reference maintenance (`bos.rs:1983`, `3382`) rewrites `ref_luma`, which was not measured | Yes, reused values are identical, but validity needs per-node invalidation. All 8,192 `PatchRefData` (~1.4 KB each, 11.5 MB) do not fit the wasm's ~6.6 MB of free memory, so it is native-only or a subset |
-| 4 | **Fuse the two streaming passes of `chronos_pre_tick`.** The RGBA-to-planar pooling and the static/motion grid each read the full RGBA frame | `simd_ops.rs` `rgba_to_planar_and_pool160_simd128`, `stat_fused_hd40_grid_loop` | `hero_hd` 21% + 51%; swarm 6% + 12%; `rs_vibrometry` 10% + 16% | One fewer pass over 2 x 0.9 MB of RGBA per HD frame in a memory-bound loop; estimate 10-20% of `pre_tick`, not measured | Yes (per-pixel arithmetic unchanged) |
-| 5 | NEON `i32x4_dot_i16x8` as `smull` + `smull2` + `addp` | `src/simd/neon.rs` | was 12.9% of `hero_hd` | **Done**: `pre_tick` 9-10% faster on every tick workload, geomean 0.951 | Yes (conformance + parity pass) |
-| 6 | Fewer `v128_any_true` exits in the candidate scan: OR 16-32 pixels of hit masks before one test | `soa_tracks.rs` `extract_phase1a_raw` | swarm 15.5% (any_true 37% of it) | Small, estimate under 5% of the swarm | Yes (control flow only) |
-| 7 | Find why `apply_laplacian_p_to_lp` is slower natively | `bos.rs:2681` | 2.7-3.4% of `bos`/`ingest_roi`, 1.46-1.65 times V8 | 1-3% of those workloads | Yes. A leaf on both sides with the same branch and load/store structure as V8's TurboFan code (checked with `--print-wasm-code-function-index=392`); suspected memory dependence on `lp[u + 1]` across iterations, so measure with CPU counters first |
-| 8 | Remove `#[inline(never)]` from the 7 by-value-`v128` helpers | `simd_ops.rs`, `soa_tracks.rs:3419` | at most 2.1% including their bodies | Under 0.1% | Yes. Not worth a wasm rebuild |
-| 9 | Other multi-instruction NEON ops (`any_true`, `pmin`/`pmax`, narrows, bitmasks) | `src/simd/neon.rs` | 0.8-5.5% each, as V8 | None found: each is already the shortest exact sequence and matches V8's lowering | |
-| 10 | 256-bit SIMD | | | None on Apple Silicon: NEON is 128-bit and there is no SVE. SME's streaming SVE needs a mode switch and is not general-purpose; M4 P-cores already issue up to four 128-bit vector ops per cycle. On x86-64, AVX2 would need the kernel to issue two `v128` ops per 256-bit op (or a 256-bit layer). It is exact only with lane-wise identical op sequences, no FMA and unchanged reduction order. Not measurable here (Rosetta) | Possible on x86 with those rules |
-| 11 | Build flags: fat LTO, `codegen-units = 1`, `panic = "abort"`, `target-cpu=native` | `native/Cargo.toml` | | **None** (measured, table above) | Yes |
-
-For the wasm itself the profile suggests one more item: LLVM does not auto-vectorise for wasm32 the loops it vectorises for aarch64 (`warmup_accumulate_and_lock`, 6 times slower in V8). Hand-written `f32x4` code there would help the shipped wasm. It would not help native.
+| 1 | **Sequential `f64` sums in BOS and the LOO solver as partial sums** | `eval_cur_patch_8x8` (`sum_ti`, `bx`, `by`), dense-LK residual, reductions on a reference-patch miss | see the profiles above | measured on a prototype, see [Proposals that change output](#proposals-that-change-output-measured-not-landed) | **No**: a different summation order changes the last bits |
+| 2 | Pair two BOS nodes in `f64x2` lanes (each lane exactly one node's scalar sequence) | `extract_dense_lk` with `eval_cur_patch_8x8` | as #1 | Limited: each node's chain loop already keeps the FP pipes ~90% busy (11 FP ops per pixel against a 3-cycle add chain), so pairing mostly halves latency the pipes cannot fill; estimate 10% of `eval_cur_patch_8x8`, not measured | Yes, but needs the LK iterations of two nodes in lockstep |
+| 3 | BOS reference-patch hit path in `f64x2` (`ref_patch_restore`, two pixels per op) | `bos.rs` | the hit path is most of what is left of `build_ref_patch_node` | Needs `f64x2_promote_low_f32x4` and `f32x4_demote_f64x2_zero` in the SIMD layer (every backend, conformance table); estimate 3-5% of `bos` and `ingest_roi`, not measured | Yes |
+| 4 | Invalidate only the nodes a maintenance update touches | `update_mode2_reference` | `bos` only: ~100 of 635 dense-LK frames follow a maintenance update and miss the whole cache | Estimate ~2% of `bos`, not measured | Yes |
+| 5 | Fewer `v128_any_true` exits in the candidate scan: OR 16-32 pixels of hit masks before one test | `soa_tracks.rs` `extract_phase1a_raw` | swarm 16%, covariance 11%, hodge 9% (wasm) | Estimate under 5% of those, not measured | Yes (control flow only) |
+| 6 | Row-luma means inside the pooling pass; 8-op instead of 11-op tolerance pack in the grid loop | `rgba_to_planar_and_pool160_simd128`, `stat_fused_hd40_row` | `compute_row_luma_means_simd128` 3.4% of `hero_hd`; the pack ~2% of the grid loop | Estimate 2-3% and ~1% of `hero_hd` | Yes, keeping each row's four accumulators and their order. The full pass fusion: see "Tried and not landed" above |
+| 7 | Branch-free masked sums in the Hodge PCG | `hodge.rs` | `project_zero_mean` 23% of `hodge` (wasm) | **Measured**: NEON 0.965, wasm 0.993 (inside the noise); not landed | Yes |
+| 8 | The scan-along-`ex` branch of the band rows | `vibrometry.rs` | not reached by the canonical set | Same transformation as the landed one; needs a recorded session that uses it first | Yes |
+| 9 | Build flags: fat LTO, `codegen-units = 1`, `panic = "abort"`, `target-cpu=native` | `native/Cargo.toml` | | **None** (measured on v3.0.0, table above) | Yes |

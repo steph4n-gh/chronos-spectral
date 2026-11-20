@@ -24,7 +24,7 @@ flowchart TB
   POST -->|"Display slot [t - eff_k] + Telemetry"| GL["OffscreenCanvas WebGL2 + Canvas2D Compositors"]
 ```
 
-Static checks in [build.sh](../build.sh) and [src/lib.rs](../src/lib.rs) pin `sizeof(Arena)` (`22,644,848 B <= 24,117,248 B`), static `.rodata` end (`59,216 B`), and static data end `dualStaticEnd` (`22,704,064 B <= 24,248,320 B`) inside `448` Wasm pages (`29,360,128 B`) with `0` runtime heap allocation. Major subsystems split memory cleanly:
+Static checks in [build.sh](../build.sh) and [src/lib.rs](../src/lib.rs) pin `sizeof(Arena)` (`23,300,224 B <= 24,117,248 B`), static `.rodata` end (exactly `59,216 B`, so every region keeps its address), and static data end `dualStaticEnd` (`23,359,440 B <= 24,248,320 B`) inside `448` Wasm pages (`29,360,128 B`) with `0` runtime heap allocation. Major subsystems split memory cleanly:
 
 | Arena section | Resident structs and buffers | Purpose |
 | :--- | :--- | :--- |

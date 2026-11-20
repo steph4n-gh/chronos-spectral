@@ -8,7 +8,7 @@
 
 CHRONOS-SPECTRAL turns raw video pixels directly into occlusion-bridged trajectories, symbolic differential equations, continuum flow decompositions, Background-Oriented Schlieren (BOS) refraction fields, and rolling-shutter vibrometry maps inside one zero-allocation WebAssembly kernel. It solves tracking, phase estimation, and physical system identification from classical signal processing and variational mechanics rather than trained neural networks.
 
-Everything compiles into one `2.36 MiB` (`2,475,310 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 22,644,848 B`, `dualStaticEnd = 22,704,064 B`). The kernel has `76` exports (`memory` and `75` functions, one of them a test hook), zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and only `6` `unsafe` tokens inside the continuum physics module (one SIMD128 `k`-NN candidate scan).
+Everything compiles into one `2.36 MiB` (`2,479,630 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 23,300,224 B`, `dualStaticEnd = 23,359,440 B`). The kernel has `76` exports (`memory` and `75` functions, one of them a test hook), zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and only `6` `unsafe` tokens inside the continuum physics module (one SIMD128 `k`-NN candidate scan).
 
 ## Live demonstrations
 
