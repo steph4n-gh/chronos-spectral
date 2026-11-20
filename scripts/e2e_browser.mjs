@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // ============================================================================
 // CHRONOS-SPECTRAL // Zero-Dependency Headless Chrome CDP Full-Stack E2E Gate
-// Exercises V8 Web Worker + OffscreenCanvas HUD, 256-page Wasm SIMD128 kernel,
+// Exercises V8 Web Worker + OffscreenCanvas HUD, 448-page Wasm SIMD128 kernel,
 // runtime 320x180 SD <-> 640x360 HD switching, real-camera H.264 MP4 playback,
 // exact 1/fps transport step, Nikko 0.80 Hz vs APERIODIC gating, ASSUMED vs
 // SURVEYED calibration provenance + Escape preservation, 56-col v1.5.0 export,

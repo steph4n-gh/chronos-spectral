@@ -4,13 +4,13 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `2.0.x` (`main`, `v2.0.0`) | Yes |
-| `< 2.0` | No |
+| `3.0.x` (`main`, `v3.0.0`) | Yes |
+| `< 3.0` | No |
 
 ## Architecture & Threat Boundary
 
 1. **Static Client-Side Showcase & Command Deck (`web/index.html`, `web/worker.js`, `web/chronos_spectral.wasm`):**
-   - Runs 100% locally inside a browser Web Worker over a static 320-page `#![no_std]` WebAssembly linear arena (`0` host imports, `0` Cargo/npm runtime dependencies, `0` external CDN scripts or analytics).
+   - Runs 100% locally inside a browser Web Worker over a static 448-page (`28.00 MB`) `#![no_std]` WebAssembly linear arena (`0` host imports, `0` Cargo/npm runtime dependencies, `0` external CDN scripts or analytics).
    - User-selected MP4/WebM files (`Drag & Drop` or file picker) and webcam streams stay in browser memory (`0` bytes uploaded).
    - Do not expose sensitive local camera feeds or private footage on shared or untrusted screens.
 

@@ -52,6 +52,37 @@ cp "$WASM_SRC" "${WASM_DST}.tmp.$$"
 mv -f "${WASM_DST}.tmp.$$" "$WASM_DST"
 ls -lh "$WASM_DST"
 
+if command -v sha256sum >/dev/null 2>&1; then
+  WASM_SHA256="$(sha256sum "$WASM_DST" | cut -d' ' -f1)"
+else
+  WASM_SHA256="$(shasum -a 256 "$WASM_DST" | cut -d' ' -f1)"
+fi
+echo "  [INFO] $(rustc --version) -> sha256 ${WASM_SHA256}"
+
+# The committed web/chronos_spectral.wasm is the binary GitHub Pages deploys. CI sets
+# CHRONOS_VERIFY_COMMITTED_WASM=1 so every gate below runs against exactly that binary.
+if [ "${CHRONOS_VERIFY_COMMITTED_WASM:-0}" = "1" ]; then
+  if ! git diff --quiet HEAD -- "$WASM_DST"; then
+    echo "FAIL: rebuilt ${WASM_DST} (sha256 ${WASM_SHA256}) differs from the committed binary." >&2
+    echo "      Rebuild with the toolchain pinned in rust-toolchain.toml and commit the result." >&2
+    exit 1
+  fi
+  echo "  [PASS] Rebuilt Wasm is byte-identical to the committed ${WASM_DST}"
+fi
+
+# Source hygiene claims published in README.md and docs/: keep the docs and these counts in step.
+CONTINUUM_UNSAFE_EXPECTED=6
+CONTINUUM_UNSAFE="$(grep -ow 'unsafe' src/continuum_physics.rs | wc -l | tr -d ' ')"
+if [ "$CONTINUUM_UNSAFE" != "$CONTINUUM_UNSAFE_EXPECTED" ]; then
+  echo "FAIL: src/continuum_physics.rs has ${CONTINUUM_UNSAFE} unsafe tokens, docs state ${CONTINUUM_UNSAFE_EXPECTED}." >&2
+  exit 1
+fi
+if grep -q 'MaybeUninit' src/*.rs; then
+  echo "FAIL: MaybeUninit found in src/*.rs, docs state 0." >&2
+  exit 1
+fi
+echo "  [PASS] Source hygiene: ${CONTINUUM_UNSAFE} unsafe tokens in continuum_physics.rs, 0 MaybeUninit across src/*.rs"
+
 echo ""
 echo "[2/5] Auditing Wasm binary layout & SIMD128 / CLZ opcodes via wasm-objdump..."
 if ! command -v wasm-objdump >/dev/null 2>&1; then
