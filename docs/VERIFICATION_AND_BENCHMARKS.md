@@ -205,3 +205,117 @@ Exercises the full browser application against `scripts/dev_server.mjs` over Dev
 - **Step 8:** Default Split-Wipe Showcase surface (`starling_1000`, `model_rockets`, `bos_plume` presets), drag handle interaction, Showcase <-> Deck switching, and `CLS = 0.000000`.
 - **Step 9:** Wave-1 Deck controls (`1:1` Native ROI crop/orientation, `bosModeSelect` + `bos_thermal_plume.mp4` READY refraction overlay, `bos_handheld_failure.mp4` tripod-motion warning) and `CLS = 0.000000`.
 - **Steps 10 & 10e:** Wave-2 `40x22` Mesh Hodge (`vortex_1200`, `coexactFrac > 0.85`, `orthEcRel < 1e-6`), RS + Welch (`880 Hz`, `K >= 8`) + `EXPOSURE_NULL` warning banner, occluded equal-mass `AMBIGUOUS` conservation, plus native Chrome webcam/Web Audio Worker acknowledgment checks and 40 mocked audio/`currentTime`/`getOutputTimestamp`/`rVFC` `captureTime` clock-skew lifecycle scenarios (`CLS = 0.000000`).
+
+## Kernel record-and-replay traces (`CSTRACE v1`)
+
+Whole-kernel parity between the wasm build and a native build is checked by recording what the existing harnesses do to the kernel, then replaying it without any JavaScript. The scene generators are not ported; their effect on the kernel is recorded.
+
+| File | Role |
+| :--- | :--- |
+| [scripts/trace_hook.mjs](../scripts/trace_hook.mjs) | Node preload. Inert unless `CHRONOS_TRACE_DIR` is set; then every kernel instance (any module exporting `chronos_init`) is recorded to one trace file, with no change to the harness. |
+| [scripts/trace_replay.mjs](../scripts/trace_replay.mjs) | Reference replayer: fresh instance, apply writes, make calls, check every return value and region digest. |
+| [scripts/record_canonical_traces.mjs](../scripts/record_canonical_traces.mjs) | Records the canonical scenario set (`--list` shows it). |
+| [scripts/trace_lib.mjs](../scripts/trace_lib.mjs) | Shared code: `XXH32`, wasm section parser, region table, format reader. |
+| [scripts/trace_tool.mjs](../scripts/trace_tool.mjs) | `info` dump and the negative-control mutations (`mutate-write`, `mutate-arg`). |
+
+```bash
+# Record one harness
+CHRONOS_TRACE_DIR=/tmp/traces node --import ./scripts/trace_hook.mjs scripts/gate_i3_hodge.mjs
+# ...or any command line, including child processes
+CHRONOS_TRACE_DIR=/tmp/traces NODE_OPTIONS="--import=$PWD/scripts/trace_hook.mjs" node scripts/gate_i5_bos.mjs
+# Record the canonical set outside the repo, then replay all of it
+node scripts/record_canonical_traces.mjs --out=/tmp/chronos-traces --replay
+node scripts/trace_replay.mjs /tmp/chronos-traces/*/
+node scripts/trace_tool.mjs info /tmp/chronos-traces/hodge/<file>.cstrace
+```
+
+Hook environment: `CHRONOS_TRACE_LABEL` (file prefix), `CHRONOS_TRACE_MAX_BYTES` (per-instance cap, default 4 GiB), `CHRONOS_TRACE_TOTAL_MAX_BYTES` (per-process cap, default 16 GiB), `CHRONOS_TRACE_MAX_INSTANCES`, `CHRONOS_TRACE_INSTANCES` (for example `0-3,100`), `CHRONOS_TRACE_STRICT=1` (snapshot and digest after every call, getters included), `CHRONOS_TRACE_MEMDIGEST=N` (validation: every Nth digested call also carries an `XXH32` of all memory above the shadow stack), `CHRONOS_TRACE_LOG=0`. When a cap is hit, the trace gets an `END` record at the last whole call and the program continues unrecorded. Each directory also gets an `index.jsonl` line per trace. Latency gates run slower while recording: the canonical recorder sets `CHRONOS_CI_BUDGET_SCALE` (default `32`) and leaves budgets unchanged. Its own caps default to 1 GiB per instance and 8 GiB for the whole set. Traces are temporary artifacts. The recorder refuses an output directory inside the repository.
+
+### How the hook works
+
+Per instance, the hook keeps a full snapshot of linear memory taken after the previous call. Before each export call it compares memory with the snapshot (`Buffer.compare` over 64 KiB blocks and 4 KiB chunks, then 32-bit words, trimmed to exact bytes) to find every byte the host changed. The kernel's own writes are already in the snapshot, so they never appear as host writes. Each changed range is named by **region + offset**, never by raw address. If some changed bytes fall outside every region, the hook checks whether memory now equals the fresh-instance image plus region writes. That is what `calibrate_mp4.mjs` does when it resets a pooled instance by restoring the first 64 KiB and zeroing the rest. If so, the change is recorded as `RESET` followed by those region writes. Anything else outside every region becomes an `UNMAPPED` record and is reported on stderr. The export is called with arguments converted exactly as the JS API converts them (`ToInt32`, `Math.fround`, `ToNumber`). After the call, the snapshot is refreshed and the `XXH32` digest of every digested region is recorded. Getters (`chronos_get_*`, `padic_ultrametric_val`) have their host writes captured like any call, but carry no digests; after a getter only the shadow stack (`[0, __stack_pointer init)`) is re-synchronised. Strict mode confirms getters write nothing else.
+
+### Region table
+
+The table lives in `REGION_SPECS` in [scripts/trace_lib.mjs](../scripts/trace_lib.mjs). Each entry names the getter export and the Rust backing field. The byte length comes from that field's declared array type in `src/*.rs`, evaluated from the Rust `const` items (and `size_of::<IngestSlotMeta>() == 96` for `ring_meta`). Element type and direction come from the getter's Rust return type: `*const` is `out`, `*mut` is `both`, and `in` marks the staging buffers `ingest_rgba`, `audio_staging`, `hodge_inject` and `conservation_input`. Building the table fails if a pointer-returning export in `src/lib.rs` has no entry. At startup each region's pointer is checked for alignment and for lying inside memory, above the shadow stack.
+
+There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_ring_slot_ptr(k)`), the two moving aliases `ingest_rgba` and `display_rgba` (host writes can be addressed through them, but they are not digested separately), and 33 fixed regions: `eca_res`, `pip_rgba`, `all_pip_rgba`, `slot_meta`, `laplacian`, `fiedler`, `telemetry`, `micro_tracks`, `continuum_field`, `rigid_bodies`, `swarm_telemetry`, `modal_field`, `ring_meta`, `row_luma`, `wave1_telemetry`, `bos_telemetry`, `bos_planes`, `bos_valid`, `bos_rgba`, `micro_cov`, `micro_residual`, `micro_loom`, `micro_quality`, `hero_candidates`, `wave2_telemetry`, `audio_staging`, `vibro_telemetry`, `vibro_planes`, `hodge_telemetry`, `hodge_planes`, `hodge_inject`, `conservation_telemetry` and `conservation_input`. Each digested call covers 45 regions, 12,715,152 bytes. The full table, with getter, argument, element type, length and flags, is embedded in every trace header, so a replayer never parses Rust.
+
+### Canonical set (measured)
+
+`record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 46 s (including replay) on Apple Silicon. Replaying all 29 takes 39 s with 0 mismatches.
+
+| Scenario | Harness | Traces | Calls | Host writes | Size |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| `hero_sd` | `calibrate_mp4.mjs --clip=juggling_ballistic` (SD) | 2 | 1,126 | 145,042 + 1 reset | 45.2 MB |
+| `hero_hd` | `calibrate_mp4.mjs --hd --clip=juggling_ballistic` | 2 | 1,126 | 613,215 + 1 reset | 162.8 MB |
+| `hero_suite` | build.sh `[3/5]` Gates A-P + SD/HD pillar trials | 1 | 31,371 | 754,082 | 677.6 MB |
+| `mp4_occlusion` | `calibrate_mp4.mjs --clip=roundabout_occlusion` | 2 | 1,241 | 821 + 1 reset | 58.9 MB |
+| `swarm_1200` | `benchmark_1000.mjs --only=Q1` | 1 | 719 | 636,687 | 50.0 MB |
+| `bos` | `gate_i5_bos.mjs` | 1 | 2,464 | 109,002 + 1 unmapped | 110.2 MB |
+| `hodge` | `gate_i3_hodge.mjs` | 1 | 175 | 95,067 | 19.2 MB |
+| `rs_vibrometry` | `gate_i2_rs_welch.mjs` | 1 | 6,739 | 401,893 | 1,054.8 MB |
+| `conservation` | `gate_i5b_conservation.mjs` | 1 | 1,424 | 15,662 | 14.8 MB |
+| `covariance` | `gate_i1_cov_residual.mjs` (10 of 406 instances) | 10 | 4,742 | 338,512 | 127.5 MB |
+| `ingest_roi` | `gate_i0_i4_ingest.mjs` | 7 | 7,707 | 351,051 + 3 unmapped | 221.0 MB |
+
+Each `calibrate_mp4.mjs` scenario also has a 0-call trace for its probe instance. Recording costs about 4 ms per kernel call (SD hero tick `0.12 -> 4.1 ms`, Q1 swarm tick `1.3 -> 5.7 ms`). Strict mode with `--memdigest=1` takes about 2.4 times as long as default recording.
+
+Non-portable writes in the set: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` find the private `Arena` fields `ring_cursor`, `res_mode` and `frame_idx` by scanning memory and overwrite them to test frame-index wraparound. No getter exposes those fields, so the writes are `UNMAPPED`. They replay against the wasm, but a native build can follow those three traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Making them portable would need a test-only export for those fields.
+
+### Format
+
+All integers are little-endian. Header:
+
+| Field | Type |
+| :--- | :--- |
+| magic | 8 bytes `CSTRACE\0` |
+| version major, minor | `u16`, `u16` (`1`, `0`) |
+| header length in bytes (from offset 0) | `u32` |
+| sha256 of the wasm binary | 32 bytes |
+| linear memory size in bytes | `u32` |
+| flags (bit 0: strict, bit 1: whole-memory digests present) | `u32` |
+| metadata JSON (label, argv, pid, instance ordinal, node version, ...) | `u32` length + UTF-8 |
+| function table: `u16` count, then per export: name (`u16` length + UTF-8), `u8` nparams, param types, `u8` nresults, result types, `u8` flags | value types are wasm codes `0x7f` i32, `0x7e` i64, `0x7d` f32, `0x7c` f64; flag bit 0 = returns a pointer, bit 1 = getter (no digests) |
+| region table: `u16` count, then per region: name (`u16` length + UTF-8), `u16` getter function index, `u8` has-argument, `u32` argument, `u8` element (`1` u8, `2` u32, `3` f32), `u32` byte length, `u8` flags | flag bit 0 = host-writable (`*mut`), bit 1 = digested, bit 2 = alias, bit 3 = input-only |
+
+Records follow, in session order, each starting with a one-byte tag:
+
+| Tag | Record | Payload |
+| :--- | :--- | :--- |
+| `0x57` `W` | host write | `u16` region index, `u32` offset in region, `u32` length, bytes |
+| `0x55` `U` | unmapped host write | `u32` raw wasm address, `u32` length, bytes |
+| `0x52` `R` | reset | none: memory now equals the fresh-instance image (the `W` records that follow are relative to it) |
+| `0x43` `C` | export call | `u32` call index (from 0), `u16` function index, arguments as raw bit patterns (4 bytes for i32/f32, 8 for i64/f64), `u8` status (`0` returned, `1` trapped/threw), result bits if status `0` and the function has a result, `u8` digest flags, then if bit 0 is set one `u32` `XXH32` per digested region in table order, then if bit 1 is set one `u32` `XXH32` of memory `[stackTop, memory size)` (validation traces only; `stackTop` is in the metadata JSON) |
+| `0x45` `E` | end | `u8` reason (`0` process exit, `1` instance cap, `2` total cap, `3` instance garbage-collected), `u32` calls, `u32` host writes, `u32` unmapped writes |
+
+Replay rules (what [scripts/trace_replay.mjs](../scripts/trace_replay.mjs) does, and what a native replayer must do):
+
+1. For `W`, resolve the region's address now by calling its getter (with its argument), then copy the bytes to address + offset. `ingest_rgba` moves with the ring cursor, so it must be resolved at that point in the sequence, not cached.
+2. For `C`, call the export with the decoded arguments and compare status and result. f32 and f64 results compare as bit patterns, except that NaN matches any NaN, because the JS API cannot observe NaN payloads. Pointer results (function flag bit 0) are addresses: they are compared only when replaying the same wasm, and a native replayer skips them.
+3. When digest bit 0 is set, hash every digested region and compare it with the recorded value. A mismatch names the call index, the export and the region. Bit 1 (whole-memory digest) is meaningful only against the identical wasm binary. A native replayer reads past it.
+4. For `R`, restore the fresh-instance state. The JS replayer copies back the memory image it saved at instantiation. A native replayer starts a fresh kernel (a new process, or a reset entry point if one is added).
+5. A `U` record is a raw-address write. It replays only against the identical wasm binary. For a native build, the trace is portable up to the call that follows the first `U` record.
+6. A file without an `E` record (process killed) replays up to its last whole record.
+
+### Digest hash: `XXH32`, seed `0`
+
+The digest is standard `XXH32` (xxHash 32-bit) over the region's raw bytes, seed `0`. With all arithmetic mod 2^32, `rotl` = rotate left, and `P1 = 0x9E3779B1`, `P2 = 0x85EBCA77`, `P3 = 0xC2B2AE3D`, `P4 = 0x27D4EB2F`, `P5 = 0x165667B1`:
+
+- If `len >= 16`: `v1 = seed + P1 + P2`, `v2 = seed + P2`, `v3 = seed`, `v4 = seed - P1`. For each 16-byte stripe, read four little-endian `u32` lanes and set `vi = rotl(vi + lane_i * P2, 13) * P1`. Then `h = rotl(v1, 1) + rotl(v2, 7) + rotl(v3, 12) + rotl(v4, 18)`. Otherwise `h = seed + P5`.
+- `h += len`.
+- For each remaining 4-byte little-endian word `w`: `h = rotl(h + w * P3, 17) * P4`.
+- For each remaining byte `b`: `h = rotl(h + b * P5, 11) * P1`.
+- Avalanche: `h ^= h >> 15; h *= P2; h ^= h >> 13; h *= P3; h ^= h >> 16`.
+
+Test vectors (ASCII input, seed `0`), checked against the reference `xxhash` implementation:
+
+| Input | `XXH32` |
+| :--- | :--- |
+| `""` | `02cc5d05` |
+| `"a"` | `550d7456` |
+| `"abc"` | `32d153ff` |
+| `"xxhash"` | `9a95b70e` |
+| `"0123456789abcdef"` (16 bytes, one stripe) | `c2c45b69` |
+| `"0123456789abcdefg"` (17 bytes, stripe + tail byte) | `cc79b217` |
+| `"Nobody inspects the spammish repetition"` | `e2293b2f` |
