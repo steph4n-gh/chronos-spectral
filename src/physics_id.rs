@@ -6048,8 +6048,10 @@ fn evaluate_stationary_birth_one_side(
 ) -> CollisionPairEvent {
     let mut ev = CollisionPairEvent::zeroed();
     let born_earliest = t_born.birth_frame;
-    // Born partner must have actually appeared around or shortly after f_c (never a pre-existing track)
-    if born_earliest + 2 < f_c || born_earliest > f_c + 8 {
+    // Born partner must have actually appeared around or shortly after f_c (never a pre-existing track).
+    // Compared in `u64`: `birth_frame + 2` overflows `u32` for a track born on one of the last two
+    // frames before the counter wraps. (`f_c + 8` cannot: callers pass `f_c <= frame_idx - 8`.)
+    if (born_earliest as u64) + 2 < (f_c as u64) || (born_earliest as u64) > (f_c as u64) + 8 {
         return ev;
     }
     let s = if a.scale_s > 0.1 { a.scale_s } else { (a.frame_w / 320.0).max(0.25) };
@@ -6250,8 +6252,10 @@ fn evaluate_pair_at_frame_ref(
         ev.score = -1.0;
         return ev;
     }
-    if (ta.last_discont_frame > 0 && f_c < ta.last_discont_frame + 5)
-        || (tb.last_discont_frame > 0 && f_c < tb.last_discont_frame + 5)
+    // Compared in `u64`: `last_discont_frame + 5` overflows `u32` for a discontinuity on one of
+    // the last five frames before the counter wraps.
+    if (ta.last_discont_frame > 0 && (f_c as u64) < (ta.last_discont_frame as u64) + 5)
+        || (tb.last_discont_frame > 0 && (f_c as u64) < (tb.last_discont_frame as u64) + 5)
     {
         ev.score = -2.0;
         return ev;
@@ -7337,5 +7341,48 @@ mod frame_wrap_tests {
         let mut st = std::boxed::Box::new(CollisionAnalyzerState::zeroed());
         let out = analyze_two_body_collisions(&a, &tracks, &mut st);
         assert_eq!(out.has_pair_event, 0);
+    }
+
+    #[test]
+    fn pair_candidate_after_discontinuity_near_u32_max() {
+        // A discontinuity two frames before the wrap rejects every candidate frame before
+        // `last_discont_frame + 5` (score -2). Up to v3.1.0 that bound was computed in `u32`: it
+        // panics with overflow checks, and without them it wraps to 2, so the candidate at
+        // f_c = MAX - 8 was evaluated (and failed later, with score -3, on too few samples).
+        let r = ring();
+        let a = arena_view(&r);
+        let mut t_disc = track_view(&r, 1);
+        t_disc.last_discont_frame = LAST - 2;
+        let t_clean = track_view(&r, 2);
+        let ev = evaluate_pair_at_frame_ref(&a, &t_disc, &t_clean, 0, 1, LAST - 8);
+        assert_eq!((ev.valid, ev.score), (0, -2.0));
+        let ev = evaluate_pair_at_frame_ref(&a, &t_clean, &t_disc, 1, 0, LAST - 8);
+        assert_eq!((ev.valid, ev.score), (0, -2.0));
+        // Every discontinuity frame whose `+ 5` overflows.
+        for d in LAST - 4..=LAST {
+            t_disc.last_discont_frame = d;
+            let ev = evaluate_pair_at_frame_ref(&a, &t_disc, &t_clean, 0, 1, LAST - 8);
+            assert_eq!((ev.valid, ev.score), (0, -2.0), "last_discont_frame = MAX - {}", LAST - d);
+        }
+    }
+
+    #[test]
+    fn stationary_birth_partner_born_near_u32_max() {
+        // A partner born on one of the last two frames before the wrap, for the newest candidate
+        // frame f_c = MAX - 8. Up to v3.1.0 the "born near f_c" test computed `birth_frame + 2`
+        // in `u32`, which panics with overflow checks. The event is invalid either way: the born
+        // track has at most two frames >= birth_frame in its post-impact window, so this path
+        // cannot change a result, and `evaluate_pair_at_frame_ref` never reaches it (it requires
+        // four post-impact samples of the born track first).
+        let r = ring();
+        let a = arena_view(&r);
+        let t_str = track_view(&r, 1);
+        for born in [LAST - 1, LAST] {
+            let mut t_born = track_view(&r, 2);
+            t_born.birth_frame = born;
+            t_born.orig_birth_frame = born;
+            let ev = evaluate_stationary_birth_one_side(&a, &t_str, &t_born, 0, 1, LAST - 8);
+            assert_eq!(ev.valid, 0, "birth_frame = MAX - {}", LAST - born);
+        }
     }
 }
