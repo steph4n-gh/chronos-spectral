@@ -689,10 +689,13 @@ assert(
   const rcHiWord = wi - 1;
   const fIdxWord = wi + 1;
 
-  // Position engine 18 ticks before u32::MAX: 1 re-sync tick (0xffffffee) + 16 clear warmup ticks -> READY at 0xffffffff -> wrap at 0
-  arenaU32[rcLoWord] = 0xffffffee;
-  arenaU32[rcHiWord] = 0;
-  arenaU32[fIdxWord] = 0xffffffee;
+  // Position engine 18 ticks before u32::MAX: 1 re-sync tick (0xffffffee) + 16 clear warmup ticks -> READY at 0xffffffff -> wrap at 0.
+  // Through the test-hook export, not a raw write, so recorded traces of this gate replay natively.
+  exp.chronos_test_hook_set_frame_counters(0xffffffee, 0xffffffee, 0);
+  assert(
+    arenaU32[rcLoWord] === 0xffffffee && arenaU32[rcHiWord] === 0 && arenaU32[fIdxWord] === 0xffffffee,
+    'chronos_test_hook_set_frame_counters must set exactly the located (ring_cursor, frame_idx) words'
+  );
   pushFrame(clearFrame, wrapSeq, (wrapSeq + 1) * 33333, 0);
   wrapSeq++;
   exp.chronos_reset_bos_ref();

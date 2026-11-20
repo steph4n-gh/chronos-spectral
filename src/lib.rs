@@ -5496,6 +5496,23 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     init_wave1_telemetry(a, true);
 }
 
+/// Test hook, not part of the host API. Sets the engine frame counter `frame_idx` (the `u32`
+/// that `chronos_post_tick` advances with wrapping) and the ingest ring cursor `ring_cursor`
+/// (the monotonic `u64` that selects the ring slot), and nothing else, so test harnesses can
+/// exercise the frame-index wrap at `u32::MAX` without running 2^32 frames. The cursor is
+/// `ring_cursor_hi << 32 | ring_cursor_lo`; pass its current value to move only `frame_idx`.
+///
+/// Ring contents, frame history and track state are left as they are: the kernel sees both
+/// counters jump, exactly as if the host had overwritten the two arena fields. The gates did
+/// that by raw address until v3.1.0 (`scripts/gate_i5_bos.mjs`, `scripts/gate_i0_i4_ingest.mjs`),
+/// which a recorded trace cannot replay on a native build; a call to this export replays on both.
+#[no_mangle]
+pub unsafe extern "C" fn chronos_test_hook_set_frame_counters(frame_idx: u32, ring_cursor_lo: u32, ring_cursor_hi: u32) {
+    let a = arena_mut();
+    a.frame_idx = frame_idx;
+    a.ring_cursor = ((ring_cursor_hi as u64) << 32) | ring_cursor_lo as u64;
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chronos_set_ingest_pts(pts_sec: f64) {
     if pts_sec.is_finite() && pts_sec >= 0.0 {
@@ -7810,7 +7827,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
     let mut flat_cnt = 0usize;
     let mut tot_cnt = 0usize;
     let mut y = 2usize;
-
     let (v_gthresh, v_cthresh, v_bg) = {
         use crate::simd::f32x4_splat;
         (f32x4_splat(0.003), f32x4_splat(0.012), f32x4_splat(bg_ref))
@@ -7820,7 +7836,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
         let row1 = row0 + frame_w;
         let mut x = 2usize;
         while x + 5 < frame_w {
-
             {
                 use crate::simd::{
                     f32x4_abs, f32x4_add, f32x4_le, f32x4_sub, i32x4_bitmask, v128, v128_and,
@@ -7841,20 +7856,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
                 flat_cnt += (m as u32).count_ones() as usize;
                 tot_cnt += 4;
             }
-            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
             x += 4;
         }
         if tot_cnt - flat_cnt > max_non_flat {
@@ -12427,7 +12428,6 @@ fn update_physics_and_telemetry(
         a.telemetry[ti] = 0.0;
     }
 
-
     {
         use crate::simd::{f32x4_abs, f32x4_lt, f32x4_splat, v128, v128_and};
         const _: () = assert!(TELEMETRY_LEN % 4 == 0);
@@ -12446,12 +12446,6 @@ fn update_physics_and_telemetry(
             }
         }
     }
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
     true
 }
 

@@ -9,7 +9,8 @@
 // XXH32 digests. This is the reference the native Rust replayer follows.
 //
 // Usage:
-//   node scripts/trace_replay.mjs [--wasm=<path>] [--stats] [--portable] [--max-errors=N] <trace|dir>...
+//   node scripts/trace_replay.mjs [--wasm=<path>] [--stats] [--portable] [--max-errors=N]
+//        [--allow-wasm-mismatch] <trace|dir>...
 //   node scripts/trace_replay.mjs --bench [--warmup=N] [--passes=N] [--bench-reconcile=K]
 //        [--bench-verbose] [--json=FILE] [--bench-cpu-prof=FILE] [--wasm=<path>] <trace|dir>...
 //
@@ -20,6 +21,13 @@
 // Exit status: 0 when every trace replays with 0 mismatches, 1 otherwise.
 // UNMAPPED (raw-address) host writes are applied and reported as non-portable;
 // --portable turns them into failures.
+//
+// --allow-wasm-mismatch replays traces recorded against a different wasm build
+// (for example sessions recorded on the previous release, replayed on a new
+// one) instead of refusing them. Everything is still checked, pointer results
+// included: equal pointers mean every region is where it was, which UNMAPPED
+// writes rely on. Whole-memory digests cover the data section too, so they are
+// skipped (and counted) on a different build.
 // ============================================================================
 
 import crypto from 'node:crypto';
@@ -36,6 +44,7 @@ const wasmPath = path.resolve((args.find((a) => a.startsWith('--wasm=')) || `--w
 const maxErrors = Number((args.find((a) => a.startsWith('--max-errors=')) || '--max-errors=1').slice(13));
 const showStats = args.includes('--stats');
 const requirePortable = args.includes('--portable');
+const allowWasmMismatch = args.includes('--allow-wasm-mismatch');
 const inputs = args.filter((a) => !a.startsWith('--'));
 const optVal = (k, d) => {
   const a = args.find((x) => x.startsWith(`--${k}=`));
@@ -64,7 +73,10 @@ function replay(file) {
   const rd = new TraceReader(file);
   const h = rd.header;
   const name = path.basename(file);
-  if (h.wasmSha256 !== wasmSha) throw new Error(`${name}: trace was recorded against wasm ${h.wasmSha256}, replay wasm is ${wasmSha}`);
+  const otherWasm = h.wasmSha256 !== wasmSha;
+  if (otherWasm && !allowWasmMismatch) {
+    throw new Error(`${name}: trace was recorded against wasm ${h.wasmSha256}, replay wasm is ${wasmSha} (--allow-wasm-mismatch replays it anyway)`);
+  }
 
   const E = new WA.Instance(wasmModule, {}).exports;
   const mem = new Uint8Array(E.memory.buffer);
@@ -95,7 +107,7 @@ function replay(file) {
   const prevBytes = digested.map(() => null);
   const prevHash = new Uint32Array(digested.length);
 
-  const st = { firstUnmappedCall: -1, resets: 0, memChecks: 0, calls: 0, digestChecks: 0, writes: 0, writeBytes: 0, unmapped: 0, errors: 0, perRegionWriteBytes: new Map() };
+  const st = { firstUnmappedCall: -1, resets: 0, memChecks: 0, memSkipped: 0, calls: 0, digestChecks: 0, writes: 0, writeBytes: 0, unmapped: 0, errors: 0, perRegionWriteBytes: new Map() };
   const fail = (msg) => {
     st.errors++;
     if (st.errors <= maxErrors) console.error(`  [MISMATCH] ${name}: ${msg}`);
@@ -160,7 +172,9 @@ function replay(file) {
           }
         }
       }
-      if (rec.memDigest !== null) {
+      if (rec.memDigest !== null && otherWasm) {
+        st.memSkipped++;
+      } else if (rec.memDigest !== null) {
         // Validation traces: all memory above the shadow stack must match too.
         const lo = h.meta.stackTop;
         const hash = xxh32(mem, lo, mem.length - lo);
@@ -194,6 +208,12 @@ function replay(file) {
       `${st.memChecks ? `, ${st.memChecks} whole-memory` : ''}), ` +
       `${st.writes} host writes (${(st.writeBytes / 1e6).toFixed(2)} MB), ${st.resets} resets, ${st.unmapped} unmapped, ${(size / 1e6).toFixed(1)} MB, end=${endTxt}, mismatches=${st.errors}`
   );
+  if (otherWasm) {
+    console.log(
+      `  [NOTE] ${name}: recorded against wasm ${h.wasmSha256.slice(0, 16)}..., replayed on ${wasmSha.slice(0, 16)}... (--allow-wasm-mismatch)` +
+        `${st.memSkipped ? `; ${st.memSkipped} whole-memory digest(s) skipped` : ''}`
+    );
+  }
   if (st.unmapped) {
     console.log(
       `  [${requirePortable ? 'FAIL' : 'WARN'}] ${name}: ${st.unmapped} UNMAPPED raw-address write(s); ` +

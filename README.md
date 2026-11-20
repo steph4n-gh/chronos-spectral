@@ -8,7 +8,7 @@
 
 CHRONOS-SPECTRAL turns raw video pixels directly into occlusion-bridged trajectories, symbolic differential equations, continuum flow decompositions, Background-Oriented Schlieren (BOS) refraction fields, and rolling-shutter vibrometry maps inside one zero-allocation WebAssembly kernel. It solves tracking, phase estimation, and physical system identification from classical signal processing and variational mechanics rather than trained neural networks.
 
-Everything compiles into one `2.36 MiB` (`2,474,879 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 22,644,848 B`, `dualStaticEnd = 22,704,064 B`). The kernel has `75` exports, zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and only `6` `unsafe` tokens inside the continuum physics module (one SIMD128 `k`-NN candidate scan).
+Everything compiles into one `2.36 MiB` (`2,475,310 B`) `#![no_std]` Rust WebAssembly (`wasm32-unknown-unknown` `+simd128`) binary pinned to a fixed `28.00 MB` (`448`-page) linear memory arena (`Arena = 22,644,848 B`, `dualStaticEnd = 22,704,064 B`). The kernel has `76` exports (`memory` and `75` functions, one of them a test hook), zero host imports, zero runtime heap allocations, zero `memory.grow` ops, zero indirect calls, zero `MaybeUninit` blocks, and only `6` `unsafe` tokens inside the continuum physics module (one SIMD128 `k`-NN candidate scan).
 
 ## Live demonstrations
 
@@ -47,7 +47,7 @@ Everything compiles into one `2.36 MiB` (`2,474,879 B`) `#![no_std]` Rust WebAss
 
 Most video perception stacks split into two camps: heavy neural detectors (`YOLO`/`SAM` paired with `ByteTrack`) that fail outside their training distribution and demand gigabytes of VRAM, or classical causal filters (`OpenCV` optical flow + Kalman) that smooth away sharp impacts, lag during phase estimation, and swap IDs whenever identical objects cross behind clutter. CHRONOS-SPECTRAL occupies the third quadrant: a deterministic visual physics instrument in `2.36 MiB` of portable WebAssembly.
 
-| Capability | Neural Detector + Sort (`YOLO`/`SAM`) | Classical Causal (`OpenCV` + Kalman) | CHRONOS-SPECTRAL (`v3.0.0`) |
+| Capability | Neural Detector + Sort (`YOLO`/`SAM`) | Classical Causal (`OpenCV` + Kalman) | CHRONOS-SPECTRAL (`v3.1.0`) |
 | :--- | :--- | :--- | :--- |
 | Object taxonomy and training | Requires labeled classes and weights | Class-agnostic blobs | Zero ML, zero weights: arbitrary unknown targets on frame 1 |
 | Auto-exposure and camera flicker | Vulnerable without domain augmentation | Thresholding breaks on exposure steps | Orthogonal Rank-2 ECA subspace (`36-64 dB` background suppression) |
@@ -91,7 +91,7 @@ Compile `web/chronos_spectral.wasm`, run all offline verification gates (`--chec
 ./build.sh
 ```
 
-Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite), and `Gate N` (native/wasm whole-kernel parity) without launching a server:
+Run release build, `wasm-objdump` opcode/import/shadow-stack audit, mathematical counterexample gates (`Gates A-P`), Wave-1 gates (`I0`, `I4`, `I5`, `I1`), Wave-2 gates (`I2`, `I3`, `I5b`), the `5x2` interleaved SD/HD pillar benchmark, `Gate Q` (`21/21` swarm and continuum checks), `Gate X` (adversarial C-ABI fuzz: random exports with hostile arguments, pixels and staging buffers, `0` traps), and `Gate S` (SIMD layer conformance: Wasm SIMD128 in V8 vs the portable scalar reference, plus the native host suite), and `Gate N` (native/wasm whole-kernel parity) without launching a server:
 
 ```bash
 ./build.sh --check

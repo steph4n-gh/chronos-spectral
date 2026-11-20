@@ -4,7 +4,7 @@ CHRONOS-SPECTRAL solves real-time multi-target tracking, sub-pixel vibration ana
 
 ## 1. End-to-end execution and static arena architecture
 
-All compute state lives in one static aligned struct (`Arena` in [src/lib.rs](../src/lib.rs)), compiled to `wasm32-unknown-unknown` with `+simd128` (`101,655` SIMD128 instructions, `8` `i32.clz` instructions, `75` exports, `0` imports, `0` `memory.grow` ops, `0` `call_indirect` ops, `0` call cycles, and `13,776 B` verified max call-graph stack depth below the `16,384 B` shadow stack reserve).
+All compute state lives in one static aligned struct (`Arena` in [src/lib.rs](../src/lib.rs)), compiled to `wasm32-unknown-unknown` with `+simd128` (`101,655` SIMD128 instructions, `8` `i32.clz` instructions, `76` exports, `0` imports, `0` `memory.grow` ops, `0` `call_indirect` ops, `0` call cycles, and `13,776 B` verified max call-graph stack depth below the `16,384 B` shadow stack reserve).
 
 ```mermaid
 flowchart TB

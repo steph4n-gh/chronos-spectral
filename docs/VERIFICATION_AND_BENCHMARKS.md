@@ -12,16 +12,17 @@ Ensure Rust (`wasm32-unknown-unknown`), Node.js (`v22+`), and `python3` are inst
 ./build.sh --check
 ```
 
-Runs nine sequential offline stages:
+Runs ten sequential offline stages:
 1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`).
-2. `wasm-objdump` binary audit (`75` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
+2. `wasm-objdump` binary audit (`76` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
 3. Mathematical counterexample gates (`Gates A-P`, including `N1` and `N2`).
 4. `5x2` interleaved `320x180` SD vs `640x360` HD Blind Pixel Pillar benchmark.
 5. `Gate Q` high-density `1,000+` target swarm and continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
 6. Wave-1 gates (`gate_i0_i4_ingest.mjs`, `gate_i1_cov_residual.mjs`, `gate_i5_bos.mjs`).
 7. Wave-2 gates (`gate_i2_rs_welch.mjs`, `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs`).
-8. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
-9. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `104 MB` trace set from the wasm (real-MP4 sparse tracking, Hodge, conservation, the first `24 MiB` of the `1,200`-target swarm; `3,088` calls) and replays it on the native build with overflow checks on: every return value and every region digest must match bit for bit, and a corrupted copy of one trace must be rejected at the right call (see [Native replay driver](#native-replay-driver-nativereplay)).
+8. `Gate X` adversarial C-ABI fuzz (`scripts/gate_abi_fuzz.mjs`): random export calls with hostile arguments, pixels and staging buffers, `0` traps required (see [Adversarial C-ABI fuzz](#adversarial-c-abi-fuzz-gate-x)).
+9. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
+10. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `104 MB` trace set from the wasm (real-MP4 sparse tracking, Hodge, conservation, the first `24 MiB` of the `1,200`-target swarm; `3,088` calls) and replays it on the native build with overflow checks on: every return value and every region digest must match bit for bit, and a corrupted copy of one trace must be rejected at the right call (see [Native replay driver](#native-replay-driver-nativereplay)).
 
 ### Full end-to-end pipeline (CI entrypoint)
 
@@ -37,7 +38,7 @@ Runs everything in `--check`, plus Gate `I6` physical capture fixtures (`scripts
 ./build.sh --native-check
 ```
 
-Runs stages 1, 2, 8 and 9 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 7). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
+Runs stages 1, 2, 9 and 10 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 8). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
 
 The scalar reference backend at kernel level (what CI runs with `simd-force-scalar`; drop `--scenarios` when `ffmpeg` is installed):
 
@@ -75,6 +76,9 @@ node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
 
+# Adversarial C-ABI fuzz (Gate X); --trials, --frames, --timeout, --wasm
+node scripts/gate_abi_fuzz.mjs
+
 # SIMD layer conformance: Wasm SIMD128 (V8) vs simd::scalar, then the native host suite
 node scripts/gate_simd_conformance.mjs
 cargo test --target host-tuple
@@ -94,11 +98,11 @@ For slower shared cloud virtual machines, set `CHRONOS_CI_BUDGET_SCALE=3.5` (mat
 
 ## Static binary and safety invariants
 
-Measured directly on `web/chronos_spectral.wasm` (`2,474,879 B`):
+Measured directly on `web/chronos_spectral.wasm` (`2,475,310 B`):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |
-| Export count & host imports | `75` exports, `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
+| Export count & host imports | `76` exports (`memory` and `75` functions, one of them the test hook `chronos_test_hook_set_frame_counters`), `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
 | Wasm linear memory | `initial=448 max=448` (`29,360,128 B`) | `448` fixed pages, `0` `memory.grow` |
 | Arena size | `22,644,848 B` | `<= 24,117,248 B` (`Arena` static bound) |
 | Static `.rodata` end | `59,216 B` | Unchanged `.rodata` ceiling |
@@ -215,6 +219,16 @@ Key measured deltas:
 | `I3` | [scripts/gate_i3_hodge.mjs](../scripts/gate_i3_hodge.mjs) | `40x22` mesh Hodge `2`-complex (`(880, 1698, 819)`), orthogonal exact/coexact/harmonic solves (`orthEcRel < 1e-6`), enclosed-hole `beta_1` vs open-port flooding, and `UNCONV` non-convergence gating. |
 | `I5b` | [scripts/gate_i5b_conservation.mjs](../scripts/gate_i5b_conservation.mjs) | Non-circular four-branch (`H0_KEEP`, `H0_SWAP`, `H1_KEEP`, `H1_SWAP`) occluded pair conservation distinguishing `UNIQUE`, `AMBIGUOUS`, and `VIOLATED`. |
 
+## Adversarial C-ABI fuzz (`Gate X`)
+
+[scripts/gate_abi_fuzz.mjs](../scripts/gate_abi_fuzz.mjs) drives `web/chronos_spectral.wasm` the way a careless or hostile host could. Each trial is a fresh instance: `chronos_init`, SD or HD, then 48 frames. Every frame writes pixels into the ingest slot (random noise, black, white, a black/white strobe, alpha-0 stripes, or moving discs on texture), then on a random fraction of frames calls 1 to 4 random exports (every function except the four tick/init exports and the pointer getters, the test hook included) with arguments drawn from a hostile pool (`0`, `-1`, `2^31 - 1`, `2^31`, `2^32 - 1`, frame sizes and slot counts `+-1`, `NaN`, `+-Infinity`, `+-1e-38`, `1e-45`, `+-1e38`, `3.4e38`, audio rates, ...), after filling a random staging buffer (audio, Hodge injection, conservation input, Laplacian or Fiedler vector) with `NaN`, `+-1e30` noise or pool values. It then ticks with `chronos_tick`, `pre_tick` + `post_tick`, the two out of order, or all three, mostly at `1/30 s` and otherwise at a hostile step (`0`, negative, `NaN`, `+-Infinity`, `1e-40`, `1e9`), and finally calls every pointer getter (`chronos_get_ring_slot_ptr` with a pool argument) and reads the `f32` views `telemetry`, `swarm_telemetry`, `conservation_telemetry` and `slot_meta`.
+
+- **Gate:** `0` traps, and every trial ticks all of its frames. A trap is a wasm trap or JS exception thrown by any export call (the frame-size and pointer getters, and the typed-array views over the pointers they return, included), or a change of the fixed `448`-page memory size. Each one is printed with its trial and the 12 calls before it.
+- **Reported, not gated:** every non-finite value in those views, by slot, with its first occurrence.
+- **Deterministic and bounded:** trial `k` draws everything from its own seeded PRNG, so a given wasm makes the same calls on every run. The default `300` trials x `48` frames run in a worker thread under a `300 s` watchdog, so a call that never returns fails the gate, naming the trial and call count reached.
+
+Measured on the v3.1.0 wasm (Apple M4 Pro): `14,400` frames ticked, `37,202` export calls, `0` traps, `0` non-finite values, about `13 s`. The v3.0.0 wasm gives the same result (it lacks the test hook, so `37,101` calls).
+
 ## Headless Chrome CDP full-stack E2E (`scripts/e2e_browser.mjs`)
 
 Exercises the full browser application against `scripts/dev_server.mjs` over DevTools Protocol (`Steps 1-10e`, enforcing zero page/worker exceptions and `CLS = 0.000000` at every transition):
@@ -272,25 +286,29 @@ There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_r
 
 ### Canonical set (measured)
 
-`record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 46 s (including replay) on Apple Silicon. Replaying all 29 takes 39 s with 0 mismatches. Re-recorded in format 1.1 (digest mask), the set has identical call and host-write counts, and all 29 again replay against the wasm with 0 mismatches.
+`record_canonical_traces.mjs` with default caps: 11 scenarios, 29 traces, 2.54 GB, recorded in 3 min 51 s on Apple Silicon (v3.1.0 wasm, format 1.1). Replaying all 29 against the wasm takes about 40 s with 0 mismatches, also with `--portable` (no `UNMAPPED` record). Compared with the v3.0.0 recording, every scenario has identical call and host-write counts except `bos` (+1 call) and `ingest_roi` (+3 calls): the test-hook calls that replace the raw-address writes (see below).
 
 | Scenario | Harness | Traces | Calls | Host writes | Size |
 | :--- | :--- | ---: | ---: | ---: | ---: |
 | `hero_sd` | `calibrate_mp4.mjs --clip=juggling_ballistic` (SD) | 2 | 1,126 | 145,042 + 1 reset | 45.2 MB |
 | `hero_hd` | `calibrate_mp4.mjs --hd --clip=juggling_ballistic` | 2 | 1,126 | 613,215 + 1 reset | 162.8 MB |
-| `hero_suite` | build.sh `[3/5]` Gates A-P + SD/HD pillar trials | 1 | 31,371 | 754,082 | 677.6 MB |
+| `hero_suite` | build.sh `[3/5]` Gates A-P + SD/HD pillar trials | 1 | 31,371 | 754,082 | 677.0 MB |
 | `mp4_occlusion` | `calibrate_mp4.mjs --clip=roundabout_occlusion` | 2 | 1,241 | 821 + 1 reset | 58.9 MB |
 | `swarm_1200` | `benchmark_1000.mjs --only=Q1` | 1 | 719 | 636,687 | 50.0 MB |
-| `bos` | `gate_i5_bos.mjs` | 1 | 2,464 | 109,002 + 1 unmapped | 110.2 MB |
+| `bos` | `gate_i5_bos.mjs` | 1 | 2,465 | 109,002 | 110.2 MB |
 | `hodge` | `gate_i3_hodge.mjs` | 1 | 175 | 95,067 | 19.2 MB |
 | `rs_vibrometry` | `gate_i2_rs_welch.mjs` | 1 | 6,739 | 401,893 | 1,054.8 MB |
 | `conservation` | `gate_i5b_conservation.mjs` | 1 | 1,424 | 15,662 | 14.8 MB |
 | `covariance` | `gate_i1_cov_residual.mjs` (10 of 406 instances) | 10 | 4,742 | 338,512 | 127.5 MB |
-| `ingest_roi` | `gate_i0_i4_ingest.mjs` | 7 | 7,707 | 351,051 + 3 unmapped | 221.0 MB |
+| `ingest_roi` | `gate_i0_i4_ingest.mjs` | 7 | 7,710 | 351,051 | 221.0 MB |
 
 Each `calibrate_mp4.mjs` scenario also has a 0-call trace for its probe instance. Recording costs about 4 ms per kernel call (SD hero tick `0.12 -> 4.1 ms`, Q1 swarm tick `1.3 -> 5.7 ms`). Strict mode with `--memdigest=1` takes about 2.4 times as long as default recording.
 
-Non-portable writes in the set: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` find the private `Arena` fields `ring_cursor`, `res_mode` and `frame_idx` by scanning memory and overwrite them to test frame-index wraparound. No getter exposes those fields, so the writes are `UNMAPPED`. They replay against the wasm, but a native build can follow those three traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Making them portable would need a test-only export for those fields. The native driver stops each of them at that call and reports `portable prefix ended at call N`, which is distinct from both a pass and a failure.
+Portable frame-counter writes: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` test frame-index wraparound by moving the private `Arena` fields `ring_cursor` and `frame_idx` to just before `u32::MAX`. Up to v3.0.0 they overwrote those fields by raw address (found by scanning memory), which the hook records as `UNMAPPED`, so a native build could follow three canonical traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Since v3.1.0 they make exactly the same change through the test-hook export `chronos_test_hook_set_frame_counters(frame_idx, ring_cursor_lo, ring_cursor_hi)`, which a trace records as an ordinary call, and the canonical set has no `UNMAPPED` record. The native driver still stops a trace that has one at that call and reports `portable prefix ended at call N`, which is distinct from both a pass and a failure.
+
+### Sessions recorded on v3.0.0, replayed on v3.1.0
+
+v3.1.0 is the first change of the shipped wasm since the canonical set was recorded, so the v3.0.0 recording (sha256 `7ba36a5b...`, the 29 traces of the table above as they were before this release: `bos` 2,464 calls, `ingest_roi` 7,707, with the four raw-address writes) was replayed on the v3.1.0 wasm (sha256 `f4ad7ce5...`) with `node scripts/trace_replay.mjs --allow-wasm-mismatch`: 29 traces, 58,834 calls, 44,307 digest-checked calls, 1,993,815 region digests, **0 mismatches**. Every return value matched, pointer results included: all 36 region getters return the same addresses in both builds (the release changes no `Arena` field, and the static data ends at the same address, `22,704,064`), so the four raw-address writes still land on `ring_cursor` and `frame_idx`. That is the expected result. The frame-index fix changes results only when a window loop runs past `u32::MAX` with fewer samples than its count bound. The sessions that tick through `u32::MAX` (`bos` and `ingest_roi` instances 2 and 6) never do: the only window loop that reaches that frame is in `bos` at call `#263`, and it has a full 64-frame window, which the old loop also ended on its count bound. The collapsed padding changes only panic locations, and no session panics.
 
 ### Format
 
@@ -326,6 +344,8 @@ Replay rules (what [scripts/trace_replay.mjs](../scripts/trace_replay.mjs) does,
 4. For `R`, restore the fresh-instance state. The JS replayer copies back the memory image it saved at instantiation. The native driver calls `chronos_spectral::native::reset_to_pristine()`, which zeroes the arena (`ARENA` is initialised to zero bytes and is the kernel's only mutable static).
 5. A `U` record is a raw-address write. It replays only against the identical wasm binary. For a native build, the trace is portable up to the call that follows the first `U` record.
 6. A file without an `E` record (process killed) replays up to its last whole record.
+
+The JS replayer refuses a trace recorded against a different wasm build unless given `--allow-wasm-mismatch`, which replays sessions recorded on one release against another (see [Sessions recorded on v3.0.0, replayed on v3.1.0](#sessions-recorded-on-v300-replayed-on-v310)). It still checks everything, pointer results included: equal pointers show that every region is where it was, which `U` records rely on. Whole-memory digests cover the data section too, so they are skipped and counted.
 
 ### Digest hash: `XXH32`, seed `0`
 
@@ -403,7 +423,7 @@ That is 16 bytes exempt per digest-checked call, out of 12,715,152 bytes hashed 
 
 ### Native parity results (measured)
 
-The canonical set re-recorded in format 1.1 was replayed on the native scalar build (`simd::scalar`, the only native backend so far), Apple Silicon (aarch64), release profile: 66.6 s for 2.54 GB.
+The v3.1.0 canonical set (format 1.1, recorded from the v3.1.0 wasm) replayed in full on the native build with Gate N's settings (`checked` profile: overflow checks and debug assertions, including core's UB precondition checks; `--require-full --wasm-sha256=<web wasm>`), Apple M4 Pro (aarch64), on the NEON backend (39.6 s for 2.54 GB) and on the scalar reference (`--features simd-force-scalar`, 99.4 s). Both give the same table:
 
 | Scenario | Traces | Calls replayed | Digest-checked calls | Region digests | Result |
 | :--- | ---: | ---: | ---: | ---: | :--- |
@@ -412,28 +432,37 @@ The canonical set re-recorded in format 1.1 was replayed on the native scalar bu
 | `hero_suite` | 1 | 31,371 | 25,927 | 1,166,715 | pass |
 | `mp4_occlusion` | 2 | 1,241 | 1,026 | 46,170 | pass |
 | `swarm_1200` | 1 | 719 | 604 | 27,180 | pass |
-| `bos` | 1 | 209 | 172 | 7,740 | portable prefix ended at call 209 |
+| `bos` | 1 | 2,465 | 1,685 | 75,825 | pass |
 | `hodge` | 1 | 175 | 125 | 5,625 | pass |
 | `rs_vibrometry` | 1 | 6,739 | 5,413 | 243,585 | pass |
 | `conservation` | 1 | 1,424 | 958 | 43,110 | pass |
 | `covariance` | 10 | 4,742 | 1,086 | 48,870 | pass |
-| `ingest_roi` | 7 | 7,525 | 5,556 | 250,020 | 5 pass; instance 2: portable prefix ended at call 58; instance 6: at call 710 |
-| **total** | **29** | **56,397** | **42,735** | **1,923,075** | **0 mismatches** (26 pass, 3 portable prefix) |
+| `ingest_roi` | 7 | 7,710 | 5,619 | 252,855 | pass |
+| **total** | **29** | **58,838** | **44,311** | **1,993,995** | **0 mismatches** (29 pass, 0 portable prefix, 0 fail) |
 
-The `checked` profile (overflow checks and debug assertions, including core's UB precondition checks) gives the same result on all 29 traces with no panic. The unoptimised `dev` profile gives the same result on the subset it was run on (`hero_sd`, `swarm_1200`, `mp4_occlusion`, `bos`, `hodge`, `conservation`, two `covariance` and two `ingest_roi` instances).
+The v3.0.0 set gave the same result up to the three portable prefixes (`bos` at call `#209`, `ingest_roi` instance 2 at `#58`, instance 6 at `#710`: 56,397 calls, 26 pass and 3 portable prefix) on the scalar build in the release profile, on `checked` too, and on the unoptimised `dev` profile for the subset it was run on (`hero_sd`, `swarm_1200`, `mp4_occlusion`, `bos`, `hodge`, `conservation`, two `covariance` and two `ingest_roi` instances).
 
 Expected divergence sources that turned out not to diverge, and why:
 
-- **`isize` clamps** (`(x + d).min(N - 1) as usize` at `src/soa_tracks.rs` 3152, 3154, 9376, 9378 and `src/continuum_physics.rs` 5567, 5577, 5771, 5790, 9365, 9386). A negative value would give a different `usize` on 32 and 64 bits, but none can be negative. In `soa_tracks.rs` the base is `cell_coord(..)`, which is clamped to `[0, max_cell]`. In `continuum_physics.rs`, `row_s + d_max` has `row >= 0` and `dy_cells` clamped to `[1, FIELD_GRID_H - 1]` by `compute_row_dx_spans`, and every `col + dx_c` is behind a `dx_c >= 0` guard.
+- **`isize` clamps** (`(x + d).min(N - 1) as usize` at `src/soa_tracks.rs` 2945, 2947, 8444, 8446 and `src/continuum_physics.rs` 5488, 5498, 5692, 5711, 8639, 8660). A negative value would give a different `usize` on 32 and 64 bits, but none can be negative. In `soa_tracks.rs` the base is `cell_coord(..)`, which is clamped to `[0, max_cell]`. In `continuum_physics.rs`, `row_s + d_max` has `row >= 0` and `dy_cells` clamped to `[1, FIELD_GRID_H - 1]` by `compute_row_dx_spans`, and every `col + dx_c` is behind a `dx_c >= 0` guard.
 - **`src/simd_ops.rs:10504`** aligns the `roi_luma` scratch pointer up to 16 bytes, so the h-cache starts at a different offset in the scratch on each target. That is harmless: the cache keys (`cached_sy`, `cached_fused_sy`) are per-call locals initialised to `i32::MIN`, so every cache row is written before it is read in the same call. The other `roi_luma` users fill their window before reading it. The extent used, at most a few KiB plus 15 bytes of slack, is far inside the 36,864-byte buffer.
 - **`usize` fields** change the arena layout (`22,644,848` vs `22,651,136` bytes), but nothing reads the arena as bytes except `chronos_init`'s zeroing and the size words in the allowlist.
 - **Scalar backend and NaN payloads.** No scalar-backend op disagreed with V8's SIMD128 on any trace. A NaN census of every digested `f32` region at every digest-checked call (an instrumented throwaway build) found that the kernel never writes a NaN into an output region in the canonical set. The only NaNs present are host-written invalid-input tests (`hodge_inject`, `conservation_input`, `0x7fc00000`), which the driver copies byte for byte. So the payload of generated NaNs, which differs between aarch64 (`0x7fc00000`) and x86 (`0xffc00000`), cannot affect these traces.
 
-**Overflow checks beyond the portable prefix** (an experiment in a throwaway copy, not part of the driver). The three `U` writes set `ring_cursor` and `frame_idx` to `2^32 - 18`, `2^32 - 3` and `2^32 - 2` to test frame-index wraparound, so the prefixes stop just before the arithmetic most likely to wrap. Mapping those 16 bytes onto the native fields (`ring_cursor: u64, res_mode: u32, frame_idx: u32`, contiguous in the `repr(C)` arena on both targets) let all three traces continue under the `checked` profile. Both `ingest_roi` traces then replay to the end bit for bit (83 and 867 calls). `bos` hits exactly one overflow: `src/physics_id.rs:2713` `f += 1` (`u32`) in `extract_compensated_window_from_ring`, once, at `f == u32::MAX` (call `#263`). Treating that one increment as wrapping, the whole `bos` trace (2,464 calls) replays bit for bit. It is a known, unfixed issue: see "Frame-index wraparound in physics-ID window loops" below.
+**Overflow checks across the frame-index wrap.** The `bos` and `ingest_roi` traces move `ring_cursor` and `frame_idx` to `2^32 - 18` and `2^32 - 3` and tick through the wrap, so with the `checked` profile they are the canonical test of frame arithmetic at `u32::MAX`. On v3.0.0 they could not be followed natively past the raw-address writes; an experiment in a throwaway copy that mapped those writes onto the native fields found exactly one overflow, `src/physics_id.rs:2713` `f += 1` in `extract_compensated_window_from_ring` at `f == u32::MAX` (`bos`, call `#263`). On v3.1.0 the traces are portable and pass in full under `checked` (table above). The same v3.1.0 `bos` trace replayed on a driver built from the v3.1.0 sources with only `src/physics_id.rs` reverted to v3.0.0 aborts at call `#264` (`chronos_tick`) with `attempt to add with overflow` at that line. See "Frame-index wraparound in physics-ID window loops" below.
 
-#### Frame-index wraparound in physics-ID window loops (known, not fixed)
+#### Frame-index wraparound in physics-ID window loops (fixed in v3.1.0)
 
-`while f <= head_f && cnt < 64 { ...; f += 1; }` at `src/physics_id.rs:2713` overflows when `head_f == u32::MAX`. In the traced case the loop then ends on `cnt == 64`, so the wrapped value is never used. If fewer than 64 frames lie in `[start_f, u32::MAX]` (a track born, or a discontinuity, within the last 63 frames before the wrap), the release build wraps `f` to `0` and keeps appending samples from ring slots `0, 1, ...` until it has 64. Those frames are outside the window. The same pattern exists at line 2766 (`#[allow(dead_code)]`, emits no code), line 5802 (`while f <= fe && count < 10`) and line 7118 (`while f <= scan_hi`, no count bound, so it would loop through all `2^32` values). The line-preserving fix `if f == <bound> { break; } f += 1;` at those four lines changes the shipped wasm from 2,474,879 to 2,475,032 bytes (sha256 `a9beac15eded8feccc42efd4407caf7fbc9550bbbcbd6166cbe15452306d3c3b`). The affected function bodies are `update_physics_and_telemetry` (+94 B, line 2713 inlined), `analyze_two_body_collisions` (+10 B, line 7118), `evaluate_pair_at_frame_ref` (+28 B) and `evaluate_stationary_birth_one_side` (+21 B), the last two being line 5802 inlined twice. It needs a deliberate wasm rebuild and commit.
+The engine frame counter `frame_idx` is a `u32` that `chronos_post_tick` advances with `wrapping_add`, so `u32::MAX` is an ordinary frame index: the 2^32-th frame of a session (about 2.3 years at 60 fps), or immediately in the gates that position the counter just before the wrap. Up to v3.0.0, four window loops in [src/physics_id.rs](../src/physics_id.rs) had the form `while f <= bound { ...; f += 1; }`, which computes `bound + 1` when `bound == u32::MAX`:
+
+| Function (v3.0.0 line of `f += 1`) | Reached from the exports | Effect when the bound was `u32::MAX` |
+| :--- | :--- | :--- |
+| `extract_compensated_window_from_ring` (2713), bound `head_f` | `chronos_post_tick` / `chronos_tick` (`update_physics_and_telemetry`), for every confirmed track, with `head_f = frame_idx`: every tick at which `frame_idx == u32::MAX`. | With 64 frames in `[start_f, u32::MAX]` the loop ended on its count bound after computing `u32::MAX + 1` (the overflow the `bos` experiment above hit at call `#263`). With fewer (a track born, or a discontinuity, within the last 63 frames before the wrap) the release build wrapped `f` to `0` and appended samples from ring slots `0, 1, ...`, frames from outside the window, until it had 64. |
+| `extract_compensated_vis_to_scratch` (2766), bound `head_f` | Not reachable: its only caller, `step_ode_track_from_ring`, has no caller (`#[allow(dead_code)]`, emits no wasm). | As above. |
+| `collect_window_samples` (5802), bound `fe` | `chronos_post_tick` / `chronos_tick` through `analyze_two_body_collisions` and `evaluate_pair_at_frame_ref` (and `evaluate_stationary_birth_one_side` from it): the post-impact window of the newest candidate frame `f_c = frame_idx - post_reach` ends at `frame_idx`. Every tick at which `frame_idx == u32::MAX` while two confirmed tracks are close enough for the pair scan to evaluate them. | The window holds 6 or 8 frames and the count bound is 10, so the loop always wrapped: it added samples from the oldest ring slots (64 frames back) to the post-impact fit until it had 10 visible ones, wherever they were in the ring. |
+| `analyze_two_body_collisions` pair scan (7118), bound `scan_hi` | Not reachable at `u32::MAX`: `scan_hi = frame_idx - win_w <= u32::MAX - 6`. | None. |
+
+v3.1.0 writes all four, and the candidate loop next to the pair scan (bound `f_hi <= u32::MAX - 8`), as inclusive ranges (`for f in lo..=hi`), which end after `hi` without computing `hi + 1`. Results are unchanged for every bound below `u32::MAX`. Regression tests: `physics_id::frame_wrap_tests` (`cargo test --target host-tuple`, run by Gate S). With overflow checks (the test profile) all four tests panic on the old loops. Without them (the release wasm's arithmetic) the window functions return 64 and 10 samples instead of 5 and 6. Every other `while x <= bound` loop in `src/` is bounded by grid, frame or array dimensions far below the maximum of its type.
 
 ### Gate N: native/wasm parity in `./build.sh --check`
 
@@ -567,7 +596,7 @@ node scripts/bench_profile.mjs --same-code $R/release/chronos_replay $R/profilin
 
 ### Results: native NEON vs wasm in V8 (measured)
 
-Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` (sha256 `7ba36a5b...`) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
+Final build (`release` profile, NEON backend including the `i32x4_dot_i16x8` change described below; binary sha256 `5e2e719b...`), `web/chronos_spectral.wasm` as of v3.0.0 (sha256 `7ba36a5b...`; not re-measured for v3.1.0) in Node 26.9.0, and the scalar backend for reference (same profile, `--features simd-force-scalar`). 5 interleaved rounds x 3 measured passes per side after 2 warm-up passes. Each number is the median kernel time per pass: the sum of every timed kernel call in one replay of the workload's traces. Frames are `chronos_pre_tick` plus `chronos_tick` calls. The run took 40.5 min, with load average 5 to 6.5 from the other agent.
 
 | Workload | Frames | wasm ms/pass | NEON ms/pass | NEON / wasm (round range) | scalar ms/pass | scalar / wasm | spread wasm / NEON / scalar |
 | :--- | ---: | ---: | ---: | :--- | ---: | ---: | :--- |
@@ -812,14 +841,14 @@ Shares are of native kernel time on the workload named, from the profiles above.
 
 | # | What | Where | Measured share | Expected gain | Exact? |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| 1 | **Threads for the independent per-item loops** (native only). Per node: the BOS dense-LK and warm-up node loops. Per track: `solve_bench_loo_residuals` and the swarm candidate and LK loops. Per band/cell: the vibrometry loops (their independence is not yet checked). Per row band: the grid loop. Each item is computed exactly as now; cross-item sums (`disp2_sum`, `acc_err2`/`acc_sig2`, ...) are added afterwards in the original order. | `bos.rs` `extract_dense_lk` / `accumulate_warmup_node_noise`; `continuum_physics.rs:11547`; `vibrometry.rs`; `simd_ops.rs` grid loop | `ingest_roi` i001: 31% LOO + 36-39% dense LK. `bos`: 71% (warm-up + dense LK). `rs_vibrometry`: 31% + 13%. `hero_hd`: 51% (grid loop) | Up to the core count on those loops (8 P-cores here). Plausibly 2 to 4 times on `bos` and `ingest_roi`, less on sparse tracking, where frames take 0.09-0.27 ms and thread hand-off costs microseconds | Yes, with fixed partitioning and ordered reductions. Costs: per-thread scratch in the arena (the patch buffers are shared today) and a thread source for a `no_std` kernel (host callback or `std` feature). The wasm stays single-threaded (wasm threads need cross-origin isolation) |
+| 1 | **Threads for the independent per-item loops** (native only). Per node: the BOS dense-LK and warm-up node loops. Per track: `solve_bench_loo_residuals` and the swarm candidate and LK loops. Per band/cell: the vibrometry loops (their independence is not yet checked). Per row band: the grid loop. Each item is computed exactly as now; cross-item sums (`disp2_sum`, `acc_err2`/`acc_sig2`, ...) are added afterwards in the original order. | `bos.rs` `extract_dense_lk` / `accumulate_warmup_node_noise`; `continuum_physics.rs:10820`; `vibrometry.rs`; `simd_ops.rs` grid loop | `ingest_roi` i001: 31% LOO + 36-39% dense LK. `bos`: 71% (warm-up + dense LK). `rs_vibrometry`: 31% + 13%. `hero_hd`: 51% (grid loop) | Up to the core count on those loops (8 P-cores here). Plausibly 2 to 4 times on `bos` and `ingest_roi`, less on sparse tracking, where frames take 0.09-0.27 ms and thread hand-off costs microseconds | Yes, with fixed partitioning and ordered reductions. Costs: per-thread scratch in the arena (the patch buffers are shared today) and a thread source for a `no_std` kernel (host callback or `std` feature). The wasm stays single-threaded (wasm threads need cross-origin isolation) |
 | 2 | **Vectorise the BOS patch builders.** Bilinear sampling, gradients and residuals per pixel in `f32x4`. f64 sums stay scalar, in index order | `bos.rs:504` `build_ref_patch_8x8`, `bos.rs:776` `eval_cur_patch_8x8` | `bos` 42% + 22%; `ingest_roi` i001 21% + 16%. 89-99% scalar code today | Estimate 1.5 to 3 times on these functions (most of their arithmetic is element-wise); not measured | Yes, if the f64 accumulation order is kept. Helps the wasm too |
 | 3 | **Reuse reference patches.** `build_ref_patch_8x8` depends only on `ref_luma` and the node. Today it is rebuilt for every node every frame (dense LK, warm-up) and three times per anchor per candidate in `eval_anchor_mse_at` | `bos.rs:1642`, `1778`, `3551`, `1531-1587` | Up to the `build_ref_patch_8x8` share above (42% `bos`, 21% `ingest_roi` i001) while the reference is unchanged | Up to those shares; depends on how often reference maintenance (`bos.rs:1983`, `3382`) rewrites `ref_luma`, which was not measured | Yes, reused values are identical, but validity needs per-node invalidation. All 8,192 `PatchRefData` (~1.4 KB each, 11.5 MB) do not fit the wasm's ~6.6 MB of free memory, so it is native-only or a subset |
 | 4 | **Fuse the two streaming passes of `chronos_pre_tick`.** The RGBA-to-planar pooling and the static/motion grid each read the full RGBA frame | `simd_ops.rs` `rgba_to_planar_and_pool160_simd128`, `stat_fused_hd40_grid_loop` | `hero_hd` 21% + 51%; swarm 6% + 12%; `rs_vibrometry` 10% + 16% | One fewer pass over 2 x 0.9 MB of RGBA per HD frame in a memory-bound loop; estimate 10-20% of `pre_tick`, not measured | Yes (per-pixel arithmetic unchanged) |
 | 5 | NEON `i32x4_dot_i16x8` as `smull` + `smull2` + `addp` | `src/simd/neon.rs` | was 12.9% of `hero_hd` | **Done**: `pre_tick` 9-10% faster on every tick workload, geomean 0.951 | Yes (conformance + parity pass) |
 | 6 | Fewer `v128_any_true` exits in the candidate scan: OR 16-32 pixels of hit masks before one test | `soa_tracks.rs` `extract_phase1a_raw` | swarm 15.5% (any_true 37% of it) | Small, estimate under 5% of the swarm | Yes (control flow only) |
 | 7 | Find why `apply_laplacian_p_to_lp` is slower natively | `bos.rs:2681` | 2.7-3.4% of `bos`/`ingest_roi`, 1.46-1.65 times V8 | 1-3% of those workloads | Yes. A leaf on both sides with the same branch and load/store structure as V8's TurboFan code (checked with `--print-wasm-code-function-index=392`); suspected memory dependence on `lp[u + 1]` across iterations, so measure with CPU counters first |
-| 8 | Remove `#[inline(never)]` from the 7 by-value-`v128` helpers | `simd_ops.rs`, `soa_tracks.rs:3629` | at most 2.1% including their bodies | Under 0.1% | Yes. Not worth a wasm rebuild |
+| 8 | Remove `#[inline(never)]` from the 7 by-value-`v128` helpers | `simd_ops.rs`, `soa_tracks.rs:3419` | at most 2.1% including their bodies | Under 0.1% | Yes. Not worth a wasm rebuild |
 | 9 | Other multi-instruction NEON ops (`any_true`, `pmin`/`pmax`, narrows, bitmasks) | `src/simd/neon.rs` | 0.8-5.5% each, as V8 | None found: each is already the shortest exact sequence and matches V8's lowering | |
 | 10 | 256-bit SIMD | | | None on Apple Silicon: NEON is 128-bit and there is no SVE. SME's streaming SVE needs a mode switch and is not general-purpose; M4 P-cores already issue up to four 128-bit vector ops per cycle. On x86-64, AVX2 would need the kernel to issue two `v128` ops per 256-bit op (or a 256-bit layer). It is exact only with lane-wise identical op sequences, no FMA and unchanged reduction order. Not measurable here (Rosetta) | Possible on x86 with those rules |
 | 11 | Build flags: fat LTO, `codegen-units = 1`, `panic = "abort"`, `target-cpu=native` | `native/Cargo.toml` | | **None** (measured, table above) | Yes |

@@ -46,12 +46,10 @@
 //!
 //! Kernel code has no `cfg(target_arch = "wasm32")` SIMD branches and no hand-written non-wasm
 //! alternatives: every backend runs the same sequence of layer ops, so results can match bit for
-//! bit. The removed alternatives are marked in the kernel sources with
-//! `// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers`,
-//! followed by blank lines. Those blank lines are deliberate: panic `Location`s (file, line,
-//! column of every bounds check, `unwrap`, ...) are stored in the shipped Wasm's data section,
-//! so deleting lines would change `web/chronos_spectral.wasm`. Collapse the gaps in the first
-//! change that rebuilds and commits the Wasm for another reason.
+//! bit. (Until v3.1.0 the places where such alternatives were removed kept blank lines in their
+//! place, because panic `Location`s, the file, line and column of every bounds check, `unwrap`
+//! and so on, are stored in the shipped Wasm's data section, and the Wasm had to stay
+//! byte-identical. v3.1.0 rebuilt the Wasm and removed them.)
 //!
 //! # Native builds
 //!
