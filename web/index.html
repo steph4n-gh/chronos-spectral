@@ -5920,11 +5920,16 @@
         if (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0) {
           lastPumpPerfMs = extras.nowPerfMs;
         }
+        // A capture timestamp is only implausible if it lies in the future. Do not compare it with the
+        // rVFC `now` argument: that is the start of the rendering update, and a frame captured a few ms
+        // after it (routine, and tens of ms under main-thread load) is still presented in that update.
+        // Rejecting those frames swapped the reference to `now` and dragged rsVidClockOffsetUs by the
+        // capture-to-`now` gap, which surfaced as false audio/video clock skew.
         const hasCaptureTime =
           typeof extras.captureTimeMs === 'number' &&
           Number.isFinite(extras.captureTimeMs) &&
           extras.captureTimeMs > 0 &&
-          (typeof extras.nowPerfMs !== 'number' || !Number.isFinite(extras.nowPerfMs) || extras.captureTimeMs <= extras.nowPerfMs);
+          extras.captureTimeMs <= performance.now();
         const refPerf = hasCaptureTime
           ? extras.captureTimeMs
           : (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0
