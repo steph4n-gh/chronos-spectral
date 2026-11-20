@@ -1,5 +1,5 @@
 #![no_std]
-
+pub mod simd;
 pub(crate) mod simd_ops;
 #[allow(dead_code)]
 pub(crate) mod physics_id;
@@ -11,14 +11,14 @@ pub(crate) mod vibrometry;
 #[allow(dead_code)]
 pub(crate) mod hodge;
 
-use core::arch::wasm32::{
+use crate::simd::{
     f32x4_abs, f32x4_add, f32x4_div, f32x4_extract_lane, f32x4_floor, f32x4_ge, f32x4_gt,
     f32x4_lt, f32x4_mul, f32x4_nearest, f32x4_pmax, f32x4_pmin, f32x4_splat, f32x4_sqrt,
     f32x4_sub, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat, f64x2_sqrt, f64x2_sub,
     i32x4, i32x4_bitmask, i32x4_shuffle, v128, v128_bitselect, v128_load, v128_store,
 };
-use core::panic::PanicInfo;
-use core::ptr::{addr_of, addr_of_mut};
+#[cfg(target_arch = "wasm32")] use core::panic::PanicInfo;
+use core::ptr::addr_of_mut;
 
 #[cfg(target_arch = "wasm32")]
 extern "C" {
@@ -29,7 +29,7 @@ extern "C" {
 fn linked_static_end_bytes() -> u32 {
     #[cfg(target_arch = "wasm32")]
     {
-        addr_of!(__heap_base) as usize as u32
+        core::ptr::addr_of!(__heap_base) as usize as u32
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
@@ -102,7 +102,7 @@ fn hypot_f64(a: f64, b: f64) -> f64 {
     hi * wasm_sqrt_f64(1.0 + u * u)
 }
 
-#[panic_handler]
+#[cfg(target_arch = "wasm32")] #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     core::arch::wasm32::unreachable()
 }
@@ -7810,9 +7810,9 @@ unsafe fn swarm_pan_flat_canvas_reject(
     let mut flat_cnt = 0usize;
     let mut tot_cnt = 0usize;
     let mut y = 2usize;
-    #[cfg(target_arch = "wasm32")]
+
     let (v_gthresh, v_cthresh, v_bg) = {
-        use core::arch::wasm32::f32x4_splat;
+        use crate::simd::f32x4_splat;
         (f32x4_splat(0.003), f32x4_splat(0.012), f32x4_splat(bg_ref))
     };
     while y + 1 < frame_h {
@@ -7820,9 +7820,9 @@ unsafe fn swarm_pan_flat_canvas_reject(
         let row1 = row0 + frame_w;
         let mut x = 2usize;
         while x + 5 < frame_w {
-            #[cfg(target_arch = "wasm32")]
+
             {
-                use core::arch::wasm32::{
+                use crate::simd::{
                     f32x4_abs, f32x4_add, f32x4_le, f32x4_sub, i32x4_bitmask, v128, v128_and,
                 };
                 let p0 = a.luma.as_ptr().add(row0 + x);
@@ -7841,20 +7841,20 @@ unsafe fn swarm_pan_flat_canvas_reject(
                 flat_cnt += (m as u32).count_ones() as usize;
                 tot_cnt += 4;
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let mut k = 0usize;
-                while k < 4 {
-                    let v0 = a.luma[row0 + x + k];
-                    let vx = a.luma[row0 + x + k + 1];
-                    let vy = a.luma[row1 + x + k];
-                    if (vx - v0).abs() + (vy - v0).abs() <= 0.003 && (v0 - bg_ref).abs() <= 0.012 {
-                        flat_cnt += 1;
-                    }
-                    k += 1;
-                }
-                tot_cnt += 4;
-            }
+            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
             x += 4;
         }
         if tot_cnt - flat_cnt > max_non_flat {
@@ -12427,9 +12427,9 @@ fn update_physics_and_telemetry(
         a.telemetry[ti] = 0.0;
     }
 
-    #[cfg(target_arch = "wasm32")]
+
     {
-        use core::arch::wasm32::{f32x4_abs, f32x4_lt, f32x4_splat, v128, v128_and};
+        use crate::simd::{f32x4_abs, f32x4_lt, f32x4_splat, v128, v128_and};
         const _: () = assert!(TELEMETRY_LEN % 4 == 0);
         let vinf = f32x4_splat(f32::INFINITY);
         let p = a.telemetry.as_mut_ptr() as *mut v128;
@@ -12446,12 +12446,12 @@ fn update_physics_and_telemetry(
             }
         }
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    for ti in 0..TELEMETRY_LEN {
-        if !a.telemetry[ti].is_finite() {
-            a.telemetry[ti] = 0.0;
-        }
-    }
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
     true
 }
 
@@ -18365,4 +18365,31 @@ pub unsafe extern "C" fn chronos_tick(dt_sec: f32) -> u32 {
     chronos_pre_tick(dt_sec);
     solve_fiedler_jacobi_16x16(arena_mut());
     chronos_post_tick(dt_sec)
+}
+
+// Native builds that are not linked into a `std` binary (for example `cargo build --target
+// host-tuple` of this cdylib). Native test builds and `native/` library builds (feature
+// `native-lib`) link into `std`, which provides the panic handler and the C library. Kept at the
+// end of the file: panic `Location` line numbers are part of the shipped Wasm, so lines above
+// must not move.
+#[cfg(not(any(target_arch = "wasm32", test, feature = "native-lib")))]
+mod native_cdylib_runtime {
+    // A `no_std` cdylib links with `-nodefaultlibs`; the C library provides `abort` and the
+    // `memcpy` / `memset` / `bzero` calls LLVM emits.
+    #[cfg_attr(target_vendor = "apple", link(name = "System"))]
+    #[cfg_attr(all(unix, not(target_vendor = "apple")), link(name = "c"))]
+    extern "C" {
+        fn abort() -> !;
+    }
+
+    #[panic_handler]
+    fn panic(_info: &core::panic::PanicInfo) -> ! {
+        // SAFETY: C `abort` takes no arguments and never returns.
+        unsafe { abort() }
+    }
+
+    // The precompiled `libcore` is built with `panic = "unwind"` and references this symbol from
+    // code that an un-LTO'd (debug) link keeps. This crate aborts on panic, so it is never called.
+    #[no_mangle]
+    extern "C" fn rust_eh_personality() {}
 }

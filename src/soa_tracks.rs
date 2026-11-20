@@ -4,12 +4,12 @@
 //! zero call-stack buffers >= 64 B (all working buffers live inside `MicroSwarmState`),
 //! and top-level pipeline phases marked `#[inline(never)]` to preserve `STACK_MAX_PATH`.
 
-#[cfg(target_arch = "wasm32")]
-use core::arch::wasm32::*;
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::fast_expf;
-#[cfg(target_arch = "wasm32")]
+use crate::simd::*;
+
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
 use crate::simd_ops::hsum_f32x4;
 use crate::{wasm_floorf, wasm_sqrt_f64, wasm_sqrtf};
 
@@ -1752,7 +1752,7 @@ fn cell_coord(pos: f32, inv_span_cells: f32, max_cell: usize) -> usize {
 
 /// Overflow-free 8x8 `i8` patch SAD using exact two's-complement `i8x16_max - i8x16_min` (`0..=254u8`).
 /// Summing all 4 pairwise-widened chunks in `u16x8` stays <= 2,040 (< 65,535) and defers the u32 widen.
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 unsafe fn patch_8x8_sad_preloaded_i8_simd128(
     va0: v128,
@@ -1792,7 +1792,7 @@ unsafe fn patch_8x8_sad_preloaded_i8_simd128(
     i32x4_extract_lane::<0>(s2) as u32
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
     unsafe {
@@ -1807,18 +1807,18 @@ pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(always)]
-pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
-    let mut sum = 0u32;
-    let mut i = 0;
-    while i < 64 {
-        let d = (a[i] as i32) - (b[i] as i32);
-        sum += d.unsigned_abs();
-        i += 1;
-    }
-    sum
-}
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
 
 /// Inline minimum 2-adic distance across current & anchor signatures using hardware `clz`.
 #[inline(always)]
@@ -1839,7 +1839,7 @@ fn padic_min_inline(sig_curr: u32, sig_anc: u32, p_sig: u32) -> f32 {
 #[inline(always)]
 fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) {
     debug_assert!(x >= 2 && x + 2 < w && y >= 2 && (y + 3) * w <= luma.len());
-    #[cfg(target_arch = "wasm32")]
+
     let (sxx, syy, sxy) = unsafe {
         let wi = w as isize;
         let lp = luma.as_ptr().offset((y as isize) * wi + (x as isize));
@@ -1899,41 +1899,41 @@ fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) 
         (hsum_f32x4(vxx), hsum_f32x4(vyy), hsum_f32x4(vxy))
     };
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let (sxx, syy, sxy) = {
-        let mut sxx = 0.0f32;
-        let mut syy = 0.0f32;
-        let mut sxy = 0.0f32;
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-        const OFFSETS: [(isize, isize); 8] = [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-        ];
-        let wi = w as isize;
-        let base = (y as isize) * wi + (x as isize);
-        let lp = luma.as_ptr();
-        let mut k = 0;
-        while k < 8 {
-            let p = base + OFFSETS[k].1 * wi + OFFSETS[k].0;
-            let (gx, gy) = unsafe {
-                (
-                    *lp.offset(p + 1) - *lp.offset(p - 1),
-                    *lp.offset(p + wi) - *lp.offset(p - wi),
-                )
-            };
-            sxx += gx * gx;
-            syy += gy * gy;
-            sxy += gx * gy;
-            k += 1;
-        }
-        (sxx, syy, sxy)
-    };
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     let trace = sxx + syy;
     let det = sxx * syy - sxy * sxy;
     let noble = if trace > 1e-6 && det > 0.0 {
@@ -1947,7 +1947,7 @@ fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) 
 /// Evaluates `det / trace` Noble cornerness across 4 consecutive pixels `[x..x+4]` using SIMD128,
 /// masking inactive lanes and using per-lane squared thresholds without taking `sqrt`.
 /// Caller guarantees `x >= 2`, `x + 5 < w`, `y >= 2`, and `(y + 3) * w <= luma.len()`.
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn local_noble_from_rows_4x(
@@ -2415,7 +2415,7 @@ fn extract_8x8_patch_and_sig_simd128(
     py: f32,
     rg: f32,
     by: f32,
-    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))] lk_buf: &mut [f32; 64],
+    #[allow(unused_variables)] lk_buf: &mut [f32; 64],
     dst_tpl8: &mut [i8; 64],
 ) -> u32 {
     const HAAR_SPREAD: [u32; 16] = [
@@ -2447,7 +2447,7 @@ fn extract_8x8_patch_and_sig_simd128(
         0u32
     };
 
-    #[cfg(target_arch = "wasm32")]
+
     unsafe {
         let vfx = f32x4_splat(fx);
         let vfy = f32x4_splat(fy);
@@ -2591,127 +2591,127 @@ fn extract_8x8_patch_and_sig_simd128(
             | b16_bits;
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let w00 = (1.0 - fx) * (1.0 - fy);
-        let w10 = fx * (1.0 - fy);
-        let w01 = (1.0 - fx) * fy;
-        let w11 = fx * fy;
-        let mut sum = 0.0f32;
-        let mut r = 0usize;
-        while r < 8 {
-            let row0 = (y0 + r) * w + x0;
-            let row1 = row0 + w;
-            let mut c = 0usize;
-            while c < 8 {
-                let v = luma[row0 + c] * w00
-                    + luma[row0 + c + 1] * w10
-                    + luma[row1 + c] * w01
-                    + luma[row1 + c + 1] * w11;
-                lk_buf[r * 8 + c] = v;
-                sum += v;
-                c += 1;
-            }
-            r += 1;
-        }
-        let mean = sum * (1.0 / 64.0);
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-        let mut b16_bits = 0u32;
-        let mut q00 = 0.0f32;
-        let mut q01 = 0.0f32;
-        let mut q10 = 0.0f32;
-        let mut q11 = 0.0f32;
-        let mut center_sum = 0.0f32;
-        let mut outer_sum = 0.0f32;
 
-        let mut by_i = 0usize;
-        while by_i < 4 {
-            let r0 = by_i * 2;
-            let mut bx_i = 0usize;
-            while bx_i < 4 {
-                let c0 = bx_i * 2;
-                let s4 = lk_buf[r0 * 8 + c0]
-                    + lk_buf[r0 * 8 + c0 + 1]
-                    + lk_buf[(r0 + 1) * 8 + c0]
-                    + lk_buf[(r0 + 1) * 8 + c0 + 1];
-                let m4 = s4 * 0.25;
-                let z = ((by_i & 1) << 1) | (bx_i & 1) | ((by_i & 2) << 2) | ((bx_i & 2) << 1);
-                if m4 > mean {
-                    b16_bits |= 1u32 << z;
-                }
-                if by_i < 2 {
-                    if bx_i < 2 {
-                        q00 += m4;
-                    } else {
-                        q01 += m4;
-                    }
-                } else if bx_i < 2 {
-                    q10 += m4;
-                } else {
-                    q11 += m4;
-                }
-                if (by_i == 1 || by_i == 2) && (bx_i == 1 || bx_i == 2) {
-                    center_sum += m4;
-                } else {
-                    outer_sum += m4;
-                }
-                bx_i += 1;
-            }
-            by_i += 1;
-        }
 
-        let q00m = q00 * 0.25;
-        let q01m = q01 * 0.25;
-        let q10m = q10 * 0.25;
-        let q11m = q11 * 0.25;
-        let mut haar_bits = 0u32;
-        if q01m - q00m > 0.015 {
-            haar_bits |= 1 << 0;
-        } else if q00m - q01m > 0.015 {
-            haar_bits |= 1 << 1;
-        }
-        if q11m - q10m > 0.015 {
-            haar_bits |= 1 << 2;
-        } else if q10m - q11m > 0.015 {
-            haar_bits |= 1 << 3;
-        }
-        if q10m - q00m > 0.015 {
-            haar_bits |= 1 << 4;
-        } else if q00m - q10m > 0.015 {
-            haar_bits |= 1 << 5;
-        }
-        if q11m - q01m > 0.015 {
-            haar_bits |= 1 << 6;
-        } else if q01m - q11m > 0.015 {
-            haar_bits |= 1 << 7;
-        }
 
-        let cm = center_sum * 0.25;
-        let om = outer_sum * (1.0 / 12.0);
-        let co_bits = if cm - om > 0.03 {
-            6u32
-        } else if om - cm > 0.03 {
-            2u32
-        } else {
-            4u32
-        };
 
-        let mut i = 0usize;
-        while i < 64 {
-            let q = clamp_f32((lk_buf[i] - mean) * 127.0, -127.0, 127.0);
-            let r = if q >= 0.0 { q + 0.5 } else { q - 0.5 };
-            dst_tpl8[i] = r as i8;
-            i += 1;
-        }
 
-        let _ = HAAR_SPREAD[0];
-        (is_chr << 31)
-            | (rg_p << 29)
-            | (by_p << 27)
-            | (co_bits << 24)
-            | (haar_bits << 16)
-            | b16_bits
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 
 /// Samples opponent chroma `(rg, by)` directly from the `2x2` block around `(ix, iy)` in `rgba`.
@@ -2721,7 +2721,7 @@ fn sample_chroma_2x2_rgba(rgba: &[u8], w: usize, ix: usize, iy: usize) -> (f32, 
     let idx01 = idx00 + w * 4;
     debug_assert!(idx01 + 8 <= rgba.len());
 
-    #[cfg(target_arch = "wasm32")]
+
     unsafe {
         let rp = rgba.as_ptr();
         let p0 = core::ptr::read_unaligned(rp.add(idx00) as *const u64);
@@ -2740,24 +2740,24 @@ fn sample_chroma_2x2_rgba(rgba: &[u8], w: usize, ix: usize, iy: usize) -> (f32, 
         return (r - g, 0.5 * (r + g) - b);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let idx10 = idx00 + 4;
-        let idx11 = idx01 + 4;
-        let r = (rgba[idx00] as f32 + rgba[idx10] as f32 + rgba[idx01] as f32 + rgba[idx11] as f32)
-            * (0.25 / 255.0);
-        let g = (rgba[idx00 + 1] as f32
-            + rgba[idx10 + 1] as f32
-            + rgba[idx01 + 1] as f32
-            + rgba[idx11 + 1] as f32)
-            * (0.25 / 255.0);
-        let b = (rgba[idx00 + 2] as f32
-            + rgba[idx10 + 2] as f32
-            + rgba[idx01 + 2] as f32
-            + rgba[idx11 + 2] as f32)
-            * (0.25 / 255.0);
-        (r - g, 0.5 * (r + g) - b)
-    }
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 
 /// 1D quadratic parabolic sub-pixel offset `[-0.5, +0.5]` when `v0` is a true extremum.
@@ -2774,7 +2774,7 @@ fn parabolic_1d(vm: f32, v0: f32, vp: f32) -> f32 {
 #[inline(never)]
 fn refine_peak_subpixel_noble_packed(luma: &[f32], w: usize, ix: usize, iy: usize) -> u64 {
     // Polygon vertex / non-extremum shape: refine on 2D cornerness
-    #[cfg(target_arch = "wasm32")]
+
     let (cl, cc, cr) = if ix >= 3 && ix + 5 <= w && iy >= 2 && (iy + 3) * w <= luma.len() {
         unsafe {
             let vc = f32x4_sqrt(local_noble_corner_4x(
@@ -2798,12 +2798,12 @@ fn refine_peak_subpixel_noble_packed(luma: &[f32], w: usize, ix: usize, iy: usiz
             local_noble_corner(luma, w, ix + 1, iy).0,
         )
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    let (cl, cc, cr) = (
-        local_noble_corner(luma, w, ix - 1, iy).0,
-        local_noble_corner(luma, w, ix, iy).0,
-        local_noble_corner(luma, w, ix + 1, iy).0,
-    );
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
     let (ct, _) = local_noble_corner(luma, w, ix, iy - 1);
     let (cb, _) = local_noble_corner(luma, w, ix, iy + 1);
     let px = ix as f32 + parabolic_1d(cl, cc, cr);
@@ -2886,7 +2886,7 @@ fn count_occupied_cc_cells_simd128(cc_energy: &[f32]) -> u32 {
     let thresh = 0.01f32;
     let mut occ = 0u32;
     let mut i = 0usize;
-    #[cfg(target_arch = "wasm32")]
+
     unsafe {
         let vth = f32x4_splat(thresh);
         let ptr = cc_energy.as_ptr();
@@ -3462,7 +3462,7 @@ pub fn extract_micro_peaks_simd128(
     extract_phase1c_patches(ms, luma, rgba, w, h, raw_heap_len);
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_8px_pair(
@@ -3560,7 +3560,7 @@ unsafe fn eval_cand_8px_pair(
     mask
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px_rows(
@@ -3623,7 +3623,7 @@ unsafe fn eval_cand_4px_rows(
     true
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px(
@@ -3671,62 +3671,62 @@ unsafe fn eval_cand_4px(
     )
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-unsafe fn eval_cand_scalar_range(
-    luma: &[f32],
-    bg_base: *const f32,
-    eca_base: *const f32,
-    sr_p: *mut f32,
-    lum_p: *const f32,
-    w: usize,
-    x_start: usize,
-    x_stop: usize,
-    y: usize,
-    adaptive_floor: f32,
-    tremor_floor: f32,
-    min_c_eca: f32,
-    min_c_trem: f32,
-) -> u32 {
-    let base_c = x_start >> 2;
-    let mut hit_mask = 0u32;
-    let row_off = y * w;
-    let mut px = x_start;
-    while px < x_stop {
-        let idx = row_off + px;
-        let e_val = (*eca_base.add(idx)).abs();
-        let t_val = (*lum_p.add(px) - *bg_base.add(idx)).abs();
-        if (e_val.is_finite() && e_val > adaptive_floor)
-            || (t_val.is_finite() && t_val > tremor_floor)
-        {
-            let (corner, _) = local_noble_corner(luma, w, px, y);
-            let min_c = if e_val > adaptive_floor {
-                min_c_eca
-            } else {
-                min_c_trem
-            };
-            if corner.is_finite() && corner > min_c {
-                let diff_s = if e_val.is_finite() && e_val > t_val * 0.85 {
-                    e_val
-                } else {
-                    t_val * 0.85
-                };
-                let cand_s = corner * (0.35 + 1.50 * diff_s);
-                let cand_s2 = cand_s * cand_s;
-                if cand_s2.is_finite() {
-                    *sr_p.add(px) = cand_s2;
-                    let off = (px >> 2) - base_c;
-                    if off < 32 {
-                        hit_mask |= 1u32 << off;
-                    }
-                }
-            }
-        }
-        px += 1;
-    }
-    hit_mask
-}
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
@@ -3746,7 +3746,7 @@ unsafe fn extract_phase1a_3x3_max(
 ) -> u64 {
     let x_limit = x_end - 1;
     let y_hi_bits = ((ym1 as u16) as u32) << 16;
-    #[cfg(target_arch = "wasm32")]
+
     let mut vfloor = f32x4_splat(if (heap_state & 0x1_0000) != 0 { *raw_scores } else { 0.0 });
     let mut w_idx = 0usize;
     while w_idx < 3 {
@@ -3761,7 +3761,7 @@ unsafe fn extract_phase1a_3x3_max(
             bits &= bits - 1;
             let cx4 = base_x + (b << 2);
 
-            #[cfg(target_arch = "wasm32")]
+
             {
                 let p_mid = sp.add(r_mid + cx4);
                 let vs = core::ptr::read_unaligned(p_mid as *const v128);
@@ -3810,36 +3810,36 @@ unsafe fn extract_phase1a_3x3_max(
                     }
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let mut lane = 0usize;
-                while lane < 4 {
-                    let cx = cx4 + lane;
-                    if cx >= 6 && cx < x_limit {
-                        let s0 = *sp.add(r_mid + cx);
-                        if s0.is_finite()
-                            && s0 > 0.0
-                            && s0 >= *sp.add(r_mid + cx - 1)
-                            && s0 > *sp.add(r_mid + cx + 1)
-                            && s0 >= *sp.add(r_top + cx - 1)
-                            && s0 >= *sp.add(r_top + cx)
-                            && s0 >= *sp.add(r_top + cx + 1)
-                            && s0 > *sp.add(r_bot + cx - 1)
-                            && s0 > *sp.add(r_bot + cx)
-                            && s0 > *sp.add(r_bot + cx + 1)
-                        {
-                            heap_state = raw_heap_push_lazy_packed(
-                                raw_scores,
-                                raw_xy,
-                                heap_state,
-                                s0,
-                                ((cx as u16) as u32) | y_hi_bits,
-                            );
-                        }
-                    }
-                    lane += 1;
-                }
-            }
+            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         }
         w_idx += 1;
     }
@@ -3927,7 +3927,7 @@ pub fn extract_phase1a_raw(
     };
     let min_c_eca_2 = min_c_eca * min_c_eca;
     let min_c_trem_2 = min_c_trem * min_c_trem;
-    #[cfg(target_arch = "wasm32")]
+
     let (vadapt, vtrem, mut v_score_floor, mut v_safe_floor) = (
         f32x4_splat(adaptive_floor),
         f32x4_splat(tremor_floor),
@@ -3964,7 +3964,7 @@ pub fn extract_phase1a_raw(
         } else {
             let dirty = cur_m0.count_ones() + cur_m1.count_ones() + cur_m2.count_ones();
             if dirty != 0 {
-                #[cfg(target_arch = "wasm32")]
+
                 if dirty <= 16 {
                     unsafe {
                         let vzero_sr = f32x4_splat(0.0);
@@ -3993,14 +3993,14 @@ pub fn extract_phase1a_raw(
                         core::ptr::write_bytes(sr_base.add(cur_off), 0, w);
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                unsafe {
-                    core::ptr::write_bytes(sr_base.add(cur_off), 0, w);
-                }
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
             }
         }
 
-        #[cfg(target_arch = "wasm32")]
+
         unsafe {
             let eca_p = eca_base.add(row_off);
             let lum_p = lum_base.add(row_off);
@@ -4124,93 +4124,93 @@ pub fn extract_phase1a_raw(
                 x += 4;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        let x = {
-            let mut x = 5usize;
-            while x + 4 <= x_end {
-                let mut mask = 0i32;
-                let mut k = 0;
-                while k < 4 {
-                    if unsafe { *eca_base.add(row_off + x + k) }.abs() > adaptive_floor
-                        || (unsafe { *lum_base.add(row_off + x + k) - *bg_base.add(row_off + x + k) })
-                            .abs()
-                            > tremor_floor
-                    {
-                        mask |= 1 << k;
-                    }
-                    k += 1;
-                }
-                if mask != 0 {
-                    let mut lane = 0usize;
-                    while lane < 4 {
-                        if (mask & (1 << lane)) != 0 {
-                            let px = x + lane;
-                            let idx = row_off + px;
-                            let e_val = unsafe { *eca_base.add(idx) }.abs();
-                            let t_val = unsafe { *lum_base.add(idx) - *bg_base.add(idx) }.abs();
-                            let (corner, _) = local_noble_corner(luma, w, px, y);
-                            let min_c = if e_val > adaptive_floor {
-                                min_c_eca
-                            } else {
-                                min_c_trem
-                            };
-                            if corner.is_finite() && corner > min_c {
-                                let diff_s = if e_val.is_finite() && e_val > t_val * 0.85 {
-                                    e_val
-                                } else {
-                                    t_val * 0.85
-                                };
-                                let cand_s = corner * (0.35 + 1.50 * diff_s);
-                                let cand_s2 = cand_s * cand_s;
-                                if cand_s2.is_finite() {
-                                    unsafe {
-                                        *sr_base.add(cur_off + px) = cand_s2;
-                                    }
-                                    mark_chunk!(px);
-                                }
-                            }
-                        }
-                        lane += 1;
-                    }
-                }
-                x += 4;
-            }
-            x
-        };
-        #[cfg(not(target_arch = "wasm32"))]
-        if x < x_end {
-            let base_c = x >> 2;
-            let mut hm = unsafe {
-                eval_cand_scalar_range(
-                    luma,
-                    bg_base,
-                    eca_base,
-                    sr_base.add(cur_off),
-                    lum_base.add(row_off),
-                    w,
-                    x,
-                    x_end,
-                    y,
-                    adaptive_floor,
-                    tremor_floor,
-                    min_c_eca,
-                    min_c_trem,
-                )
-            };
-            while hm != 0 {
-                let off = hm.trailing_zeros() as usize;
-                hm &= hm - 1;
-                let ch = base_c + off;
-                let bit = 1u64 << (ch & 63);
-                if ch < 64 {
-                    cm0 |= bit;
-                } else if ch < 128 {
-                    cm1 |= bit;
-                } else {
-                    cm2 |= bit;
-                }
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         cur_m0 = cm0;
         cur_m1 = cm1;
         cur_m2 = cm2;
@@ -4232,7 +4232,7 @@ pub fn extract_phase1a_raw(
                     mid_m1,
                     mid_m2,
                 );
-                #[cfg(target_arch = "wasm32")]
+
                 if (heap_state & 0x1_0000) != 0 {
                     let fl = *raw_scores_p;
                     v_score_floor = f32x4_splat(fl);
@@ -4683,7 +4683,7 @@ pub fn imm_predict_micro_simd128(
     let inv_w_255 = 255.0 / (w as f32);
     let inv_h_255 = 255.0 / (h as f32);
 
-    #[cfg(target_arch = "wasm32")]
+
     unsafe {
         let v_pan_x = f32x4_splat(pan_dx_f);
         let v_pan_y = f32x4_splat(pan_dy_f);
@@ -4845,55 +4845,55 @@ pub fn imm_predict_micro_simd128(
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
-        let has_pan = pan_dx_f != 0.0 || pan_dy_f != 0.0;
-        let mut i = 0usize;
-        while i < MAX_MICRO {
-            if ms.tracks.state[i] != MICRO_STATE_INACTIVE {
-                let x = ms.tracks.pos_x[i] + pan_dx_f;
-                let y = ms.tracks.pos_y[i] + pan_dy_f;
-                let eqx = ms.tracks.eq_x[i] + pan_dx_f;
-                let eqy = ms.tracks.eq_y[i] + pan_dy_f;
-                ms.tracks.prev_x[i] = x;
-                ms.tracks.prev_y[i] = y;
-                ms.tracks.pos_x[i] = x;
-                ms.tracks.pos_y[i] = y;
-                ms.tracks.last_obs_x[i] += pan_dx_f;
-                ms.tracks.last_obs_y[i] += pan_dy_f;
-                ms.tracks.eq_x[i] = eqx;
-                ms.tracks.eq_y[i] = eqy;
-                ms.tracks.ftle_a_x0[i] += pan_dx_f;
-                ms.tracks.ftle_a_y0[i] += pan_dy_f;
-                ms.tracks.ftle_b_x0[i] += pan_dx_f;
-                ms.tracks.ftle_b_y0[i] += pan_dy_f;
-                if metro_on && has_pan {
-                    ms.metrology.loom_anchor[i] += pan_dx_f;
-                    ms.metrology.loom_anchor[MAX_MICRO + i] += pan_dy_f;
-                }
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-                let vx = ms.tracks.vel_x[i];
-                let vy = ms.tracks.vel_y[i];
-                let x_cv = x + vx * safe_dt;
-                let y_cv = y + vy * safe_dt;
-                let x_bal = x + 1.06 * vx * safe_dt;
-                let y_bal = y + 1.06 * vy * safe_dt;
-                let x_osc = eqx + 0.95 * (x - eqx) + 0.72 * vx * safe_dt;
-                let y_osc = eqy + 0.95 * (y - eqy) + 0.72 * vy * safe_dt;
 
-                let px = ms.tracks.imm_w_cv[i] * x_cv
-                    + ms.tracks.imm_w_bal[i] * x_bal
-                    + ms.tracks.imm_w_osc[i] * x_osc;
-                let py = ms.tracks.imm_w_cv[i] * y_cv
-                    + ms.tracks.imm_w_bal[i] * y_bal
-                    + ms.tracks.imm_w_osc[i] * y_osc;
-                ms.tracks.pred_x[i] = clamp_f32(px, 0.0, max_x);
-                ms.tracks.pred_y[i] = clamp_f32(py, 0.0, max_y);
-            }
-            i += 1;
-        }
-    }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     // Collect active slots (deactivating any corrupted non-finite slot) & sort by Morton order
     let mut act_n = 0usize;
@@ -5358,11 +5358,11 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
     let idx_ptr = ms.cell_pidx.as_ptr();
     let prelim_ptr = ms.prelim_cands.as_mut_ptr();
 
-    #[cfg(target_arch = "wasm32")]
+
     let v_px = f32x4_splat(px);
-    #[cfg(target_arch = "wasm32")]
+
     let v_py = f32x4_splat(py);
-    #[cfg(target_arch = "wasm32")]
+
     let mut v_d2_lim = f32x4_splat(d2_lim);
 
     macro_rules! push_stage1_hit {
@@ -5381,7 +5381,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                         i0 = idx_val;
                         if d2 < tight_hit_d2 && tight_cap_d2 < d2_lim {
                             d2_lim = tight_cap_d2;
-                            #[cfg(target_arch = "wasm32")]
+
                             {
                                 v_d2_lim = f32x4_splat(d2_lim);
                             }
@@ -5398,7 +5398,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                     prelim_len += 1;
                     if prelim_len == 3 && d2v < d2_lim {
                         d2_lim = d2v;
-                        #[cfg(target_arch = "wasm32")]
+
                         {
                             v_d2_lim = f32x4_splat(d2_lim);
                         }
@@ -5414,7 +5414,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                         i0 = idx_val;
                         if d2 < tight_hit_d2 && tight_cap_d2 < d2_lim {
                             d2_lim = tight_cap_d2;
-                            #[cfg(target_arch = "wasm32")]
+
                             {
                                 v_d2_lim = f32x4_splat(d2_lim);
                             }
@@ -5430,7 +5430,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                     }
                     if d2v < d2_lim {
                         d2_lim = d2v;
-                        #[cfg(target_arch = "wasm32")]
+
                         {
                             v_d2_lim = f32x4_splat(d2_lim);
                         }
@@ -5445,7 +5445,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                 ki,
                 d2,
             ) {
-                #[cfg(target_arch = "wasm32")]
+
                 {
                     v_d2_lim = f32x4_splat(d2_lim);
                 }
@@ -5481,7 +5481,7 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
         ($s_expr:expr, $e_expr:expr) => {{
             let mut k = $s_expr;
             let e = ($e_expr).min(MAX_MICRO_PEAKS);
-            #[cfg(target_arch = "wasm32")]
+
             while k + 4 <= e {
                 let vx = core::ptr::read_unaligned(px_ptr.add(k) as *const v128);
                 let vy = core::ptr::read_unaligned(py_ptr.add(k) as *const v128);
@@ -5673,9 +5673,9 @@ unsafe fn gather_csr_stage2_track(
     let csr_peak_ptr = ms.csr_peak_idx.as_mut_ptr();
 
     let tpl_t = &*track_tpl_ptr.add(ti);
-    #[cfg(target_arch = "wasm32")]
+
     let mut tpl_loaded = false;
-    #[cfg(target_arch = "wasm32")]
+
     let (mut t0, mut t1, mut t2, mut t3) = {
         let z = i8x16_splat(0);
         (z, z, z, z)
@@ -5714,7 +5714,7 @@ unsafe fn gather_csr_stage2_track(
             continue;
         }
 
-        #[cfg(target_arch = "wasm32")]
+
         let sad = {
             if !tpl_loaded {
                 let pa = tpl_t.as_ptr() as *const v128;
@@ -5732,8 +5732,8 @@ unsafe fn gather_csr_stage2_track(
                 &*peak_tpl_ptr.add(pi),
             )
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        let sad = patch_8x8_sad_i8_simd128(tpl_t, &*peak_tpl_ptr.add(pi));
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
         if coast == 0 && sad > 1966 {
             continue;
         }
@@ -5876,7 +5876,7 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
             if ph > 0 {
                 let eps_prev = eps_phases[ph - 1];
                 let relax = eps_prev + (eps_prev >> 2);
-                #[cfg(target_arch = "wasm32")]
+
                 let mut j = {
                     let vrelax = i32x4_splat(relax);
                     let vzero = i32x4_splat(0);
@@ -5891,8 +5891,8 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
                     }
                     j
                 };
-                #[cfg(not(target_arch = "wasm32"))]
-                let mut j = 0usize;
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
                 while j < num_peaks {
                     let p = (*peak_price_ptr.add(j)).saturating_sub(relax);
                     *peak_price_ptr.add(j) = if p > 0 { p } else { 0 };
@@ -6274,7 +6274,7 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
 
 /// Evaluates 8x8 bilinearly warped patch at `(cx, cy)` and accumulates true Huber IRLS
 /// objective, L1 mean residual, Hessian `(H_xx, H_xy, H_yy)`, and gradient residual `(b_x, b_y)`.
-#[cfg(target_arch = "wasm32")]
+
 #[inline(never)]
 fn eval_lk_patch_wasm<const NEED_GRAD: bool, const ROWS4: bool>(
     luma: &[f32],
@@ -6536,111 +6536,111 @@ fn eval_lk_patch_wasm<const NEED_GRAD: bool, const ROWS4: bool>(
 
 /// Evaluates 8x8 bilinearly warped patch at `(cx, cy)` and accumulates true Huber IRLS
 /// objective, L1 mean residual, Hessian `(H_xx, H_xy, H_yy)`, and gradient residual `(b_x, b_y)`.
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(always)]
-fn eval_lk_patch<const NEED_GRAD: bool>(
-    luma: &[f32],
-    w: usize,
-    h: usize,
-    cx: f32,
-    cy: f32,
-    tpl_e2: f32,
-    lk_tpl_f: &[f32; 64],
-    lk_gx: &[f32; 64],
-    lk_gy: &[f32; 64],
-    lk_warp_f: &mut [f32; 64],
-) -> (f32, f32, f32, f32, bool) {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let loss = eval_lk_patch_wasm::<NEED_GRAD, false>(
-            luma, w, h, cx, cy, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-        );
-        (
-            loss,
-            lk_warp_f[1],
-            lk_warp_f[2],
-            lk_warp_f[3],
-            loss < 1.0e30,
-        )
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        const HUBER_DELTA: f32 = 0.08;
-        if !cx.is_finite() || !cy.is_finite() {
-            return (f32::INFINITY, f32::INFINITY, 0.0, 0.0, false);
-        }
-        let sx = cx - 3.5;
-        let sy = cy - 3.5;
-        if sx < 0.0 || sy < 0.0 || sx > (w as f32) - 9.0 || sy > (h as f32) - 9.0 {
-            return (f32::INFINITY, f32::INFINITY, 0.0, 0.0, false);
-        }
-        let ix = wasm_floorf(sx) as usize;
-        let iy = wasm_floorf(sy) as usize;
-        let fx = sx - (ix as f32);
-        let fy = sy - (iy as f32);
-        let w00 = (1.0 - fx) * (1.0 - fy);
-        let w10 = fx * (1.0 - fy);
-        let w01 = (1.0 - fx) * fy;
-        let w11 = fx * fy;
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-        let mut sum_i = 0.0f32;
-        let mut rr = 0usize;
-        while rr < 8 {
-            let p0 = (iy + rr) * w + ix;
-            let p1 = p0 + w;
-            let mut cc = 0usize;
-            while cc < 8 {
-                let iw = luma[p0 + cc] * w00
-                    + luma[p0 + cc + 1] * w10
-                    + luma[p1 + cc] * w01
-                    + luma[p1 + cc + 1] * w11;
-                lk_warp_f[rr * 8 + cc] = iw;
-                sum_i += iw;
-                cc += 1;
-            }
-            rr += 1;
-        }
-        let mean_i = sum_i * (1.0 / 64.0);
-        if !mean_i.is_finite() {
-            return (f32::INFINITY, f32::INFINITY, 0.0, 0.0, false);
-        }
 
-        let (mut b_x, mut b_y, mut abs_sum, mut rho_sum, mut warp_e2, mut dot_wt) =
-            (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
-        let mut k = 0usize;
-        while k < 64 {
-            let iw_zm = lk_warp_f[k] - mean_i;
-            let tpl = lk_tpl_f[k];
-            let err = iw_zm - tpl;
-            let aerr = err.abs();
-            let alo = if aerr < HUBER_DELTA { aerr } else { HUBER_DELTA };
-            abs_sum += aerr;
-            rho_sum += alo * (aerr - 0.5 * alo);
-            warp_e2 += iw_zm * iw_zm;
-            dot_wt += iw_zm * tpl;
-            if NEED_GRAD {
-                let psi = clamp_f32(err, -HUBER_DELTA, HUBER_DELTA);
-                b_x += lk_gx[k] * psi;
-                b_y += lk_gy[k] * psi;
-            }
-            k += 1;
-        }
 
-        let loss = rho_sum * (1.0 / 64.0);
-        let abs_res = abs_sum * (1.0 / 64.0);
-        let cond_ok = loss.is_finite()
-            && abs_res.is_finite()
-            && b_x.is_finite()
-            && b_y.is_finite()
-            && warp_e2.is_finite()
-            && dot_wt.is_finite()
-            && warp_e2 >= 0.0008
-            && warp_e2 >= 0.05 * tpl_e2
-            && dot_wt > 0.0
-            && dot_wt * dot_wt >= 0.04 * warp_e2 * tpl_e2;
-        (loss, abs_res, b_x, b_y, cond_ok)
-    }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /// Runs 2-iteration SIMD128 Huber IC-LK sub-pixel refinement on `luma` using `ms.tracks.tpl8_i8[ti]`
 /// and arena-resident `lk_*` scratch (zero stack buffers >= 64 B). Enforces zero-mean projected
@@ -6665,7 +6665,7 @@ fn refine_ic_lk_8x8_2iter(
     fast_lk: bool,
     metrology_active: bool,
 ) -> (f32, f32, f32, f32, bool) {
-    #[cfg(target_arch = "wasm32")]
+
     {
         let tr = refine_ic_lk_8x8_2iter_wasm(
             luma,
@@ -6691,26 +6691,26 @@ fn refine_ic_lk_8x8_2iter(
             tr > 0.0,
         )
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    refine_ic_lk_8x8_2iter_scalar(
-        luma,
-        w,
-        h,
-        q,
-        tpl_i8,
-        x0,
-        y0,
-        max_shift,
-        lk_tpl_f,
-        lk_gx,
-        lk_gy,
-        lk_warp_f,
-        fast_lk,
-        metrology_active,
-    )
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 fn refine_ic_lk_8x8_2iter_wasm(
@@ -6745,7 +6745,7 @@ fn refine_ic_lk_8x8_2iter_wasm(
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
 unsafe fn prep_ic_lk_tpl<const FAST_4X8: bool>(
     tpl_i8: &[i8; 64],
@@ -6997,7 +6997,7 @@ unsafe fn prep_ic_lk_tpl<const FAST_4X8: bool>(
     out_stats[3] = (hsum_f32x4(vh_yy) - n_pix * mgy * mgy).max(0.0);
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(never)]
 unsafe fn prep_ic_lk_tpl_8x8(
     tpl_i8: &[i8; 64],
@@ -7009,7 +7009,7 @@ unsafe fn prep_ic_lk_tpl_8x8(
     prep_ic_lk_tpl::<false>(tpl_i8, lk_tpl_f, lk_gx, lk_gy, out_stats);
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool, const METROLOGY_ACTIVE: bool>(
@@ -7239,249 +7239,249 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool, const METROLOGY_ACTIVE
     if FAST_4X8 { 2.0 * tr_b } else { tr_b }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-#[inline(never)]
-#[allow(clippy::too_many_arguments)]
-fn refine_ic_lk_8x8_2iter_scalar(
-    luma: &[f32],
-    w: usize,
-    h: usize,
-    q: f32,
-    tpl_i8: &[i8; 64],
-    x0: f32,
-    y0: f32,
-    max_shift: f32,
-    lk_tpl_f: &mut [f32; 64],
-    lk_gx: &mut [f32; 64],
-    lk_gy: &mut [f32; 64],
-    lk_warp_f: &mut [f32; 64],
-    fast_lk: bool,
-    metrology_active: bool,
-) -> (f32, f32, f32, f32, bool) {
-    assert!(luma.len() >= w * h);
-    let min_c = 4.5f32;
-    let max_wx = (w as f32) - 6.0;
-    let max_wy = (h as f32) - 6.0;
-    if !q.is_finite()
-        || q <= 0.0
-        || !x0.is_finite()
-        || !y0.is_finite()
-        || x0 < min_c
-        || x0 > max_wx
-        || y0 < min_c
-        || y0 > max_wy
-    {
-        if metrology_active {
-            lk_warp_f[3] = 0.0;
-            lk_warp_f[4] = 0.0;
-            lk_warp_f[5] = 0.0;
-        }
-        return (x0, y0, 0.0, 0.0, false);
-    }
+// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-    let (tpl_e2, mut h_xx, mut h_xy, mut h_yy) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
-    let mut sum_tpl = 0.0f32;
-    let mut t2 = 0.0f32;
-    let mut i = 0usize;
-    while i < 64 {
-        let v = (tpl_i8[i] as f32) * (1.0 / 127.0);
-        lk_tpl_f[i] = v;
-        sum_tpl += v;
-        t2 += v * v;
-        i += 1;
-    }
-    let mean_tpl = sum_tpl * (1.0 / 64.0);
-    let _ = tpl_e2;
-    let tpl_e2 = (t2 - 64.0 * mean_tpl * mean_tpl).max(0.0);
 
-    let mut sum_gx = 0.0f32;
-    let mut sum_gy = 0.0f32;
-    let mut r = 0usize;
-    while r < 8 {
-        let rm = if r == 0 { 0 } else { r - 1 };
-        let rp = if r == 7 { 7 } else { r + 1 };
-        let y_scale = if r == 0 || r == 7 { 1.0 } else { 0.5 };
-        let mut c = 0usize;
-        while c < 8 {
-            let cm = if c == 0 { 0 } else { c - 1 };
-            let cp = if c == 7 { 7 } else { c + 1 };
-            let x_scale = if c == 0 || c == 7 { 1.0 } else { 0.5 };
-            let gx = (lk_tpl_f[r * 8 + cp] - lk_tpl_f[r * 8 + cm]) * x_scale;
-            let gy = (lk_tpl_f[rp * 8 + c] - lk_tpl_f[rm * 8 + c]) * y_scale;
-            lk_gx[r * 8 + c] = gx;
-            lk_gy[r * 8 + c] = gy;
-            sum_gx += gx;
-            sum_gy += gy;
-            h_xx += gx * gx;
-            h_xy += gx * gy;
-            h_yy += gy * gy;
-            c += 1;
-        }
-        r += 1;
-    }
-    let mut ci = 0usize;
-    while ci < 64 {
-        lk_tpl_f[ci] -= mean_tpl;
-        ci += 1;
-    }
-    let mean_gx = sum_gx * (1.0 / 64.0);
-    let mean_gy = sum_gy * (1.0 / 64.0);
-    h_xx = (h_xx - 64.0 * mean_gx * mean_gx).max(0.0);
-    h_xy -= 64.0 * mean_gx * mean_gy;
-    h_yy = (h_yy - 64.0 * mean_gy * mean_gy).max(0.0);
 
-    let tr_b = h_xx + h_yy;
-    let det_raw = h_xx * h_yy - h_xy * h_xy;
-    if !tpl_e2.is_finite()
-        || !tr_b.is_finite()
-        || !det_raw.is_finite()
-        || tr_b <= 1e-5
-        || det_raw <= 1e-10
-        || tr_b * tr_b > 22.05 * det_raw
-    {
-        if metrology_active {
-            lk_warp_f[3] = 0.0;
-            lk_warp_f[4] = 0.0;
-            lk_warp_f[5] = 0.0;
-        }
-        return (x0, y0, 0.0, 0.0, false);
-    }
 
-    let diff_h = h_xx - h_yy;
-    let disc_h = wasm_sqrtf((diff_h * diff_h + 4.0 * h_xy * h_xy).max(0.0));
-    let lambda_min = (0.5 * (tr_b - disc_h)).max(0.0);
-    let snr_bound = 0.25 * q;
-    let min_sigma_r = 0.004f32;
-    if min_sigma_r * min_sigma_r > snr_bound * snr_bound * lambda_min {
-        if metrology_active {
-            lk_warp_f[3] = 0.0;
-            lk_warp_f[4] = 0.0;
-            lk_warp_f[5] = 0.0;
-        }
-        return (x0, y0, 0.0, tr_b, false);
-    }
 
-    let (loss0, abs0, bx0, by0, ok0) = eval_lk_patch::<true>(
-        luma, w, h, x0, y0, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-    );
-    if !ok0 {
-        let safe_abs = if abs0.is_finite() { abs0 } else { 0.0 };
-        if metrology_active {
-            lk_warp_f[3] = 0.0;
-            lk_warp_f[4] = 0.0;
-            lk_warp_f[5] = 0.0;
-        }
-        return (x0, y0, safe_abs, tr_b, false);
-    }
 
-    let mut acc_x = x0;
-    let mut acc_y = y0;
-    let mut acc_loss = loss0;
-    let mut acc_abs = abs0;
-    let mut acc_bx = bx0;
-    let mut acc_by = by0;
 
-    let step_lim = 0.75 * q;
-    let max_tot = if max_shift.abs() < 1.0e30 {
-        max_shift.max(0.0).min(1.5 * q)
-    } else {
-        0.0
-    };
-    let max_tot2 = max_tot * max_tot;
-    let damp = 0.005 * tr_b + 1e-6;
-    let d_xx = h_xx + damp;
-    let d_yy = h_yy + damp;
-    let det = d_xx * d_yy - h_xy * h_xy;
-    if det > 1e-12 && det < 1.0e30 {
-        let inv_det = 1.0 / det;
-        let mut iter = 0usize;
-        while iter < 2 {
-            let mut dx = -(d_yy * acc_bx - h_xy * acc_by) * inv_det;
-            let mut dy = -(d_xx * acc_by - h_xy * acc_bx) * inv_det;
-            if !(dx.abs() < 1.0e30 && dy.abs() < 1.0e30) {
-                break;
-            }
-            let step2 = dx * dx + dy * dy;
-            if step2 < if iter == 0 { 9e-4 } else { 1.6e-3 } {
-                break;
-            }
-            if step2 > step_lim * step_lim {
-                let sc = step_lim / wasm_sqrtf(step2);
-                dx *= sc;
-                dy *= sc;
-            }
-            let cand_x = clamp_f32(acc_x + dx, min_c, max_wx);
-            let cand_y = clamp_f32(acc_y + dy, min_c, max_wy);
-            let shift2 = (cand_x - x0) * (cand_x - x0) + (cand_y - y0) * (cand_y - y0);
-            if !(shift2 <= max_tot2) {
-                break;
-            }
-            if (cand_x - acc_x) * (cand_x - acc_x) + (cand_y - acc_y) * (cand_y - acc_y) < 1e-4 {
-                break;
-            }
-            if iter == 0
-                && (step2 < 0.004
-                    || if fast_lk {
-                        step2 < 0.49 && acc_abs < 0.115
-                    } else {
-                        step2 < 0.036 && acc_abs < 0.075
-                    })
-            {
-                acc_x = cand_x;
-                acc_y = cand_y;
-                if metrology_active {
-                    let (_, ac_early, _, _, ok_early) = eval_lk_patch::<false>(
-                        luma, w, h, cand_x, cand_y, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-                    );
-                    if ok_early {
-                        acc_abs = ac_early;
-                    }
-                }
-                break;
-            }
 
-            let (lc, ac, bxc, byc, okc) = if iter == 0 && !fast_lk {
-                eval_lk_patch::<true>(
-                    luma, w, h, cand_x, cand_y, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-                )
-            } else {
-                eval_lk_patch::<false>(
-                    luma, w, h, cand_x, cand_y, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-                )
-            };
-            if !okc || lc > acc_loss {
-                break;
-            }
-            acc_x = cand_x;
-            acc_y = cand_y;
-            acc_loss = lc;
-            acc_abs = ac;
-            if fast_lk {
-                break;
-            }
-            acc_bx = bxc;
-            acc_by = byc;
-            iter += 1;
-        }
-    }
 
-    let sigma_r = (1.2533 * acc_abs).max(0.004);
-    if sigma_r * sigma_r > snr_bound * snr_bound * lambda_min {
-        if metrology_active {
-            lk_warp_f[3] = 0.0;
-            lk_warp_f[4] = 0.0;
-            lk_warp_f[5] = 0.0;
-        }
-        return (x0, y0, abs0, tr_b, false);
-    }
 
-    if metrology_active {
-        lk_warp_f[3] = h_xx;
-        lk_warp_f[4] = h_xy;
-        lk_warp_f[5] = h_yy;
-    }
-    (acc_x, acc_y, acc_abs, tr_b, true)
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 #[inline(always)]
 unsafe fn apply_coast_or_retire_raw(
@@ -7989,7 +7989,7 @@ pub fn update_step1_matched(
                     + 0.72 * vy_prior * safe_dt;
                 let e_osc2 = (nx - ex_osc) * (nx - ex_osc) + (ny - ey_osc) * (ny - ey_osc);
 
-                #[cfg(target_arch = "wasm32")]
+
                 {
                     let x = f32x4_mul(
                         f32x4_splat(-inv_2sig2),
@@ -8069,30 +8069,30 @@ pub fn update_step1_matched(
                         };
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let l_cv = *imm_cv_ptr.add(ti) * fast_expf(-e_cv2 * inv_2sig2);
-                    let l_bal = *imm_bal_ptr.add(ti) * fast_expf(-e_bal2 * inv_2sig2);
-                    let l_osc = *imm_osc_ptr.add(ti) * fast_expf(-e_osc2 * inv_2sig2);
-                    let sum_l = l_cv + l_bal + l_osc + 1e-6;
-                    if sum_l > 0.0 && sum_l < 1.0e30 {
-                        let inv_sum_l = 1.0 / sum_l;
-                        let w0 = clamp_f32(l_cv * inv_sum_l, 0.05, 0.90);
-                        let w1 = clamp_f32(l_bal * inv_sum_l, 0.05, 0.90);
-                        let w2 = clamp_f32(l_osc * inv_sum_l, 0.05, 0.90);
-                        let inv_wsum = 1.0 / (w0 + w1 + w2);
-                        *imm_cv_ptr.add(ti) = w0 * inv_wsum;
-                        *imm_bal_ptr.add(ti) = w1 * inv_wsum;
-                        *imm_osc_ptr.add(ti) = w2 * inv_wsum;
-                        *regime_ptr.add(ti) = if w2 > w0 && w2 > w1 {
-                            2
-                        } else if w1 > w0 {
-                            1
-                        } else {
-                            0
-                        };
-                    }
-                }
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
                 let prev_confirmed_mature = was_coasting == 0
                     && *state_ptr.add(ti) == MICRO_STATE_CONFIRMED
@@ -8172,7 +8172,7 @@ pub fn update_step1_matched(
 
                 // Symmetric truncation-toward-zero template refresh ONLY when IC-LK accepted cleanly
                 if ok && lk_res < 0.14 && !chr_shock {
-                    #[cfg(target_arch = "wasm32")]
+
                     {
                         let dp = (*tpl8_ptr.add(ti)).as_mut_ptr() as *mut v128;
                         let sp = (*peak_tpl8_ptr.add(pi)).as_ptr() as *const v128;
@@ -8199,17 +8199,17 @@ pub fn update_step1_matched(
                             c += 1;
                         }
                     }
-                    #[cfg(not(target_arch = "wasm32"))]
-                    {
-                        let dst = &mut *tpl8_ptr.add(ti);
-                        let src = &*peak_tpl8_ptr.add(pi);
-                        let mut b = 0usize;
-                        while b < 64 {
-                            let blended = (dst[b] as i32) * 3 + (src[b] as i32);
-                            dst[b] = (blended / 4).clamp(-127, 127) as i8;
-                            b += 1;
-                        }
-                    }
+                    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
                 }
             }
             ord_i += 1;
@@ -8768,7 +8768,7 @@ pub fn update_step2_coast_merge_direct(
             let r_merge2 = r_merge * r_merge;
             let dv_lim = 4.0 * q * inv_dt;
             let dv_lim2 = dv_lim * dv_lim;
-            #[cfg(target_arch = "wasm32")]
+
             let vr_merge2 = f32x4_splat(r_merge2);
 
             ord_i = 0;
@@ -8781,7 +8781,7 @@ pub fn update_step2_coast_merge_direct(
                     let x_hi = cell_coord(px + r_merge, inv_fcw, CSR_CELL_W - 1);
                     let y_lo = cell_coord(py - r_merge, inv_fch, CSR_CELL_H - 1);
                     let y_hi = cell_coord(py + r_merge, inv_fch, CSR_CELL_H - 1);
-                    #[cfg(target_arch = "wasm32")]
+
                     let (v_px, v_py) = (f32x4_splat(px), f32x4_splat(py));
                     let mut dup = false;
                     let mut cy = y_lo;
@@ -8791,7 +8791,7 @@ pub fn update_step2_coast_merge_direct(
                         let e_seg = (*cell_off_ptr.add(row_off + x_hi + 1) as usize).min(MAX_MICRO);
                         let mut k = s_seg;
 
-                        #[cfg(target_arch = "wasm32")]
+
                         while k < e_seg {
                             let dx = f32x4_sub(
                                 core::ptr::read_unaligned(cpx_ptr.add(k) as *const v128),
@@ -8835,35 +8835,35 @@ pub fn update_step2_coast_merge_direct(
                             k += 4;
                         }
 
-                        #[cfg(not(target_arch = "wasm32"))]
-                        while k < e_seg {
-                            let dx = *cpx_ptr.add(k) - px;
-                            let dx2 = dx * dx;
-                            if dx2 < r_merge2 {
-                                let dy = *cpy_ptr.add(k) - py;
-                                if dx2 + dy * dy < r_merge2 {
-                                    let tj = *cidx_ptr.add(k) as usize;
-                                    if tj > ti && *state_ptr.add(tj) != MICRO_STATE_INACTIVE {
-                                        let dvx = *vel_x_ptr.add(tj) - *vel_x_ptr.add(ti);
-                                        let dvy = *vel_y_ptr.add(tj) - *vel_y_ptr.add(ti);
-                                        if dvx * dvx + dvy * dvy <= dv_lim2 {
-                                            let age_j = *age_ptr.add(tj);
-                                            let age_i = *age_ptr.add(ti);
-                                            let tid_j = *track_id_ptr.add(tj);
-                                            if age_j > age_i
-                                                || (age_j == age_i && tid_j < *track_id_ptr.add(ti))
-                                            {
-                                                dup = true;
-                                                break;
-                                            } else {
-                                                retire_dup_slot!(tj);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            k += 1;
-                        }
+                        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                         cy += 1;
                     }
                     if dup {
@@ -9193,7 +9193,7 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
             && ms.tracks.ftle_val.len() >= MAX_MICRO
     );
 
-    #[cfg(target_arch = "wasm32")]
+
     let vzero = f32x4_splat(0.0);
     let exp_ptr = ms.export_micro.as_mut_ptr();
     let state_p = ms.tracks.state.as_mut_ptr();
@@ -9239,23 +9239,23 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                 }
             }
             if st == MICRO_STATE_INACTIVE {
-                #[cfg(target_arch = "wasm32")]
+
                 {
                     let ep = exp_ptr.add(base) as *mut v128;
                     core::ptr::write_unaligned(ep, vzero);
                     core::ptr::write_unaligned(ep.add(1), vzero);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    *exp_ptr.add(base) = 0.0;
-                    *exp_ptr.add(base + 1) = 0.0;
-                    *exp_ptr.add(base + 2) = 0.0;
-                    *exp_ptr.add(base + 3) = 0.0;
-                    *exp_ptr.add(base + 4) = 0.0;
-                    *exp_ptr.add(base + 5) = 0.0;
-                    *exp_ptr.add(base + 6) = 0.0;
-                    *exp_ptr.add(base + 7) = 0.0;
-                }
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
             } else {
                 act_cnt += 1;
                 if st == MICRO_STATE_CONFIRMED {
@@ -9272,7 +9272,7 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                     *ftle_val_p.add(i) = FTLE_INVALID_VAL;
                     FTLE_INVALID_VAL
                 };
-                #[cfg(target_arch = "wasm32")]
+
                 {
                     let ep = exp_ptr.add(base) as *mut v128;
                     core::ptr::write_unaligned(
@@ -9294,17 +9294,17 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                         ),
                     );
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    *exp_ptr.add(base) = *tid_p.add(i) as f32;
-                    *exp_ptr.add(base + 1) = *px_p.add(i);
-                    *exp_ptr.add(base + 2) = *py_p.add(i);
-                    *exp_ptr.add(base + 3) = *vx_p.add(i);
-                    *exp_ptr.add(base + 4) = *vy_p.add(i);
-                    *exp_ptr.add(base + 5) = st as f32;
-                    *exp_ptr.add(base + 6) = *body_p.add(i) as f32;
-                    *exp_ptr.add(base + 7) = ftle;
-                }
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
             }
             i += 1;
         }

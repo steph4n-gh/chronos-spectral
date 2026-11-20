@@ -926,9 +926,9 @@ fn visit_knn_slice_reg(
     }
     let rem_s = p.min(n);
     if n - rem_s >= 4 {
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let vxi = f32x4_splat(xi);
             let vyi = f32x4_splat(yi);
             let mut vlim = f32x4_splat(top.lim);
@@ -966,45 +966,45 @@ fn visit_knn_slice_reg(
             }
             p = rem_s + ((n - rem_s) & !3);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            for ((xc, yc), tc) in xs[p..]
-                .chunks_exact(4)
-                .zip(ys[p..].chunks_exact(4))
-                .zip(tis[p..].chunks_exact(4))
-            {
-                if let (&[x0, x1, x2, x3], &[y0, y1, y2, y3], &[t0, t1, t2, t3]) = (xc, yc, tc) {
-                    let d0 = { let dx = x0 - xi; let dy = y0 - yi; dx * dx + dy * dy };
-                    let d1 = { let dx = x1 - xi; let dy = y1 - yi; dx * dx + dy * dy };
-                    let d2 = { let dx = x2 - xi; let dy = y2 - yi; dx * dx + dy * dy };
-                    let d3 = { let dx = x3 - xi; let dy = y3 - yi; dx * dx + dy * dy };
-                    let lim = top.lim;
-                    let mask = ((d0 < lim) as u32)
-                        | (((d1 < lim) as u32) << 1)
-                        | (((d2 < lim) as u32) << 2)
-                        | (((d3 < lim) as u32) << 3);
-                    if mask != 0 {
-                        if (mask & 1) != 0 {
-                            let j = t0 as usize;
-                            if j != i { top.push_full(d0, j as i16); }
-                        }
-                        if (mask & 2) != 0 && d1 < top.lim {
-                            let j = t1 as usize;
-                            if j != i { top.push_full(d1, j as i16); }
-                        }
-                        if (mask & 4) != 0 && d2 < top.lim {
-                            let j = t2 as usize;
-                            if j != i { top.push_full(d2, j as i16); }
-                        }
-                        if (mask & 8) != 0 && d3 < top.lim {
-                            let j = t3 as usize;
-                            if j != i { top.push_full(d3, j as i16); }
-                        }
-                    }
-                }
-                p += 4;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     while p < n {
         let dx = xs[p] - xi;
@@ -1329,9 +1329,9 @@ fn visit_knn_slice_full_noskip(
     let xs = &cs.field_grid_x[..MAX_MICRO];
     let ys = &cs.field_grid_y[..MAX_MICRO];
     let tis = &cs.field_grid_ti[..MAX_MICRO];
-    #[cfg(target_arch = "wasm32")]
+
     if e - p >= 4 {
-        use core::arch::wasm32::*;
+        use crate::simd::*;
         let xs_p = xs.as_ptr();
         let ys_p = ys.as_ptr();
         let tis_p = tis.as_ptr();
@@ -1722,7 +1722,7 @@ pub fn build_sparse_knn_graph(
                                 & (d2_5 <= r_max2) as u8)
                                 != 0
                             {
-                                #[cfg(target_arch = "wasm32")]
+
                                 let (obs_inc, strain_inc, persist_fwd) =
                                     update_knn_slot_edges_same6_wasm(
                                         ms,
@@ -1745,24 +1745,24 @@ pub fn build_sparse_knn_graph(
                                         q,
                                         min_ref_dist,
                                     );
-                                #[cfg(not(target_arch = "wasm32"))]
-                                let (obs_inc, strain_inc, persist_fwd) = update_knn_slot_edges(
-                                    ms,
-                                    cs,
-                                    i,
-                                    xi,
-                                    yi,
-                                    knn_pack(d2_0, j0 as i16),
-                                    knn_pack(d2_1, j1 as i16),
-                                    knn_pack(d2_2, j2 as i16),
-                                    knn_pack(d2_3, j3 as i16),
-                                    knn_pack(d2_4, j4 as i16),
-                                    knn_pack(d2_5, j5 as i16),
-                                    MICRO_KNN_K,
-                                    frame_idx,
-                                    q,
-                                    min_ref_dist,
-                                );
+                                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                                 if persist_fwd {
                                     let sidx = rigid_seed_n.min(MAX_MICRO - 1);
                                     cs.rigid_seeds[sidx] = i as u16;
@@ -2044,9 +2044,9 @@ fn compute_knn_star_dtheta(
 
 #[inline(always)]
 fn sqrt_top6_d2(best_d2: &[f32; MICRO_KNN_K]) -> [f32; MICRO_KNN_K] {
-    #[cfg(target_arch = "wasm32")]
+
     {
-        use core::arch::wasm32::{f32x4, f32x4_extract_lane, f32x4_max, f32x4_splat, f32x4_sqrt};
+        use crate::simd::{f32x4, f32x4_extract_lane, f32x4_max, f32x4_splat, f32x4_sqrt};
         let z = f32x4_splat(0.0);
         let v0 = f32x4_sqrt(f32x4_max(
             f32x4(best_d2[0], best_d2[1], best_d2[2], best_d2[3]),
@@ -2062,17 +2062,17 @@ fn sqrt_top6_d2(best_d2: &[f32; MICRO_KNN_K]) -> [f32; MICRO_KNN_K] {
             f32x4_extract_lane::<1>(v1),
         ]
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        [
-            wasm_sqrtf(best_d2[0].max(0.0)),
-            wasm_sqrtf(best_d2[1].max(0.0)),
-            wasm_sqrtf(best_d2[2].max(0.0)),
-            wasm_sqrtf(best_d2[3].max(0.0)),
-            wasm_sqrtf(best_d2[4].max(0.0)),
-            wasm_sqrtf(best_d2[5].max(0.0)),
-        ]
-    }
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
 }
 
 #[inline(never)]
@@ -2158,7 +2158,7 @@ fn finalize_knn_slot_dtheta(
     };
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn eval_knn_edges_6_wasm(
@@ -2183,12 +2183,12 @@ fn eval_knn_edges_6_wasm(
     pxi: f32,
     pyi: f32,
     matched_mask: u8,
-    vref0_old: core::arch::wasm32::v128,
-    vref1_old: core::arch::wasm32::v128,
+    vref0_old: crate::simd::v128,
+    vref1_old: crate::simd::v128,
     prev_strain: [u16; MICRO_KNN_K],
     prev_streak: [u8; MICRO_KNN_K],
 ) -> (f32, u8, u8, bool) {
-    use core::arch::wasm32::*;
+    use crate::simd::*;
     let vz = f32x4_splat(0.0);
     let v0 = f32x4_sqrt(f32x4_max(f32x4(d2_0, d2_1, d2_2, d2_3), vz));
     let v1 = f32x4_sqrt(f32x4_max(f32x4(d2_4, d2_5, 0.0, 0.0), vz));
@@ -2480,9 +2480,9 @@ fn update_knn_slot_reordered(
     q: f32,
     min_ref_dist: f32,
 ) -> (u32, f64, bool) {
-    #[cfg(target_arch = "wasm32")]
+
     if best_cnt == MICRO_KNN_K && old_cnt == MICRO_KNN_K {
-        use core::arch::wasm32::*;
+        use crate::simd::*;
         let old_tid = cs.knn[i].tid;
         let old_ref = cs.knn[i].ref_dist;
         let old_strain = cs.knn[i].strain_q15;
@@ -2793,7 +2793,7 @@ fn update_knn_slot_slow(
     (best_cnt as u32, slot_strain as f64, has_persist_fwd)
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[allow(clippy::too_many_arguments)]
 #[inline(always)]
 fn update_knn_slot_edges_same6_wasm(
@@ -2827,7 +2827,7 @@ fn update_knn_slot_edges_same6_wasm(
         (0.0, 0.0)
     };
     let (slot_strain, star_mask, has_persist_fwd) = {
-        use core::arch::wasm32::f32x4;
+        use crate::simd::f32x4;
         let dst = &mut cs.knn[i];
         let vref0_cur =
             f32x4(dst.ref_dist[0], dst.ref_dist[1], dst.ref_dist[2], dst.ref_dist[3]);
@@ -2926,7 +2926,7 @@ fn update_knn_slot_edges(
         return (0, 0.0, false);
     }
 
-    #[cfg(target_arch = "wasm32")]
+
     if old_cnt == MICRO_KNN_K && best_cnt == MICRO_KNN_K {
         let j0 = ((p0 as u16) as usize).min(MAX_MICRO - 1);
         let j1 = ((p1 as u16) as usize).min(MAX_MICRO - 1);
@@ -2970,7 +2970,7 @@ fn update_knn_slot_edges(
                 (0.0, 0.0)
             };
             let (slot_strain, star_mask, has_persist_fwd) = {
-                use core::arch::wasm32::f32x4;
+                use crate::simd::f32x4;
                 let dst = &mut cs.knn[i];
                 dst.idx = [
                     (p0 as u16) as i16,
@@ -4476,9 +4476,9 @@ fn reconcile_and_complete_rigid_bodies(
                                 if !near_ok {
                                     let mx_s = &cs.cand_buf_dx[..mem_n.min(CAND_BUF_CAP)];
                                     let my_s = &cs.cand_buf_dy[..mem_n.min(CAND_BUF_CAP)];
-                                    #[cfg(target_arch = "wasm32")]
+
                                     let mut k = {
-                                        use core::arch::wasm32::*;
+                                        use crate::simd::*;
                                         let vpx = f32x4_splat(px);
                                         let vpy = f32x4_splat(py);
                                         let vr2 = f32x4_splat(near_mem_r2);
@@ -4498,8 +4498,8 @@ fn reconcile_and_complete_rigid_bodies(
                                         }
                                         mx_s.len() & !3
                                     };
-                                    #[cfg(not(target_arch = "wasm32"))]
-                                    let mut k = 0usize;
+                                    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
                                     if !near_ok {
                                         while k < mx_s.len() {
                                             let mdx = px - mx_s[k];
@@ -5798,9 +5798,9 @@ fn gather_cell_candidates_diverse(
                     let ys = &gy[s..e];
                     let tis = &gti[s..e];
                     let mut p = 0usize;
-                    #[cfg(target_arch = "wasm32")]
+
                     {
-                        use core::arch::wasm32::*;
+                        use crate::simd::*;
                         if len >= 4 {
                             let vxc = f32x4_splat(xc);
                             let vyc = f32x4_splat(yc);
@@ -5944,9 +5944,9 @@ fn loo_eval_top_k_below_cutoff(
     let m = m.min(FIELD_CAND_CAP);
     let mut ge_cnt = 0usize;
     let mut u = 0usize;
-    #[cfg(target_arch = "wasm32")]
+
     {
-        use core::arch::wasm32::*;
+        use crate::simd::*;
         let n4 = m & !3;
         if n4 > 0 {
             let vc1 = f32x4_splat(c1);
@@ -6051,9 +6051,9 @@ fn median_and_q80_r2(
     } else {
         0
     };
-    #[cfg(target_arch = "wasm32")]
+
     let (lo_max, hi_v, q80_r2) = {
-        use core::arch::wasm32::*;
+        use crate::simd::*;
         let vinf = f32x4_splat(f32::INFINITY);
         let vn = i32x4_splat(n as i32);
         #[inline(always)]
@@ -6183,149 +6183,149 @@ fn median_and_q80_r2(
             (lo, hi, q)
         }
     };
-    #[cfg(not(target_arch = "wasm32"))]
-    let (lo_max, hi_v, q80_r2) = {
-        macro_rules! cswap {
-            ($a:expr, $b:expr) => {{
-                let x = $a;
-                let y = $b;
-                let sw = x > y;
-                $a = if sw { y } else { x };
-                $b = if sw { x } else { y };
-            }};
-        }
-        if n <= 8 {
-            let mut x0 = src[0];
-            let mut x1 = if n > 1 { src[1] } else { f32::INFINITY };
-            let mut x2 = if n > 2 { src[2] } else { f32::INFINITY };
-            let mut x3 = if n > 3 { src[3] } else { f32::INFINITY };
-            let mut x4 = if n > 4 { src[4] } else { f32::INFINITY };
-            let mut x5 = if n > 5 { src[5] } else { f32::INFINITY };
-            let mut x6 = if n > 6 { src[6] } else { f32::INFINITY };
-            let mut x7 = if n > 7 { src[7] } else { f32::INFINITY };
-            cswap!(x0, x1); cswap!(x2, x3); cswap!(x0, x2); cswap!(x1, x3); cswap!(x1, x2);
-            cswap!(x4, x5); cswap!(x6, x7); cswap!(x4, x6); cswap!(x5, x7); cswap!(x5, x6);
-            cswap!(x0, x4); cswap!(x1, x5); cswap!(x1, x4); cswap!(x2, x6); cswap!(x3, x7);
-            cswap!(x3, x6); cswap!(x2, x4); cswap!(x3, x5); cswap!(x3, x4);
-            let pick = |idx: usize| -> f32 {
-                match idx {
-                    0 => x0, 1 => x1, 2 => x2, 3 => x3,
-                    4 => x4, 5 => x5, 6 => x6, _ => x7,
-                }
-            };
-            let hi = pick(mid);
-            let lo = if odd { 0.0 } else { pick(mid - 1) };
-            let q = if want_q80 && n >= 2 { pick(idx_q80) } else { 0.0 };
-            (lo, hi, q)
-        } else if n <= 16 {
-            let mut x0 = src[0];
-            let mut x1 = src[1];
-            let mut x2 = src[2];
-            let mut x3 = src[3];
-            let mut x4 = src[4];
-            let mut x5 = src[5];
-            let mut x6 = src[6];
-            let mut x7 = src[7];
-            let mut x8 = src[8];
-            let mut x9 = if n > 9 { src[9] } else { f32::INFINITY };
-            let mut x10 = if n > 10 { src[10] } else { f32::INFINITY };
-            let mut x11 = if n > 11 { src[11] } else { f32::INFINITY };
-            let mut x12 = if n > 12 { src[12] } else { f32::INFINITY };
-            let mut x13 = if n > 13 { src[13] } else { f32::INFINITY };
-            let mut x14 = if n > 14 { src[14] } else { f32::INFINITY };
-            let mut x15 = if n > 15 { src[15] } else { f32::INFINITY };
-            cswap!(x0, x1); cswap!(x2, x3); cswap!(x0, x2); cswap!(x1, x3); cswap!(x1, x2);
-            cswap!(x4, x5); cswap!(x6, x7); cswap!(x4, x6); cswap!(x5, x7); cswap!(x5, x6);
-            cswap!(x0, x4); cswap!(x1, x5); cswap!(x1, x4); cswap!(x2, x6); cswap!(x3, x7);
-            cswap!(x3, x6); cswap!(x2, x4); cswap!(x3, x5); cswap!(x3, x4);
-            cswap!(x8, x9); cswap!(x10, x11); cswap!(x8, x10); cswap!(x9, x11); cswap!(x9, x10);
-            cswap!(x12, x13); cswap!(x14, x15); cswap!(x12, x14); cswap!(x13, x15); cswap!(x13, x14);
-            cswap!(x8, x12); cswap!(x9, x13); cswap!(x9, x12); cswap!(x10, x14); cswap!(x11, x15);
-            cswap!(x11, x14); cswap!(x10, x12); cswap!(x11, x13); cswap!(x11, x12);
-            cswap!(x0, x8); cswap!(x1, x9); cswap!(x1, x8); cswap!(x2, x10); cswap!(x3, x11);
-            cswap!(x3, x10); cswap!(x2, x8); cswap!(x3, x9); cswap!(x3, x8);
-            cswap!(x4, x12); cswap!(x5, x13); cswap!(x5, x12); cswap!(x6, x14); cswap!(x7, x15);
-            cswap!(x7, x14); cswap!(x6, x12); cswap!(x7, x13); cswap!(x7, x12);
-            cswap!(x4, x8); cswap!(x5, x9); cswap!(x5, x8); cswap!(x6, x10); cswap!(x7, x11);
-            cswap!(x7, x10); cswap!(x6, x8); cswap!(x7, x9); cswap!(x7, x8);
-            let pick = |idx: usize| -> f32 {
-                match idx {
-                    0 => x0, 1 => x1, 2 => x2, 3 => x3,
-                    4 => x4, 5 => x5, 6 => x6, 7 => x7,
-                    8 => x8, 9 => x9, 10 => x10, 11 => x11,
-                    12 => x12, 13 => x13, 14 => x14, _ => x15,
-                }
-            };
-            let hi = pick(mid);
-            let lo = if odd { 0.0 } else { pick(mid - 1) };
-            let q = if want_q80 { pick(idx_q80) } else { 0.0 };
-            (lo, hi, q)
-        } else {
-            let mut x0 = src[0];
-            let mut x1 = src[1];
-            let mut x2 = src[2];
-            let mut x3 = src[3];
-            let mut x4 = src[4];
-            let mut x5 = src[5];
-            let mut x6 = src[6];
-            let mut x7 = src[7];
-            let mut x8 = src[8];
-            let mut x9 = src[9];
-            let mut x10 = src[10];
-            let mut x11 = src[11];
-            let mut x12 = src[12];
-            let mut x13 = src[13];
-            let mut x14 = src[14];
-            let mut x15 = src[15];
-            let mut x16 = src[16];
-            let mut x17 = if n > 17 { src[17] } else { f32::INFINITY };
-            let mut x18 = if n > 18 { src[18] } else { f32::INFINITY };
-            let mut x19 = if n > 19 { src[19] } else { f32::INFINITY };
-            let mut x20 = if n > 20 { src[20] } else { f32::INFINITY };
-            let mut x21 = if n > 21 { src[21] } else { f32::INFINITY };
-            let mut x22 = if n > 22 { src[22] } else { f32::INFINITY };
-            let mut x23 = if n > 23 { src[23] } else { f32::INFINITY };
-            cswap!(x1, x2); cswap!(x0, x2); cswap!(x0, x1);
-            cswap!(x4, x5); cswap!(x3, x5); cswap!(x3, x4);
-            cswap!(x0, x3); cswap!(x1, x4); cswap!(x2, x5); cswap!(x2, x4); cswap!(x1, x3); cswap!(x2, x3);
-            cswap!(x7, x8); cswap!(x6, x8); cswap!(x6, x7);
-            cswap!(x10, x11); cswap!(x9, x11); cswap!(x9, x10);
-            cswap!(x6, x9); cswap!(x7, x10); cswap!(x8, x11); cswap!(x8, x10); cswap!(x7, x9); cswap!(x8, x9);
-            cswap!(x0, x6); cswap!(x1, x7); cswap!(x2, x8); cswap!(x2, x7); cswap!(x1, x6); cswap!(x2, x6);
-            cswap!(x3, x9); cswap!(x4, x10); cswap!(x5, x11); cswap!(x5, x10); cswap!(x4, x9); cswap!(x5, x9);
-            cswap!(x3, x6); cswap!(x4, x7); cswap!(x5, x8); cswap!(x5, x7); cswap!(x4, x6); cswap!(x5, x6);
-            cswap!(x13, x14); cswap!(x12, x14); cswap!(x12, x13);
-            cswap!(x16, x17); cswap!(x15, x17); cswap!(x15, x16);
-            cswap!(x12, x15); cswap!(x13, x16); cswap!(x14, x17); cswap!(x14, x16); cswap!(x13, x15); cswap!(x14, x15);
-            cswap!(x19, x20); cswap!(x18, x20); cswap!(x18, x19);
-            cswap!(x22, x23); cswap!(x21, x23); cswap!(x21, x22);
-            cswap!(x18, x21); cswap!(x19, x22); cswap!(x20, x23); cswap!(x20, x22); cswap!(x19, x21); cswap!(x20, x21);
-            cswap!(x12, x18); cswap!(x13, x19); cswap!(x14, x20); cswap!(x14, x19); cswap!(x13, x18); cswap!(x14, x18);
-            cswap!(x15, x21); cswap!(x16, x22); cswap!(x17, x23); cswap!(x17, x22); cswap!(x16, x21); cswap!(x17, x21);
-            cswap!(x15, x18); cswap!(x16, x19); cswap!(x17, x20); cswap!(x17, x19); cswap!(x16, x18); cswap!(x17, x18);
-            cswap!(x0, x12); cswap!(x1, x13); cswap!(x2, x14); cswap!(x2, x13); cswap!(x1, x12); cswap!(x2, x12);
-            cswap!(x3, x15); cswap!(x4, x16); cswap!(x5, x17); cswap!(x5, x16); cswap!(x4, x15); cswap!(x5, x15);
-            cswap!(x3, x12); cswap!(x4, x13); cswap!(x5, x14); cswap!(x5, x13); cswap!(x4, x12); cswap!(x5, x12);
-            cswap!(x6, x18); cswap!(x7, x19); cswap!(x8, x20); cswap!(x8, x19); cswap!(x7, x18); cswap!(x8, x18);
-            cswap!(x9, x21); cswap!(x10, x22); cswap!(x11, x23); cswap!(x11, x22); cswap!(x10, x21); cswap!(x11, x21);
-            cswap!(x9, x18); cswap!(x10, x19); cswap!(x11, x20); cswap!(x11, x19); cswap!(x10, x18); cswap!(x11, x18);
-            cswap!(x6, x12); cswap!(x7, x13); cswap!(x8, x14); cswap!(x8, x13); cswap!(x7, x12); cswap!(x8, x12);
-            cswap!(x9, x15); cswap!(x10, x16); cswap!(x11, x17); cswap!(x11, x16); cswap!(x10, x15); cswap!(x11, x15);
-            cswap!(x9, x12); cswap!(x10, x13); cswap!(x11, x14); cswap!(x11, x13); cswap!(x10, x12); cswap!(x11, x12);
-            let pick = |idx: usize| -> f32 {
-                match idx {
-                    0 => x0, 1 => x1, 2 => x2, 3 => x3, 4 => x4, 5 => x5,
-                    6 => x6, 7 => x7, 8 => x8, 9 => x9, 10 => x10, 11 => x11,
-                    12 => x12, 13 => x13, 14 => x14, 15 => x15, 16 => x16, 17 => x17,
-                    18 => x18, 19 => x19, 20 => x20, 21 => x21, 22 => x22, _ => x23,
-                }
-            };
-            let hi = pick(mid);
-            let lo = if odd { 0.0 } else { pick(mid - 1) };
-            let q = if want_q80 { pick(idx_q80) } else { 0.0 };
-            (lo, hi, q)
-        }
-    };
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     let med_r2 = if odd {
         hi_v
     } else {
@@ -6334,28 +6334,28 @@ fn median_and_q80_r2(
     (med_r2, q80_r2)
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
-fn hsum_f32x4(v: core::arch::wasm32::v128) -> f32 {
-    use core::arch::wasm32::*;
+fn hsum_f32x4(v: crate::simd::v128) -> f32 {
+    use crate::simd::*;
     let s1 = f32x4_add(v, i32x4_shuffle::<2, 3, 0, 1>(v, v));
     let s2 = f32x4_add(s1, i32x4_shuffle::<1, 0, 3, 2>(s1, s1));
     f32x4_extract_lane::<0>(s2)
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
-fn hmax_f32x4(v: core::arch::wasm32::v128) -> f32 {
-    use core::arch::wasm32::*;
+fn hmax_f32x4(v: crate::simd::v128) -> f32 {
+    use crate::simd::*;
     let m1 = f32x4_pmax(v, i32x4_shuffle::<2, 3, 0, 1>(v, v));
     let m2 = f32x4_pmax(m1, i32x4_shuffle::<1, 0, 3, 2>(m1, m1));
     f32x4_extract_lane::<0>(m2)
 }
 
-#[cfg(target_arch = "wasm32")]
+
 #[inline(always)]
-fn hmin_f32x4(v: core::arch::wasm32::v128) -> f32 {
-    use core::arch::wasm32::*;
+fn hmin_f32x4(v: crate::simd::v128) -> f32 {
+    use crate::simd::*;
     let m1 = f32x4_pmin(v, i32x4_shuffle::<2, 3, 0, 1>(v, v));
     let m2 = f32x4_pmin(m1, i32x4_shuffle::<1, 0, 3, 2>(m1, m1));
     f32x4_extract_lane::<0>(m2)
@@ -6377,9 +6377,9 @@ fn fit_cand_grad_weighted_2x2(
 
     let mut cnt = 0usize;
     let (w_sum, sx, sy, su, sv, sxx, sxy, syy, sxu, syu, sxv, syv) = {
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let mut v_lin = f32x4_splat(0.0);
             let mut v_x = f32x4_splat(0.0);
             let mut v_y = f32x4_splat(0.0);
@@ -6418,48 +6418,48 @@ fn fit_cand_grad_weighted_2x2(
                 f32x4_extract_lane::<3>(v_y),
             )
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut w_sum = 0.0f32;
-            let mut sx = 0.0f32;
-            let mut sy = 0.0f32;
-            let mut su = 0.0f32;
-            let mut sv = 0.0f32;
-            let mut sxx = 0.0f32;
-            let mut sxy = 0.0f32;
-            let mut syy = 0.0f32;
-            let mut sxu = 0.0f32;
-            let mut syu = 0.0f32;
-            let mut sxv = 0.0f32;
-            let mut syv = 0.0f32;
-            let mut k = 0usize;
-            while k < m {
-                let w = ws[k];
-                if !use_active || w > 0.0 {
-                    let dx = dxs[k];
-                    let dy = dys[k];
-                    let du = dus[k];
-                    let dv = dvs[k];
-                    let wx = w * dx;
-                    let wy = w * dy;
-                    w_sum += w;
-                    sx += wx;
-                    sy += wy;
-                    su += w * du;
-                    sv += w * dv;
-                    sxx += wx * dx;
-                    sxy += wx * dy;
-                    syy += wy * dy;
-                    sxu += wx * du;
-                    syu += wy * du;
-                    sxv += wx * dv;
-                    syv += wy * dv;
-                    cnt += 1;
-                }
-                k += 1;
-            }
-            (w_sum, sx, sy, su, sv, sxx, sxy, syy, sxu, syu, sxv, syv)
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     };
     if cnt < 4 || w_sum <= 1e-6 {
         return (false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
@@ -6558,9 +6558,9 @@ fn fill_grad_prefix_moments(
         let dys = &mut cs.cand_dy[..FIELD_CAND_CAP];
         let dus = &mut cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &mut cs.cand_dv[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let mut v_lin = f32x4(pm.sx, pm.sy, pm.su, pm.sv);
             let mut v_dx_row = f32x4(pm.sxx, pm.sxy, pm.sxu, pm.sxv);
             let mut v_dy_row = f32x4(0.0, pm.syy, pm.syu, pm.syv);
@@ -6597,59 +6597,59 @@ fn fill_grad_prefix_moments(
             pm.syv = f32x4_extract_lane::<3>(v_dy_row);
             pm.m = m;
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut sx = pm.sx;
-            let mut sy = pm.sy;
-            let mut su = pm.su;
-            let mut sv = pm.sv;
-            let mut sxx = pm.sxx;
-            let mut sxy = pm.sxy;
-            let mut syy = pm.syy;
-            let mut sxu = pm.sxu;
-            let mut syu = pm.syu;
-            let mut sxv = pm.sxv;
-            let mut syv = pm.syv;
-            while m < cand_n {
-                let d2 = cd2[m];
-                let p = (cti[m] as usize).min(MAX_MICRO - 1);
-                let dx = gx[p] - xc;
-                let dy = gy[p] - yc;
-                let uv = gaux[p];
-                let du = uv[0] - u_ref;
-                let dv = uv[1] - v_ref;
-                f_d2[m] = d2;
-                dxs[m] = dx;
-                dys[m] = dy;
-                dus[m] = du;
-                dvs[m] = dv;
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
 
-                sx += dx;
-                sy += dy;
-                su += du;
-                sv += dv;
-                sxx += dx * dx;
-                sxy += dx * dy;
-                syy += dy * dy;
-                sxu += dx * du;
-                syu += dy * du;
-                sxv += dx * dv;
-                syv += dy * dv;
-                m += 1;
-            }
-            pm.sx = sx;
-            pm.sy = sy;
-            pm.su = su;
-            pm.sv = sv;
-            pm.sxx = sxx;
-            pm.sxy = sxy;
-            pm.syy = syy;
-            pm.sxu = sxu;
-            pm.syu = syu;
-            pm.sxv = sxv;
-            pm.syv = syv;
-            pm.m = m;
-        }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     m
 }
@@ -6725,9 +6725,9 @@ fn find_cook_press_outlier_indices(
     let mut press_best_den = 1.0f32;
     let ssr_0: f32;
 
-    #[cfg(target_arch = "wasm32")]
+
     {
-        use core::arch::wasm32::*;
+        use crate::simd::*;
         let vinv_m = f32x4_splat(inv_m);
         let vmx = f32x4_splat(mx);
         let vmy = f32x4_splat(my);
@@ -6802,39 +6802,39 @@ fn find_cook_press_outlier_indices(
         }
         ssr_0 = hsum_f32x4(vssr);
     }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let mut s = 0.0f32;
-        let mut drop = m;
-        while drop > 0 {
-            drop -= 1;
-            let r_k = ress_0[drop];
-            s += r_k;
-            let ux = dxs[drop] - mx;
-            let uy = dys[drop] - my;
-            let h_i = inv_m + ux * (g00_i * ux + two_g01_i * uy) + g11_i * uy * uy;
-            if h_i >= 1.0 - 1e-6 {
-                continue;
-            }
-            let omh = 1.0 - h_i;
-            let c_num = r_k * h_i;
-            let c_den = omh * omh;
-            if c_num < cook_rhs * c_den {
-                continue;
-            }
-            if c_num * cook_best_den > cook_best_num * c_den {
-                cook_best_num = c_num;
-                cook_best_den = c_den;
-                cook_idx = drop;
-            }
-            if r_k * press_best_den > press_best_num * omh {
-                press_best_num = r_k;
-                press_best_den = omh;
-                press_idx = drop;
-            }
-        }
-        ssr_0 = s;
-    }
+    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     if press_idx >= m || press_best_num < press_frac * ssr_0 * press_best_den {
         (m, m)
@@ -6967,9 +6967,9 @@ fn try_grad_v_loo_drop(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vcu = f32x4_splat(best_cu);
             let vcv = f32x4_splat(best_cv);
@@ -6994,18 +6994,18 @@ fn try_grad_v_loo_drop(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (best_cu + best_dudx * dx + best_dudy * dy);
-                let ry = dvs[k] - (best_cv + best_dvdx * dx + best_dvdy * dy);
-                ress[k] = rx * rx + ry * ry;
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
         return median_and_q80_r2(&cs.ftle_cands_res, m, false).0;
     }
     med0_r2_in
@@ -7084,9 +7084,9 @@ fn try_solve_cell_grad_v(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vcu0 = f32x4_splat(cu0);
             let vcv0 = f32x4_splat(cv0);
@@ -7125,24 +7125,24 @@ fn try_solve_cell_grad_v(
             }
             max_r2_0 = hmax_f32x4(vmax_r2);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            let mut mx = 0.0f32;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (cu0 + dudx0 * dx + dudy0 * dy);
-                let ry = dvs[k] - (cv0 + dvdx0 * dx + dvdy0 * dy);
-                let r2_v = rx * rx + ry * ry;
-                if r2_v > mx {
-                    mx = r2_v;
-                }
-                ress[k] = r2_v;
-                k += 1;
-            }
-            max_r2_0 = mx;
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if max_r2_0 <= (0.75 * q) * (0.75 * q) {
         let u_c = u_ref + cu0;
@@ -7195,9 +7195,9 @@ fn try_solve_cell_grad_v(
     if max_r2_0 <= (1.75 * q) * (1.75 * q) {
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vhalf_inv_r2 = f32x4_splat(0.5 * inv_r2);
@@ -7214,15 +7214,15 @@ fn try_solve_cell_grad_v(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                let t = 1.0 - 0.5 * d2s[k] * inv_r2;
-                ws[k] = t.max(0.25);
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
         let (ok_f, ub, vb, xb, yb, dudx, dudy, dvdx, dvdy, w_sum) =
             fit_cand_grad_weighted_2x2(cs, m, false, min_eig_px2);
         if !ok_f {
@@ -7310,9 +7310,9 @@ fn try_solve_cell_grad_v_fallback(
     let mut cnt0_le_2vmax2 = 0usize;
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vt = f32x4_splat(r2_thresh_0);
             let vs0 = f32x4_splat(s0_grad2);
@@ -7341,29 +7341,29 @@ fn try_solve_cell_grad_v_fallback(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut kk = 0usize;
-            while kk < m {
-                let r2_v = ress[kk];
-                if r2_v <= r2_thresh_0 {
-                    cnt0_le_t += 1;
-                    if r2_v <= s0_grad2 {
-                        cnt0_le_s0 += 1;
-                    }
-                }
-                if r2_v <= two_vmax2 {
-                    cnt0_le_2vmax2 += 1;
-                    if r2_v <= vmax2 {
-                        cnt0_le_vmax2 += 1;
-                        if r2_v <= med_lim2 {
-                            cnt0_le_medlim += 1;
-                        }
-                    }
-                }
-                kk += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     let mut k;
 
@@ -7421,9 +7421,9 @@ fn try_solve_cell_grad_v_fallback(
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vinv_s2 = f32x4_splat(inv_s2);
@@ -7439,14 +7439,14 @@ fn try_solve_cell_grad_v_fallback(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                ws[k] = 1.0 / (1.0 + ress[k] * inv_s2);
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
     }
 
     let (ok1, ub1, vb1, xb1, yb1, dudx1, dudy1, dvdx1, dvdy1, _) =
@@ -7470,9 +7470,9 @@ fn try_solve_cell_grad_v_fallback(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vcu1 = f32x4_splat(cu1);
             let vcv1 = f32x4_splat(cv1);
@@ -7524,36 +7524,36 @@ fn try_solve_cell_grad_v_fallback(
             }
             max_r2_1 = hmax_f32x4(vmax_r2);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            let mut mx = 0.0f32;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (cu1 + dudx1 * dx + dudy1 * dy);
-                let ry = dvs[k] - (cv1 + dvdx1 * dx + dvdy1 * dy);
-                let r2_k = rx * rx + ry * ry;
-                if r2_k > mx {
-                    mx = r2_k;
-                }
-                if r2_k < v_hi2 {
-                    cnt1_lt_vhi += 1;
-                    if r2_k <= v_lo2 {
-                        cnt1_le_vlo += 1;
-                    }
-                }
-                if r2_k <= vmax2 {
-                    cnt_le_vmax += 1;
-                    if r2_k <= vmin2 {
-                        cnt_le_vmin += 1;
-                    }
-                }
-                ress[k] = r2_k;
-                k += 1;
-            }
-            max_r2_1 = mx;
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if cnt_le_vmax < 4 || cnt_le_vmax * 5 < m * 4 {
         let flag = if m >= 6 || (m >= 5 && (cnt_le_vmax * 5 < m * 3 || cnt_le_vmax < 4)) {
@@ -7577,9 +7577,9 @@ fn try_solve_cell_grad_v_fallback(
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vhalf_inv_r2 = f32x4_splat(0.5 * inv_r2);
@@ -7620,20 +7620,20 @@ fn try_solve_cell_grad_v_fallback(
                 }
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                if ress[k] <= thresh_v2 {
-                    let t = 1.0 - 0.5 * d2s[k] * inv_r2;
-                    ws[k] = t.max(0.25);
-                    inliers += 1;
-                } else {
-                    ws[k] = 0.0;
-                }
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if inliers < 4 || inliers * 5 < m * 4 {
         let flag = if m >= 6 { GRAD_FLAG_INCOHERENT_CORE } else { 0 };
@@ -7654,9 +7654,9 @@ fn try_solve_cell_grad_v_fallback(
         let dys = &cs.cand_dy[..FIELD_CAND_CAP];
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vcu = f32x4_splat(cu_f);
             let vcv = f32x4_splat(cv_f);
@@ -7699,22 +7699,22 @@ fn try_solve_cell_grad_v_fallback(
             }
             in_ss_res = hsum_f32x4(vss);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            let mut ss = 0.0f32;
-            while k < m {
-                if ws[k] > 0.0 {
-                    let dx = dxs[k];
-                    let dy = dys[k];
-                    let rx = dus[k] - (cu_f + dudx * dx + dudy * dy);
-                    let ry = dvs[k] - (cv_f + dvdx * dx + dvdy * dy);
-                    ss += rx * rx + ry * ry;
-                }
-                k += 1;
-            }
-            in_ss_res = ss;
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     let inv_in = 1.0 / (inliers as f32);
     let max_rmse1 = 2.5 * q;
@@ -7798,9 +7798,9 @@ fn fit_cand_ftle_weighted_2x2(
         sb21,
         sb22,
     ) = {
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let mut v_lin = f32x4_splat(0.0);
             let mut v_x0 = f32x4_splat(0.0);
             let mut v_y0 = f32x4_splat(0.0);
@@ -7847,59 +7847,59 @@ fn fit_cand_ftle_weighted_2x2(
                 f32x4_extract_lane::<3>(v_y0),
             )
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut w_sum = 0.0f32;
-            let mut sx0 = 0.0f32;
-            let mut sy0 = 0.0f32;
-            let mut sxt = 0.0f32;
-            let mut syt = 0.0f32;
-            let mut sx0x0 = 0.0f32;
-            let mut sx0y0 = 0.0f32;
-            let mut sy0y0 = 0.0f32;
-            let mut sxtxt = 0.0f32;
-            let mut sxtyt = 0.0f32;
-            let mut sytyt = 0.0f32;
-            let mut sb11 = 0.0f32;
-            let mut sb12 = 0.0f32;
-            let mut sb21 = 0.0f32;
-            let mut sb22 = 0.0f32;
-            let mut k = 0usize;
-            while k < m {
-                let w = ws[k];
-                if !use_active || w > 0.0 {
-                    let dx0 = dxs[k];
-                    let dy0 = dys[k];
-                    let dxt = dus[k];
-                    let dyt = dvs[k];
-                    let wx0 = w * dx0;
-                    let wy0 = w * dy0;
-                    let wxt = w * dxt;
-                    let wyt = w * dyt;
-                    w_sum += w;
-                    sx0 += wx0;
-                    sy0 += wy0;
-                    sxt += wxt;
-                    syt += wyt;
-                    sx0x0 += wx0 * dx0;
-                    sx0y0 += wx0 * dy0;
-                    sy0y0 += wy0 * dy0;
-                    sxtxt += wxt * dxt;
-                    sxtyt += wxt * dyt;
-                    sytyt += wyt * dyt;
-                    sb11 += wxt * dx0;
-                    sb12 += wxt * dy0;
-                    sb21 += wyt * dx0;
-                    sb22 += wyt * dy0;
-                    cnt += 1;
-                }
-                k += 1;
-            }
-            (
-                w_sum, sx0, sy0, sxt, syt, sx0x0, sx0y0, sy0y0, sxtxt, sxtyt, sytyt, sb11, sb12,
-                sb21, sb22,
-            )
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     };
     if cnt < MIN_RIGID_MEMBERS || w_sum <= 1e-6 {
         return (false, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0);
@@ -8133,9 +8133,9 @@ fn try_ftle_loo_drop(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vc1 = f32x4_splat(best_c1);
             let vc2 = f32x4_splat(best_c2);
@@ -8160,18 +8160,18 @@ fn try_ftle_loo_drop(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (best_c1 + best_f11 * dx + best_f12 * dy);
-                let ry = dvs[k] - (best_c2 + best_f21 * dx + best_f22 * dy);
-                ress[k] = rx * rx + ry * ry;
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
         return (true, median_and_q80_r2(&cs.ftle_cands_res, m, false).0);
     }
     (false, med0_r2_in)
@@ -8252,9 +8252,9 @@ fn try_solve_cell_ftle(
         let dus = &mut cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &mut cs.cand_dv[..FIELD_CAND_CAP];
 
-        #[cfg(target_arch = "wasm32")]
+
         let (mut v_lin, mut v_dx_row, mut v_dy_row, mut v_tt) = {
-            use core::arch::wasm32::f32x4;
+            use crate::simd::f32x4;
             (
                 f32x4(sx0, sy0, sxt, syt),
                 f32x4(sx0x0, sx0y0, sb11, sb21),
@@ -8278,9 +8278,9 @@ fn try_solve_cell_ftle(
                 dys[ms_idx] = dy;
                 dus[ms_idx] = du;
                 dvs[ms_idx] = dv;
-                #[cfg(target_arch = "wasm32")]
+
                 {
-                    use core::arch::wasm32::*;
+                    use crate::simd::*;
                     let v_xyuv = f32x4(dx, dy, du, dv);
                     v_lin = f32x4_add(v_lin, v_xyuv);
                     v_dx_row = f32x4_add(v_dx_row, f32x4_mul(f32x4_splat(dx), v_xyuv));
@@ -8290,23 +8290,23 @@ fn try_solve_cell_ftle(
                         f32x4_mul(f32x4(du, du, dv, 0.0), f32x4(du, dv, dv, 0.0)),
                     );
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    sx0 += dx;
-                    sy0 += dy;
-                    sxt += du;
-                    syt += dv;
-                    sx0x0 += dx * dx;
-                    sx0y0 += dx * dy;
-                    sy0y0 += dy * dy;
-                    sxtxt += du * du;
-                    sxtyt += du * dv;
-                    sytyt += dv * dv;
-                    sb11 += du * dx;
-                    sb12 += du * dy;
-                    sb21 += dv * dx;
-                    sb22 += dv * dy;
-                }
+                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
                 m += 1;
             }};
         }
@@ -8367,9 +8367,9 @@ fn try_solve_cell_ftle(
                 k += 1;
             }
         }
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::f32x4_extract_lane;
+            use crate::simd::f32x4_extract_lane;
             sx0 = f32x4_extract_lane::<0>(v_lin);
             sy0 = f32x4_extract_lane::<1>(v_lin);
             sxt = f32x4_extract_lane::<2>(v_lin);
@@ -8469,9 +8469,9 @@ fn try_solve_cell_ftle(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vc1 = f32x4_splat(c1_0);
             let vc2 = f32x4_splat(c2_0);
@@ -8517,30 +8517,30 @@ fn try_solve_cell_ftle(
             }
             max_r2_0 = hmax_f32x4(vmax_r2);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            let mut mx = 0.0f32;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (c1_0 + f11_0 * dx + f12_0 * dy);
-                let ry = dvs[k] - (c2_0 + f21_0 * dx + f22_0 * dy);
-                let r2_k = rx * rx + ry * ry;
-                if r2_k > mx {
-                    mx = r2_k;
-                }
-                if r2_k <= floor2 {
-                    cnt0_le_floor2 += 1;
-                    if r2_k <= s0_clamp2 {
-                        cnt0_le_s0 += 1;
-                    }
-                }
-                ress[k] = r2_k;
-                k += 1;
-            }
-            max_r2_0 = mx;
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
 
     // Exact-affine shortcut: sub-0.75px residual -> OLS F_0 satisfies conditioning & inlier checks
@@ -8572,9 +8572,9 @@ fn try_solve_cell_ftle(
         // with median <= 0.75*q, so skip LOO & Cauchy IRLS and run Pass 2 + verification.
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vhalf_inv_r2 = f32x4_splat(0.5 * inv_r2);
@@ -8591,15 +8591,15 @@ fn try_solve_cell_ftle(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                let t = 1.0 - 0.5 * d2s[k] * inv_r2;
-                ws[k] = t.max(0.25);
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
         return finish_ftle_pass2(cs, m, m, clean_patch, min_eig_px2, q, t_sec);
     }
 
@@ -8668,9 +8668,9 @@ fn try_solve_cell_ftle_fallback(
     let mut cnt0_le_s0 = 0usize;
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let v4q2 = f32x4_splat(four_q2);
             let vmed2 = f32x4_splat(med_bail2);
@@ -8696,26 +8696,26 @@ fn try_solve_cell_ftle_fallback(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                let r2_k = ress[k];
-                if r2_k <= four_q2 {
-                    cnt0_le_4q2 += 1;
-                    if r2_k <= med_bail2 {
-                        cnt0_le_med += 1;
-                        if r2_k <= floor2 {
-                            cnt0_le_floor2 += 1;
-                            if r2_k <= s0_clamp2 {
-                                cnt0_le_s0 += 1;
-                            }
-                        }
-                    }
-                }
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
 
     if (m >= 7 && cnt0_le_4q2 * 2 <= m) || (m == 6 && cnt0_le_4q2 < 5) {
@@ -8781,9 +8781,9 @@ fn try_solve_cell_ftle_fallback(
     {
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vinv_s2 = f32x4_splat(inv_s2);
@@ -8799,14 +8799,14 @@ fn try_solve_cell_ftle_fallback(
                 bi += 1;
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                ws[k] = 1.0 / (1.0 + ress[k] * inv_s2);
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
     }
 
     // Pass 1: IRLS refit -> bounded residual threshold -> hard-trim >=80% inliers (H7)
@@ -8833,9 +8833,9 @@ fn try_solve_cell_ftle_fallback(
         let dus = &cs.cand_du[..FIELD_CAND_CAP];
         let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
         let ress = &mut cs.ftle_cands_res[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vc1 = f32x4_splat(c1_1);
             let vc2 = f32x4_splat(c2_1);
@@ -8884,33 +8884,33 @@ fn try_solve_cell_ftle_fallback(
             }
             max_r2_1 = hmax_f32x4(vmax_r2);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            let mut mx = 0.0f32;
-            while k < m {
-                let dx = dxs[k];
-                let dy = dys[k];
-                let rx = dus[k] - (c1_1 + f11_1 * dx + f12_1 * dy);
-                let ry = dvs[k] - (c2_1 + f21_1 * dx + f22_1 * dy);
-                let r2_k = rx * rx + ry * ry;
-                if r2_k <= cap2 {
-                    cnt_le_cap += 1;
-                }
-                if r2_k < hi1_2 {
-                    cnt1_lt_hi += 1;
-                    if r2_k <= lo1_2 {
-                        cnt1_le_lo += 1;
-                    }
-                }
-                if r2_k > mx {
-                    mx = r2_k;
-                }
-                ress[k] = r2_k;
-                k += 1;
-            }
-            max_r2_1 = mx;
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if cnt_le_cap < MIN_RIGID_MEMBERS || cnt_le_cap * 5 < m * 4 {
         return (false, false, true, 0.0, 0, false);
@@ -8932,9 +8932,9 @@ fn try_solve_cell_ftle_fallback(
         let ress = &cs.ftle_cands_res[..FIELD_CAND_CAP];
         let d2s = &cs.ftle_cands_d2[..FIELD_CAND_CAP];
         let ws = &mut cs.ftle_cands_w[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
+
         {
-            use core::arch::wasm32::*;
+            use crate::simd::*;
             let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
             let vone = f32x4_splat(1.0);
             let vhalf_inv_r2 = f32x4_splat(0.5 * inv_r2);
@@ -8975,20 +8975,20 @@ fn try_solve_cell_ftle_fallback(
                 }
             }
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let mut k = 0usize;
-            while k < m {
-                if ress[k] <= thresh2 {
-                    let t = 1.0 - 0.5 * d2s[k] * inv_r2;
-                    ws[k] = t.max(0.25);
-                    inliers += 1;
-                } else {
-                    ws[k] = 0.0;
-                }
-                k += 1;
-            }
-        }
+        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
     }
     if inliers < MIN_RIGID_MEMBERS || inliers * 5 < m * 4 {
         return (false, false, false, 0.0, 0, false);
@@ -9029,9 +9029,9 @@ fn finish_ftle_pass2(
             let dys = &cs.cand_dy[..FIELD_CAND_CAP];
             let dus = &cs.cand_du[..FIELD_CAND_CAP];
             let dvs = &cs.cand_dv[..FIELD_CAND_CAP];
-            #[cfg(target_arch = "wasm32")]
+
             {
-                use core::arch::wasm32::*;
+                use crate::simd::*;
                 let blk = ((m + 3) >> 2).min(FIELD_CAND_CAP >> 2);
                 let vc1 = f32x4_splat(c1_f);
                 let vc2 = f32x4_splat(c2_f);
@@ -9086,36 +9086,36 @@ fn finish_ftle_pass2(
                 max_le_65 = hmax_f32x4(vmax);
                 min_gt_65 = hmin_f32x4(vmin);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                let mut k = 0usize;
-                let mut ss = 0.0f32;
-                let mut mx = 0.0f32;
-                let mut mn = f32::INFINITY;
-                while k < m {
-                    if inliers == m || ws[k] > 0.0 {
-                        let dx = dxs[k];
-                        let dy = dys[k];
-                        let rx = dus[k] - (c1_f + f11 * dx + f12 * dy);
-                        let ry = dvs[k] - (c2_f + f21 * dx + f22 * dy);
-                        let r2_i = rx * rx + ry * ry;
-                        if r2_i <= lim65_2 {
-                            in_le_65 += 1;
-                            if r2_i > mx {
-                                mx = r2_i;
-                            }
-                        } else if r2_i < mn {
-                            mn = r2_i;
-                        }
-                        ss += r2_i;
-                        in_cnt += 1;
-                    }
-                    k += 1;
-                }
-                ss_in = ss;
-                max_le_65 = mx;
-                min_gt_65 = mn;
-            }
+            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         }
         if in_cnt == 0 || !ss_in.is_finite() {
             return (false, true, false, 0.0, 0, false);
@@ -9258,9 +9258,9 @@ fn gather_3x3_flat_le24(
     let gti = &cs.field_grid_ti[..MAX_MICRO];
     let c_ti = &mut cs.cell_cands_ti[..FIELD_CAND_CAP];
     let c_d2 = &mut cs.cell_cands_d2[..FIELD_CAND_CAP];
-    #[cfg(target_arch = "wasm32")]
+
     let (vxc, vyc, vrmax2) = {
-        use core::arch::wasm32::f32x4_splat;
+        use crate::simd::f32x4_splat;
         (f32x4_splat(xc), f32x4_splat(yc), f32x4_splat(r_max2))
     };
     let mut si = 0usize;
@@ -9275,9 +9275,9 @@ fn gather_3x3_flat_le24(
         if s < e {
             let mut p = s;
             let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
-            #[cfg(target_arch = "wasm32")]
+
             {
-                use core::arch::wasm32::*;
+                use crate::simd::*;
                 while p + 4 <= e_lim {
                     let vx = f32x4(gx[p], gx[p + 1], gx[p + 2], gx[p + 3]);
                     let vy = f32x4(gy[p], gy[p + 1], gy[p + 2], gy[p + 3]);
@@ -9373,12 +9373,12 @@ fn gather_wide_le24(
         let gti = &cs.field_grid_ti[..MAX_MICRO];
         let c_ti = &mut cs.cell_cands_ti[..FIELD_CAND_CAP];
         let c_d2 = &mut cs.cell_cands_d2[..FIELD_CAND_CAP];
-        #[cfg(target_arch = "wasm32")]
-        let vxc = core::arch::wasm32::f32x4_splat(xc);
-        #[cfg(target_arch = "wasm32")]
-        let vyc = core::arch::wasm32::f32x4_splat(yc);
-        #[cfg(target_arch = "wasm32")]
-        let vrmax2 = core::arch::wasm32::f32x4_splat(r_max2);
+
+        let vxc = crate::simd::f32x4_splat(xc);
+
+        let vyc = crate::simd::f32x4_splat(yc);
+
+        let vrmax2 = crate::simd::f32x4_splat(r_max2);
         while ny <= ny_hi && cand_n < FIELD_CAND_CAP {
             let dx_c = row_dx[(ny as isize - row_s).unsigned_abs().min(FIELD_GRID_H - 1)] as isize;
             if dx_c >= 0 {
@@ -9390,9 +9390,9 @@ fn gather_wide_le24(
                 let s = (row_start[idx_a] as usize).min(e);
                 let mut p = s;
                 let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
-                #[cfg(target_arch = "wasm32")]
+
                 while p + 4 <= e_lim {
-                    use core::arch::wasm32::*;
+                    use crate::simd::*;
                     let ps = p.min(MAX_MICRO - 4);
                     let vdx = f32x4_sub(f32x4(gx[ps], gx[ps + 1], gx[ps + 2], gx[ps + 3]), vxc);
                     let vdy = f32x4_sub(f32x4(gy[ps], gy[ps + 1], gy[ps + 2], gy[ps + 3]), vyc);

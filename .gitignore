@@ -7,3 +7,4 @@ decisions.tsv
 node_modules/
 docs/*ROADMAP*.md
 
+/native/target/

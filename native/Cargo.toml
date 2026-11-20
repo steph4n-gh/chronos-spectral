@@ -1,0 +1,37 @@
+# Native (host) build of the kernel as a Rust library, for integration tests and host binaries.
+#
+# Why a second manifest: the root package must stay `crate-type = ["cdylib"]`. Adding "rlib"
+# there makes Cargo drop `-C lto=fat` for the whole unit (Cargo never runs LTO when a crate type
+# cannot be LTO'd, and rustc rejects `-C lto` together with an rlib output), which changes the
+# shipped `web/chronos_spectral.wasm`. This package compiles the very same `src/lib.rs` as an
+# `rlib` instead. It is its own workspace, so the root `Cargo.lock` is untouched.
+#
+# Build and test from the repository root (the root `.cargo/config.toml` defaults to wasm32):
+#   cargo test --manifest-path native/Cargo.toml --target host-tuple
+[package]
+name = "chronos_spectral_native"
+version = "3.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "chronos_spectral"
+path = "../src/lib.rs"
+crate-type = ["rlib"]
+# The crate's own unit tests (SIMD conformance and friends) run from the root package:
+# `cargo test --target host-tuple`.
+test = false
+doctest = false
+
+[dependencies]
+
+# Same feature names as the root package (the shared source refers to them). `native-lib` is on
+# by default: it omits the crate's `#[panic_handler]`, which the consuming `std` binary provides.
+[features]
+default = ["native-lib"]
+native-lib = []
+simd-force-scalar = []
+simd-conformance = []
+
+[workspace]
