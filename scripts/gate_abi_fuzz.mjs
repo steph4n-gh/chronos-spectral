@@ -11,7 +11,9 @@
 // getter and the f32 telemetry views.
 //
 //   Gate:     zero traps. A trap is a wasm trap or JS exception from any export
-//             call, or a change of the fixed 448-page memory size.
+//             call (the frame-size and pointer getters and the typed-array views
+//             over their results included), or a change of the fixed 448-page
+//             memory size. Every trial must also tick all of its frames.
 //   Reported: non-finite values in the f32 telemetry views (telemetry,
 //             swarm_telemetry, conservation_telemetry, slot_meta), per slot with
 //             the first occurrence and the calls before it. Not gated.
@@ -79,6 +81,7 @@ if (isMainThread) {
       for (const [key, v] of r.traps) console.error(`  [TRAP] x${v.count} ${key}; first in trial ${v.first.trial}; calls up to it: ${fmt(v.first.tail)}`);
       fail(`${r.traps.length} distinct trap(s) (${what}, ${secs} s)`);
     }
+    if (r.ticks !== r.trials * r.frames) fail(`only ${r.ticks} of ${r.trials * r.frames} frames ticked, without a recorded trap (${what})`);
     console.log(
       `  [PASS] Gate X (Adversarial C-ABI fuzz over ${r.exports} exported functions): ${what}, 0 traps; ` +
         `non-finite telemetry: ${r.nonFinite.length} slot(s) (reported, not gated) (${secs} s)`
@@ -200,6 +203,8 @@ if (isMainThread) {
     const e = inst.exports;
     const mem = e.memory;
     const hist = [];
+    let recorded = null; // the exception call() already recorded
+    let stage = 'init'; // what the trial was doing, for exceptions outside call()
     Atomics.store(progress, 0, trial);
     const call = (name, args) => {
       calls++;
@@ -210,6 +215,7 @@ if (isMainThread) {
         return e[name](...args);
       } catch (err) {
         note(traps, `${name}: ${err.message}`, { trial, tail: hist.slice() });
+        recorded = err;
         throw err;
       }
     };
@@ -220,6 +226,7 @@ if (isMainThread) {
       const hostility = r(); // fraction of frames that get hostile mutator calls
       for (let f = 0; f < FRAMES; f++) {
         Atomics.store(progress, 1, f);
+        stage = 'frame size getters / ingest view';
         const w = e.chronos_get_frame_w();
         const h = e.chronos_get_frame_h();
         const u8 = new Uint8Array(mem.buffer, e.chronos_get_ingest_rgba_ptr(), w * h * 4);
@@ -231,6 +238,7 @@ if (isMainThread) {
             // hostile staging contents
             if (r() < 0.4) {
               const [g, len] = STAGING[(r() * STAGING.length) | 0];
+              stage = `staging view ${g}`;
               if (e[g]) {
                 const v = new Float32Array(mem.buffer, e[g](), len);
                 const mode = (r() * 4) | 0;
@@ -261,9 +269,11 @@ if (isMainThread) {
           call('chronos_post_tick', [dt]);
         }
         ticks++;
+        stage = 'pointer getter sweep';
         for (const g of ptrGetters) e[g](g === 'chronos_get_ring_slot_ptr' ? HOSTILE[(r() * HOSTILE.length) | 0] : undefined);
         for (const [g, len] of F32_VIEWS) {
           if (!e[g]) continue;
+          stage = `telemetry view ${g}`;
           const v = new Float32Array(mem.buffer, e[g](), len);
           for (let i = 0; i < len; i++) {
             if (!Number.isFinite(v[i])) {
@@ -273,8 +283,10 @@ if (isMainThread) {
         }
         if (mem.buffer.byteLength !== 448 * 65536) note(traps, 'memory size changed', { trial, tail: hist.slice() });
       }
-    } catch {
-      /* recorded above; the next trial uses a fresh instance */
+    } catch (err) {
+      // Exceptions from call() are already recorded; anything else (a direct getter call, or a
+      // typed-array view over a bad pointer) is recorded here. The next trial uses a fresh instance.
+      if (err !== recorded) note(traps, `${stage}: ${err?.message ?? String(err)}`, { trial, tail: hist.slice() });
     }
   }
 
