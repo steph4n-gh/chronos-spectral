@@ -1,6 +1,6 @@
 # CHRONOS-SPECTRAL UI and telemetry guide
 
-This reference documents every UI panel, `OffscreenCanvas` visualization, dynamic KPI state transition, calibration rule, WebAudio synthesizer voice, and exported telemetry field in the CHRONOS-SPECTRAL Command Deck and Showcase ([web/index.html](../web/index.html), [web/worker.js](../web/worker.js), [src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs), [src/soa_tracks.rs](../src/soa_tracks.rs), [src/continuum_physics.rs](../src/continuum_physics.rs), [src/bos.rs](../src/bos.rs), and [docs/ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)).
+This reference documents every UI panel, `OffscreenCanvas` visualization, dynamic KPI state transition, calibration rule, WebAudio synthesizer voice, and exported telemetry field in the CHRONOS-SPECTRAL Command Deck and Showcase ([web/index.html](../web/index.html), [web/worker.js](../web/worker.js), [src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs), [src/soa_tracks.rs](../src/soa_tracks.rs), [src/continuum_physics.rs](../src/continuum_physics.rs), [src/bos.rs](../src/bos.rs), [src/hodge.rs](../src/hodge.rs), [src/vibrometry.rs](../src/vibrometry.rs), and [docs/ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)).
 
 Each entry documents:
 1. **What it is:** Exact UI label, DOM `#id` or CSS/canvas component, and source file.
@@ -15,7 +15,7 @@ Each entry documents:
 
 ```mermaid
 flowchart TB
-  WASM["Rust Wasm SIMD128 Kernel (src/lib.rs, physics_id.rs, soa_tracks.rs, continuum_physics.rs, bos.rs)\n448 Pages / 28.00 MB Static Arena\nrgba_ring[0..11] + ring_meta[0..11] + wave1_telem[0..191] + bos_telem[0..31] + telemetry[0..1567] + swarm_telem[0..63]"] --> WORKER["Web Worker Isolate (web/worker.js)\nLanczos Fiedler + DLT Homography + 18,000x56 Recorder"]
+  WASM["Rust Wasm SIMD128 Kernel (src/lib.rs, physics_id.rs, soa_tracks.rs, continuum_physics.rs, bos.rs, hodge.rs, vibrometry.rs)\n448 Pages / 28.00 MB Static Arena\nrgba_ring[0..11] + wave1_telem[0..191] + wave2_telem[0..63] + telemetry[0..1567] + swarm_telem[0..63]"] --> WORKER["Web Worker Isolate (web/worker.js)\nLanczos Fiedler + DLT Homography + 18,000x56 Recorder"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| HUD["Region 2A: #hudCanvas (960x540) + WebGL2 Field Layer"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| PIP["Region 2B: #pipCanvas (412x234)"]
   WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| ROSTERCANVAS["Region 2C: 16x .slot-pip-canvas (276x148)"]
@@ -48,7 +48,7 @@ Source: `header.deck-header` ([web/index.html](../web/index.html)).
 | :--- | :--- | :--- | :--- |
 | `.brand-badge` | `WASM32 + SIMD128` | Static target architecture indicator. | Confirms the compute kernel executes packed `v128` SIMD instructions in `wasm32`. |
 | `#pillKernel` | `◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS` | Wasm instantiation status (`ready`, `init_error`, worker `error`). | Verifies the Rust module loaded with zero host imports and zero heap allocator calls; surfaces failures immediately. |
-| `#pillArena` | `ARENA: 448 PAGES / 28.00 MB` | Fixed `WebAssembly.Memory` capacity (`telemetry[20]` = `sizeof(Arena) <= 20,702,240 B`, `wave1_telem[12]` = `__heap_base <= 20,833,312 B`, and `byteLength / 65536 = 448`). | Verifies static memory discipline across `SD` (`320x180`) and `HD` (`640x360`) resolution toggles with zero `memory.grow` leaks. |
+| `#pillArena` | `ARENA: 448 PAGES / 28.00 MB` | Fixed `WebAssembly.Memory` capacity (`telemetry[20]` = `sizeof(Arena) = 22,644,848 B <= 24,117,248 B`, `dualStaticEnd = 22,704,064 B <= 24,248,320 B`, and `byteLength / 65536 = 448`). | Verifies static memory discipline across `SD` (`320x180`) and `HD` (`640x360`) resolution toggles with zero `memory.grow` leaks. |
 | `#pillPerf` | `◆ KERNEL: 0.700 ms` | 120-frame rolling median tick latency (`wasmMedianMs`, [web/worker.js](../web/worker.js)) covering `chronos_pre_tick`, Lanczos Fiedler, and `chronos_post_tick`. | Flags `▲` warn above per-frame compute budgets (`0.35 ms` SD / `1.00 ms` HD testbench; `0.75 ms` SD / `2.20 ms` HD real video). |
 | `#pillFps` | `FPS: 25` | Smoothed ingest frame rate (`sourceFps` EMA over incoming `dtSec`, or `60` on testbench). | Confirms `requestVideoFrameCallback` delivers unique decoded frames at native cadence rather than duplicate RAF polls. |
 | `#pillStreamHealth` | `◆ CAM LOCKED · LAG 320ms · DROP 0` | Live camera state (`telemetry[1257]`: `0` locked, `1` PTZ pan `telemetry[1258]`, `2` scene cut), buffered lookahead lag `telemetry[1256]` (`disp_lag_ms`), and JS `pumpDroppedFrames` (hidden in `testbench`). | Separates true object motion from panning cameras (`▲ PTZ PAN`) or cuts (`▲ CUT RESET`) and alerts on worker backpressure drops. |

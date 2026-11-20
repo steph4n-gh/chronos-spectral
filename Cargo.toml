@@ -1,9 +1,9 @@
 [package]
 name = "chronos_spectral"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 authors = ["steph4n-gh"]
-description = "Zero-ML, zero-allocation #![no_std] Wasm32 SIMD128 spatiotemporal wavefield, 1,500-target swarm & continuum physics tracker"
+description = "Zero-ML, zero-allocation #![no_std] Wasm32 SIMD128 visual physics, 1,500-target swarm, BOS Schlieren, Hodge & vibrometry kernel"
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/steph4n-gh/chronos-spectral"

@@ -1,21 +1,22 @@
 # Architecture and mathematical foundations
 
-CHRONOS-SPECTRAL solves real-time multi-target tracking, sub-pixel vibration analysis, continuum fluid/swarm estimation, and governing-equation discovery using bounded numerical linear algebra, signal processing, and `#![no_std]` Rust SIMD128 kernels inside a fixed `20.00 MB` linear memory arena.
+CHRONOS-SPECTRAL solves real-time multi-target tracking, sub-pixel vibration analysis, Background-Oriented Schlieren (`BOS`) refraction recovery, discrete Hodge flow decomposition, and governing-equation discovery using bounded numerical linear algebra, signal processing, and `#![no_std]` Rust SIMD128 kernels inside a fixed `28.00 MB` linear memory arena.
 
 ## 1. End-to-end execution and static arena architecture
 
-All compute state lives in one static aligned struct (`Arena` in [src/lib.rs](../src/lib.rs)), compiled to `wasm32-unknown-unknown` with `+simd128` (`50,636` `v128` instructions, `8` `i32.clz` instructions, `0` imports, `0` `memory.grow` ops, and `13,712 B` verified max call-graph stack depth below the `16,384 B` shadow stack reserve).
+All compute state lives in one static aligned struct (`Arena` in [src/lib.rs](../src/lib.rs)), compiled to `wasm32-unknown-unknown` with `+simd128` (`101,655` SIMD128 instructions, `8` `i32.clz` instructions, `75` exports, `0` imports, `0` `memory.grow` ops, `0` `call_indirect` ops, `0` call cycles, and `13,776 B` verified max call-graph stack depth below the `16,384 B` shadow stack reserve).
 
 ```mermaid
 flowchart TB
-  SRC["Video / Webcam / Live MSE / Blind Testbench"] -->|"RGBA frame t (createImageBitmap + OffscreenCanvas)"| PRE["chronos_pre_tick (Wasm SIMD128)"]
-  subgraph ARENA["Static WebAssembly.Memory Arena (320 pages = 20,971,520 B)"]
-    RING["rgba_ring[0..11] (11.06 MB up to 640x360)"]
+  SRC["Video / Webcam / Live MSE / Blind Testbench"] -->|"RGBA frame t + Native ROI meta"| PRE["chronos_pre_tick (Wasm SIMD128)"]
+  subgraph ARENA["Static WebAssembly.Memory Arena (448 pages = 29,360,128 B)"]
+    RING["rgba_ring[0..11] (11.06 MB up to 640x360) + row_luma"]
     ECA["Rank-2 ECA Subspace + 160x90 Pyramid"]
     HERO["Hero-16 IMM + Spectral + FISTA + Dormant Re-ID"]
-    PHYS["Physics ID + LyapunovScratch + Collision Analyzer"]
-    SWARM["1,536-Slot MicroTrackSoA + Morton-CSR Auction"]
-    CONT["40x22 Eulerian / FTLE / SE(2) / Modal Fields"]
+    PHYS["Physics ID + LyapunovScratch + Occluded Conservation"]
+    SWARM["1,536-Slot MicroTrackSoA + Morton-CSR Auction + 2x2 Cov"]
+    CONT["40x22 Eulerian / FTLE / SE(2) / Modal + Hodge 2-Complex"]
+    BOSV["128x64 BOS Neumann Poisson + RS Welch Vibrometry"]
   end
   PRE --> ARENA
   ARENA -->|"32x32 Laplacian"| LANC["Shifted Lanczos Fiedler (web/worker.js)"]
@@ -23,16 +24,17 @@ flowchart TB
   POST -->|"Display slot [t - eff_k] + Telemetry"| GL["OffscreenCanvas WebGL2 + Canvas2D Compositors"]
 ```
 
-Compile-time assertion `size_of::<Arena>() <= 20_800_000` guarantees that `Arena` plus `.rodata` (`32,305 B`) and the `16 KiB` shadow stack stay inside `320` Wasm pages (`20,971,520 B`) at zero runtime allocation cost. Major subsystems split memory cleanly:
+Static checks in [build.sh](../build.sh) and [src/lib.rs](../src/lib.rs) pin `sizeof(Arena)` (`22,644,848 B <= 24,117,248 B`), static `.rodata` end (`59,216 B`), and static data end `dualStaticEnd` (`22,704,064 B <= 24,248,320 B`) inside `448` Wasm pages (`29,360,128 B`) with `0` runtime heap allocation. Major subsystems split memory cleanly:
 
 | Arena section | Resident structs and buffers | Purpose |
 | :--- | :--- | :--- |
-| Pixel & Pyramid Buffers | `rgba_ring[0..11]` (`11.06 MB`), `luma`, `chroma_rg`, `chroma_by`, `bg_luma`, `eca_res`, `160x90` pyramids | Non-causal `12`-frame pixel storage and optical subspace decomposition across SD (`320x180`) and HD (`640x360`). |
+| Pixel & Pyramid Buffers | `rgba_ring[0..11]` (`11.06 MB`), `row_luma`, `luma`, `chroma_rg`, `chroma_by`, `bg_luma`, `eca_res`, `160x90` pyramids | Non-causal `12`-frame pixel storage, unconditional ingest logging, Native `640x360` ROI metadata, and subspace decomposition across SD (`320x180`) and HD (`640x360`). |
 | Hero-16 Tracker | `targets[0..16]`, `kalman[0..16]`, `dormant[0..32]`, `jv_cost[16][64]`, `all_pip_rgba[16]` | Full-physics non-causal tracking for up to `16` concurrent targets, plus `32`-slot `1200`-frame Re-ID vault. |
 | Spectral Assignment | `laplacian[32x32]`, `fiedler_vec[32]`, `jacobi_mat`, `lanczos_scratch` | Pre-assignment graph connectivity partitioning paired with Worker Lanczos iterations. |
-| In-Situ Physics ID | `imm[0..16]`, `ode_states[0..16]`, `pend_states[0..16]`, `lyap_scratch`, `collision_state` | Weak-form STRidge/AICc ODE identification, nonlinear pendulum periods, chaos divergence, and collision conservation. |
-| Micro-Swarm Tracker | `micro_swarm: MicroTrackSoA` + CSR / Auction / IC-LK scratch (`src/soa_tracks.rs`) | High-density tracking for up to `1,536` sub-pixel targets (`2,048` fine peaks/frame) with zero stack arrays `>= 64 B`. |
-| Continuum Field Solver | `continuum: ContinuumState` (`src/continuum_physics.rs`, `0` `unsafe`) | `k=6` spatial graph strain, `32` `SE(2)` rigid bodies, `40x22` vorticity/divergence/FTLE, and modal resonance fields. |
+| In-Situ Physics ID | `imm[0..16]`, `ode_states[0..16]`, `pend_states[0..16]`, `lyap_scratch`, `collision_state`, `conservation_state` | Weak-form STRidge/AICc ODE identification, nonlinear pendulum periods, chaos divergence, and four-branch occluded collision conservation. |
+| Micro-Swarm Tracker | `micro_swarm: MicroTrackSoA` + CSR / Auction / IC-LK + `2x2` covariance scratch (`src/soa_tracks.rs`) | High-density tracking for up to `1,536` sub-pixel targets (`2,048` fine peaks/frame), `2x2` directional uncertainty, looming-filtered LOO residuals, and Auto-Hero promotion. |
+| Continuum & Hodge Solvers | `continuum: ContinuumState` (`src/continuum_physics.rs`), `hodge: HodgeState` (`src/hodge.rs`) | `k=6` spatial graph strain, `32` `SE(2)` rigid bodies, `40x22` vorticity/divergence/FTLE, modal resonance fields, and `40x22` discrete Hodge `2`-complex (`grad phi`, `curl* psi`, `h`). |
+| BOS & RS Vibrometry | `bos: BosState` (`src/bos.rs`), `vibro: VibroState` (`src/vibrometry.rs`) | Controlled-tripod `128x64` affine LK + Neumann Poisson refraction fields and calibrated rolling-shutter Welch audio coherence (`4096`-sample staging). |
 
 ## 2. Optical conditioning: Rank-2 ECA and sub-pixel pan advection
 
@@ -107,3 +109,14 @@ Calibration geometry (`worker.js`) transforms pixels using normalized coordinate
 $$\mathbf{v}_w = J_H(x, y)\,\mathbf{v}_{\text{px}}, \qquad J_H(x, y) = \frac{1}{w(x, y)^2} \begin{bmatrix} w h_{00} - X_{\text{num}} h_{20} & w h_{01} - X_{\text{num}} h_{21} \\ w h_{10} - Y_{\text{num}} h_{20} & w h_{11} - Y_{\text{num}} h_{21} \end{bmatrix}$$
 
 Whenever projective denominator $w = h_{20} x + h_{21} y + h_{22} < 0.14$ (near the horizon vanish line) or Wasm reports active camera motion (`cam_motion_state != 0`), metric outputs immediately gate to `OUT OF PLANE` / `PX UNITS` (`metric_valid = -1`), and every `56`-column telemetry export increments `cal_segment_id` with full `ASSUMED` vs `SURVEYED` provenance metadata.
+
+## 8. Calibrated field metrology, discrete Hodge, and rolling-shutter vibrometry
+
+Release `v3.0.0` adds six physically guarded metrology subsystems on top of the Hero-16 and Micro-Swarm pipeline (see [Acquisition and Failure Modes](./ACQUISITION_AND_FAILURE_MODES.md) for required operating envelopes and refusal conditions):
+
+1. **100% Frame-Ring Ingest and Native ROI Geometry (`src/lib.rs`):** `chronos_set_ingest_meta` records monotonic 64-bit source timestamps (`t_src_us`), `D4` orientation, scan axis (`scan_dir`), crop origin `(crop_x0, crop_y0)`, and `native_1to1` flags before committing every frame to `rgba_ring` and `row_luma`, preventing temporal aliasing across throttled downstream ticks.
+2. **Directional `2x2` Track Covariance and Looming-Filtered Residuals (`src/soa_tracks.rs`):** Propagates symmetric inverse-Hessian plus empirical covariance `(c_xx, c_xy, c_yy)`, scores leave-one-out local flow residuals (`d2_bench`), and applies a sample-disjoint chord test (`d2_nonloom`) to suppress pinhole perspective approach decoys (`x = f X / Z`) while promoting anomalous candidates for Hero-16 lock.
+3. **Controlled-Tripod BOS Schlieren (`src/bos.rs`):** Compares incoming frames on a `128x64` lattice via affine Lucas-Kanade against a frozen `16`-frame static reference, checks discrete curl $\nabla \times \boldsymbol{\varepsilon}$ consistency, and solves the inhomogeneous Neumann Poisson system $\Delta\Phi = \nabla \cdot \boldsymbol{\varepsilon}$ with boundary flux $\partial_n \Phi = \boldsymbol{\varepsilon} \cdot \mathbf{n}$ referenced to a designated quiet gauge ROI.
+4. **Calibrated Rolling-Shutter Vibrometry (`src/vibrometry.rs`):** Inverts `D4` sensor scan coordinates to reconstruct sub-frame row displacement against `ref_luma_q16`, restricts Welch spectral bins strictly below the optical Nyquist bound (`0.48 / dt_row_us`), compensates shutter integration via $H(f) = \sin(\pi f T_e)/(\pi f T_e)$ (raising `EXPOSURE_NULL` when $|H(f)| < 0.05$), and enforces Bonferroni-corrected `K >= 8` Welch coherence against synchronized audio (`chronos_push_audio_block`) with fail-closed `CLOCK_SKEW`, `NO_PTS`, `NO_SCAN_DIR`, `NOT_NATIVE_1TO1`, and `AXIS_TRANSPOSED` guards.
+5. **Bounded `40x22` Mesh Hodge `2`-Complex (`src/hodge.rs`):** Forms a cell-vertex complex up to `(V, E, F) = (880, 1698, 819)` from gradient-valid cells (`CELL_VALID_GRAD`), solves orthogonal exact (`grad phi`), coexact (`curl* psi`), and harmonic (`h`) components over one positive `W_1` edge metric via Jacobi PCG (gating to `UNCONV` on solver non-convergence), and floods complementary plaquettes from the exterior border to distinguish enclosed circulation holes (`beta_1`) from open boundary ports.
+6. **Four-Branch Occluded Collision Conservation (`src/physics_id.rs`):** Scores `H0_KEEP`, `H0_SWAP`, `H1_KEEP`, and `H1_SWAP` hypotheses across co-occluded track pairs under declared mass priors, explicitly returning `AMBIGUOUS` for indistinguishable symmetric encounters and `VIOLATED` when impulse/energy bounds fail.
