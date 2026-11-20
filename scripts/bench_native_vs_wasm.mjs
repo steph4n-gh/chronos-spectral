@@ -19,6 +19,10 @@
 //   --wasm-variant=LABEL=FLAGS  time the wasm under several V8 configurations
 //                        side by side (repeatable; FLAGS space-separated, may be
 //                        empty), e.g. --wasm-variant=wasm= --wasm-variant=turbofan=--no-liftoff
+//   --wasm-bin=LABEL=PATH  time several wasm builds side by side (repeatable),
+//                        e.g. a kernel change against the recorded build; each is
+//                        replayed with --allow-wasm-mismatch (return values are
+//                        still checked against the recording)
 //   --rounds=R           interleaved rounds (default 5)
 //   --warmup=W           discarded passes per process (default 2)
 //   --passes=N           measured passes per process (default 3)
@@ -111,8 +115,22 @@ const wasmVariants = multi('wasm-variant').map((v) => {
   if (i <= 0) throw new Error(`--wasm-variant=${v}: expected LABEL=FLAGS`);
   return { label: v.slice(0, i), kind: 'wasm', flags: v.slice(i + 1).split(' ').filter(Boolean) };
 });
+const wasmBins = multi('wasm-bin').map((v) => {
+  const i = v.indexOf('=');
+  if (i <= 0) throw new Error(`--wasm-bin=${v}: expected LABEL=PATH`);
+  const wasm = path.resolve(v.slice(i + 1));
+  if (!fs.existsSync(wasm)) throw new Error(`--wasm-bin=${v}: ${wasm} not found`);
+  return { label: v.slice(0, i), kind: 'wasm', flags: nodeFlags, wasm, extra: ['--allow-wasm-mismatch'] };
+});
+if (wasmVariants.length && wasmBins.length) throw new Error('--wasm-variant and --wasm-bin cannot be combined');
 const sides = [
-  ...(withWasm ? (wasmVariants.length ? wasmVariants : [{ label: 'wasm', kind: 'wasm', flags: nodeFlags }]) : []),
+  ...(withWasm
+    ? wasmBins.length
+      ? wasmBins
+      : wasmVariants.length
+        ? wasmVariants
+        : [{ label: 'wasm', kind: 'wasm', flags: nodeFlags }]
+    : []),
   ...natives.map((n) => ({ ...n, kind: 'native' })),
 ];
 const base = sides[0].label;
@@ -132,7 +150,7 @@ function runOne(side, w, r) {
   const log = path.join(outDir, `${w.name}.${side.label}.r${r}.log`);
   const [cmd, args] =
     side.kind === 'wasm'
-      ? [process.execPath, [...side.flags, '--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', `--wasm=${wasmPath}`, ...benchArgs, `--json=${json}`, w.path]]
+      ? [process.execPath, [...side.flags, '--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', `--wasm=${side.wasm || wasmPath}`, ...(side.extra || []), ...benchArgs, `--json=${json}`, w.path]]
       : [side.bin, ['--bench', ...benchArgs, `--json=${json}`, w.path]];
   const t0 = Date.now();
   const res = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
