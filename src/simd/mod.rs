@@ -149,9 +149,14 @@ layer_items!(reexport_layer!(core::arch::wasm32));
 
 #[cfg(all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")))]
 layer_items!(reexport_layer!(self::neon));
+/// Name of the backend `crate::simd::*` resolves to in this build (native builds only).
+#[cfg(all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")))]
+pub const BACKEND_NAME: &str = "neon";
 
 #[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")))]
 layer_items!(reexport_layer!(self::sse));
+#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")))]
+pub const BACKEND_NAME: &str = "sse";
 
 // The scalar line excludes every condition above, so exactly one selection applies.
 #[cfg(not(any(
@@ -160,3 +165,9 @@ layer_items!(reexport_layer!(self::sse));
     all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")),
 )))]
 layer_items!(reexport_layer!(self::scalar));
+#[cfg(not(any(
+    target_arch = "wasm32",
+    all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")),
+    all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")),
+)))]
+pub const BACKEND_NAME: &str = "scalar";
