@@ -779,14 +779,34 @@ pub fn i32x4_bitmask(a: v128) -> u8 {
 
 /// `a[2i]*b[2i] + a[2i+1]*b[2i+1]` in 32 bits (`smull` + `smull2` + `addp`, wrapping only for
 /// all-`-32768` inputs, as in wasm).
+///
+/// Written as inline assembly rather than `vmull_s16` + `vmull_high_s16` + `vpaddq_s32`: given the
+/// intrinsics, LLVM "optimises" the common kernel pattern (u8 pixels widened to i16, a constant
+/// weight vector whose two 64-bit halves are equal, the results fed to `uzp1`/`uzp2` shuffles)
+/// into `mov d, v[1]` + `umull` pairs and extra `uzp1`s: 15 instructions per 4 pixels instead of
+/// 11, and 1.16-1.27x slower than V8 in `rgba_to_planar_and_pool160_simd128` (measured;
+/// docs/VERIFICATION_AND_BENCHMARKS.md, "Native profile"). The asm block is the same three
+/// instructions with the same results; it is opaque to LLVM, which keeps it as written.
 #[inline(always)]
 pub fn i32x4_dot_i16x8(a: v128, b: v128) -> v128 {
     let (a, b) = (i16s(a), i16s(b));
+    let r: int32x4_t;
+    // SAFETY: NEON is enabled for this module (see the module docs); the block reads only `a` and
+    // `b` and writes only its two outputs. `out` (not `lateout`) operands are never allocated to an
+    // input register, so `t` and `r` cannot clobber `a` or `b` before the last read.
     unsafe {
-        let lo = vmull_s16(vget_low_s16(a), vget_low_s16(b));
-        let hi = vmull_high_s16(a, b);
-        from_i32s(vpaddq_s32(lo, hi))
+        core::arch::asm!(
+            "smull {t:v}.4s, {a:v}.4h, {b:v}.4h",
+            "smull2 {r:v}.4s, {a:v}.8h, {b:v}.8h",
+            "addp {r:v}.4s, {t:v}.4s, {r:v}.4s",
+            a = in(vreg) a,
+            b = in(vreg) b,
+            t = out(vreg) _,
+            r = out(vreg) r,
+            options(pure, nomem, nostack, preserves_flags),
+        );
     }
+    from_i32s(r)
 }
 
 #[inline(always)]
