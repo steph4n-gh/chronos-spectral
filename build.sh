@@ -2997,6 +2997,10 @@ RUSTFLAGS="-D warnings" cargo test --quiet --target host-tuple
 RUSTFLAGS="-D warnings" cargo test --quiet --manifest-path native/Cargo.toml --target host-tuple
 echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance suite & native library link verified with zero warnings"
 
+echo ""
+echo "[Gate N] Running Native/Wasm Whole-Kernel Parity (fresh CSTRACE recording replayed bit for bit on the native build, negative control)..."
+node scripts/gate_native_parity.mjs
+
 CERT_PARTIAL=0
 if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
   CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")
