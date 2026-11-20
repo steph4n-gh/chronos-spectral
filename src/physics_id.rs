@@ -103,6 +103,24 @@ fn hypot_f32(x: f32, y: f32) -> f32 {
 }
 
 #[inline(always)]
+fn hypot_f64(x: f64, y: f64) -> f64 {
+    let ax = x.abs();
+    let ay = y.abs();
+    let hi = ax.max(ay);
+    if hi == 0.0 {
+        0.0
+    } else {
+        let r = ax.min(ay) / hi;
+        hi * wasm_sqrtd(1.0 + r * r)
+    }
+}
+
+#[inline(always)]
+fn f64_fits_f32(x: f64) -> bool {
+    x.is_finite() && x.abs() <= (f32::MAX as f64)
+}
+
+#[inline(always)]
 fn fast_sin_cos(x: f32) -> (f32, f32) {
     (fast_sinf(x), fast_cosf(x))
 }
@@ -4564,6 +4582,949 @@ impl TargetCollisionOut {
     }
 }
 
+pub const CONSERVATION_TELEM_LEN: usize = 32;
+pub const CONSERVATION_INPUT_LEN: usize = 32;
+
+pub const OCCL_STATUS_NONE: u32 = 0;
+pub const OCCL_STATUS_UNIQUE: u32 = 1;
+pub const OCCL_STATUS_AMBIGUOUS: u32 = 2;
+pub const OCCL_STATUS_VIOLATED: u32 = 3;
+
+pub const HYP_PASSTHROUGH_KEEP: u32 = 1 << 0;
+pub const HYP_PASSTHROUGH_SWAP: u32 = 1 << 1;
+pub const HYP_COLLISION_KEEP: u32 = 1 << 2;
+pub const HYP_COLLISION_SWAP: u32 = 1 << 3;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SlotObsHistory {
+    pub t_sec: [f64; 8],
+    pub wx: [f32; 8],
+    pub wy: [f32; 8],
+    pub tid: u32,
+    pub orig_birth: u32,
+    pub last_vis_frame: u32,
+    pub prev_coasting: u8,
+    pub vis_streak: u8,
+    pub head: u8,
+    pub active: u8,
+}
+
+impl SlotObsHistory {
+    pub const fn zeroed() -> Self {
+        Self {
+            t_sec: [0.0; 8],
+            wx: [0.0; 8],
+            wy: [0.0; 8],
+            tid: 0,
+            orig_birth: 0,
+            last_vis_frame: 0,
+            prev_coasting: 0,
+            vis_streak: 0,
+            head: 0,
+            active: 0,
+        }
+    }
+
+    pub fn reset_in_place(&mut self) {
+        self.t_sec.fill(0.0);
+        self.wx.fill(0.0);
+        self.wy.fill(0.0);
+        self.tid = 0;
+        self.orig_birth = 0;
+        self.last_vis_frame = 0;
+        self.prev_coasting = 0;
+        self.vis_streak = 0;
+        self.head = 0;
+        self.active = 0;
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OcclPairTrackState {
+    pub pre_t_sec: f64,
+    pub tid_a: u32,
+    pub tid_b: u32,
+    pub orig_birth_a: u32,
+    pub orig_birth_b: u32,
+    pub start_frame: u32,
+    pub last_seen_frame: u32,
+    pub occl_start_frame: u32,
+    pub cooldown_until: u32,
+    pub pre_x1: f32,
+    pub pre_y1: f32,
+    pub pre_vx1: f32,
+    pub pre_vy1: f32,
+    pub pre_x2: f32,
+    pub pre_y2: f32,
+    pub pre_vx2: f32,
+    pub pre_vy2: f32,
+    pub pre_rmse: f32,
+    pub slot_a: u8,
+    pub slot_b: u8,
+    pub active: u8,
+    pub has_pre: u8,
+    pub both_occluded: u8,
+    pub occl_seen_mask: u8,
+    pub max_coast_a: u8,
+    pub max_coast_b: u8,
+    pub co_coast_frames: u8,
+    pub _pad: [u8; 3],
+}
+
+impl OcclPairTrackState {
+    pub const fn zeroed() -> Self {
+        Self {
+            pre_t_sec: 0.0,
+            tid_a: 0,
+            tid_b: 0,
+            orig_birth_a: 0,
+            orig_birth_b: 0,
+            start_frame: 0,
+            last_seen_frame: 0,
+            occl_start_frame: 0,
+            cooldown_until: 0,
+            pre_x1: 0.0,
+            pre_y1: 0.0,
+            pre_vx1: 0.0,
+            pre_vy1: 0.0,
+            pre_x2: 0.0,
+            pre_y2: 0.0,
+            pre_vx2: 0.0,
+            pre_vy2: 0.0,
+            pre_rmse: 0.0,
+            slot_a: 0,
+            slot_b: 0,
+            active: 0,
+            has_pre: 0,
+            both_occluded: 0,
+            occl_seen_mask: 0,
+            max_coast_a: 0,
+            max_coast_b: 0,
+            co_coast_frames: 0,
+            _pad: [0; 3],
+        }
+    }
+
+    pub fn reset_in_place(&mut self) {
+        self.pre_t_sec = 0.0;
+        self.tid_a = 0;
+        self.tid_b = 0;
+        self.orig_birth_a = 0;
+        self.orig_birth_b = 0;
+        self.start_frame = 0;
+        self.last_seen_frame = 0;
+        self.occl_start_frame = 0;
+        self.cooldown_until = 0;
+        self.pre_x1 = 0.0;
+        self.pre_y1 = 0.0;
+        self.pre_vx1 = 0.0;
+        self.pre_vy1 = 0.0;
+        self.pre_x2 = 0.0;
+        self.pre_y2 = 0.0;
+        self.pre_vx2 = 0.0;
+        self.pre_vy2 = 0.0;
+        self.pre_rmse = 0.0;
+        self.slot_a = 0;
+        self.slot_b = 0;
+        self.active = 0;
+        self.has_pre = 0;
+        self.both_occluded = 0;
+        self.occl_seen_mask = 0;
+        self.max_coast_a = 0;
+        self.max_coast_b = 0;
+        self.co_coast_frames = 0;
+        self._pad = [0; 3];
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OccludedConservationState {
+    pub telem: [f32; CONSERVATION_TELEM_LEN],
+    pub input: [f32; CONSERVATION_INPUT_LEN],
+    pub track_pairs: [OcclPairTrackState; 8],
+    pub slot_obs: [SlotObsHistory; MAX_TARGETS],
+    pub live_event_seq: u32,
+    pub last_frame_idx: u32,
+    pub last_discont_seen: u32,
+    pub last_continuity_epoch: u32,
+    pub has_last_frame: u8,
+    pub _pad: [u8; 3],
+}
+
+const _: () = assert!(core::mem::size_of::<OccludedConservationState>() <= 8_192);
+
+#[derive(Clone, Copy)]
+struct AssignConservationEval {
+    j_net_mag: f64,
+    mom_resid_norm: f64,
+    ang_mom_resid_norm_trap: f64,
+    ang_mom_resid_norm_h1: f64,
+    d_lz_trap: f64,
+    dk: f64,
+    delta_ke_ratio: f64,
+    eps_k: f64,
+    l_env_max: f64,
+    l_scale: f64,
+    h0_ok: bool,
+    h0_chi2: f64,
+    h0_imp_resid: f64,
+    h1_ok: bool,
+    h1_chi2: f64,
+    h1_imp_resid: f64,
+    h1_tau: f64,
+    h1_e: f64,
+    finite_ok: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+#[inline(never)]
+fn eval_occluded_assignment(
+    x1_pre: f64,
+    y1_pre: f64,
+    vx1_pre: f64,
+    vy1_pre: f64,
+    m1: f64,
+    r1: f64,
+    x2_pre: f64,
+    y2_pre: f64,
+    vx2_pre: f64,
+    vy2_pre: f64,
+    m2: f64,
+    r2: f64,
+    x1_out: f64,
+    y1_out: f64,
+    vx1_out: f64,
+    vy1_out: f64,
+    x2_out: f64,
+    y2_out: f64,
+    vx2_out: f64,
+    vy2_out: f64,
+    dt: f64,
+    g_y: f64,
+    drag_beta_max: f64,
+    a_np: f64,
+    a_env_1: f64,
+    a_env_2: f64,
+    v_drag_1: f64,
+    v_drag_2: f64,
+    sigma_pos: f64,
+    sigma_vel: f64,
+    j_env_max: f64,
+) -> AssignConservationEval {
+    let x_ref = 0.5 * (x1_pre + x2_pre);
+    let y_ref = 0.5 * (y1_pre + y2_pre);
+
+    let v1_pre_sq = vx1_pre * vx1_pre + vy1_pre * vy1_pre;
+    let v2_pre_sq = vx2_pre * vx2_pre + vy2_pre * vy2_pre;
+    let v1_out_sq = vx1_out * vx1_out + vy1_out * vy1_out;
+    let v2_out_sq = vx2_out * vx2_out + vy2_out * vy2_out;
+
+    let v1_pre_mag = hypot_f64(vx1_pre, vy1_pre);
+    let v2_pre_mag = hypot_f64(vx2_pre, vy2_pre);
+    let v1_out_mag = hypot_f64(vx1_out, vy1_out);
+    let v2_out_mag = hypot_f64(vx2_out, vy2_out);
+
+    // Net non-gravitational impulse across [0, dt]
+    let p_pre_x = m1 * vx1_pre + m2 * vx2_pre;
+    let p_pre_y = m1 * vy1_pre + m2 * vy2_pre;
+    let p_post_x = m1 * vx1_out + m2 * vx2_out;
+    let p_post_y = m1 * vy1_out + m2 * vy2_out;
+    let j_grav_y = (m1 + m2) * g_y * dt;
+    let j_net_x = p_post_x - p_pre_x;
+    let j_net_y = (p_post_y - p_pre_y) - j_grav_y;
+    let j_net_mag = hypot_f64(j_net_x, j_net_y);
+
+    let p_scale = (0.5
+        * (m1 * (v1_pre_mag + v1_out_mag)
+            + m2 * (v2_pre_mag + v2_out_mag)
+            + (m1 + m2) * g_y.abs() * dt))
+        .max(j_env_max)
+        .max(1.0e-3 * (m1 + m2));
+    let mom_resid_norm = if j_net_mag <= 1.0e-6 || p_scale <= 0.0 {
+        0.0
+    } else {
+        j_net_mag / p_scale
+    };
+
+    // Angular momentum about fixed inertial origin (x_ref, y_ref) with gravity torque
+    let l_pre = m1 * ((x1_pre - x_ref) * vy1_pre - (y1_pre - y_ref) * vx1_pre)
+        + m2 * ((x2_pre - x_ref) * vy2_pre - (y2_pre - y_ref) * vx2_pre);
+    let l_post = m1 * ((x1_out - x_ref) * vy1_out - (y1_out - y_ref) * vx1_out)
+        + m2 * ((x2_out - x_ref) * vy2_out - (y2_out - y_ref) * vx2_out);
+    let tau_grav_trap = (m1 * (0.5 * (x1_pre + x1_out) - x_ref)
+        + m2 * (0.5 * (x2_pre + x2_out) - x_ref))
+        * g_y
+        * dt;
+    let d_lz_trap = (l_post - l_pre) - tau_grav_trap;
+
+    let arm1_pre = hypot_f64(x1_pre - x_ref, y1_pre - y_ref) + r1;
+    let arm1_post = hypot_f64(x1_out - x_ref, y1_out - y_ref) + r1;
+    let arm1 = arm1_pre.max(arm1_post);
+    let arm2_pre = hypot_f64(x2_pre - x_ref, y2_pre - y_ref) + r2;
+    let arm2_post = hypot_f64(x2_out - x_ref, y2_out - y_ref) + r2;
+    let arm2 = arm2_pre.max(arm2_post);
+    let arm_eff = (0.5 * (arm1 + arm2)).max((r1 + r2).max(1.0));
+
+    let g_half = 0.5 * g_y * dt;
+    let sigma_l_pos = sigma_pos
+        * hypot_f64(
+            m1 * hypot_f64(hypot_f64(vx1_pre, vy1_pre), hypot_f64(v1_out_mag, g_half)),
+            m2 * hypot_f64(hypot_f64(vx2_pre, vy2_pre), hypot_f64(v2_out_mag, g_half)),
+        );
+    let sigma_l_vel = sigma_vel
+        * hypot_f64(m1 * hypot_f64(arm1_pre, arm1_post), m2 * hypot_f64(arm2_pre, arm2_post));
+    let l_env_max = dt * (m1 * a_env_1 * arm1 + m2 * a_env_2 * arm2)
+        + 3.0 * hypot_f64(sigma_l_pos, sigma_l_vel)
+        + 1.0e-3 * (m1 + m2) * arm_eff * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
+    let l_scale = (l_pre.abs() + l_post.abs()).max((p_scale * arm_eff).max(l_env_max));
+    let ang_mom_resid_norm_trap = if d_lz_trap.abs() <= 1.0e-5 || l_scale <= 0.0 {
+        0.0
+    } else {
+        d_lz_trap.abs() / l_scale
+    };
+
+    // Gravity-compensated mechanical energy change dK
+    let k_pre = 0.5 * (m1 * v1_pre_sq + m2 * v2_pre_sq);
+    let k_post_raw = 0.5 * (m1 * v1_out_sq + m2 * v2_out_sq);
+    let w_grav = m1 * g_y * (y1_out - y1_pre) + m2 * g_y * (y2_out - y2_pre);
+    let k_post_grav_work = k_post_raw - w_grav;
+    let dk = k_post_grav_work - k_pre;
+    let k_ref = k_pre.max(k_post_grav_work.abs().max(1.0e-3 * (m1 + m2)));
+    let delta_ke_ratio = if dk.abs() <= 1.0e-5 || k_ref <= 0.0 { 0.0 } else { dk / k_ref };
+
+    let sigma_k_vel = sigma_vel
+        * hypot_f64(m1 * hypot_f64(v1_pre_mag, v1_out_mag), m2 * hypot_f64(v2_pre_mag, v2_out_mag))
+        + 2.0 * (m1 + m2) * sigma_vel * sigma_vel;
+    let sigma_k_pos = 1.4142135623730951 * hypot_f64(m1, m2) * g_y.abs() * sigma_pos;
+    let w_env_pos = persp_scale_bound_term_f64(
+        a_np,
+        dt,
+        m1,
+        m2,
+        v1_pre_mag,
+        v1_out_mag,
+        v2_pre_mag,
+        v2_out_mag,
+    );
+    let eps_k = w_env_pos
+        + 3.0 * hypot_f64(sigma_k_vel, sigma_k_pos)
+        + 1.0e-3 * k_pre.max(m1 + m2);
+
+    // Individual gravity-compensated velocity jumps & position propagation residuals
+    let dv1_x = vx1_out - vx1_pre;
+    let dv1_y = vy1_out - (vy1_pre + g_y * dt);
+    let dv2_x = vx2_out - vx2_pre;
+    let dv2_y = vy2_out - (vy2_pre + g_y * dt);
+    let vel_err_1 = hypot_f64(dv1_x, dv1_y);
+    let vel_err_2 = hypot_f64(dv2_x, dv2_y);
+
+    let g_dt2_half = 0.5 * g_y * dt * dt;
+    let dp1_x = (x1_pre + vx1_pre * dt) - x1_out;
+    let dp1_y = (y1_pre + vy1_pre * dt + g_dt2_half) - y1_out;
+    let dp2_x = (x2_pre + vx2_pre * dt) - x2_out;
+    let dp2_y = (y2_pre + vy2_pre * dt + g_dt2_half) - y2_out;
+    let pos_err_1 = hypot_f64(dp1_x, dp1_y);
+    let pos_err_2 = hypot_f64(dp2_x, dp2_y);
+
+    // H0: Ballistic pass-through without contact
+    let sqrt2 = 1.4142135623730951f64;
+    let pos_noise = 3.0 * hypot_f64(sqrt2 * sigma_pos, sigma_vel * dt);
+    let vel_noise = 3.0 * sqrt2 * sigma_vel;
+    let num_eps_pos = 1.0e-3 * (1.0 + 0.01 * (v_drag_1 + v_drag_2) * dt);
+    let num_eps_vel = 1.0e-3 * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
+    let pos_tol_1 = 0.5 * a_env_1 * dt * dt + pos_noise + num_eps_pos;
+    let pos_tol_2 = 0.5 * a_env_2 * dt * dt + pos_noise + num_eps_pos;
+    let vel_tol_1 = a_env_1 * dt + vel_noise + num_eps_vel;
+    let vel_tol_2 = a_env_2 * dt + vel_noise + num_eps_vel;
+
+    let dk_1 = 0.5 * m1 * (v1_out_sq - v1_pre_sq) - m1 * g_y * (y1_out - y1_pre);
+    let dk_2 = 0.5 * m2 * (v2_out_sq - v2_pre_sq) - m2 * g_y * (y2_out - y2_pre);
+    let eps_k1 = a_np * dt * m1 * 0.5 * (v1_pre_mag + v1_out_mag)
+        + 0.5 * m1 * (a_np * dt) * (a_np * dt)
+        + 3.0 * sigma_vel * m1 * hypot_f64(v1_pre_mag, v1_out_mag)
+        + 3.0 * sqrt2 * m1 * g_y.abs() * sigma_pos
+        + 2.0 * m1 * sigma_vel * sigma_vel
+        + 1.0e-3 * (0.5 * m1 * v1_pre_sq).max(m1);
+    let eps_k2 = a_np * dt * m2 * 0.5 * (v2_pre_mag + v2_out_mag)
+        + 0.5 * m2 * (a_np * dt) * (a_np * dt)
+        + 3.0 * sigma_vel * m2 * hypot_f64(v2_pre_mag, v2_out_mag)
+        + 3.0 * sqrt2 * m2 * g_y.abs() * sigma_pos
+        + 2.0 * m2 * sigma_vel * sigma_vel
+        + 1.0e-3 * (0.5 * m2 * v2_pre_sq).max(m2);
+
+    let h0_cons_ok = j_net_mag <= j_env_max
+        && d_lz_trap.abs() <= l_env_max
+        && dk <= eps_k
+        && dk_1 <= eps_k1
+        && dk_2 <= eps_k2;
+    let h0_ok = pos_err_1 <= pos_tol_1
+        && pos_err_2 <= pos_tol_2
+        && vel_err_1 <= vel_tol_1
+        && vel_err_2 <= vel_tol_2
+        && h0_cons_ok;
+
+    let r_p1 = pos_err_1 / pos_tol_1;
+    let r_p2 = pos_err_2 / pos_tol_2;
+    let r_v1 = vel_err_1 / vel_tol_1;
+    let r_v2 = vel_err_2 / vel_tol_2;
+    let mut h0_chi2 = 9.0 * (r_p1 * r_p1 + r_p2 * r_p2 + r_v1 * r_v1 + r_v2 * r_v2);
+    if !h0_cons_ok {
+        let r_j = j_net_mag / j_env_max;
+        let r_l = d_lz_trap.abs() / l_env_max;
+        let r_k = dk.max(0.0) / eps_k;
+        h0_chi2 += 9.0 * (1.0 + r_j * r_j + r_l * r_l + r_k * r_k);
+    }
+    let h0_imp_resid = m1 * vel_err_1 + m2 * vel_err_2;
+
+    // H1: Hidden two-body collision at tau in [0, dt]
+    let j12_x = 0.5 * (m1 * dv1_x - m2 * dv2_x);
+    let j12_y = 0.5 * (m1 * dv1_y - m2 * dv2_y);
+    let j12_mag = hypot_f64(j12_x, j12_y);
+    let sigma_j12 = 0.5 * 1.4142135623730951 * hypot_f64(m1, m2) * sigma_vel;
+    let j12_min = (3.0 * sigma_j12 + 0.5 * (m1 * a_env_1 + m2 * a_env_2) * dt)
+        .max(1.0e-2 * (m1 + m2));
+    let (nx, ny) = if j12_mag > 1.0e-12 {
+        (j12_x / j12_mag, j12_y / j12_mag)
+    } else {
+        (1.0, 0.0)
+    };
+
+    let r1_post0_x = x1_out - vx1_out * dt;
+    let r1_post0_y = y1_out - vy1_out * dt + g_dt2_half;
+    let r2_post0_x = x2_out - vx2_out * dt;
+    let r2_post0_y = y2_out - vy2_out * dt + g_dt2_half;
+
+    let gap1_0x = x1_pre - r1_post0_x;
+    let gap1_0y = y1_pre - r1_post0_y;
+    let gap2_0x = x2_pre - r2_post0_x;
+    let gap2_0y = y2_pre - r2_post0_y;
+
+    let dr0_x = x1_pre - x2_pre;
+    let dr0_y = y1_pre - y2_pre;
+    let dr_post0_x = r1_post0_x - r2_post0_x;
+    let dr_post0_y = r1_post0_y - r2_post0_y;
+
+    let vrel_pre_x = vx1_pre - vx2_pre;
+    let vrel_pre_y = vy1_pre - vy2_pre;
+    let vrel_out_x = vx1_out - vx2_out;
+    let vrel_out_y = vy1_out - vy2_out;
+
+    let dv_sq = dv1_x * dv1_x + dv1_y * dv1_y + dv2_x * dv2_x + dv2_y * dv2_y;
+    let vrel_pre_sq = vrel_pre_x * vrel_pre_x + vrel_pre_y * vrel_pre_y;
+    let vrel_out_sq = vrel_out_x * vrel_out_x + vrel_out_y * vrel_out_y;
+
+    let r_sum = r1 + r2;
+    let cx_off = r_sum * nx;
+    let cy_off = r_sum * ny;
+
+    let a_tau = dv_sq + 0.5 * (vrel_pre_sq + vrel_out_sq);
+    let b_tau = (gap1_0x * dv1_x + gap1_0y * dv1_y)
+        + (gap2_0x * dv2_x + gap2_0y * dv2_y)
+        - 0.5
+            * (((dr0_x - cx_off) * vrel_pre_x + (dr0_y - cy_off) * vrel_pre_y)
+                + ((dr_post0_x - cx_off) * vrel_out_x + (dr_post0_y - cy_off) * vrel_out_y));
+    let tau = if a_tau > 1.0e-12 {
+        (b_tau / a_tau).clamp(0.0, dt)
+    } else {
+        0.5 * dt
+    };
+
+    let kink1 = hypot_f64(gap1_0x - dv1_x * tau, gap1_0y - dv1_y * tau);
+    let kink2 = hypot_f64(gap2_0x - dv2_x * tau, gap2_0y - dv2_y * tau);
+    let dr_pre_tx = dr0_x + vrel_pre_x * tau;
+    let dr_pre_ty = dr0_y + vrel_pre_y * tau;
+    let dr_post_tx = dr_post0_x + vrel_out_x * tau;
+    let dr_post_ty = dr_post0_y + vrel_out_y * tau;
+    let dr_mid_tx = 0.5 * (dr_pre_tx + dr_post_tx);
+    let dr_mid_ty = 0.5 * (dr_pre_ty + dr_post_ty);
+
+    let sep_pre = hypot_f64(dr_pre_tx, dr_pre_ty);
+    let sep_post = hypot_f64(dr_post_tx, dr_post_ty);
+    let sep_mid = hypot_f64(dr_mid_tx, dr_mid_ty);
+
+    let dt_rem = dt - tau;
+    let sigma_kink = wasm_sqrtd(
+        2.0 * sigma_pos * sigma_pos + sigma_vel * sigma_vel * (tau * tau + dt_rem * dt_rem),
+    );
+    let env_kink_1 = 0.5 * a_env_1 * (tau * tau + dt_rem * dt_rem);
+    let env_kink_2 = 0.5 * a_env_2 * (tau * tau + dt_rem * dt_rem);
+    let kink_tol_1 = env_kink_1 + 3.0 * sqrt2 * sigma_kink + num_eps_pos;
+    let kink_tol_2 = env_kink_2 + 3.0 * sqrt2 * sigma_kink + num_eps_pos;
+    let contact_pos_tol = 0.5 * (env_kink_1 + env_kink_2) + 3.0 * sqrt2 * sigma_kink + num_eps_pos;
+
+    // Exact piecewise gravity torque at contact instant tau for H1
+    let x1_c = 0.5 * ((x1_pre + vx1_pre * tau) + (x1_out - vx1_out * dt_rem));
+    let x2_c = 0.5 * ((x2_pre + vx2_pre * tau) + (x2_out - vx2_out * dt_rem));
+    let tau_grav_h1 = (m1
+        * (0.5 * ((x1_pre - x_ref) + (x1_c - x_ref)) * tau
+            + 0.5 * ((x1_c - x_ref) + (x1_out - x_ref)) * dt_rem)
+        + m2 * (0.5 * ((x2_pre - x_ref) + (x2_c - x_ref)) * tau
+            + 0.5 * ((x2_c - x_ref) + (x2_out - x_ref)) * dt_rem))
+        * g_y;
+    let d_lz_h1 = (l_post - l_pre) - tau_grav_h1;
+    let ang_mom_resid_norm_h1 = if d_lz_h1.abs() <= 1.0e-5 || l_scale <= 0.0 {
+        0.0
+    } else {
+        d_lz_h1.abs() / l_scale
+    };
+
+    // Normal approach, separation, and joint velocity + position-chord restitution
+    let vn_pre = vrel_pre_x * nx + vrel_pre_y * ny;
+    let vn_post = vrel_out_x * nx + vrel_out_y * ny;
+    let v_close_vel = -vn_pre;
+    let v_close_min = (2.0 * sigma_vel).max(1.0e-3);
+    let dv_rel_tol = 3.0 * sqrt2 * sigma_vel + 0.5 * (a_env_1 + a_env_2) * dt + num_eps_vel;
+
+    let dr_end_x = x1_out - x2_out;
+    let dr_end_y = y1_out - y2_out;
+    let dr0_n = dr0_x * nx + dr0_y * ny;
+    let dr_end_n = dr_end_x * nx + dr_end_y * ny;
+    let end_sep_tol = 3.0 * sqrt2 * sigma_pos + num_eps_pos;
+    let end_side_ok = dr0_n >= r_sum - end_sep_tol && dr_end_n >= r_sum - end_sep_tol;
+
+    let a_env_sum = a_env_1 + a_env_2;
+    let var_vel = 2.0 * sigma_vel * sigma_vel + 0.25 * a_env_sum * a_env_sum * dt * dt + 1.0e-12;
+    let w_vel = 1.0 / var_vel;
+
+    let (v_close_fit, alpha_pre) = if tau > 1.0e-4 {
+        let vc_chord = (dr0_n - r_sum) / tau;
+        let var_c_pre = (4.0 * sigma_pos * sigma_pos) / (tau * tau)
+            + 0.25 * a_env_sum * a_env_sum * tau * tau
+            + 1.0e-12;
+        let w_c = 1.0 / var_c_pre;
+        let a_p = w_c / (w_vel + w_c);
+        (v_close_vel + a_p * (vc_chord - v_close_vel), a_p)
+    } else {
+        (v_close_vel, 0.0)
+    };
+
+    let (vn_post_fit, alpha_post) = if dt_rem > 1.0e-4 {
+        let vp_chord = (dr_end_n - r_sum) / dt_rem;
+        let var_c_post = (4.0 * sigma_pos * sigma_pos) / (dt_rem * dt_rem)
+            + 0.25 * a_env_sum * a_env_sum * dt_rem * dt_rem
+            + 1.0e-12;
+        let w_c = 1.0 / var_c_post;
+        let a_p = w_c / (w_vel + w_c);
+        (vn_post + a_p * (vp_chord - vn_post), a_p)
+    } else {
+        (vn_post, 0.0)
+    };
+
+    let e_fit = if v_close_fit > 1.0e-6 {
+        vn_post_fit / v_close_fit
+    } else {
+        -1.0
+    };
+
+    // Scale-aware f32 input quantization slack (4 half-ULPs of f32; never widens noisy fits)
+    const F32_HALF_ULP: f64 = 0.5 * (f32::EPSILON as f64);
+    let pos_mag = x1_pre
+        .abs()
+        .max(y1_pre.abs())
+        .max(x2_pre.abs())
+        .max(y2_pre.abs())
+        .max(x1_out.abs())
+        .max(y1_out.abs())
+        .max(x2_out.abs())
+        .max(y2_out.abs())
+        .max(r_sum)
+        .max(1.0);
+    let vel_mag = v1_pre_mag
+        .max(v2_pre_mag)
+        .max(v1_out_mag)
+        .max(v2_out_mag)
+        .max(1.0);
+    let ulp_pos = 4.0 * F32_HALF_ULP * pos_mag;
+    let ulp_vel = 4.0 * F32_HALF_ULP * vel_mag;
+    let dv_ulp_pre = ulp_vel + if tau > 1.0e-4 { alpha_pre * (ulp_pos / tau) } else { 0.0 };
+    let dv_ulp_post = ulp_vel + if dt_rem > 1.0e-4 { alpha_post * (ulp_pos / dt_rem) } else { 0.0 };
+    let e_ulp_tol = if v_close_fit > 1.0e-6 {
+        ((dv_ulp_post + dv_ulp_pre) / v_close_fit).min(5.0e-5) + 1.0e-12
+    } else {
+        1.0e-12
+    };
+
+    let mu = (m1 * m2) / (m1 + m2);
+    let vc_pos = v_close_fit.max(0.0);
+    let e_phys = e_fit.clamp(0.0, 1.0);
+    let dk_expected = -0.5 * mu * (1.0 - e_phys * e_phys) * vc_pos * vc_pos;
+    let w_drag_max =
+        drag_beta_max * dt * (m1 * v_drag_1 * v_drag_1 + m2 * v_drag_2 * v_drag_2);
+    let dk_consistent = dk <= eps_k && dk >= dk_expected - w_drag_max - 1.5 * eps_k;
+
+    let norm_dot = dr_mid_tx * nx + dr_mid_ty * ny;
+    let norm_side_ok = if sep_mid > 1.0e-6 && r_sum > contact_pos_tol {
+        norm_dot >= 0.85 * sep_mid - contact_pos_tol
+    } else {
+        norm_dot >= -contact_pos_tol
+    };
+    let sep_mid_ok = (sep_mid - r_sum).abs() <= contact_pos_tol;
+    let sep_pre_ok =
+        sep_pre >= r_sum - 1.25 * contact_pos_tol && sep_pre <= r_sum + 1.25 * contact_pos_tol;
+    let sep_post_ok =
+        sep_post >= r_sum - 1.25 * contact_pos_tol && sep_post <= r_sum + 1.25 * contact_pos_tol;
+    let contact_ok = kink1 <= kink_tol_1
+        && kink2 <= kink_tol_2
+        && sep_mid_ok
+        && sep_pre_ok
+        && sep_post_ok
+        && end_side_ok
+        && norm_side_ok;
+
+    let h1_dyn_ok = j12_mag > j12_min
+        && v_close_fit > v_close_min
+        && vn_post_fit >= -dv_ulp_post
+        && e_fit >= -e_ulp_tol
+        && e_fit <= 1.0 + e_ulp_tol
+        && (v_close_vel - v_close_fit).abs() <= dv_rel_tol
+        && (vn_post - vn_post_fit).abs() <= dv_rel_tol;
+    let h1_ok = j_net_mag <= j_env_max
+        && d_lz_h1.abs() <= l_env_max
+        && dk_consistent
+        && h1_dyn_ok
+        && contact_ok;
+
+    let r_j = j_net_mag / j_env_max;
+    let r_lh1 = d_lz_h1.abs() / l_env_max;
+    let r_k1 = kink1 / kink_tol_1;
+    let r_k2 = kink2 / kink_tol_2;
+    let r_sep = (sep_mid - r_sum).abs() / contact_pos_tol;
+    let r_dk = dk.max(0.0) / eps_k;
+    let mut h1_chi2 = 9.0
+        * (r_j * r_j + r_lh1 * r_lh1 + r_k1 * r_k1 + r_k2 * r_k2 + r_sep * r_sep + r_dk * r_dk);
+    if !h1_ok {
+        if !h1_dyn_ok || !norm_side_ok || !end_side_ok || !dk_consistent {
+            h1_chi2 += 16.0;
+        }
+        if !sep_pre_ok || !sep_post_ok {
+            h1_chi2 += 9.0;
+        }
+    }
+
+    let e_out = if h1_ok { e_fit.clamp(0.0, 1.0) } else { e_fit };
+    let finite_ok = f64_fits_f32(j_net_mag)
+        && f64_fits_f32(mom_resid_norm)
+        && f64_fits_f32(ang_mom_resid_norm_trap)
+        && f64_fits_f32(ang_mom_resid_norm_h1)
+        && f64_fits_f32(delta_ke_ratio)
+        && f64_fits_f32(h0_chi2)
+        && f64_fits_f32(h0_imp_resid)
+        && f64_fits_f32(h1_chi2)
+        && f64_fits_f32(tau)
+        && f64_fits_f32(e_out)
+        && f64_fits_f32(eps_k)
+        && f64_fits_f32(l_env_max)
+        && f64_fits_f32(l_scale);
+
+    AssignConservationEval {
+        j_net_mag,
+        mom_resid_norm,
+        ang_mom_resid_norm_trap,
+        ang_mom_resid_norm_h1,
+        d_lz_trap,
+        dk,
+        delta_ke_ratio,
+        eps_k,
+        l_env_max,
+        l_scale,
+        h0_ok,
+        h0_chi2,
+        h0_imp_resid,
+        h1_ok,
+        h1_chi2,
+        h1_imp_resid: j_net_mag,
+        h1_tau: tau,
+        h1_e: e_out,
+        finite_ok,
+    }
+}
+
+#[inline(always)]
+fn persp_scale_bound_term_f64(
+    a_np: f64,
+    dt: f64,
+    m1: f64,
+    m2: f64,
+    v1_pre_mag: f64,
+    v1_out_mag: f64,
+    v2_pre_mag: f64,
+    v2_out_mag: f64,
+) -> f64 {
+    a_np * dt * (m1 * 0.5 * (v1_pre_mag + v1_out_mag) + m2 * 0.5 * (v2_pre_mag + v2_out_mag))
+        + 0.5 * (m1 + m2) * (a_np * dt) * (a_np * dt)
+}
+
+#[inline(never)]
+fn eval_occluded_pair_core(
+    inp: &[f32; CONSERVATION_INPUT_LEN],
+    telem: &mut [f32; CONSERVATION_TELEM_LEN],
+) -> u32 {
+    telem.fill(0.0);
+
+    let mut i = 0usize;
+    while i < CONSERVATION_INPUT_LEN - 1 {
+        if !inp[i].is_finite() {
+            return OCCL_STATUS_NONE;
+        }
+        i += 1;
+    }
+
+    let x1_pre = inp[0] as f64;
+    let y1_pre = inp[1] as f64;
+    let vx1_pre = inp[2] as f64;
+    let vy1_pre = inp[3] as f64;
+    let m1_in = inp[4] as f64;
+    let r1 = inp[5] as f64;
+
+    let x2_pre = inp[6] as f64;
+    let y2_pre = inp[7] as f64;
+    let vx2_pre = inp[8] as f64;
+    let vy2_pre = inp[9] as f64;
+    let m2_in = inp[10] as f64;
+    let r2 = inp[11] as f64;
+
+    let x_a = inp[12] as f64;
+    let y_a = inp[13] as f64;
+    let vx_a = inp[14] as f64;
+    let vy_a = inp[15] as f64;
+
+    let x_b = inp[16] as f64;
+    let y_b = inp[17] as f64;
+    let vx_b = inp[18] as f64;
+    let vy_b = inp[19] as f64;
+
+    let dt = inp[20] as f64;
+    let g_y = inp[21] as f64;
+    let drag_beta_max = inp[22] as f64;
+    let spin_magnus_bound = inp[23] as f64;
+    let persp_scale_bound = inp[24] as f64;
+    let sigma_pos = inp[25] as f64;
+    let sigma_vel = inp[26] as f64;
+    let tid_a = inp[27];
+    let tid_b = inp[28];
+    let event_frame = inp[29];
+    let mass_known_flag = inp[30];
+
+    if dt <= 0.0
+        || r1 < 0.0
+        || r2 < 0.0
+        || drag_beta_max < 0.0
+        || spin_magnus_bound < 0.0
+        || persp_scale_bound < 0.0
+        || sigma_pos < 0.0
+        || sigma_vel < 0.0
+    {
+        return OCCL_STATUS_NONE;
+    }
+
+    let (m1, m2) = if mass_known_flag > 0.5 {
+        if m1_in <= 0.0 || m2_in <= 0.0 {
+            return OCCL_STATUS_NONE;
+        }
+        (m1_in, m2_in)
+    } else {
+        if m1_in < 0.0 || m2_in < 0.0 {
+            return OCCL_STATUS_NONE;
+        }
+        (1.0f64, 1.0f64)
+    };
+
+    let mass_ratio = m2 / m1;
+    let inv_mass_ratio = m1 / m2;
+    let mass_ratio_f32 = mass_ratio as f32;
+    let inv_mass_ratio_f32 = inv_mass_ratio as f32;
+    if !f64_fits_f32(mass_ratio)
+        || !f64_fits_f32(inv_mass_ratio)
+        || !mass_ratio_f32.is_normal()
+        || !inv_mass_ratio_f32.is_normal()
+        || !f64_fits_f32(m1 + m2)
+    {
+        return OCCL_STATUS_NONE;
+    }
+
+    // Pre-state-only drag speed bounds (strictly non-circular)
+    let v1_pre_mag = hypot_f64(vx1_pre, vy1_pre);
+    let v2_pre_mag = hypot_f64(vx2_pre, vy2_pre);
+    let v_drag_1 = v1_pre_mag.max(hypot_f64(vx1_pre, vy1_pre + g_y * dt));
+    let v_drag_2 = v2_pre_mag.max(hypot_f64(vx2_pre, vy2_pre + g_y * dt));
+
+    let a_np = spin_magnus_bound + persp_scale_bound;
+    let a_env_1 = drag_beta_max * v_drag_1 + a_np;
+    let a_env_2 = drag_beta_max * v_drag_2 + a_np;
+
+    let sigma_j = 1.4142135623730951 * hypot_f64(m1, m2) * sigma_vel;
+    let j_num_eps = 1.0e-4 * (m1 + m2) * (1.0 + 0.01 * (v_drag_1 + v_drag_2));
+    let j_env_max = dt * (m1 * a_env_1 + m2 * a_env_2) + 3.0 * sigma_j + j_num_eps;
+    if !f64_fits_f32(j_env_max) {
+        return OCCL_STATUS_NONE;
+    }
+
+    let keep = eval_occluded_assignment(
+        x1_pre, y1_pre, vx1_pre, vy1_pre, m1, r1, x2_pre, y2_pre, vx2_pre, vy2_pre, m2, r2, x_a,
+        y_a, vx_a, vy_a, x_b, y_b, vx_b, vy_b, dt, g_y, drag_beta_max, a_np, a_env_1, a_env_2,
+        v_drag_1, v_drag_2, sigma_pos, sigma_vel, j_env_max,
+    );
+    let swap = eval_occluded_assignment(
+        x1_pre, y1_pre, vx1_pre, vy1_pre, m1, r1, x2_pre, y2_pre, vx2_pre, vy2_pre, m2, r2, x_b,
+        y_b, vx_b, vy_b, x_a, y_a, vx_a, vy_a, dt, g_y, drag_beta_max, a_np, a_env_1, a_env_2,
+        v_drag_1, v_drag_2, sigma_pos, sigma_vel, j_env_max,
+    );
+    if !keep.finite_ok || !swap.finite_ok {
+        return OCCL_STATUS_NONE;
+    }
+
+    let mut mask: u32 = 0;
+    if keep.h0_ok {
+        mask |= HYP_PASSTHROUGH_KEEP;
+    }
+    if swap.h0_ok {
+        mask |= HYP_PASSTHROUGH_SWAP;
+    }
+    if keep.h1_ok {
+        mask |= HYP_COLLISION_KEEP;
+    }
+    if swap.h1_ok {
+        mask |= HYP_COLLISION_SWAP;
+    }
+
+    let admissible_count = mask.count_ones();
+    let status = if admissible_count == 1 {
+        OCCL_STATUS_UNIQUE
+    } else if admissible_count >= 2 {
+        OCCL_STATUS_AMBIGUOUS
+    } else {
+        OCCL_STATUS_VIOLATED
+    };
+
+    let keep_any = keep.h0_ok || keep.h1_ok;
+    let swap_any = swap.h0_ok || swap.h1_ok;
+    let use_swap = if keep_any && !swap_any {
+        false
+    } else if swap_any && !keep_any {
+        true
+    } else {
+        let kj = keep.j_net_mag / j_env_max;
+        let kk = keep.dk.max(0.0) / keep.eps_k;
+        let sj = swap.j_net_mag / j_env_max;
+        let sk = swap.dk.max(0.0) / swap.eps_k;
+        (sj * sj + sk * sk) < (kj * kj + kk * kk)
+    };
+    let top = if use_swap { &swap } else { &keep };
+
+    let top_ang_mom_resid = if !use_swap {
+        if keep.h1_ok && !keep.h0_ok {
+            keep.ang_mom_resid_norm_h1
+        } else if keep.h0_ok && !keep.h1_ok {
+            keep.ang_mom_resid_norm_trap
+        } else {
+            keep.ang_mom_resid_norm_trap.min(keep.ang_mom_resid_norm_h1)
+        }
+    } else if swap.h1_ok && !swap.h0_ok {
+        swap.ang_mom_resid_norm_h1
+    } else if swap.h0_ok && !swap.h1_ok {
+        swap.ang_mom_resid_norm_trap
+    } else {
+        swap.ang_mom_resid_norm_trap.min(swap.ang_mom_resid_norm_h1)
+    };
+    let _ = (top.d_lz_trap, top.l_env_max, top.l_scale);
+
+    let (est_tau_sec, est_restitution_e) = if keep.h1_ok && swap.h1_ok {
+        if swap.h1_chi2 < keep.h1_chi2 {
+            (swap.h1_tau, swap.h1_e)
+        } else {
+            (keep.h1_tau, keep.h1_e)
+        }
+    } else if keep.h1_ok {
+        (keep.h1_tau, keep.h1_e)
+    } else if swap.h1_ok {
+        (swap.h1_tau, swap.h1_e)
+    } else {
+        (0.0, 0.0)
+    };
+
+    telem[0] = status as f32;
+    telem[1] = mask as f32;
+    telem[2] = admissible_count as f32;
+    telem[3] = top.j_net_mag as f32;
+    telem[4] = j_env_max as f32;
+    telem[5] = top.mom_resid_norm as f32;
+    telem[6] = top_ang_mom_resid as f32;
+    telem[7] = top.delta_ke_ratio as f32;
+    telem[8] = keep.h0_chi2 as f32;
+    telem[9] = swap.h0_chi2 as f32;
+    telem[10] = keep.h1_chi2 as f32;
+    telem[11] = swap.h1_chi2 as f32;
+    telem[12] = est_tau_sec as f32;
+    telem[13] = est_restitution_e as f32;
+    telem[14] = tid_a;
+    telem[15] = tid_b;
+    telem[16] = dt as f32;
+    telem[17] = event_frame;
+    telem[18] = keep.h0_imp_resid as f32;
+    telem[19] = swap.h0_imp_resid as f32;
+    telem[20] = keep.h1_imp_resid as f32;
+    telem[21] = swap.h1_imp_resid as f32;
+    telem[22] = g_y as f32;
+    telem[23] = mass_ratio as f32;
+
+    status
+}
+
+impl OccludedConservationState {
+    pub const fn zeroed() -> Self {
+        Self {
+            telem: [0.0; CONSERVATION_TELEM_LEN],
+            input: [0.0; CONSERVATION_INPUT_LEN],
+            track_pairs: [OcclPairTrackState::zeroed(); 8],
+            slot_obs: [SlotObsHistory::zeroed(); MAX_TARGETS],
+            live_event_seq: 0,
+            last_frame_idx: 0,
+            last_discont_seen: 0,
+            last_continuity_epoch: 0,
+            has_last_frame: 0,
+            _pad: [0; 3],
+        }
+    }
+
+    pub fn clear_tracking_state(&mut self) {
+        let mut p = 0usize;
+        while p < 8 {
+            self.track_pairs[p].reset_in_place();
+            p += 1;
+        }
+        let mut m = 0usize;
+        while m < MAX_TARGETS {
+            self.slot_obs[m].reset_in_place();
+            m += 1;
+        }
+        self.last_frame_idx = 0;
+        self.last_discont_seen = 0;
+        self.has_last_frame = 0;
+    }
+
+    pub fn reset_continuity(&mut self) {
+        self.telem.fill(0.0);
+        self.live_event_seq = 0;
+        self.last_continuity_epoch = 0;
+        self.clear_tracking_state();
+    }
+
+    pub fn reset(&mut self) {
+        self.telem.fill(0.0);
+        self.input.fill(0.0);
+        self.live_event_seq = 0;
+        self.last_continuity_epoch = 0;
+        self.clear_tracking_state();
+    }
+
+    pub fn eval_staged(&mut self) -> u32 {
+        eval_occluded_pair_core(&self.input, &mut self.telem)
+    }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct CollisionAnalyzerState {
@@ -4576,6 +5537,7 @@ pub struct CollisionAnalyzerState {
     pub recent_pairs: [RecentCollisionPair; 8],
     pub recent_cursor: u8,
     pub _pad: [u8; 3],
+    pub conservation: OccludedConservationState,
 }
 
 #[repr(C)]
@@ -4608,6 +5570,7 @@ impl CollisionAnalyzerState {
             recent_pairs: [RecentCollisionPair::zeroed(); 8],
             recent_cursor: 0,
             _pad: [0; 3],
+            conservation: OccludedConservationState::zeroed(),
         }
     }
 
@@ -4625,6 +5588,27 @@ impl CollisionAnalyzerState {
         self.recent_pairs.fill(RecentCollisionPair::zeroed());
         self.recent_cursor = 0;
         self._pad = [0; 3];
+        self.conservation.reset();
+    }
+
+    #[inline(always)]
+    pub fn conservation_telemetry_ptr(&self) -> *const f32 {
+        self.conservation.telem.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn conservation_input_mut_ptr(&mut self) -> *mut f32 {
+        self.conservation.input.as_mut_ptr()
+    }
+
+    #[inline(never)]
+    pub fn eval_staged_occluded_pair(&mut self) -> u32 {
+        self.conservation.eval_staged()
+    }
+
+    #[inline(always)]
+    pub fn conservation_live_event_seq(&self) -> u32 {
+        self.conservation.live_event_seq
     }
 }
 
@@ -4692,6 +5676,7 @@ struct SamplePt {
 #[derive(Clone, Copy)]
 pub struct CollisionArenaView<'a> {
     pub frame_idx: u32,
+    pub continuity_epoch: u32,
     pub lookahead_k: u8,
     pub scene_gravity_conf: f32,
     pub scene_gravity_px_s2: f32,
@@ -4710,8 +5695,10 @@ pub struct CollisionTrackView<'a> {
     pub confirmed: u8,
     pub is_ballistic: u8,
     pub pivot_valid: u8,
+    pub coasting: u8,
     pub track_id: u32,
     pub birth_frame: u32,
+    pub orig_birth_frame: u32,
     pub last_discont_frame: u32,
     pub disp_world_x: f32,
     pub disp_world_y: f32,
@@ -4725,11 +5712,25 @@ pub struct CollisionTrackView<'a> {
 #[inline(always)]
 pub fn reset_collision_slot(st: &mut CollisionAnalyzerState, slot_m: usize) {
     if slot_m < MAX_TARGETS {
+        let old_tid = st.target_last_tid[slot_m];
+        let obs_tid = st.conservation.slot_obs[slot_m].tid;
         st.target_last_e[slot_m] = 0.0;
         st.target_last_frame[slot_m] = 0;
         st.target_detect_frame[slot_m] = 0;
         st.target_last_tid[slot_m] = 0;
         st.target_partner_tid[slot_m] = 0;
+        st.conservation.slot_obs[slot_m].reset_in_place();
+        for p in 0..8 {
+            let pair = &mut st.conservation.track_pairs[p];
+            if pair.active != 0
+                && (pair.slot_a as usize == slot_m
+                    || pair.slot_b as usize == slot_m
+                    || (old_tid != 0 && (pair.tid_a == old_tid || pair.tid_b == old_tid))
+                    || (obs_tid != 0 && (pair.tid_a == obs_tid || pair.tid_b == obs_tid)))
+            {
+                pair.reset_in_place();
+            }
+        }
     }
 }
 
@@ -5585,6 +6586,476 @@ fn record_collision_event(state: &mut CollisionAnalyzerState, ev: CollisionPairE
     }
 }
 
+fn fit_obs_history_slice(
+    obs: &SlotObsHistory,
+    k_start: usize,
+    k_end: usize,
+    t_ref: f64,
+    grav_ay: f32,
+    dt_nom: f32,
+) -> OlsRay {
+    let n_stored = (obs.vis_streak as usize).min(8);
+    let hi = k_end.min(n_stored);
+    if k_start >= hi || hi - k_start < 3 {
+        return OlsRay {
+            valid: false,
+            px0: 0.0,
+            py0: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            rmse: 1e9,
+            span_sec: 0.0,
+        };
+    }
+    let base = if obs.vis_streak > 8 {
+        obs.head as usize
+    } else {
+        0
+    };
+    let mut pts = [SamplePt {
+        tau: 0.0,
+        wx: 0.0,
+        wy: 0.0,
+    }; 8];
+    let mut cnt = 0usize;
+    let mut k = k_start;
+    while k < hi && cnt < 8 {
+        let idx = (base + k) & 7;
+        let tau = (obs.t_sec[idx] - t_ref) as f32;
+        let wx = obs.wx[idx];
+        let wy = obs.wy[idx] - 0.5 * grav_ay * tau * tau;
+        pts[cnt] = SamplePt { tau, wx, wy };
+        cnt += 1;
+        k += 1;
+    }
+    fit_ols_line(&pts[..cnt], dt_nom)
+}
+
+#[inline(always)]
+fn expire_pairs_for_slot_or_tid(
+    pairs: &mut [OcclPairTrackState; 8],
+    slot_m: usize,
+    tid_old: u32,
+    tid_new: u32,
+) {
+    for p in 0..8 {
+        let pair = &mut pairs[p];
+        if pair.active != 0
+            && (pair.slot_a as usize == slot_m
+                || pair.slot_b as usize == slot_m
+                || (tid_old != 0 && (pair.tid_a == tid_old || pair.tid_b == tid_old))
+                || (tid_new != 0 && (pair.tid_a == tid_new || pair.tid_b == tid_new)))
+        {
+            pair.reset_in_place();
+        }
+    }
+}
+
+#[inline(never)]
+fn update_live_occluded_pairs(
+    arena: &CollisionArenaView<'_>,
+    tracks: &[CollisionTrackView<'_>; 16],
+    cons: &mut OccludedConservationState,
+    s: f32,
+    dt_nom: f32,
+) {
+    if cons.has_last_frame != 0 && arena.frame_idx == cons.last_frame_idx {
+        return;
+    }
+
+    let mut max_discont: u32 = 0;
+    for m in 0..MAX_TARGETS {
+        if tracks[m].last_discont_frame > max_discont {
+            max_discont = tracks[m].last_discont_frame;
+        }
+    }
+    if (cons.has_last_frame != 0 && arena.frame_idx != cons.last_frame_idx.wrapping_add(1))
+        || (cons.last_continuity_epoch != 0
+            && arena.continuity_epoch != cons.last_continuity_epoch)
+        || (max_discont > 0
+            && (max_discont != cons.last_discont_seen || max_discont == arena.frame_idx))
+    {
+        cons.reset_continuity();
+        cons.last_discont_seen = max_discont;
+    }
+    cons.last_continuity_epoch = arena.continuity_epoch;
+    cons.has_last_frame = 1;
+    cons.last_frame_idx = arena.frame_idx;
+
+    let f_slot = (arena.frame_idx as usize) & HIST_RING_MASK;
+    let t_now = arena.hist_t_sec[f_slot];
+    let cam_now_x = arena.hist_cam_x[f_slot];
+    let cam_now_y = arena.hist_cam_y[f_slot];
+
+    // Capture live unoccluded observations once per committed frame, keyed by (track_id, orig_birth_frame).
+    for m in 0..MAX_TARGETS {
+        let tm = &tracks[m];
+        if tm.active == 0 || tm.confirmed == 0 || tm.track_id == 0 {
+            if cons.slot_obs[m].active != 0 {
+                let old_tid = cons.slot_obs[m].tid;
+                expire_pairs_for_slot_or_tid(&mut cons.track_pairs, m, old_tid, 0);
+                cons.slot_obs[m].reset_in_place();
+            }
+            continue;
+        }
+
+        if cons.slot_obs[m].active == 0
+            || cons.slot_obs[m].tid != tm.track_id
+            || cons.slot_obs[m].orig_birth != tm.orig_birth_frame
+        {
+            let old_tid = cons.slot_obs[m].tid;
+            expire_pairs_for_slot_or_tid(&mut cons.track_pairs, m, old_tid, tm.track_id);
+            cons.slot_obs[m].reset_in_place();
+            cons.slot_obs[m].tid = tm.track_id;
+            cons.slot_obs[m].orig_birth = tm.orig_birth_frame;
+            cons.slot_obs[m].active = 1;
+            cons.slot_obs[m].prev_coasting = tm.coasting;
+        }
+
+        if tm.coasting == 0 {
+            if cons.slot_obs[m].prev_coasting > 0
+                || (cons.slot_obs[m].vis_streak > 0
+                    && arena.frame_idx != cons.slot_obs[m].last_vis_frame.wrapping_add(1))
+            {
+                cons.slot_obs[m].vis_streak = 0;
+                cons.slot_obs[m].head = 0;
+            }
+            let wx = tm.arc_raw_x[f_slot] + cam_now_x;
+            let wy = tm.arc_raw_y[f_slot] + cam_now_y;
+            if tm.arc_vis[f_slot] != 0 && wx.is_finite() && wy.is_finite() && t_now.is_finite() {
+                let h = (cons.slot_obs[m].head as usize) & 7;
+                cons.slot_obs[m].t_sec[h] = t_now;
+                cons.slot_obs[m].wx[h] = wx;
+                cons.slot_obs[m].wy[h] = wy;
+                cons.slot_obs[m].head = ((h + 1) & 7) as u8;
+                cons.slot_obs[m].vis_streak = cons.slot_obs[m].vis_streak.saturating_add(1);
+                cons.slot_obs[m].last_vis_frame = arena.frame_idx;
+            }
+        }
+        cons.slot_obs[m].prev_coasting = tm.coasting;
+    }
+
+    // Expire retired, mismatched, or timed-out pending pairs.
+    for p in 0..8 {
+        let pair = &mut cons.track_pairs[p];
+        if pair.active == 0 {
+            continue;
+        }
+        let sa = pair.slot_a as usize;
+        let sb = pair.slot_b as usize;
+        let valid_slots = sa < MAX_TARGETS
+            && sb < MAX_TARGETS
+            && sa != sb
+            && tracks[sa].active != 0
+            && tracks[sa].confirmed != 0
+            && tracks[sb].active != 0
+            && tracks[sb].confirmed != 0
+            && tracks[sa].track_id == pair.tid_a
+            && tracks[sb].track_id == pair.tid_b
+            && tracks[sa].orig_birth_frame == pair.orig_birth_a
+            && tracks[sb].orig_birth_frame == pair.orig_birth_b;
+        let timed_out = arena.frame_idx.saturating_sub(pair.last_seen_frame) > 90
+            || (pair.occl_seen_mask != 0
+                && arena.frame_idx.saturating_sub(pair.occl_start_frame) > 90);
+        if !valid_slots || timed_out {
+            pair.reset_in_place();
+        }
+    }
+
+    let prox_r = PAIR_SCAN_PROX_SD * s;
+    let prox_r2 = prox_r * prox_r;
+    let far_r2 = (1.35 * prox_r) * (1.35 * prox_r);
+
+    for i in 0..MAX_TARGETS {
+        let ti = &tracks[i];
+        if ti.active == 0 || ti.confirmed == 0 || ti.track_id == 0 {
+            continue;
+        }
+        for j in (i + 1)..MAX_TARGETS {
+            let tj = &tracks[j];
+            if tj.active == 0 || tj.confirmed == 0 || tj.track_id == 0 {
+                continue;
+            }
+            let (sa, sb) = if ti.track_id <= tj.track_id {
+                (i, j)
+            } else {
+                (j, i)
+            };
+            let ta = &tracks[sa];
+            let tb = &tracks[sb];
+
+            let mut found_idx: Option<usize> = None;
+            for p in 0..8 {
+                let pr = &cons.track_pairs[p];
+                if pr.active != 0 && pr.tid_a == ta.track_id && pr.tid_b == tb.track_id {
+                    found_idx = Some(p);
+                    break;
+                }
+            }
+
+            let ca = ta.coasting;
+            let cb = tb.coasting;
+            let g_pair = if arena.scene_gravity_conf >= 0.45
+                && (ta.is_ballistic != 0 || tb.is_ballistic != 0)
+                && ta.pivot_valid == 0
+                && tb.pivot_valid == 0
+            {
+                arena.scene_gravity_px_s2
+            } else {
+                0.0
+            };
+
+            if ca == 0 && cb == 0 {
+                let ax = ta.arc_raw_x[f_slot] + cam_now_x;
+                let ay = ta.arc_raw_y[f_slot] + cam_now_y;
+                let bx = tb.arc_raw_x[f_slot] + cam_now_x;
+                let by = tb.arc_raw_y[f_slot] + cam_now_y;
+                let dist2 = (bx - ax) * (bx - ax) + (by - ay) * (by - ay);
+
+                let Some(p_idx) = found_idx else {
+                    if dist2 <= prox_r2 && ta.arc_vis[f_slot] != 0 && tb.arc_vis[f_slot] != 0 {
+                        let mut alloc_p = None;
+                        for p in 0..8 {
+                            if cons.track_pairs[p].active == 0 {
+                                alloc_p = Some(p);
+                                break;
+                            }
+                        }
+                        if alloc_p.is_none() {
+                            let mut best_evict = 0usize;
+                            let mut best_score = u64::MAX;
+                            for p in 0..8 {
+                                let pr = &cons.track_pairs[p];
+                                let prio: u64 = if pr.both_occluded != 0 {
+                                    2u64 << 40
+                                } else if pr.has_pre != 0 {
+                                    1u64 << 40
+                                } else {
+                                    0
+                                };
+                                let sc = prio | (pr.last_seen_frame as u64);
+                                if sc < best_score {
+                                    best_score = sc;
+                                    best_evict = p;
+                                }
+                            }
+                            alloc_p = Some(best_evict);
+                        }
+                        if let Some(p) = alloc_p {
+                            let pr = &mut cons.track_pairs[p];
+                            pr.reset_in_place();
+                            pr.tid_a = ta.track_id;
+                            pr.tid_b = tb.track_id;
+                            pr.orig_birth_a = ta.orig_birth_frame;
+                            pr.orig_birth_b = tb.orig_birth_frame;
+                            pr.slot_a = sa as u8;
+                            pr.slot_b = sb as u8;
+                            pr.active = 1;
+                            pr.start_frame = arena.frame_idx;
+                            pr.last_seen_frame = arena.frame_idx;
+                        }
+                    }
+                    continue;
+                };
+
+                cons.track_pairs[p_idx].slot_a = sa as u8;
+                cons.track_pairs[p_idx].slot_b = sb as u8;
+                cons.track_pairs[p_idx].last_seen_frame = arena.frame_idx;
+
+                if cons.track_pairs[p_idx].both_occluded != 0 {
+                    if cons.slot_obs[sa].vis_streak >= 5 && cons.slot_obs[sb].vis_streak >= 5 {
+                        let na = (cons.slot_obs[sa].vis_streak as usize).min(8);
+                        let nb = (cons.slot_obs[sb].vis_streak as usize).min(8);
+                        let ka0 = if cons.track_pairs[p_idx].max_coast_a == 0 {
+                            na.saturating_sub(4)
+                        } else if cons.slot_obs[sa].vis_streak <= 8 {
+                            1
+                        } else {
+                            na.saturating_sub(6)
+                        };
+                        let kb0 = if cons.track_pairs[p_idx].max_coast_b == 0 {
+                            nb.saturating_sub(4)
+                        } else if cons.slot_obs[sb].vis_streak <= 8 {
+                            1
+                        } else {
+                            nb.saturating_sub(6)
+                        };
+                        let ra_post = fit_obs_history_slice(
+                            &cons.slot_obs[sa],
+                            ka0,
+                            na,
+                            t_now,
+                            g_pair,
+                            dt_nom,
+                        );
+                        let rb_post = fit_obs_history_slice(
+                            &cons.slot_obs[sb],
+                            kb0,
+                            nb,
+                            t_now,
+                            g_pair,
+                            dt_nom,
+                        );
+                        let occl_dt = (t_now - cons.track_pairs[p_idx].pre_t_sec) as f32;
+                        if ra_post.valid
+                            && rb_post.valid
+                            && ra_post.rmse <= 4.0 * s
+                            && rb_post.rmse <= 4.0 * s
+                            && occl_dt > dt_nom
+                        {
+                            let rmse_max = cons.track_pairs[p_idx]
+                                .pre_rmse
+                                .max(ra_post.rmse)
+                                .max(rb_post.rmse);
+                            let sigma_pos = max_f32(1.2 * s, rmse_max);
+                            let sigma_vel = clamp_f32(
+                                max_f32(rmse_max, 0.35 * s) / max_f32(1.5 * dt_nom, 0.015),
+                                4.0 * s,
+                                35.0 * s,
+                            );
+                            let pr = cons.track_pairs[p_idx];
+                            let mut live_in = [0.0f32; CONSERVATION_INPUT_LEN];
+                            live_in[0] = pr.pre_x1;
+                            live_in[1] = pr.pre_y1;
+                            live_in[2] = pr.pre_vx1;
+                            live_in[3] = pr.pre_vy1;
+                            live_in[4] = 1.0;
+                            live_in[5] = 6.0 * s;
+                            live_in[6] = pr.pre_x2;
+                            live_in[7] = pr.pre_y2;
+                            live_in[8] = pr.pre_vx2;
+                            live_in[9] = pr.pre_vy2;
+                            live_in[10] = 1.0;
+                            live_in[11] = 6.0 * s;
+                            live_in[12] = ra_post.px0;
+                            live_in[13] = ra_post.py0;
+                            live_in[14] = ra_post.vx;
+                            live_in[15] = ra_post.vy;
+                            live_in[16] = rb_post.px0;
+                            live_in[17] = rb_post.py0;
+                            live_in[18] = rb_post.vx;
+                            live_in[19] = rb_post.vy;
+                            live_in[20] = occl_dt;
+                            live_in[21] = g_pair;
+                            live_in[22] = 0.05;
+                            live_in[23] = 2.0 * s;
+                            live_in[24] = 2.0 * s;
+                            live_in[25] = sigma_pos;
+                            live_in[26] = sigma_vel;
+                            live_in[27] = pr.tid_a as f32;
+                            live_in[28] = pr.tid_b as f32;
+                            live_in[29] = pr.occl_start_frame as f32;
+                            live_in[30] = 0.0;
+                            live_in[31] = 0.0;
+
+                            let st_code = eval_occluded_pair_core(&live_in, &mut cons.telem);
+                            if st_code != OCCL_STATUS_NONE {
+                                let ns = cons.live_event_seq.wrapping_add(1);
+                                cons.live_event_seq = if ns == 0 { 1 } else { ns };
+                            }
+                        }
+
+                        let pr = &mut cons.track_pairs[p_idx];
+                        pr.both_occluded = 0;
+                        pr.occl_seen_mask = 0;
+                        pr.has_pre = 0;
+                        pr.max_coast_a = 0;
+                        pr.max_coast_b = 0;
+                        pr.co_coast_frames = 0;
+                        pr.cooldown_until = arena.frame_idx.saturating_add(12);
+                    }
+                } else if dist2 > far_r2 {
+                    cons.track_pairs[p_idx].reset_in_place();
+                } else {
+                    cons.track_pairs[p_idx].occl_seen_mask = 0;
+                    cons.track_pairs[p_idx].max_coast_a = 0;
+                    cons.track_pairs[p_idx].max_coast_b = 0;
+                    if arena.frame_idx >= cons.track_pairs[p_idx].cooldown_until
+                        && cons.slot_obs[sa].vis_streak >= 4
+                        && cons.slot_obs[sb].vis_streak >= 4
+                    {
+                        let na = (cons.slot_obs[sa].vis_streak as usize).min(8);
+                        let nb = (cons.slot_obs[sb].vis_streak as usize).min(8);
+                        let use_a = if na >= 5 { na - 1 } else { na };
+                        let use_b = if nb >= 5 { nb - 1 } else { nb };
+                        let ref_f = if na >= 5 && nb >= 5 {
+                            arena.frame_idx.saturating_sub(1)
+                        } else {
+                            arena.frame_idx
+                        };
+                        let t_pre_ref = arena.hist_t_sec[(ref_f as usize) & HIST_RING_MASK];
+                        let ra_pre = fit_obs_history_slice(
+                            &cons.slot_obs[sa],
+                            0,
+                            use_a,
+                            t_pre_ref,
+                            g_pair,
+                            dt_nom,
+                        );
+                        let rb_pre = fit_obs_history_slice(
+                            &cons.slot_obs[sb],
+                            0,
+                            use_b,
+                            t_pre_ref,
+                            g_pair,
+                            dt_nom,
+                        );
+                        if ra_pre.valid
+                            && rb_pre.valid
+                            && ra_pre.rmse <= 3.5 * s
+                            && rb_pre.rmse <= 3.5 * s
+                        {
+                            let pr = &mut cons.track_pairs[p_idx];
+                            pr.pre_x1 = ra_pre.px0;
+                            pr.pre_y1 = ra_pre.py0;
+                            pr.pre_vx1 = ra_pre.vx;
+                            pr.pre_vy1 = ra_pre.vy;
+                            pr.pre_x2 = rb_pre.px0;
+                            pr.pre_y2 = rb_pre.py0;
+                            pr.pre_vx2 = rb_pre.vx;
+                            pr.pre_vy2 = rb_pre.vy;
+                            pr.pre_t_sec = t_pre_ref;
+                            pr.pre_rmse = max_f32(ra_pre.rmse, rb_pre.rmse);
+                            pr.has_pre = 1;
+                        }
+                    }
+                }
+            } else if let Some(p_idx) = found_idx {
+                let pr = &mut cons.track_pairs[p_idx];
+                pr.slot_a = sa as u8;
+                pr.slot_b = sb as u8;
+                if pr.has_pre != 0 {
+                    pr.last_seen_frame = arena.frame_idx;
+                    if pr.occl_seen_mask == 0 {
+                        pr.occl_start_frame = arena.frame_idx;
+                    }
+                    if ca > 0 {
+                        pr.occl_seen_mask |= 1;
+                        if ca > pr.max_coast_a {
+                            pr.max_coast_a = ca;
+                        }
+                    }
+                    if cb > 0 {
+                        pr.occl_seen_mask |= 2;
+                        if cb > pr.max_coast_b {
+                            pr.max_coast_b = cb;
+                        }
+                    }
+                    if ca > 0 && cb > 0 {
+                        pr.co_coast_frames = pr.co_coast_frames.saturating_add(1);
+                    }
+                    let both_coast_ok = pr.co_coast_frames >= 1
+                        && pr.occl_seen_mask == 3
+                        && (pr.max_coast_a >= 2 || pr.max_coast_b >= 2);
+                    if both_coast_ok {
+                        pr.both_occluded = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[inline(never)]
 pub fn analyze_two_body_collisions(
     arena: &CollisionArenaView<'_>,
@@ -5739,6 +7210,8 @@ pub fn analyze_two_body_collisions(
         out.last_pair_tid_b = st.last_event.tid_b as f32;
         out.last_pair_frame = st.last_event.event_frame as f32;
     }
+
+    update_live_occluded_pairs(arena, tracks, &mut st.conservation, s, dt_nom);
 
     out
 }

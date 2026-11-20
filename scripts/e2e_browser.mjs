@@ -57,6 +57,8 @@ function launchHeadlessChrome(chromeBin, userDataDir) {
     '--no-default-browser-check',
     '--autoplay-policy=no-user-gesture-required',
     '--mute-audio',
+    '--use-fake-device-for-media-stream',
+    '--use-fake-ui-for-media-stream',
     '--disable-background-timer-throttling',
     '--disable-renderer-backgrounding',
     '--disable-backgrounding-occluded-windows',
@@ -289,7 +291,7 @@ async function main() {
         const collisions = parseInt(document.getElementById('kpiCollisions')?.textContent || '0', 10);
         return {
           ok: kernel.includes('0 HEAP ALLOC / 0 IMPORTS') &&
-              arena.includes('320 PAGES / 20.00 MB') &&
+              arena.includes('448 PAGES / 28.00 MB') &&
               resMeta === '320×180 SD RGBA' &&
               targets === '4 / 16' &&
               collisions >= 2 &&
@@ -975,8 +977,8 @@ async function main() {
         };
       })()`
     );
-    if (selectMeta.optgroups !== 3 || selectMeta.options !== 15) {
-      throw new Error(`Expected 3 <optgroup> and 15 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (selectMeta.optgroups !== 4 || selectMeta.options !== 18) {
+      throw new Error(`Expected 4 <optgroup> and 18 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);
@@ -3482,6 +3484,3196 @@ async function main() {
       }
     }
 
+    // 9. Wave-1 Live Showcase BOS Plume, Neumann Potential / Curl Overlays, Native 1:1 ROI Offset, Tripod Failure Warning & Zero-CLS
+    {
+      const baseUrl = `http://127.0.0.1:${srv.port}`;
+      const { targetId: w1TargetId } = await cdp.send('Target.createTarget', { url: `${baseUrl}/index.html` });
+      const { sessionId: w1Session } = await cdp.send('Target.attachToTarget', { targetId: w1TargetId, flatten: true });
+      try {
+        await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, w1Session);
+        await cdp.send('Page.enable', {}, w1Session);
+        await cdp.send('Log.enable', {}, w1Session);
+        await cdp.send('Runtime.enable', {}, w1Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
+          w1Session
+        );
+
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9a: Showcase booted cleanly with Wave-1 BOS controls',
+          `(() => {
+            const kernelTxt = (document.getElementById('scValKernel')?.textContent || '').trim();
+            return {
+              ok: document.body?.dataset?.surface === 'showcase' &&
+                  Boolean(document.getElementById('btnHeroBosPlume')) &&
+                  Boolean(document.getElementById('acquisitionStatusBanner')) &&
+                  kernelTxt.endsWith('ms / frame') &&
+                  !kernelTxt.startsWith('--')
+            };
+          })()`,
+          20000,
+          true
+        );
+
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            window.__e2eW1Cls = 0;
+            window.__e2eW1ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW1Cls += e.value;
+              }
+            });
+            window.__e2eW1ClsPo.observe({ type: 'layout-shift', buffered: false });
+            document.getElementById('btnHeroBosPlume')?.click();
+            return true;
+          })()`
+        );
+
+        const bosReadyState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9a: Showcase Thermal Plume (BOS) reaches READY + 1:1 Native ROI + fresh stamps',
+          `(() => {
+            const btn = document.getElementById('btnHeroBosPlume');
+            const selVal = document.getElementById('sampleVideoSelect')?.value || '';
+            const bosMode = document.getElementById('bosModeSelect')?.value || '';
+            const ovMode = document.getElementById('fieldOverlayModeSelect')?.value || '';
+            const roiChk = document.getElementById('chkNativeRoi')?.checked === true;
+            const covChk = document.getElementById('chkCovEllipses')?.checked === true;
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            const diagBos = document.getElementById('diagBosState')?.textContent || '';
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const diagStamps = document.getElementById('diagWave1Stamps')?.textContent || '';
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const sev = banner?.dataset?.severity || '';
+            const st = window.__chronosUiState;
+            return {
+              ok: btn?.getAttribute('aria-pressed') === 'true' &&
+                  selVal.endsWith('bos_thermal_plume.mp4') &&
+                  bosMode === '1' &&
+                  ovMode === '5' &&
+                  roiChk &&
+                  covChk &&
+                  roiTxt.startsWith('1:1 NATIVE (0,0 640x360)') &&
+                  diagBos.startsWith('READY · ') &&
+                  diagIngest.includes(' · OK · ') &&
+                  diagStamps.length >= 6 &&
+                  diagStamps[5] === 'V' &&
+                  sev === 'ok' &&
+                  st?.overlays?.fieldOverlayMode === 5 &&
+                  st?.overlays?.showCovEllipses === true,
+              roiTxt,
+              diagBos,
+              diagIngest,
+              diagStamps,
+              sev,
+            };
+          })()`,
+          22000
+        );
+
+        const bosHudBytes = await (async () => {
+          const rect = await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const r = document.getElementById('hudCanvas').getBoundingClientRect();
+              return { x: Math.max(0, Math.floor(r.left)), y: Math.max(0, Math.floor(r.top)), width: Math.ceil(r.width), height: Math.ceil(r.height), scale: 1 };
+            })()`
+          );
+          const shot = await cdp.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: false, clip: rect }, w1Session);
+          return shot?.data ? Buffer.from(shot.data, 'base64').byteLength : 0;
+        })();
+        if (bosHudBytes < 2500) {
+          throw new Error(`Step 9a: Expected BOS #hudCanvas screenshot >= 2500 B, got ${bosHudBytes} B`);
+        }
+
+        await new Promise((r) => setTimeout(r, 80));
+        const w1ShowcaseCls = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (window.__e2eW1ClsPo) window.__e2eW1ClsPo.disconnect();
+            return window.__e2eW1Cls || 0;
+          })()`
+        );
+        if (w1ShowcaseCls >= 0.000001) {
+          throw new Error(`Step 9a: Expected 0.000000 CLS on Showcase BOS flow, got ${w1ShowcaseCls}`);
+        }
+
+        // 9b. Switch to Full Deck + attach fresh Deck CLS observer + verify Neumann Potential (6) & Curl Check (7) + SD Native 1:1 ROI non-zero (crop_x0, crop_y0) offset
+        await cdp.evalJs(w1Session, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b: Deck surface active for BOS mode switching',
+          `(() => ({ ok: document.body?.dataset?.surface === 'deck' }))()`,
+          6000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
+            window.__e2eW1DeckCls = 0;
+            window.__e2eW1DeckClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW1DeckCls += e.value;
+              }
+            });
+            window.__e2eW1DeckClsPo.observe({ type: 'layout-shift', buffered: false });
+            resolve(true);
+          })))`
+        );
+
+        for (const modeVal of ['6', '7']) {
+          await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const sel = document.getElementById('fieldOverlayModeSelect');
+              sel.value = ${JSON.stringify(modeVal)};
+              sel.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`
+          );
+          await waitForCondition(
+            cdp,
+            w1Session,
+            `Step 9b: BOS fieldOverlayMode=${modeVal} synced cleanly`,
+            `(() => ({
+              ok: document.getElementById('fieldOverlayModeSelect')?.value === ${JSON.stringify(modeVal)} &&
+                  window.__chronosUiState?.overlays?.fieldOverlayMode === ${Number(modeVal)}
+            }))()`,
+            4000
+          );
+        }
+
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnResSd')?.click();
+            const chk = document.getElementById('chkNativeRoi');
+            if (chk && !chk.checked) {
+              chk.checked = true;
+              chk.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const rx = document.getElementById('rangeRoiX0');
+            const ry = document.getElementById('rangeRoiY0');
+            if (rx) { rx.value = '100'; rx.dispatchEvent(new Event('input', { bubbles: true })); }
+            if (ry) { ry.value = '100'; ry.dispatchEvent(new Event('input', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const roiOffsetState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b: SD Native 1:1 ROI shifts to (320,180 320x180) without implicit rescaling',
+          `(() => {
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            return { ok: roiTxt === '1:1 NATIVE (320,180 320x180)', roiTxt };
+          })()`,
+          8000
+        );
+
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnCalRuler')?.click();
+            const hud = document.getElementById('hudCanvas');
+            const r = hud.getBoundingClientRect();
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * 0.25, clientY: r.top + r.height * 0.50 }));
+            hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * 0.75, clientY: r.top + r.height * 0.50 }));
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b-cal: SURVEYED RULER active on cropped 1:1 ROI before ROI shift',
+          `(() => ({
+            ok: document.getElementById('calBadge')?.textContent === 'SURVEYED RULER',
+            badge: document.getElementById('calBadge')?.textContent || '',
+          }))()`,
+          8000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const rx = document.getElementById('rangeRoiX0');
+            if (rx) { rx.value = '0'; rx.dispatchEvent(new Event('input', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9b-cal-reset: Shifting Native 1:1 crop_x0 resets stale SURVEYED RULER to PX UNITS',
+          `(() => {
+            const roiTxt = document.getElementById('roiGeomMeta')?.textContent || '';
+            const badge = document.getElementById('calBadge')?.textContent || '';
+            const live = document.getElementById('calStatusLive')?.textContent || '';
+            return {
+              ok: roiTxt === '1:1 NATIVE (0,180 320x180)' && badge === 'PX UNITS' && live.includes('ROI CROP CHANGED'),
+              roiTxt,
+              badge,
+              live,
+            };
+          })()`,
+          8000
+        );
+
+        // 9c. Restore HD and trigger Controlled Handheld Failure -> banner turns danger with SHIFT readout
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            document.getElementById('btnResHd')?.click();
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/bos_handheld_failure.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`
+        );
+        const failureBannerState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9c: bos_handheld_failure.mp4 triggers Tripod Failure Warning banner (data-severity="danger")',
+          `(() => {
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const sev = banner?.dataset?.severity || '';
+            const txt = banner?.textContent || '';
+            const diagBos = document.getElementById('diagBosState')?.textContent || '';
+            const diagCov = document.getElementById('diagMetrologyCov')?.textContent || '';
+            return {
+              ok: sev === 'danger' &&
+                  txt.includes('TRIPOD FAILURE / DISTURBED') &&
+                  diagBos.startsWith('DISTURBED · '),
+              sev,
+              txt,
+              diagBos,
+              diagCov,
+            };
+          })()`,
+          24000
+        );
+
+        // 9d. Perspective Flyby Decoy: 2x2 covariance active across multiple frames with 0 false I1 Hero promos
+        const epBeforeDecoy = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const m = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = m ? Number(m[1]) : 0;
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/perspective_flyby_decoy.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return curEp;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9d-init: perspective_flyby_decoy.mp4 booted to seq >= 20 on fresh continuity epoch',
+          `(() => {
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const mEp = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = mEp ? Number(mEp[1]) : 0;
+            const seqNum = snap?.wave1?.dispMeta?.sourceSeq || 0;
+            const metSel = document.getElementById('metrologyModeSelect')?.value || '';
+            const ellOn = document.getElementById('chkCovEllipses')?.checked === true;
+            const srcOk = (document.getElementById('hudSourceLabel')?.textContent || '').includes('PERSPECTIVE');
+            return {
+              ok: curEp > ${epBeforeDecoy} && srcOk && metSel === '2' && ellOn && seqNum >= 20 &&
+                  window.__chronosUiState?.overlays?.showCovEllipses === true,
+              curEp,
+              seqNum,
+            };
+          })()`,
+          24000
+        );
+        const decoyBudgetScale = Math.max(1.0, Math.min(2.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0') * 0.6));
+        const decoyDeadline = Date.now() + Math.round(22000 * decoyBudgetScale);
+        let decoyDistinct = 0;
+        let decoyPrevCommits = -1;
+        let decoyPrevSeq = -1;
+        let decoyMaxSeq = 0;
+        let decoyMaxUsable = 0;
+        let decoyLastDiag = '';
+        while (Date.now() < decoyDeadline) {
+          const sample = await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const snap = window.__chronosWave1Probe?.getLastWave1?.();
+              return {
+                diagCov: document.getElementById('diagMetrologyCov')?.textContent || '',
+                ep: snap?.wave1?.continuityEpoch || 0,
+                commits: snap?.wave1?.totalCommits || 0,
+                seq: snap?.wave1?.dispMeta?.sourceSeq || 0,
+                usable: snap?.metrology?.usableCovCount || 0,
+                cand: snap?.metrology?.promotedCandidates ?? -1,
+                autoHero: snap?.metrology?.activeAutoHeroes ?? -1,
+              };
+            })()`
+          );
+          if (sample.ep <= epBeforeDecoy) {
+            throw new Error(`Step 9d: continuity epoch regressed (${sample.ep} <= ${epBeforeDecoy})`);
+          }
+          if (sample.commits < decoyPrevCommits) {
+            throw new Error(`Step 9d: totalCommits went backward (${sample.commits} < ${decoyPrevCommits})`);
+          }
+          if (sample.cand !== 0 || sample.autoHero !== 0) {
+            throw new Error(`Step 9d: transient false Auto-Hero promotion on decoy seq=${sample.seq}: cand=${sample.cand}, autoHero=${sample.autoHero}, diag=${sample.diagCov}`);
+          }
+          if (sample.seq !== decoyPrevSeq && sample.commits > decoyPrevCommits) {
+            decoyDistinct++;
+            decoyPrevSeq = sample.seq;
+          }
+          decoyPrevCommits = sample.commits;
+          decoyMaxSeq = Math.max(decoyMaxSeq, sample.seq);
+          decoyMaxUsable = Math.max(decoyMaxUsable, sample.usable);
+          decoyLastDiag = sample.diagCov;
+          if (decoyMaxSeq >= 115 && decoyDistinct >= 8 && decoyMaxUsable >= 20) break;
+          await new Promise((r) => setTimeout(r, 90));
+        }
+        if (decoyMaxSeq < 115 || decoyDistinct < 8 || decoyMaxUsable < 20) {
+          throw new Error(`Step 9d: decoy loop incomplete (maxSeq=${decoyMaxSeq}, distinct=${decoyDistinct}, maxUsable=${decoyMaxUsable}, diag=${decoyLastDiag})`);
+        }
+        const decoyState = { diagCov: `${decoyLastDiag} (${decoyDistinct} samples, maxSeq=${decoyMaxSeq}, maxUsable=${decoyMaxUsable})` };
+
+        // 9e. Real Starling Swarm + H.264 2x2 Covariance Ellipse + Auto-Hero Promotion & Retirement Proof
+        const epBeforeStarling = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const m = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = m ? Number(m[1]) : 0;
+            const sel = document.getElementById('sampleVideoSelect');
+            sel.value = './samples/starling_murmuration_1000.mp4';
+            sel.dispatchEvent(new Event('change', { bubbles: true }));
+            return curEp;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e: Starling clip booted on fresh continuity epoch before enabling H.264 2x2 metrology',
+          `(() => {
+            const diagIngest = document.getElementById('diagWave1Ingest')?.textContent || '';
+            const mEp = diagIngest.match(/EP\\s+(\\d+)/);
+            const curEp = mEp ? Number(mEp[1]) : 0;
+            const srcOk = (document.getElementById('hudSourceLabel')?.textContent || '').includes('STARLING');
+            return { ok: curEp > ${epBeforeStarling} && srcOk, curEp, diagIngest };
+          })()`,
+          15000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
+            const sw = document.getElementById('swarmModeSelect');
+            if (sw && sw.value !== '2') { sw.value = '2'; sw.dispatchEvent(new Event('change', { bubbles: true })); }
+            const mm = document.getElementById('metrologyModeSelect');
+            if (mm) { mm.value = '2'; mm.dispatchEvent(new Event('change', { bubbles: true })); }
+            const chk = document.getElementById('chkCovEllipses');
+            if (chk && !chk.checked) { chk.checked = true; chk.dispatchEvent(new Event('change', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const denseCovState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e: Dense starling swarm runs 2x2 covariance + LOO residual Auto-Hero promotion (cand >= 1, tgts in 1..3)',
+          `(() => {
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v && v.playbackRate !== 0.25) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const diagCov = document.getElementById('diagMetrologyCov')?.textContent || '';
+            const mUsable = diagCov.match(/(\\d+)\\s+usable/);
+            const mCand = diagCov.match(/(\\d+)\\s+cand/);
+            const usable = mUsable ? Number(mUsable[1]) : 0;
+            const cand = mCand ? Number(mCand[1]) : 0;
+            const autoHero = snap?.metrology?.activeAutoHeroes ?? 0;
+            const conf = parseInt((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0].replace(/,/g, ''), 10) || 0;
+            const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
+            return {
+              ok: conf >= 900 &&
+                  usable >= 300 &&
+                  cand >= 1 &&
+                  tgts >= 1 &&
+                  tgts <= 3 &&
+                  window.__chronosUiState?.overlays?.showCovEllipses === true,
+              diagCov,
+              conf,
+              usable,
+              cand,
+              autoHero,
+              tgts,
+            };
+          })()`,
+          24000
+        );
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const mm = document.getElementById('metrologyModeSelect');
+            if (mm) { mm.value = '0'; mm.dispatchEvent(new Event('change', { bubbles: true })); }
+            return true;
+          })()`
+        );
+        const starlingMetOffState = await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9e-off: Disabling metrology mode=0 clears candidates & enabled bit 0 while keeping legacy tracking intact',
+          `(() => {
+            const snap = window.__chronosWave1Probe?.getLastWave1?.();
+            const autoHero = snap?.metrology?.activeAutoHeroes ?? -1;
+            const cand = snap?.metrology?.promotedCandidates ?? -1;
+            const enabledBits = snap?.wave1?.enabledBits ?? 1;
+            return {
+              ok: autoHero === 0 && cand === 0 && (enabledBits & 1) === 0,
+              autoHero,
+              cand,
+              enabledBits,
+            };
+          })()`,
+          12000
+        );
+
+        // 9f. Browser 8x4 Orientation x scanDir Matrix, 360x640 Quarter-Turn Native, Undersized Non-Smooth Fallback & Reject
+        await cdp.evalJs(
+          w1Session,
+          `(() => {
+            const v = document.getElementById('hiddenVideoSource') || document.querySelector('video');
+            if (v) {
+              v.defaultPlaybackRate = 1.0;
+              v.playbackRate = 1.0;
+              v.pause();
+            }
+            const sel = document.getElementById('sampleVideoSelect');
+            if (sel) sel.value = '';
+            const probe = window.__chronosWave1Probe;
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 0 });
+            probe.postWorkerMsg({ type: 'set_bos_config', bosMode: 0 });
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 0 });
+            probe.postWorkerMsg({ type: 'set_field_overlay_mode', fieldOverlayMode: 0 });
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 1.0, showHeroTargets: false, showcaseMinimalScopes: false });
+            probe.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w1Session,
+          'Step 9f-drain: Wait for paused video backpressure to settle before matrix checks',
+          `(() => ({ ok: window.__chronosWave1Probe?.getBusyState?.().workerFrameBusy === false }))()`,
+          5000
+        );
+        await new Promise((r) => setTimeout(r, 80));
+        const orientMatrixReport = await cdp.evalJs(
+          w1Session,
+          `(async () => {
+            const probe = window.__chronosWave1Probe;
+            const hudEl = document.getElementById('hudCanvas');
+            const readCanvas = document.createElement('canvas');
+            readCanvas.width = 960;
+            readCanvas.height = 540;
+            const rCtx = readCanvas.getContext('2d', { willReadFrequently: true });
+            const srcCanvas = document.createElement('canvas');
+            const sCtx = srcCanvas.getContext('2d');
+            const waitRafs = () => new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+            const sampleCornerColors = () => {
+              rCtx.drawImage(hudEl, 0, 0);
+              const pts = [[200, 135], [760, 135], [200, 405], [760, 405]];
+              return pts.map(([x, y]) => {
+                const d = rCtx.getImageData(x, y, 1, 1).data;
+                if (d[0] > 200 && d[1] < 55 && d[2] < 55) return 'R';
+                if (d[0] < 55 && d[1] > 200 && d[2] < 55) return 'G';
+                if (d[0] < 55 && d[1] < 55 && d[2] > 200) return 'B';
+                if (d[0] > 200 && d[1] > 200 && d[2] < 55) return 'Y';
+                return d[0] + ',' + d[1] + ',' + d[2];
+              }).join('');
+            };
+            const paintQuadrants = (w, h) => {
+              srcCanvas.width = w;
+              srcCanvas.height = h;
+              const hw = w >> 1;
+              const hh = h >> 1;
+              sCtx.fillStyle = '#ff0000'; sCtx.fillRect(0, 0, hw, hh);
+              sCtx.fillStyle = '#00ff00'; sCtx.fillRect(hw, 0, w - hw, hh);
+              sCtx.fillStyle = '#0000ff'; sCtx.fillRect(0, hh, hw, h - hh);
+              sCtx.fillStyle = '#ffff00'; sCtx.fillRect(hw, hh, w - hw, h - hh);
+            };
+            const expectedCorners = ['RGBY', 'BRYG', 'YBGR', 'GYRB', 'GRYB', 'RBGY', 'BYRG', 'YGBR'];
+            let seq = 1;
+            const epoch = 901;
+            let quarterTurnCount = 0;
+            for (let o = 0; o < 8; o++) {
+              const swapped = (o & 1) === 1;
+              const sw = swapped ? 360 : 640;
+              const sh = swapped ? 640 : 360;
+              paintQuadrants(sw, sh);
+              const rawImgData = (scanDirIdx) => sCtx.getImageData(0, 0, sw, sh).data.buffer.slice(0);
+              for (let sd = 0; sd < 4; sd++) {
+                probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: o, scanDir: sd });
+                let ack;
+                const ts = seq * 33333;
+                if ((sd & 1) === 0) {
+                  const bmp = await createImageBitmap(srcCanvas);
+                  ack = await probe.submitTestFrame({
+                    type: 'video_frame',
+                    epoch,
+                    seq,
+                    bitmap: bmp,
+                    dtSec: 1 / 30,
+                    mediaTimeSec: seq / 30,
+                    tSrcUs: ts,
+                  }, [bmp]);
+                } else {
+                  const buf = rawImgData(sd);
+                  ack = await probe.submitTestFrame({
+                    type: 'video_rgba',
+                    epoch,
+                    seq,
+                    width: sw,
+                    height: sh,
+                    buffer: buf,
+                    dtSec: 1 / 30,
+                    mediaTimeSec: seq / 30,
+                    tSrcUs: ts,
+                  }, [buf]);
+                }
+                if (!ack || ack.type !== 'frame_ack') {
+                  throw new Error('Step 9f matrix frame failed o=' + o + ' sd=' + sd + ': ' + JSON.stringify(ack));
+                }
+                const snap = probe.getLastWave1();
+                if (!snap || !snap.roi || snap.roi.orientation !== o || snap.roi.scanDir !== sd || !snap.roi.native1to1Active) {
+                  throw new Error('Step 9f ROI metadata mismatch o=' + o + ' sd=' + sd + ': ' + JSON.stringify(snap?.roi));
+                }
+                if (swapped) {
+                  if (snap.roi.srcW !== 360 || snap.roi.srcH !== 640 || snap.roi.engineW !== 640 || snap.roi.engineH !== 360) {
+                    throw new Error('Step 9f quarter-turn dims mismatch o=' + o + ': ' + JSON.stringify(snap.roi));
+                  }
+                  quarterTurnCount++;
+                }
+                let gotColors = '';
+                for (let rf = 0; rf < 24; rf++) {
+                  await waitRafs();
+                  gotColors = sampleCornerColors();
+                  if (gotColors === expectedCorners[o]) break;
+                }
+                if (gotColors !== expectedCorners[o]) {
+                  throw new Error('Step 9f HUD D4 mismatch o=' + o + ' sd=' + sd + ': got ' + gotColors + ' expected ' + expectedCorners[o]);
+                }
+                seq++;
+              }
+            }
+
+            // Undersized 160x90 sharp edge non-smoothed fallback check
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 160;
+            srcCanvas.height = 90;
+            sCtx.fillStyle = '#ff0000'; sCtx.fillRect(0, 0, 80, 90);
+            sCtx.fillStyle = '#0000ff'; sCtx.fillRect(80, 0, 80, 90);
+            const smallBmp = await createImageBitmap(srcCanvas);
+            const smallAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: smallBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [smallBmp]);
+            seq++;
+            if (!smallAck || smallAck.type !== 'frame_ack') throw new Error('Step 9f undersized ack failed');
+            const smallSnap = probe.getLastWave1();
+            if (!smallSnap?.roi || smallSnap.roi.native1to1Active !== false || smallSnap.roi.fallbackScale !== true) {
+              throw new Error('Step 9f undersized fallback flag mismatch: ' + JSON.stringify(smallSnap?.roi));
+            }
+            let leftPx = null;
+            let rightPx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              leftPx = rCtx.getImageData(478, 140, 1, 1).data;
+              rightPx = rCtx.getImageData(482, 140, 1, 1).data;
+              if (leftPx[1] <= 15 && rightPx[1] <= 15 && leftPx[0] >= 200 && rightPx[2] >= 200) break;
+            }
+            if (!leftPx || !rightPx || leftPx[0] < 240 || leftPx[2] > 15 || rightPx[2] < 240 || rightPx[0] > 15) {
+              throw new Error('Step 9f undersized fallback was smoothed! L=' + Array.from(leftPx || []) + ' R=' + Array.from(rightPx || []));
+            }
+
+            // preScaled=true on 640x360 must never mark native1to1Active=true
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            sCtx.fillStyle = '#00ff00'; sCtx.fillRect(0, 0, 640, 360);
+            const preBmp = await createImageBitmap(srcCanvas);
+            const preAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: preBmp,
+              preScaled: true,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [preBmp]);
+            seq++;
+            if (!preAck || preAck.type !== 'frame_ack') throw new Error('Step 9f preScaled ack failed');
+            const preSnap = probe.getLastWave1();
+            if (!preSnap?.roi || preSnap.roi.native1to1Active !== false || preSnap.roi.fallbackScale !== true) {
+              throw new Error('Step 9f preScaled native flag mismatch: ' + JSON.stringify(preSnap?.roi));
+            }
+
+            // Invalid byteLength video_rgba must reject without deadlocking busy state
+            const commitsBeforeRej = preSnap.wave1.totalCommits;
+            const badBuf = new Uint8Array(1024).buffer;
+            const rejAck = await probe.submitTestFrame({
+              type: 'video_rgba',
+              epoch,
+              seq,
+              width: 640,
+              height: 360,
+              buffer: badBuf,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [badBuf]);
+            seq++;
+            const busyAfterRej = probe.getBusyState().workerFrameBusy;
+            if (!rejAck || rejAck.type !== 'ingest_rejected' || busyAfterRej !== false) {
+              throw new Error('Step 9f reject contract failed: ' + JSON.stringify({ rejAck, busyAfterRej }));
+            }
+            const recBmp = await createImageBitmap(srcCanvas);
+            const recAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch,
+              seq,
+              bitmap: recBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: seq / 30,
+              tSrcUs: seq * 33333,
+            }, [recBmp]);
+            const recSnap = probe.getLastWave1();
+            if (!recAck || recAck.type !== 'frame_ack' || recSnap.wave1.totalCommits !== commitsBeforeRej + 1) {
+              throw new Error('Step 9f post-reject recovery failed: ' + JSON.stringify({ recAck, commitsBeforeRej, after: recSnap?.wave1?.totalCommits }));
+            }
+
+            // Browser visibleRect provenance: coded 640x360 with visibleRect (40,20,560,320) + x0=10,y0=5 -> RingMeta (560x320, crop=10,5), sampled at coded (50,25)
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 0 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, x0: 10, y0: 5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            sCtx.fillStyle = '#001000'; sCtx.fillRect(0, 0, 640, 360);
+            sCtx.fillStyle = '#ff00ff'; sCtx.fillRect(50, 25, 320, 180);
+            const vrBmp = await createImageBitmap(srcCanvas);
+            const vrAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch: epoch + 1,
+              seq: 1,
+              bitmap: vrBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: 0.0,
+              tSrcUs: 0,
+              geom: { visibleRect: { x: 40, y: 20, width: 560, height: 320 } },
+            }, [vrBmp]);
+            if (!vrAck || vrAck.type !== 'frame_ack') {
+              throw new Error('Step 9f visibleRect frame failed: ' + JSON.stringify(vrAck));
+            }
+            const vrSnap = probe.getLastWave1();
+            if (!vrSnap?.roi || vrSnap.roi.srcW !== 560 || vrSnap.roi.srcH !== 320 || vrSnap.roi.cropX0 !== 10 || vrSnap.roi.cropY0 !== 5 || !vrSnap.roi.native1to1Active) {
+              throw new Error('Step 9f visibleRect ROI coords mismatch: ' + JSON.stringify(vrSnap?.roi));
+            }
+            let vrPx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              vrPx = rCtx.getImageData(480, 270, 1, 1).data;
+              if (vrPx[0] > 200 && vrPx[2] > 200 && vrPx[1] < 55) break;
+            }
+            if (!vrPx || vrPx[0] < 200 || vrPx[2] < 200 || vrPx[1] > 55) {
+              throw new Error('Step 9f visibleRect did not sample coded (50,25) magenta region: ' + Array.from(vrPx || []));
+            }
+
+            // Synchronous dispatchBitmapFrameToWorker DataCloneError (closed ImageBitmap) clears workerFrameBusy=false and does not wedge
+            const deadBmp = await createImageBitmap(srcCanvas);
+            deadBmp.close();
+            const busyBeforeErr = probe.getBusyState();
+            const syncDispatchOk = probe.dispatchBitmapFrame({
+              epoch: busyBeforeErr.sourceEpoch,
+              seq: busyBeforeErr.frameSeq + 50,
+              bitmap: deadBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: -1,
+              tSrcUs: null,
+              captureAgeMs: -1,
+              enqueuedEpochMs: performance.now(),
+              gapMask: 0,
+              geom: null,
+            });
+            const busyAfterErr = probe.getBusyState();
+            if (syncDispatchOk !== false || busyAfterErr.workerFrameBusy !== false) {
+              throw new Error('Step 9f synchronous transfer throw leaked busy state: ' + JSON.stringify({ syncDispatchOk, busyAfterErr }));
+            }
+            const afterDeadBmp = await createImageBitmap(srcCanvas);
+            const afterDeadAck = await probe.submitTestFrame({
+              type: 'video_frame',
+              epoch: epoch + 1,
+              seq: 2,
+              bitmap: afterDeadBmp,
+              dtSec: 1 / 30,
+              mediaTimeSec: 1 / 30,
+              tSrcUs: 33333,
+            }, [afterDeadBmp]);
+            if (!afterDeadAck || afterDeadAck.type !== 'frame_ack') {
+              throw new Error('Step 9f post-DataCloneError worker recovery failed: ' + JSON.stringify(afterDeadAck));
+            }
+
+            // lastPresentedFrames skip-gap preservation when bitmapCaptureBusy drops frame curP+1
+            const hiddenVid = document.getElementById('hiddenVideoSource');
+            if (!hiddenVid || hiddenVid.readyState < 2) {
+              throw new Error('Step 9f expected loaded hiddenVideoSource for capture-busy skip check');
+            }
+            await hiddenVid.play().catch(() => {});
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 1.0, showHeroTargets: false });
+            for (let wt = 0; wt < 60 && (probe.getBusyState().lastPresentedFrames < 1 || probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+              await new Promise((res) => setTimeout(res, 25));
+            }
+            const busy0 = probe.getBusyState();
+            if (busy0.lastPresentedFrames < 1 || busy0.bitmapCaptureBusy || busy0.workerFrameBusy) {
+              throw new Error('Step 9f video pump did not become ready for skip-gap check: ' + JSON.stringify(busy0));
+            }
+            const curP = busy0.lastPresentedFrames;
+            probe.setCaptureBusyForTest(true);
+            const droppedWhileBusy = await probe.forwardVideoFrameForTest(
+              -1,
+              performance.now(),
+              { presentedFrames: curP + 1 }
+            );
+            const busyDuringDrop = probe.getBusyState();
+            probe.setCaptureBusyForTest(false);
+            if (droppedWhileBusy !== false || busyDuringDrop.lastPresentedFrames !== curP) {
+              hiddenVid.pause();
+              throw new Error('Step 9f bitmapCaptureBusy must not advance lastPresentedFrames: ' + JSON.stringify({ droppedWhileBusy, curP, got: busyDuringDrop.lastPresentedFrames }));
+            }
+            const pNext = probe.forwardVideoFrameForTest(
+              -1,
+              performance.now() + 33,
+              { presentedFrames: curP + 2 }
+            );
+            hiddenVid.pause();
+            const nextSent = await pNext;
+            if (nextSent !== true || probe.getBusyState().lastPresentedFrames !== curP + 2) {
+              throw new Error('Step 9f post-busy skip capture did not advance lastPresentedFrames to curP+2: ' + JSON.stringify({ nextSent, got: probe.getBusyState().lastPresentedFrames, curP }));
+            }
+            for (let wt = 0; wt < 60 && probe.getBusyState().workerFrameBusy; wt++) {
+              await new Promise((res) => setTimeout(res, 20));
+            }
+            const skipSnap = probe.getLastWave1();
+            if (!skipSnap?.wave1?.dispMeta || (skipSnap.wave1.dispMeta.frameGapFlag & 1) === 0) {
+              throw new Error('Step 9f dropped presentedFrame curP+1 failed to emit FRAME_GAP_SEQ (bit 0): ' + JSON.stringify(skipSnap?.wave1?.dispMeta));
+            }
+
+            // bitmapCaptureBusy drop without presentedFrames still preserves FRAME_GAP_SEQ (bit 0)
+            if (hiddenVid.ended) hiddenVid.currentTime = 0;
+            await hiddenVid.play().catch(() => {});
+            probe.setCaptureBusyForTest(true);
+            const dropNoPres = await probe.forwardVideoFrameForTest(-1, performance.now() + 66, null);
+            const busyGapNoPres = probe.getBusyState().pendingVideoGapMask;
+            hiddenVid.pause();
+            probe.setCaptureBusyForTest(false);
+            if (dropNoPres !== false || (busyGapNoPres & 1) === 0) {
+              throw new Error('Step 9f bitmapCaptureBusy without presentedFrames failed to set bit0: ' + JSON.stringify({ dropNoPres, busyGapNoPres, paused: hiddenVid.paused, ended: hiddenVid.ended, readyState: hiddenVid.readyState }));
+            }
+
+            // Async in-flight createImageBitmap overlap must preserve FRAME_GAP_SEQ across F1 commit for F3
+            const origCreateImageBitmap = window.createImageBitmap;
+            try {
+              // Flush pending bit cleanly via F0 first
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const pF0 = Math.max(curP + 3, probe.getBusyState().lastPresentedFrames + 1);
+              const f0Sent = await probe.forwardVideoFrameForTest(-1, performance.now() + 80, { presentedFrames: pF0 });
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              if ((f0Sent !== true && probe.getBusyState().lastPresentedFrames < pF0) || probe.getBusyState().pendingVideoGapMask !== 0) {
+                throw new Error('Step 9f async overlap pre-flush failed: ' + JSON.stringify({ f0Sent, busy: probe.getBusyState() }));
+              }
+              let releaseF1Bitmap = null;
+              let rejectF1Bitmap = null;
+              let f1Intercepted = false;
+              window.createImageBitmap = (src, ...rest) => {
+                if (!f1Intercepted && src === hiddenVid) {
+                  f1Intercepted = true;
+                  return new Promise((res, rej) => {
+                    releaseF1Bitmap = () => origCreateImageBitmap(srcCanvas).then(res, rej);
+                    rejectF1Bitmap = rej;
+                  });
+                }
+                return origCreateImageBitmap(src, ...rest);
+              };
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const pF1 = probe.getBusyState().lastPresentedFrames + 1;
+              const f1Promise = probe.forwardVideoFrameForTest(-1, performance.now() + 110, { presentedFrames: pF1 });
+              for (let wt = 0; wt < 30 && !releaseF1Bitmap; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseF1Bitmap || !probe.getBusyState().bitmapCaptureBusy) {
+                if (rejectF1Bitmap) rejectF1Bitmap(new Error('abort_overlap'));
+                hiddenVid.pause();
+                throw new Error('Step 9f failed to pause inside in-flight createImageBitmap');
+              }
+              const f2Drop = await probe.forwardVideoFrameForTest(-1, performance.now() + 125, { presentedFrames: pF1 + 1 });
+              const midOverlapGap = probe.getBusyState().pendingVideoGapMask;
+              hiddenVid.pause();
+              window.createImageBitmap = origCreateImageBitmap;
+              releaseF1Bitmap();
+              const f1Sent = await f1Promise;
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const gapAfterF1 = probe.getBusyState().pendingVideoGapMask;
+              if (f2Drop !== false || (midOverlapGap & 1) === 0 || f1Sent !== true || (gapAfterF1 & 1) === 0) {
+                throw new Error('Step 9f async createImageBitmap overlap lost pendingVideoGapMask: ' + JSON.stringify({ f2Drop, midOverlapGap, f1Sent, gapAfterF1 }));
+              }
+              const commitsBeforeF3 = probe.getLastWave1()?.wave1?.totalCommits ?? 0;
+              await hiddenVid.play().catch(() => {});
+              const pF3 = Math.max(pF1 + 2, probe.getBusyState().lastPresentedFrames + 1);
+              let f3Sent = false;
+              if (probe.getBusyState().pendingVideoGapMask !== 0) {
+                f3Sent = await probe.forwardVideoFrameForTest(-1, performance.now() + 145, { presentedFrames: pF3 });
+              }
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const f3Snap = probe.getLastWave1();
+              const committedByF3OrRvfc = f3Sent === true || (f3Snap?.wave1?.totalCommits ?? 0) > commitsBeforeF3;
+              if (!committedByF3OrRvfc || probe.getBusyState().pendingVideoGapMask !== 0 || !f3Snap?.wave1?.dispMeta || (f3Snap.wave1.dispMeta.frameGapFlag & 1) === 0) {
+                throw new Error('Step 9f F3 after async overlap failed to commit FRAME_GAP_SEQ: ' + JSON.stringify({ f3Sent, committedByF3OrRvfc, busy: probe.getBusyState(), dispMeta: f3Snap?.wave1?.dispMeta }));
+              }
+
+              // Epoch-switch held-createImageBitmap lock regression: stale epoch-1 finish must NOT unlock epoch-2 capture B or allow C to overtake B
+              let releaseEp1 = null;
+              let releaseEp2 = null;
+              let epTrap = 0;
+              window.createImageBitmap = (src, ...rest) => {
+                if (src === hiddenVid && epTrap < 2) {
+                  epTrap++;
+                  const trapIdx = epTrap;
+                  return new Promise((res, rej) => {
+                    const rel = () => origCreateImageBitmap(srcCanvas).then(res, rej);
+                    if (trapIdx === 1) releaseEp1 = rel;
+                    else releaseEp2 = rel;
+                  });
+                }
+                return origCreateImageBitmap(src, ...rest);
+              };
+              const tEp1 = Math.max(20.0, Math.ceil((hiddenVid.currentTime || 0) + 2)) + 0.1;
+              if (hiddenVid.ended) hiddenVid.currentTime = 0;
+              await hiddenVid.play().catch(() => {});
+              const ep1Promise = probe.forwardVideoFrameForTest(tEp1, performance.now() + 180, null);
+              for (let wt = 0; wt < 30 && !releaseEp1; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseEp1 || !probe.getBusyState().bitmapCaptureBusy) {
+                throw new Error('Step 9f epoch-switch test failed to trap epoch-1 createImageBitmap');
+              }
+              const ep2 = probe.simulateEpochFlushForTest();
+              if (probe.getBusyState().bitmapCaptureBusy !== false) {
+                throw new Error('Step 9f epoch-switch flush did not reset bitmapCaptureBusy for new epoch');
+              }
+              const ep2Promise = probe.forwardVideoFrameForTest(0.2, performance.now() + 200, null);
+              for (let wt = 0; wt < 30 && !releaseEp2; wt++) {
+                await new Promise((res) => setTimeout(res, 10));
+              }
+              if (!releaseEp2 || !probe.getBusyState().bitmapCaptureBusy) {
+                throw new Error('Step 9f epoch-switch test failed to trap epoch-2 Capture B createImageBitmap');
+              }
+              // Stale epoch-1 capture finishes first while epoch-2 Capture B is in flight
+              releaseEp1();
+              const ep1Result = await ep1Promise;
+              if (ep1Result !== false || probe.getBusyState().bitmapCaptureBusy !== true) {
+                throw new Error('Step 9f stale epoch-1 finish cleared epoch-2 bitmapCaptureBusy lock: ' + JSON.stringify({ ep1Result, busy: probe.getBusyState() }));
+              }
+              // Capture C arrives while Capture B is still awaiting: MUST NOT leapfrog Capture B!
+              const ep2CDrop = await probe.forwardVideoFrameForTest(0.3, performance.now() + 215, null);
+              if (ep2CDrop !== false || (probe.getBusyState().pendingVideoGapMask & 1) === 0) {
+                throw new Error('Step 9f epoch-2 Capture C overtook in-flight Capture B: ' + JSON.stringify({ ep2CDrop, busy: probe.getBusyState() }));
+              }
+              hiddenVid.pause();
+              window.createImageBitmap = origCreateImageBitmap;
+              releaseEp2();
+              const ep2BSent = await ep2Promise;
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const bMeta = probe.getLastWave1()?.wave1?.dispMeta;
+              if (ep2BSent !== true || !bMeta || bMeta.sourceEpoch !== ep2 || bMeta.tSrcUs !== 200000) {
+                throw new Error('Step 9f epoch-2 Capture B (0.2s) did not land first cleanly: ' + JSON.stringify({ ep2BSent, ep2, bMeta }));
+              }
+              await hiddenVid.play().catch(() => {});
+              const ep2DSent = await probe.forwardVideoFrameForTest(0.3, performance.now() + 235, null);
+              hiddenVid.pause();
+              for (let wt = 0; wt < 60 && (probe.getBusyState().bitmapCaptureBusy || probe.getBusyState().workerFrameBusy); wt++) {
+                await new Promise((res) => setTimeout(res, 20));
+              }
+              const dMeta = probe.getLastWave1()?.wave1?.dispMeta;
+              if (ep2DSent !== true || !dMeta || dMeta.sourceEpoch !== ep2 || dMeta.tSrcUs !== 300000 || dMeta.sourceSeq <= bMeta.sourceSeq || (dMeta.frameGapFlag & 1) === 0) {
+                throw new Error('Step 9f epoch-2 Capture D (0.3s) ordering/gap mismatch after B: ' + JSON.stringify({ ep2DSent, ep2, bSeq: bMeta.sourceSeq, dMeta }));
+              }
+            } finally {
+              window.createImageBitmap = origCreateImageBitmap;
+              hiddenVid.pause();
+            }
+
+            // Live burst + pause settle check on #hudCanvas + repeat set_resolution(1->1) check
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            srcCanvas.width = 640;
+            srcCanvas.height = 360;
+            const burstEp = Math.max(epoch + 2, busy0.sourceEpoch + 2);
+            const burstColors = ['#ff0000', '#ff0000', '#ff0000', '#00ffff'];
+            for (let bi = 0; bi < burstColors.length; bi++) {
+              sCtx.fillStyle = burstColors[bi];
+              sCtx.fillRect(0, 0, 640, 360);
+              const bBmp = await createImageBitmap(srcCanvas);
+              const bAck = await probe.submitTestFrame({
+                type: 'video_frame',
+                epoch: burstEp,
+                seq: bi + 1,
+                bitmap: bBmp,
+                dtSec: 1 / 30,
+                mediaTimeSec: bi / 30,
+                tSrcUs: bi * 33333,
+              }, [bBmp]);
+              if (!bAck || bAck.type !== 'frame_ack') {
+                throw new Error('Step 9f burst+pause frame failed bi=' + bi + ': ' + JSON.stringify(bAck));
+              }
+            }
+            let settlePx = null;
+            for (let rf = 0; rf < 24; rf++) {
+              await waitRafs();
+              rCtx.drawImage(hudEl, 0, 0);
+              settlePx = rCtx.getImageData(480, 270, 1, 1).data;
+              if (settlePx[0] < 35 && settlePx[1] > 210 && settlePx[2] > 210) break;
+            }
+            if (!settlePx || settlePx[0] > 35 || settlePx[1] < 210 || settlePx[2] < 210) {
+              throw new Error('Step 9f burst+pause #hudCanvas failed to settle on final cyan frame: ' + Array.from(settlePx || []));
+            }
+
+            // Browser live Wave-1 owned Auto-Hero promotion (activeAutoHeroes >= 1) and mode=0 retirement
+            probe.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            probe.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            probe.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 2 });
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 2, showCovEllipses: true });
+            probe.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 0.0, showHeroTargets: true, showcaseMinimalScopes: false });
+            const promoEpoch = 902;
+            const sheetBuf = new Uint8Array(640 * 360 * 4);
+            const drawGaussianDot = (cx, cy, amp) => {
+              const x0 = Math.max(0, Math.floor(cx - 5));
+              const x1 = Math.min(639, Math.ceil(cx + 5));
+              const y0 = Math.max(0, Math.floor(cy - 5));
+              const y1 = Math.min(359, Math.ceil(cy + 5));
+              for (let y = y0; y <= y1; y++) {
+                const dy = y - cy;
+                for (let x = x0; x <= x1; x++) {
+                  const dx = x - cx;
+                  const v = Math.round(amp * 255 * Math.exp(-0.5 * (dx * dx + dy * dy) / (1.4 * 1.4)));
+                  const o = (y * 640 + x) * 4;
+                  const nv = Math.min(255, sheetBuf[o] + v);
+                  sheetBuf[o] = nv;
+                  sheetBuf[o + 1] = nv;
+                  sheetBuf[o + 2] = nv;
+                }
+              }
+            };
+            const fillGaussianSheet = (frameIdx) => {
+              for (let i = 0; i < 640 * 360 * 4; i += 4) {
+                sheetBuf[i] = 38;
+                sheetBuf[i + 1] = 38;
+                sheetBuf[i + 2] = 38;
+                sheetBuf[i + 3] = 255;
+              }
+              for (let r = 0; r < 4; r++) {
+                for (let c = 0; c < 6; c++) {
+                  drawGaussianDot(70 + c * 98 + 0.35 * frameIdx, 55 + r * 80 + 0.1 * frameIdx, 0.28);
+                }
+              }
+              let ox = 200 + 0.35 * frameIdx;
+              let oy = 180 + 0.1 * frameIdx;
+              if (frameIdx >= 16) {
+                const tau = frameIdx - 16;
+                ox += 24 * (1 - Math.cos(0.32 * tau));
+                oy += 22 * Math.sin(0.35 * tau);
+              }
+              drawGaussianDot(ox, oy, 0.34);
+            };
+            let sawAutoPromo = 0;
+            let sawActiveTgts = 0;
+            for (let t = 0; t < 28; t++) {
+              fillGaussianSheet(t);
+              const ab = sheetBuf.buffer.slice(0);
+              const sAck = await probe.submitTestFrame({
+                type: 'video_rgba',
+                epoch: promoEpoch,
+                seq: t + 1,
+                width: 640,
+                height: 360,
+                buffer: ab,
+                dtSec: 1 / 30,
+                mediaTimeSec: t / 30,
+                tSrcUs: t * 33333,
+              }, [ab]);
+              if (!sAck || sAck.type !== 'frame_ack') throw new Error('Step 9f-hero frame failed t=' + t);
+              const hSnap = probe.getLastWave1();
+              if (hSnap?.metrology?.activeAutoHeroes >= 1 && hSnap?.metrology?.promotedCandidates >= 1) {
+                sawAutoPromo = Math.max(sawAutoPromo, hSnap.metrology.activeAutoHeroes);
+                sawActiveTgts = Math.max(sawActiveTgts, hSnap.activeTargets || 0);
+              }
+            }
+            if (sawAutoPromo < 1 || sawAutoPromo > 3 || sawActiveTgts < 1) {
+              throw new Error('Step 9f-hero failed to promote owned Auto-Hero in browser: ' + JSON.stringify({ sawAutoPromo, sawActiveTgts, last: probe.getLastWave1()?.metrology }));
+            }
+            probe.postWorkerMsg({ type: 'set_metrology_config', metrologyMode: 0, showCovEllipses: false });
+            for (let t = 28; t < 30; t++) {
+              fillGaussianSheet(t);
+              const ab = sheetBuf.buffer.slice(0);
+              await probe.submitTestFrame({
+                type: 'video_rgba',
+                epoch: promoEpoch,
+                seq: t + 1,
+                width: 640,
+                height: 360,
+                buffer: ab,
+                dtSec: 1 / 30,
+                mediaTimeSec: t / 30,
+                tSrcUs: t * 33333,
+              }, [ab]);
+            }
+            const retSnap = probe.getLastWave1();
+            if (!retSnap || retSnap.metrology.activeAutoHeroes !== 0 || retSnap.metrology.promotedCandidates !== 0 || retSnap.activeTargets !== 0 || (retSnap.wave1.enabledBits & 1) !== 0) {
+              throw new Error('Step 9f-hero mode=0 failed to retire owned Auto-Hero: ' + JSON.stringify({ retMet: retSnap?.metrology, tgts: retSnap?.activeTargets, en: retSnap?.wave1?.enabledBits }));
+            }
+            return { matrixFrames: 32, quarterTurnCount, commitsAfter: retSnap.wave1.totalCommits, sawAutoPromo, retiredAutoHeroes: retSnap.metrology.activeAutoHeroes };
+          })()`
+        );
+
+        await new Promise((r) => setTimeout(r, 80));
+        const w1DeckCls = await cdp.evalJs(
+          w1Session,
+          `(() => {
+            if (window.__e2eW1DeckClsPo) window.__e2eW1DeckClsPo.disconnect();
+            return window.__e2eW1DeckCls || 0;
+          })()`
+        );
+        if (w1DeckCls >= 0.000001) {
+          throw new Error(`Step 9b-9f: Expected 0.000000 CLS across Deck BOS/ROI/Failure/Metrology/Orientation flows, got ${w1DeckCls}`);
+        }
+        const totalW1Cls = w1ShowcaseCls + w1DeckCls;
+
+        console.log(
+          `  [PASS] Step 9 (Wave-1 BOS Plume, Native 1:1 ROI, Tripod Failure, 2x2 Cov/Decoy & 8x4 D4 Matrix): bos=${bosReadyState.diagBos}, stamps=${bosReadyState.diagStamps}, hud=${bosHudBytes}B, roiOffset="${roiOffsetState.roiTxt}", failure="${failureBannerState.diagBos}" (${failureBannerState.sev}), decoy="${decoyState.diagCov}", denseCov="${denseCovState.diagCov}", metOffCands=${starlingMetOffState.cand}, matrix=${orientMatrixReport.matrixFrames} (qturn=${orientMatrixReport.quarterTurnCount}), ownedAutoPromo=${orientMatrixReport.sawAutoPromo}->${orientMatrixReport.retiredAutoHeroes}, CLS=${totalW1Cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: w1TargetId }).catch(() => {});
+      }
+    }
+
+    // 10. Wave-2 Browser E2E: 40x22 Mesh Hodge, Calibrated RS+Welch (K>=8 + Exposure Null Banner), Occluded AMBIGUOUS & Zero-CLS
+    {
+      const baseUrl = `http://127.0.0.1:${srv.port}`;
+      const { targetId: w2TargetId } = await cdp.send('Target.createTarget', { url: `${baseUrl}/index.html?view=deck` });
+      const { sessionId: w2Session } = await cdp.send('Target.attachToTarget', { targetId: w2TargetId, flatten: true });
+      try {
+        await cdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, w2Session);
+        await cdp.send('Page.enable', {}, w2Session);
+        await cdp.send('Log.enable', {}, w2Session);
+        await cdp.send('Runtime.enable', {}, w2Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: process.env.CI ? 1 : 2, mobile: false },
+          w2Session
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Deck booted cleanly with Wave-2 probe & controls',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            return {
+              ok: document.body?.dataset?.surface === 'deck' &&
+                  Boolean(document.getElementById('hodgeModeSelect')) &&
+                  Boolean(document.getElementById('rsVibroModeSelect')) &&
+                  Boolean(document.getElementById('inpRsDtRowUs')) &&
+                  Boolean(document.getElementById('inpRsExposureUs')) &&
+                  Boolean(document.getElementById('selRsScanDir')) &&
+                  Boolean(document.getElementById('diagHodge2Complex')) &&
+                  Boolean(w2 && w2.available === true && w2.vibro?.available && w2.hodge?.available && w2.conservation?.available),
+              avail: Boolean(w2?.available),
+            };
+          })()`,
+          20000,
+          true
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            window.__e2eW2DeckCls = 0;
+            window.__e2eW2DeckClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eW2DeckCls += e.value;
+              }
+            });
+            window.__e2eW2DeckClsPo.observe({ type: 'layout-shift', buffered: false });
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) {
+              rm.value = '1';
+              rm.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return true;
+          })()`
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Fresh Deck UI RS Mode 1 reaches READY without probe overrides',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const v = w2?.vibro;
+            const diag = document.getElementById('diagRsWelch')?.textContent || '';
+            return {
+              ok: Boolean(v && v.state === 3 && diag.startsWith('READY · ')),
+              state: v?.state,
+              reason: v?.reasonFlags,
+              diag,
+            };
+          })()`,
+          15000
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) {
+              rm.value = '0';
+              rm.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            const chkNative = document.getElementById('chkNativeRoi');
+            if (chkNative && chkNative.checked) {
+              chkNative.checked = false;
+              chkNative.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            document.querySelector('[data-showcase="vortex_1200"]')?.click();
+            return true;
+          })()`
+        );
+
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: vortex_1200 swarm initialized before enabling Hodge',
+          `(() => {
+            const btn = document.querySelector('[data-showcase="vortex_1200"]');
+            const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
+            return {
+              ok: btn?.getAttribute('aria-pressed') === 'true' && meta.startsWith('SWARM: ACTIVE'),
+              meta,
+            };
+          })()`,
+          20000
+        );
+
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const hm = document.getElementById('hodgeModeSelect');
+            hm.value = '2';
+            hm.dispatchEvent(new Event('change', { bubbles: true }));
+            const ov = document.getElementById('fieldOverlayModeSelect');
+            ov.value = '9';
+            ov.dispatchEvent(new Event('change', { bubbles: true }));
+            return true;
+          })()`
+        );
+
+        const hodgeState = await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: 40x22 Mesh Hodge on vortex_1200 converges (READY, coexactFrac > 0.85, orthEcRel < 1e-6)',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const h = w2?.hodge;
+            const diag = document.getElementById('diagHodge2Complex')?.textContent || '';
+            const ok = Boolean(
+              h &&
+              h.state === 2 &&
+              h.converged === true &&
+              h.coexactFrac > 0.85 &&
+              h.orthEcRel < 1e-6 &&
+              typeof h.voidCx === 'number' &&
+              typeof h.voidCy === 'number' &&
+              Array.isArray(h.wakeBbox) &&
+              h.wakeBbox.length === 4 &&
+              !('voidR' in h) &&
+              !('wakeR' in h) &&
+              w2?.stamps?.hodge?.valid === true &&
+              diag.startsWith('READY · ')
+            );
+            return {
+              ok,
+              state: h?.state,
+              converged: h?.converged,
+              exactFrac: h?.exactFrac,
+              coexactFrac: h?.coexactFrac,
+              harmFrac: h?.harmFrac,
+              orthEcRel: h?.orthEcRel,
+              beta1: h?.beta1,
+              diag,
+            };
+          })()`,
+          20000
+        );
+
+        for (const omVal of ['8', '10', '9']) {
+          await cdp.evalJs(
+            w2Session,
+            `(() => {
+              const ov = document.getElementById('fieldOverlayModeSelect');
+              ov.value = ${JSON.stringify(omVal)};
+              ov.dispatchEvent(new Event('change', { bubbles: true }));
+              return true;
+            })()`
+          );
+          await waitForCondition(
+            cdp,
+            w2Session,
+            `Step 10a: Hodge fieldOverlayMode=${omVal} synced`,
+            `(() => ({ ok: window.__chronosUiState?.overlays?.fieldOverlayMode === ${Number(omVal)} }))()`,
+            4000
+          );
+        }
+
+        const w2HudRect = await cdp.evalJs(
+          w2Session,
+          `(() => {
+            const el = document.getElementById('hudCanvas');
+            if (!el) return null;
+            el.scrollIntoView({ block: 'center', inline: 'center' });
+            const r = el.getBoundingClientRect();
+            return {
+              x: Math.max(0, Math.floor(r.left + (window.scrollX || 0))),
+              y: Math.max(0, Math.floor(r.top + (window.scrollY || 0))),
+              width: Math.ceil(r.width),
+              height: Math.ceil(r.height),
+            };
+          })()`
+        );
+        const w2HudShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const w2HudBytes = w2HudShot?.data ? Buffer.from(w2HudShot.data, 'base64').byteLength : 0;
+        if (w2HudBytes < 2500) {
+          throw new Error(`Step 10a: Expected Hodge #hudCanvas screenshot >= 2500 B, got ${w2HudBytes} B`);
+        }
+
+        // Switching to a preset without an overlayMode (model_rockets) must reset orphaned Hodge overlay 9 -> 0
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            document.querySelector('[data-showcase="model_rockets"]')?.click();
+            return true;
+          })()`
+        );
+        await waitForCondition(
+          cdp,
+          w2Session,
+          'Step 10a: Preset without overlayMode resets orphaned Hodge overlay 9 -> 0',
+          `(() => {
+            const hm = document.getElementById('hodgeModeSelect')?.value;
+            const ov = document.getElementById('fieldOverlayModeSelect')?.value;
+            return {
+              ok: hm === '0' && ov === '0' && window.__chronosUiState?.overlays?.fieldOverlayMode === 0,
+              hm,
+              ov,
+              uiOm: window.__chronosUiState?.overlays?.fieldOverlayMode,
+            };
+          })()`,
+          8000
+        );
+        await cdp.evalJs(
+          w2Session,
+          `(() => {
+            document.getElementById('btnSrcTestbench')?.click();
+            return true;
+          })()`
+        );
+
+        // 10b. Calibrated RS + Welch (K >= 8, 880 Hz) & Exposure-Null Banner (T_e = 1/880s)
+        const rsWelchReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            w1p.postWorkerMsg({ type: 'set_source', sourceMode: 'video', fpsHint: 30 });
+            w1p.postWorkerMsg({ type: 'set_resolution', resMode: 1 });
+            w1p.postWorkerMsg({ type: 'set_swarm_mode', swarmMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_bos_config', bosMode: 0 });
+            w1p.postWorkerMsg({ type: 'set_roi', native1to1: true, normX: 0.5, normY: 0.5, orientation: 0, scanDir: 0 });
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0, rawWipeRatio: 0.0, showHeroTargets: false });
+
+            const hm = document.getElementById('hodgeModeSelect');
+            if (hm) hm.value = '0';
+            const ov = document.getElementById('fieldOverlayModeSelect');
+            if (ov) { ov.value = '11'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
+            const rm = document.getElementById('rsVibroModeSelect');
+            if (rm) rm.value = '2';
+
+            const W = 640;
+            const H = 360;
+            const frameBytes = W * H * 4;
+            const rgba = new Uint8Array(frameBytes);
+
+            const ax = 0.27, ay = 0.13, bx = 0.19, by = -0.31, cx = 0.37, cy = 0.29;
+            const npix = W * H;
+            const sA = new Float32Array(npix);
+            const cA = new Float32Array(npix);
+            const cB = new Float32Array(npix);
+            const sB = new Float32Array(npix);
+            const sC = new Float32Array(npix);
+            const cC = new Float32Array(npix);
+            for (let y = 0; y < H; y++) {
+              const row = y * W;
+              for (let x = 0; x < W; x++) {
+                const idx = row + x;
+                const pA = ax * x + ay * y;
+                const pB = bx * x + by * y;
+                const pC = cx * x + cy * y;
+                sA[idx] = Math.sin(pA); cA[idx] = Math.cos(pA);
+                cB[idx] = Math.cos(pB); sB[idx] = Math.sin(pB);
+                sC[idx] = Math.sin(pC); cC[idx] = Math.cos(pC);
+              }
+            }
+
+            const renderRsFrame = (tSrcUs, dtRowUs, exposureUs, fTone, ampPx, taps) => {
+              const expSec = exposureUs * 1e-6;
+              const invT = 1.0 / taps;
+              const scA = new Float64Array(taps);
+              const ccA = new Float64Array(taps);
+              const scB = new Float64Array(taps);
+              const ccB = new Float64Array(taps);
+              const scC = new Float64Array(taps);
+              const ccC = new Float64Array(taps);
+              const w2piF = 2.0 * Math.PI * fTone;
+              for (let y = 0; y < H; y++) {
+                const tMid = (tSrcUs + y * dtRowUs + 0.5 * exposureUs) * 1e-6;
+                for (let s = 0; s < taps; s++) {
+                  const tS = taps === 1 ? tMid : (tMid + ((s + 0.5) * invT - 0.5) * expSec);
+                  const ux = ampPx * Math.cos(w2piF * tS + 0.4);
+                  scA[s] = Math.sin(ax * ux); ccA[s] = Math.cos(ax * ux);
+                  scB[s] = Math.sin(bx * ux); ccB[s] = Math.cos(bx * ux);
+                  scC[s] = Math.sin(cx * ux); ccC[s] = Math.cos(cx * ux);
+                }
+                const row = y * W;
+                for (let x = 0; x < W; x++) {
+                  const idx = row + x;
+                  let acc = 0.0;
+                  for (let s = 0; s < taps; s++) {
+                    const vA = sA[idx] * ccA[s] - cA[idx] * scA[s];
+                    const vB = cB[idx] * ccB[s] + sB[idx] * scB[s];
+                    const vC = sC[idx] * ccC[s] - cC[idx] * scC[s];
+                    const l = 128.0 + 38.0 * vA + 34.0 * vB + 22.0 * vC;
+                    acc += l < 8.0 ? 8.0 : (l > 247.0 ? 247.0 : l);
+                  }
+                  const v = Math.round(acc * invT);
+                  const o = idx * 4;
+                  rgba[o] = v; rgba[o + 1] = v; rgba[o + 2] = v; rgba[o + 3] = 255;
+                }
+              }
+            };
+
+            const pumpRsSession = async ({ epoch, totalFrames, t0Us, fps, dtRowUs, exposureUs, audioRateHz, fTone, taps }) => {
+              w2p.postWorkerMsg({
+                type: 'set_rs_calib',
+                rsMode: 2,
+                dtRowUs,
+                exposureUs,
+                audioRateHz,
+                maxSkewUs: 500.0,
+              });
+              let cursor = 0;
+              for (let f = 0; f < totalFrames; f++) {
+                const tSrcUs = t0Us + Math.round((f * 1e6) / fps);
+                const endSample = Math.round((((f + 1) / fps) * audioRateHz));
+                const nAudio = endSample - cursor;
+                const pcm = new Array(nAudio);
+                for (let i = 0; i < nAudio; i++) {
+                  const tS = t0Us * 1e-6 + (cursor + i) / audioRateHz;
+                  pcm[i] = 0.5 * Math.cos(2.0 * Math.PI * fTone * tS + 0.1);
+                }
+                const tEndUs = t0Us + Math.round((endSample * 1e6) / audioRateHz);
+                const aAck = await w2p.submitAudioBlock({ samples: pcm, tEndUs, sampleRateHz: audioRateHz, estSkewUs: 0.0 });
+                if (!aAck || aAck.accepted !== 1) {
+                  throw new Error('Step 10b audio push rejected at frame ' + f + ': ' + JSON.stringify(aAck));
+                }
+                cursor = endSample;
+
+                renderRsFrame(tSrcUs, dtRowUs, exposureUs, fTone, 0.85, taps);
+                const ab = rgba.buffer.slice(0);
+                const fAck = await w1p.submitTestFrame({
+                  type: 'video_rgba',
+                  epoch,
+                  seq: f + 1,
+                  width: W,
+                  height: H,
+                  buffer: ab,
+                  dtSec: 1 / fps,
+                  mediaTimeSec: (f + 1) / fps,
+                  tSrcUs,
+                }, [ab]);
+                if (!fAck || fAck.type !== 'frame_ack') {
+                  throw new Error('Step 10b frame rejected at f=' + f + ': ' + JSON.stringify(fAck));
+                }
+              }
+            };
+
+            await pumpRsSession({
+              epoch: 910,
+              totalFrames: 30,
+              t0Us: 1_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1000.0,
+              audioRateHz: 45056.0,
+              fTone: 880.0,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 60));
+            const snapReady = w2p.getLastWave2();
+            const diagReady = document.getElementById('diagRsWelch')?.textContent || '';
+
+            await pumpRsSession({
+              epoch: 911,
+              totalFrames: 28,
+              t0Us: 3_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1e6 / 880.0,
+              audioRateHz: 48000.0,
+              fTone: 880.0,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 60));
+            const snapNull = w2p.getLastWave2();
+            const banner = document.getElementById('acquisitionStatusBanner');
+            const nullSev = banner?.dataset?.severity || '';
+            const nullTxt = banner?.textContent || '';
+
+            const chunkPcm = new Array(6000);
+            for (let i = 0; i < 6000; i++) {
+              chunkPcm[i] = 0.25 * Math.cos(2.0 * Math.PI * 440.0 * (i / 48000.0));
+            }
+            const chunkAck = await w2p.submitAudioBlock({
+              samples: chunkPcm,
+              tEndUs: 5_000_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            const nanSkewAck = await w2p.submitAudioBlock({
+              samples: [0.0, 0.0, 0.0, 0.0],
+              tEndUs: 5_050_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: NaN,
+            });
+            const f32InfSampleAck = await w2p.submitAudioBlock({
+              samples: [1e40],
+              tEndUs: 5_100_000,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            const u64WrapTimeAck = await w2p.submitAudioBlock({
+              samples: [0.1, 0.2, 0.3, 0.4],
+              tEndUs: 2 ** 64,
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 30));
+            const postNanVibro = w2p.getLastWave2();
+
+            // Delayed-ring fault isolation at lookaheadK=4: rejected 44100 Hz block must show DISTURBED (4), NOT OFF (0)
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 4 });
+            await pumpRsSession({
+              epoch: 912,
+              totalFrames: 30,
+              t0Us: 7_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1000.0,
+              audioRateHz: 48000.0,
+              fTone: 843.75,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 60));
+            const preFaultVibro = w2p.getLastWave2();
+            await w2p.submitAudioBlock({
+              samples: new Array(1600).fill(0.1),
+              tEndUs: 8_050_000,
+              sampleRateHz: 44100.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 40));
+            const delayedFaultVibro = w2p.getLastWave2();
+
+            // Delayed-ring dropped-block underrun + paused Hodge STANDBY transitions (lookaheadK=4)
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 4 });
+            await pumpRsSession({
+              epoch: 913,
+              totalFrames: 30,
+              t0Us: 10_000_000,
+              fps: 30,
+              dtRowUs: 25.0,
+              exposureUs: 1000.0,
+              audioRateHz: 48000.0,
+              fTone: 843.75,
+              taps: 11,
+            });
+            await new Promise((r) => setTimeout(r, 110));
+            const preDropVibro = w2p.getLastWave2();
+
+            return {
+              readyVibro: snapReady?.vibro || null,
+              diagReady,
+              nullVibro: snapNull?.vibro || null,
+              nullSev,
+              nullTxt,
+              chunkAck,
+              nanSkewAck,
+              f32InfSampleAck,
+              u64WrapTimeAck,
+              postNanState: postNanVibro?.vibro?.state ?? -1,
+              postNanStampValid: Boolean(postNanVibro?.stamps?.vibro?.valid),
+              preFaultState: preFaultVibro?.vibro?.state ?? -1,
+              delayedFaultState: delayedFaultVibro?.vibro?.state ?? -1,
+              delayedFaultReason: delayedFaultVibro?.vibro?.reasonMask ?? 0,
+              delayedFaultStampValid: Boolean(delayedFaultVibro?.stamps?.vibro?.valid),
+              preDropState: preDropVibro?.vibro?.state ?? -1,
+            };
+          })()`
+        );
+
+        const hudBeforeDropShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const dropGapAndHodge = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            const dropGapAck = await w2p.submitAudioBlock({
+              samples: new Array(1600).fill(0.15),
+              tEndUs: 11_066_667, // skip 33,333 us (1600 samples) after 11_000_000 -> accepted new interval WARMING|AUDIO_UNDERRUN
+              sampleRateHz: 48000.0,
+              estSkewUs: 0.0,
+            });
+            await new Promise((r) => setTimeout(r, 150));
+            const dropGapSnap = w2p.getLastWave2();
+            return {
+              dropGapAccepted: dropGapAck?.accepted ?? -1,
+              dropGapState: dropGapSnap?.vibro?.state ?? -1,
+              dropGapReason: dropGapSnap?.vibro?.reasonMask ?? 0,
+              dropGapStampValid: Boolean(dropGapSnap?.stamps?.vibro?.valid),
+            };
+          })()`
+        );
+        const hudAfterDropShot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: { ...w2HudRect, scale: 1 } },
+          w2Session
+        );
+        const hudBeforeDropBuf = Buffer.from(hudBeforeDropShot?.data || '', 'base64');
+        const hudAfterDropBuf = Buffer.from(hudAfterDropShot?.data || '', 'base64');
+        if (hudBeforeDropBuf.length < 1000 || hudBeforeDropBuf.equals(hudAfterDropBuf)) {
+          throw new Error('Step 10b dropped PCM block while running=true did not redraw paused #hudCanvas from READY to WARMING');
+        }
+        const pausedHodgeEnableReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const w1p = window.__chronosWave1Probe;
+            const w2p = window.__chronosWave2Probe;
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            await new Promise((r) => setTimeout(r, 30));
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 1 });
+            await new Promise((r) => setTimeout(r, 50));
+            const pausedHodgeEnableSnap = w2p.getLastWave2();
+            w1p.postWorkerMsg({ type: 'set_hodge_config', hodgeMode: 0 });
+            w1p.postWorkerMsg({ type: 'params', lookaheadK: 0 });
+            return {
+              pausedHodgeReqMode: pausedHodgeEnableSnap?.hodge?.reqMode ?? -1,
+              pausedHodgeState: pausedHodgeEnableSnap?.hodge?.state ?? -1,
+            };
+          })()`
+        );
+        Object.assign(rsWelchReport, dropGapAndHodge, pausedHodgeEnableReport);
+
+        if (
+          !rsWelchReport.chunkAck ||
+          rsWelchReport.chunkAck.accepted !== 1 ||
+          rsWelchReport.chunkAck.count !== 6000
+        ) {
+          throw new Error('Step 10b 6000-sample chunking gate failed: ' + JSON.stringify(rsWelchReport.chunkAck));
+        }
+        if (
+          !rsWelchReport.nanSkewAck ||
+          rsWelchReport.nanSkewAck.accepted !== 0 ||
+          rsWelchReport.postNanState !== 4 ||
+          rsWelchReport.postNanStampValid ||
+          !rsWelchReport.f32InfSampleAck ||
+          rsWelchReport.f32InfSampleAck.accepted !== 0 ||
+          rsWelchReport.f32InfSampleAck.count !== 0 ||
+          !rsWelchReport.u64WrapTimeAck ||
+          rsWelchReport.u64WrapTimeAck.accepted !== 0 ||
+          rsWelchReport.u64WrapTimeAck.count !== 0 ||
+          rsWelchReport.preFaultState !== 3 ||
+          rsWelchReport.delayedFaultState !== 4 ||
+          (rsWelchReport.delayedFaultReason & 1) === 0 ||
+          rsWelchReport.delayedFaultStampValid ||
+          rsWelchReport.preDropState !== 3 ||
+          rsWelchReport.dropGapAccepted !== 1 ||
+          rsWelchReport.dropGapState !== 2 ||
+          (rsWelchReport.dropGapReason & 0x100) === 0 ||
+          rsWelchReport.dropGapStampValid ||
+          rsWelchReport.pausedHodgeReqMode !== 1 ||
+          rsWelchReport.pausedHodgeState !== 1
+        ) {
+          throw new Error('Step 10b audio boundary, K=4 fault/drop propagation & paused Hodge STANDBY gate failed: ' + JSON.stringify(rsWelchReport));
+        }
+
+        const rv = rsWelchReport.readyVibro;
+        if (
+          !rv ||
+          rv.state !== 3 ||
+          rv.welchK < 8 ||
+          Math.abs(rv.domFreqHz - 880.0) >= 1.0 ||
+          rv.maxCohGamma2 <= 0.90 ||
+          rv.coupledCellsCount < 1 ||
+          !rsWelchReport.diagReady.startsWith('READY · ')
+        ) {
+          throw new Error('Step 10b RS+Welch READY gate failed: ' + JSON.stringify({ rv, diagReady: rsWelchReport.diagReady }));
+        }
+        const nv = rsWelchReport.nullVibro;
+        if (
+          !nv ||
+          nv.exposureNullFlag !== true ||
+          Math.abs(nv.sincH) >= 0.05 ||
+          rsWelchReport.nullSev !== 'warn' ||
+          !rsWelchReport.nullTxt.includes('EXPOSURE_NULL')
+        ) {
+          throw new Error('Step 10b Exposure-Null banner gate failed: ' + JSON.stringify({ nv, nullSev: rsWelchReport.nullSev, nullTxt: rsWelchReport.nullTxt }));
+        }
+
+        // 10c. Occluded Equal-Mass AMBIGUOUS Conservation + UI Check
+        const consReport = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const ack = await window.__chronosWave2Probe.evalOccludedPair([
+              100, 90, 150, 0, 1, 0,
+              160, 90, -150, 0, 1, 0,
+              100, 90, -150, 0,
+              160, 90, 150, 0,
+              0.40, 0, 0.02, 1, 1, 1, 3,
+              11, 12, 42, 1, 0,
+            ]);
+            await new Promise((r) => setTimeout(r, 50));
+            return {
+              ack,
+              lastCons: window.__chronosWave2Probe?.getLastWave2()?.conservation || null,
+              diagCons: document.getElementById('diagOcclConservation')?.textContent || '',
+            };
+          })()`
+        );
+        const oc = consReport.lastCons || consReport.ack?.conservation;
+        if (
+          !oc ||
+          oc.status !== 2 ||
+          (oc.ambiguityMask & 6) !== 6 ||
+          !consReport.diagCons.includes('AMBIGUOUS')
+        ) {
+          throw new Error('Step 10c Occluded conservation AMBIGUOUS gate failed: ' + JSON.stringify(consReport));
+        }
+
+        // 10d. Zero-CLS Check (leave observer active through Step 10e)
+        await new Promise((r) => setTimeout(r, 80));
+        const w2DeckCls = await cdp.evalJs(
+          w2Session,
+          `(() => window.__e2eW2DeckCls || 0)()`
+        );
+        if (w2DeckCls >= 0.000001) {
+          throw new Error(`Step 10d: Expected 0.000000 CLS across Wave-2 Deck flows, got ${w2DeckCls}`);
+        }
+
+        // 10e. Webcam Live Audio Anchoring (Native Fake Webcam + Mock Lifecycle Edge Cases)
+        const nativeWebcamCheck = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const origPostMessage = Worker.prototype.postMessage;
+            const origGetUserMedia = navigator.mediaDevices && navigator.mediaDevices.getUserMedia
+              ? navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices)
+              : null;
+              const nativePushMsgs = [];
+              const nativeAcks = [];
+              const nativeAckWorkers = new WeakSet();
+              let nativeCapturing = true;
+              const capturedStreams = [];
+              try {
+                if (!origGetUserMedia) {
+                  return { unsupported: true };
+                }
+                navigator.mediaDevices.getUserMedia = async (constraints) => {
+                  const st = await origGetUserMedia(constraints);
+                  capturedStreams.push(st);
+                  return st;
+                };
+                Worker.prototype.postMessage = function (data) {
+                  if (nativeCapturing && data && data.type === 'push_audio_pcm') {
+                    if (!nativeAckWorkers.has(this)) {
+                      nativeAckWorkers.add(this);
+                      this.addEventListener('message', (ev) => {
+                        const d = ev && ev.data;
+                        if (d && d.type === 'wave2_audio_ack' && typeof d.reqId === 'string' && d.reqId.startsWith('e2e-native-')) {
+                          nativeAcks.push(d);
+                        }
+                      });
+                    }
+                    data.wantAck = true;
+                    data.reqId = 'e2e-native-' + nativePushMsgs.length;
+                    nativePushMsgs.push({
+                      tEndUs: data.tEndUs,
+                      estSkewUs: data.estSkewUs,
+                      len: data.samples ? data.samples.length : 0,
+                    });
+                  }
+                  return origPostMessage.apply(this, arguments);
+                };
+
+                const rmSel = document.getElementById('rsVibroModeSelect');
+                if (rmSel) {
+                  rmSel.value = '0';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                await new Promise((r) => setTimeout(r, 40));
+                document.getElementById('btnSrcWebcam')?.click();
+                await new Promise((r) => setTimeout(r, 220));
+                nativePushMsgs.length = 0;
+                nativeAcks.length = 0;
+
+                if (rmSel) {
+                  rmSel.value = '2';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                const deadline = performance.now() + 4500;
+                while (performance.now() < deadline && nativePushMsgs.length < 40) {
+                  await new Promise((r) => setTimeout(r, 40));
+                }
+                nativeCapturing = false;
+                const ackDeadline = performance.now() + 2500;
+                while (nativeAcks.length < nativePushMsgs.length && performance.now() < ackDeadline) {
+                  await new Promise((r) => setTimeout(r, 15));
+                }
+                await new Promise((r) => setTimeout(r, 40));
+                const nativeVibro = window.__chronosWave2Probe?.getLastWave2()?.vibro || null;
+                if (rmSel) {
+                  rmSel.value = '0';
+                  rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+                await new Promise((r) => setTimeout(r, 80));
+                const nativePushed = nativePushMsgs.length;
+                const pushedSamplesSum = nativePushMsgs.reduce((acc, m) => acc + m.len, 0);
+                const pushedSkews = nativePushMsgs.map((m) => m.estSkewUs);
+                const acceptedDelta = nativeAcks.reduce((acc, a) => acc + (a.accepted ? a.count : 0), 0);
+                const liveAudioAfterOff = capturedStreams.reduce(
+                  (cnt, st) => cnt + st.getAudioTracks().filter((tr) => tr.readyState === 'live').length,
+                  0
+                );
+                return {
+                  unsupported: false,
+                  nativePushed,
+                  nativeAckCount: nativeAcks.length,
+                  pushedSamplesSum,
+                  acceptedDelta,
+                  nativeAcceptedAll:
+                    nativeAcks.length === nativePushed && acceptedDelta === pushedSamplesSum && pushedSamplesSum > 0,
+                  state: nativeVibro?.state ?? -1,
+                  reasonMask: nativeVibro?.reasonMask ?? -1,
+                  liveAudioAfterOff,
+                  maxAbsSkew: pushedSkews.reduce((mx, v) => Math.max(mx, Math.abs(v)), 0),
+                };
+            } finally {
+              Worker.prototype.postMessage = origPostMessage;
+              if (origGetUserMedia) {
+                navigator.mediaDevices.getUserMedia = origGetUserMedia;
+              }
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+            }
+          })()`
+        );
+        if (
+          !nativeWebcamCheck ||
+          nativeWebcamCheck.unsupported ||
+          nativeWebcamCheck.nativePushed < 36 ||
+          nativeWebcamCheck.maxAbsSkew > 500 ||
+          !nativeWebcamCheck.nativeAcceptedAll ||
+          nativeWebcamCheck.state === 4 ||
+          (nativeWebcamCheck.reasonMask & 32) !== 0 ||
+          nativeWebcamCheck.liveAudioAfterOff !== 0
+        ) {
+          throw new Error('Step 10e native Chrome webcam + Web Audio live gate failed: ' + JSON.stringify(nativeWebcamCheck));
+        }
+
+        const webcamAudioCheck = await cdp.evalJs(
+          w2Session,
+          `(async () => {
+            const origMediaDevicesDesc = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
+            const origAudioCtx = window.AudioContext;
+            const origWebkitAudioCtx = window.webkitAudioContext;
+            const origPostMessage = Worker.prototype.postMessage;
+            const origPerfNow = performance.now.bind(performance);
+            const canvas = document.createElement('canvas');
+            canvas.width = 320;
+            canvas.height = 180;
+            const cctx = canvas.getContext('2d');
+            cctx.fillStyle = '#204060';
+            cctx.fillRect(0, 0, 320, 180);
+            const realAc = new origAudioCtx();
+            const d1 = realAc.createMediaStreamDestination();
+            const d2 = realAc.createMediaStreamDestination();
+            const d3 = realAc.createMediaStreamDestination();
+            const dComb = realAc.createMediaStreamDestination();
+            const dStaleA = realAc.createMediaStreamDestination();
+            const dStaleB1 = realAc.createMediaStreamDestination();
+            const dStaleB2 = realAc.createMediaStreamDestination();
+            const dDriftNeg = realAc.createMediaStreamDestination();
+            const trackA = d1.stream.getAudioTracks()[0];
+            const trackB = d2.stream.getAudioTracks()[0];
+            const trackC = d3.stream.getAudioTracks()[0];
+            const trackComb = dComb.stream.getAudioTracks()[0];
+            const trackStaleA = dStaleA.stream.getAudioTracks()[0];
+            const trackStaleB1 = dStaleB1.stream.getAudioTracks()[0];
+            const trackStaleB2 = dStaleB2.stream.getAudioTracks()[0];
+            const trackDriftNeg = dDriftNeg.stream.getAudioTracks()[0];
+            const driftExtraTracks = [];
+            let nextDynamicMicTrack = null;
+            let nextMockSampleRate = 48000;
+            const stream = canvas.captureStream(30);
+            const micOnlyStream = new MediaStream([trackA]);
+            const combStream = canvas.captureStream(30);
+            combStream.addTrack(trackComb);
+            const streamStaleA = canvas.captureStream(30);
+            const streamStaleB = canvas.captureStream(30);
+            let pendingResolveA = null;
+            let pendingResolveB1 = null;
+            let gumMode = 'normal';
+            const gumCalls = [];
+            try {
+              const ctxSpies = [];
+              let firePrePumpOnNextAssign = false;
+              let prePumpCount = -1;
+              let msgsBeforeComb = 0;
+              class MockAudioContext {
+                constructor() {
+                  this.sampleRate = nextMockSampleRate;
+                  this.state = 'running';
+                  this.closed = false;
+                  this.boundTrackIds = [];
+                  this.hwClockFn = null;
+                  this.currentTimeFn = null;
+                  Object.defineProperty(this, 'currentTime', {
+                    configurable: true,
+                    get: () => (typeof this.currentTimeFn === 'function' ? this.currentTimeFn() : undefined),
+                  });
+                  let onProc = null;
+                  this.proc = {
+                    get onaudioprocess() {
+                      return onProc;
+                    },
+                    set onaudioprocess(fn) {
+                      onProc = fn;
+                      if (typeof fn === 'function' && firePrePumpOnNextAssign) {
+                        firePrePumpOnNextAssign = false;
+                        const arr = new Float32Array(2048);
+                        fn({ inputBuffer: { numberOfChannels: 1, getChannelData: () => arr } });
+                        prePumpCount = pushedAudioMsgs.length - msgsBeforeComb;
+                      }
+                    },
+                    connect: () => {},
+                    disconnect: () => {},
+                  };
+                  ctxSpies.push(this);
+                }
+                createMediaStreamSource(srcStream) {
+                  this.boundTrackIds = srcStream && typeof srcStream.getAudioTracks === 'function'
+                    ? srcStream.getAudioTracks().map((tr) => tr.id)
+                    : [];
+                  return { connect: () => {}, disconnect: () => {} };
+                }
+                createScriptProcessor() {
+                  return this.proc;
+                }
+                createGain() {
+                  return { gain: { value: 0 }, connect: () => {}, disconnect: () => {} };
+                }
+                getOutputTimestamp() {
+                  if (typeof this.hwClockFn === 'function') {
+                    return this.hwClockFn();
+                  }
+                  return { contextTime: 0, performanceTime: 0 };
+                }
+                resume() {}
+                close() {
+                  this.closed = true;
+                }
+              }
+              window.AudioContext = MockAudioContext;
+              window.webkitAudioContext = MockAudioContext;
+
+              const pushedAudioMsgs = [];
+              const driftAckWorkers = new WeakSet();
+              let pendingDriftNextWantAckReqId = '';
+              let pendingDriftAckReqId = '';
+              let pendingDriftSawAck = false;
+              let pendingDriftDrainResolve = null;
+              let driftLastReqIdSeen = '';
+              const resolvePendingDriftDrain = () => {
+                if (pendingDriftDrainResolve) {
+                  const fn = pendingDriftDrainResolve;
+                  pendingDriftDrainResolve = null;
+                  fn(driftLastReqIdSeen);
+                }
+              };
+              let virtOffsetMs = 0.0;
+              let frozenNowMs = null;
+              performance.now = () => (frozenNowMs !== null ? frozenNowMs : origPerfNow()) + virtOffsetMs;
+              Worker.prototype.postMessage = function (data) {
+                if (data && data.type === 'push_audio_pcm') {
+                  if (!driftAckWorkers.has(this)) {
+                    driftAckWorkers.add(this);
+                    this.addEventListener('message', (ev) => {
+                      const d = ev && ev.data;
+                      if (!d || !pendingDriftAckReqId) return;
+                      if (d.type === 'wave2_audio_ack' && d.reqId === pendingDriftAckReqId) {
+                        pendingDriftSawAck = true;
+                        driftLastReqIdSeen = d.reqId;
+                      } else if (pendingDriftSawAck && d.type === 'telemetry') {
+                        pendingDriftAckReqId = '';
+                        pendingDriftSawAck = false;
+                        resolvePendingDriftDrain();
+                      }
+                    });
+                  }
+                  if (pendingDriftNextWantAckReqId) {
+                    data.wantAck = true;
+                    data.reqId = pendingDriftNextWantAckReqId;
+                    pendingDriftAckReqId = pendingDriftNextWantAckReqId;
+                    pendingDriftSawAck = false;
+                    pendingDriftNextWantAckReqId = '';
+                  }
+                  pushedAudioMsgs.push({
+                    tEndUs: data.tEndUs,
+                    estSkewUs: data.estSkewUs,
+                    len: data.samples ? data.samples.length : 0,
+                  });
+                }
+                return origPostMessage.apply(this, arguments);
+              };
+              Object.defineProperty(navigator, 'mediaDevices', {
+                configurable: true,
+                value: {
+                  getUserMedia: async (constraints) => {
+                    gumCalls.push({
+                      video: Boolean(constraints && constraints.video),
+                      audio: Boolean(constraints && constraints.audio),
+                    });
+                    if (gumMode === 'combined') {
+                      return combStream;
+                    }
+                    if (gumMode === 'stale_a_vid') return streamStaleA;
+                    if (gumMode === 'stale_a_mic') {
+                      return new Promise((res) => { pendingResolveA = res; });
+                    }
+                    if (gumMode === 'stale_b_vid') return streamStaleB;
+                    if (gumMode === 'stale_b1_mic') {
+                      return new Promise((res) => { pendingResolveB1 = res; });
+                    }
+                    if (gumMode === 'stale_b2_mic') {
+                      return new MediaStream([trackStaleB2]);
+                    }
+                    if (gumMode === 'drift_neg_mic') {
+                      return new MediaStream([trackDriftNeg]);
+                    }
+                    if (gumMode === 'dynamic_mic' && nextDynamicMicTrack) {
+                      return new MediaStream([nextDynamicMicTrack]);
+                    }
+                    return constraints && constraints.audio && !constraints.video ? micOnlyStream : stream;
+                  },
+                },
+              });
+
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) {
+                rmSel.value = '0';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              document.getElementById('btnSrcWebcam')?.click();
+              for (let i = 0; i < 40 && gumCalls.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              await new Promise((r) => setTimeout(r, 60));
+              const initialGumCount = gumCalls.length;
+              const initialGumAudio = Boolean(gumCalls[0] && gumCalls[0].audio);
+              const ctxBeforeWelch = ctxSpies.length;
+
+              if (rmSel) {
+                rmSel.value = '2';
+                rmSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              for (let i = 0; i < 40 && ctxSpies.length === 0; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              const lateGumCount = gumCalls.length;
+              const lateGumAudioOnly = Boolean(gumCalls[1] && gumCalls[1].audio && !gumCalls[1].video);
+              const c1 = ctxSpies[0];
+              const fireAudioCb = (ctxObj, playbackTimeSec = undefined) => {
+                if (ctxObj && ctxObj.proc && typeof ctxObj.proc.onaudioprocess === 'function') {
+                  const arr = new Float32Array(2048);
+                  const ev = {
+                    inputBuffer: { numberOfChannels: 1, getChannelData: () => arr },
+                  };
+                  if (typeof playbackTimeSec === 'number') {
+                    ev.playbackTime = playbackTimeSec;
+                  }
+                  ctxObj.proc.onaudioprocess(ev);
+                }
+              };
+
+              // Pump frames until rVFC initializes pump ref; dispatch first post-pump callback 5.0 ms late
+              for (let f = 0; f < 30 && pushedAudioMsgs.length === 0; f++) {
+                cctx.fillStyle = 'rgb(' + (30 + ((f * 7) % 200)) + ',' + ((60 + f * 5) % 220) + ',160)';
+                cctx.fillRect(20 + (f % 10) * 6, 20, 48, 48);
+                await new Promise((r) => setTimeout(r, 40));
+                if (f >= 2) {
+                  frozenNowMs = origPerfNow();
+                  virtOffsetMs = 5.0;
+                  fireAudioCb(c1);
+                  if (pushedAudioMsgs.length === 0) {
+                    virtOffsetMs = 0.0;
+                    frozenNowMs = null;
+                  }
+                }
+              }
+              if (pushedAudioMsgs.length === 1) {
+                virtOffsetMs = 2048.0 / 48.0;
+                fireAudioCb(c1);
+                virtOffsetMs = (2.0 * 2048.0) / 48.0;
+                fireAudioCb(c1);
+                virtOffsetMs = (3.0 * 2048.0) / 48.0;
+                fireAudioCb(c1);
+              }
+              frozenNowMs = null;
+              await new Promise((r) => setTimeout(r, 25));
+              const postAudioReason = window.__chronosWave2Probe?.getLastWave2()?.vibro?.reasonMask ?? 0;
+
+              // Empty-gap track swap: remove trackA -> callback closes c1 -> addTrack(trackB) restarts capture with zero extra callbacks
+              stream.removeTrack(trackA);
+              fireAudioCb(c1);
+              const ctxCountDuringGap = ctxSpies.length;
+              const c1ClosedDuringGap = Boolean(c1 && c1.closed);
+              stream.addTrack(trackB);
+              await new Promise((r) => setTimeout(r, 25));
+              const c2 = ctxSpies[1] || null;
+              const ctxCountAfterGapAdd = ctxSpies.length;
+
+              // Ended track kept in stream alongside live trackC: createMediaStreamSource receives ONLY [trackC.id]
+              trackB.stop();
+              stream.addTrack(trackC);
+              await new Promise((r) => setTimeout(r, 25));
+              const cLast = ctxSpies[ctxSpies.length - 1] || null;
+
+              const gumCountAfterNormal = gumCalls.length;
+              const ctxCountBeforeExtra = ctxSpies.length;
+
+              // Combined webcam+mic start -> trigger synchronous pre-pump callback -> selecting RS Off stops/detaches audio track
+              gumMode = 'combined';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              msgsBeforeComb = pushedAudioMsgs.length;
+              firePrePumpOnNextAssign = true;
+              document.getElementById('btnSrcWebcam')?.click();
+              for (let i = 0; i < 40 && ctxSpies.length === ctxCountBeforeExtra; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              await new Promise((r) => setTimeout(r, 40));
+              const combAudioEndedAfterOff = trackComb.readyState === 'ended';
+              const combTracksLeftAfterOff = combStream.getAudioTracks().length;
+
+              // Stale pending mic A resolving while request B1 is pending + Off->Welch B2 stops A & B1 and attaches only B2
+              gumMode = 'stale_a_vid';
+              document.getElementById('btnSrcWebcam')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+              gumMode = 'stale_a_mic';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 20 && !pendingResolveA; i++) {
+                await new Promise((r) => setTimeout(r, 15));
+              }
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 25));
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              gumMode = 'stale_b_vid';
+              document.getElementById('btnSrcWebcam')?.click();
+              await new Promise((r) => setTimeout(r, 60));
+              gumMode = 'stale_b1_mic';
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 20 && !pendingResolveB1; i++) {
+                await new Promise((r) => setTimeout(r, 15));
+              }
+              if (pendingResolveA) pendingResolveA(new MediaStream([trackStaleA]));
+              await new Promise((r) => setTimeout(r, 20));
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              gumMode = 'stale_b2_mic';
+              const ctxBeforeB2 = ctxSpies.length;
+              if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              for (let i = 0; i < 40 && ctxSpies.length === ctxBeforeB2; i++) {
+                await new Promise((r) => setTimeout(r, 25));
+              }
+              if (pendingResolveB1) pendingResolveB1(new MediaStream([trackStaleB1]));
+              await new Promise((r) => setTimeout(r, 40));
+              const cStaleFinal = ctxSpies[ctxSpies.length - 1] || null;
+              const staleATracksEnded = trackStaleA.readyState === 'ended';
+              const staleB1TracksEnded = trackStaleB1.readyState === 'ended';
+              const staleBTracksIds = streamStaleB.getAudioTracks().map((tr) => tr.id);
+
+              const pushedBeforeDriftCount = pushedAudioMsgs.length;
+              const sdBtn = document.getElementById('btnResSd');
+              if (sdBtn) sdBtn.click();
+              const scanSel = document.getElementById('selRsScanDir');
+              if (scanSel && scanSel.value !== '0') {
+                scanSel.value = '0';
+                scanSel.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              await new Promise((r) => setTimeout(r, 40));
+
+              // Sustained clock drift & dispatch delay checks (Round 14 & Round 15 P2 regression suite)
+              let driftRunSeq = 0;
+              const runSustainedDrift = async (ctxObj, totalBlocks, offsetMsFn, hwSetupFn = null, curTimeSetupFn = null, omitPlaybackTime = false, videoDriftRatePerBlock = 0.0) => {
+                driftRunSeq++;
+                const msgStart = pushedAudioMsgs.length;
+                cctx.fillStyle = 'rgb(' + (40 + driftRunSeq * 15) + ',' + (70 + driftRunSeq * 10) + ',110)';
+                cctx.fillRect(16, 16, 48, 48);
+                await new Promise((r) => setTimeout(r, 40));
+                const samplesBefore = window.__chronosWave2Probe?.getLastWave2()?.vibro?.audioTotalSamples ?? 0;
+                const sr = ctxObj.sampleRate || 48000;
+                const blockDurMs = (2048.0 * 1000.0) / sr;
+                let curBlockIdx = 0;
+                ctxObj.hwClockFn = typeof hwSetupFn === 'function'
+                  ? () => hwSetupFn(curBlockIdx, frozenNowMs !== null ? frozenNowMs : origPerfNow(), blockDurMs)
+                  : null;
+                ctxObj.currentTimeFn = typeof curTimeSetupFn === 'function'
+                  ? () => curTimeSetupFn(curBlockIdx, blockDurMs)
+                  : null;
+                const hasPlayTime = !omitPlaybackTime && (typeof hwSetupFn === 'function' || typeof curTimeSetupFn === 'function');
+                const playTimeOf = (idx) => (hasPlayTime ? 1.0 + ((idx + 1) * 2048.0) / sr : undefined);
+                for (let f = 0; f < 30 && pushedAudioMsgs.length === msgStart; f++) {
+                  cctx.fillStyle = 'rgb(' + (40 + ((f * 11) % 190)) + ',' + ((80 + f * 7) % 210) + ',180)';
+                  cctx.fillRect(24 + (f % 10) * 6, 24, 48, 48);
+                  await new Promise((r) => setTimeout(r, 45));
+                  if (f >= 2) {
+                    if (videoDriftRatePerBlock !== 0.0) {
+                      const img = cctx.createImageData(canvas.width, canvas.height);
+                      for (let yy = 0; yy < canvas.height; yy++) {
+                        for (let xx = 0; xx < canvas.width; xx++) {
+                          const off = (yy * canvas.width + xx) * 4;
+                          const val = 128 + 38 * Math.sin(0.27 * xx + 0.13 * yy) + 34 * Math.cos(0.19 * xx - 0.31 * yy) + 22 * Math.cos(0.37 * xx + 0.29 * yy);
+                          img.data[off] = img.data[off + 1] = img.data[off + 2] = val;
+                          img.data[off + 3] = 255;
+                        }
+                      }
+                      cctx.putImageData(img, 0, 0);
+                      await new Promise((r) => setTimeout(r, 55));
+                    }
+                    const probe1 = window.__chronosWave1Probe;
+                    const busyDeadline = origPerfNow() + 500;
+                    while (origPerfNow() < busyDeadline) {
+                      const bNow = probe1?.getBusyState?.();
+                      const vNow = window.__chronosWave2Probe?.getLastWave2()?.vibro?.state;
+                      if ((!bNow || (!bNow.workerFrameBusy && !bNow.bitmapCaptureBusy)) && vNow === 2) break;
+                      await new Promise((r) => setTimeout(r, 15));
+                    }
+                    const readyStateNow = window.__chronosWave2Probe?.getLastWave2()?.vibro?.state;
+                    if (readyStateNow !== 2 && f < 29) continue;
+                    curBlockIdx = 0;
+                    frozenNowMs = origPerfNow();
+                    virtOffsetMs = offsetMsFn(0, blockDurMs);
+                    if (totalBlocks === 1) {
+                      pendingDriftNextWantAckReqId = 'e2e-drift-' + driftRunSeq;
+                    }
+                    fireAudioCb(ctxObj, playTimeOf(0));
+                    if (pushedAudioMsgs.length === msgStart) {
+                      pendingDriftNextWantAckReqId = '';
+                      frozenNowMs = null;
+                    }
+                  }
+                }
+                let drainPromise = null;
+                if (totalBlocks === 1 && pendingDriftAckReqId) {
+                  drainPromise = new Promise((resolve) => {
+                    const timer = setTimeout(() => {
+                      if (pendingDriftDrainResolve) {
+                        pendingDriftDrainResolve = null;
+                        resolve('timeout');
+                      }
+                    }, 20000);
+                    pendingDriftDrainResolve = (reqId) => {
+                      clearTimeout(timer);
+                      resolve(reqId);
+                    };
+                  });
+                } else if (pushedAudioMsgs.length === msgStart + 1) {
+                  let nextFrame = 1;
+                  const framePeriodMs = 1000.0 / 30.0;
+                  const vsyncMs = 1000.0 / 60.0;
+                  for (let b = 1; b < totalBlocks; b++) {
+                    curBlockIdx = b;
+                    if (videoDriftRatePerBlock !== 0.0) {
+                      while (nextFrame * framePeriodMs + 2.5 * blockDurMs <= b * blockDurMs) {
+                        const captureRel = nextFrame * framePeriodMs;
+                        const dispatchRel = Math.ceil((captureRel + 0.2) / vsyncMs) * vsyncMs;
+                        const videoDriftMs = Math.max(0.0, captureRel / blockDurMs - 320.0) * videoDriftRatePerBlock;
+                        const baseEndUs = pushedAudioMsgs[msgStart].tEndUs;
+                        const mt = (baseEndUs + (captureRel + videoDriftMs) * 1000.0) / 1e6;
+                        const probe = window.__chronosWave1Probe;
+                        for (let wi = 0; probe.getBusyState().workerFrameBusy && wi < 200; wi++) {
+                          await new Promise((r) => setTimeout(r, 1));
+                        }
+                        await probe.forwardVideoFrameForTest(mt, frozenNowMs + dispatchRel, {
+                          captureTime: frozenNowMs + captureRel,
+                        });
+                        nextFrame++;
+                      }
+                    }
+                    virtOffsetMs = offsetMsFn(b, blockDurMs);
+                    if (b === totalBlocks - 1) {
+                      pendingDriftNextWantAckReqId = 'e2e-drift-' + driftRunSeq;
+                    }
+                    fireAudioCb(ctxObj, playTimeOf(b));
+                  }
+                  if (pendingDriftAckReqId) {
+                    drainPromise = new Promise((resolve) => {
+                      const timer = setTimeout(() => {
+                        if (pendingDriftDrainResolve) {
+                          pendingDriftDrainResolve = null;
+                          resolve('timeout');
+                        }
+                      }, 20000);
+                      pendingDriftDrainResolve = (reqId) => {
+                        clearTimeout(timer);
+                        resolve(reqId);
+                      };
+                    });
+                  }
+                }
+                pendingDriftNextWantAckReqId = '';
+                ctxObj.hwClockFn = null;
+                ctxObj.currentTimeFn = null;
+                frozenNowMs = null;
+                virtOffsetMs = 0.0;
+                if (drainPromise) {
+                  await drainPromise;
+                } else {
+                  await new Promise((r) => setTimeout(r, 120));
+                }
+                pendingDriftAckReqId = '';
+                pendingDriftSawAck = false;
+                pendingDriftDrainResolve = null;
+                const snap = window.__chronosWave2Probe?.getLastWave2() || null;
+                const slice = pushedAudioMsgs.slice(msgStart);
+                const samplesAfter = snap?.vibro?.audioTotalSamples ?? 0;
+                return {
+                  pushedCount: slice.length,
+                  lastSkew: slice.length > 0 ? slice[slice.length - 1].estSkewUs : 0,
+                  maxAbsSkew: slice.reduce((mx, m) => Math.max(mx, Math.abs(m.estSkewUs)), 0),
+                  acceptedBlocks: Math.round(((samplesAfter - samplesBefore) >>> 0) / 2048),
+                  state: snap?.vibro?.state ?? -1,
+                  reasonMask: snap?.vibro?.reasonMask ?? -1,
+                  welchK: snap?.vibro?.welchK ?? -1,
+                  stampValid: Boolean(snap?.stamps?.vibro?.valid),
+                };
+              };
+
+              const restartFreshMicSession = async (sampleRate = 48000) => {
+                if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+                await new Promise((r) => setTimeout(r, 30));
+                const dst = realAc.createMediaStreamDestination();
+                const trk = dst.stream.getAudioTracks()[0];
+                driftExtraTracks.push(trk);
+                nextDynamicMicTrack = trk;
+                nextMockSampleRate = sampleRate;
+                gumMode = 'dynamic_mic';
+                const ctxBefore = ctxSpies.length;
+                if (rmSel) { rmSel.value = '2'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+                for (let i = 0; i < 40 && ctxSpies.length === ctxBefore; i++) {
+                  await new Promise((r) => setTimeout(r, 25));
+                }
+                nextMockSampleRate = 48000;
+                return ctxSpies[ctxSpies.length - 1] || null;
+              };
+
+              const driftPos = await runSustainedDrift(cStaleFinal, 320, (b, bd) => b * (bd + 0.1));
+              const cDriftNeg = await restartFreshMicSession();
+              const driftNeg = await runSustainedDrift(cDriftNeg, 320, (b, bd) => b * (bd - 0.1));
+              const cLatePosP4 = await restartFreshMicSession();
+              const lateDriftPosP4 = await runSustainedDrift(
+                cLatePosP4,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) + 0.02 * Math.max(0, b - 3000)
+              );
+              const cLateNegP4 = await restartFreshMicSession();
+              const lateDriftNegP4 = await runSustainedDrift(
+                cLateNegP4,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cDisp5333 = await restartFreshMicSession();
+              const dispatchDelay5333 = await runSustainedDrift(
+                cDisp5333,
+                410,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320))
+              );
+              const cHwDisp25ms = await restartFreshMicSession();
+              const hwDispatchDelay25ms = await runSustainedDrift(
+                cHwDisp25ms,
+                410,
+                (b, bd) => b * bd + Math.min(25.0, 0.3 * Math.max(0, b - 320)),
+                (b, basePerf, bd) => ({
+                  contextTime: 1.0 + ((b + 1) * 2048.0) / 48000.0 - 0.0426667,
+                  performanceTime: basePerf + b * bd - 42.6667,
+                })
+              );
+              const cHwLateP4 = await restartFreshMicSession();
+              const hwLateDriftP4 = await runSustainedDrift(
+                cHwLateP4,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) + 0.02 * Math.max(0, b - 3000),
+                (b, basePerf, bd) => ({
+                  contextTime: 1.0 + ((b + 1) * 2048.0) / 48000.0 - 0.0426667,
+                  performanceTime: basePerf + b * bd + 0.02 * Math.max(0, b - 3000) - 42.6667,
+                })
+              );
+              const cCtxPullDisp = await restartFreshMicSession(48000);
+              const ctxPullDisp5333 = await runSustainedDrift(
+                cCtxPullDisp,
+                410,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((Math.min(5.333e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+              );
+              const cBare44k1Pos = await restartFreshMicSession(44100);
+              const bare44k1LatePosP4 = await runSustainedDrift(
+                cBare44k1Pos,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBare44k1Neg = await restartFreshMicSession(44100);
+              const bare44k1LateNegP4 = await runSustainedDrift(
+                cBare44k1Neg,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 2) % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtx512Pull48k = await restartFreshMicSession(48000);
+              const ctx512Pull48k8000 = await runSustainedDrift(
+                cCtx512Pull48k,
+                410,
+                (b, bd) => b * bd + Math.min(8.0, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((Math.min(8e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 48000.0)) * (512.0 / 48000.0)
+              );
+              const cCtx512Pull96k = await restartFreshMicSession(96000);
+              const ctx512Pull96k5333 = await runSustainedDrift(
+                cCtx512Pull96k,
+                410,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 96000.0 + Math.floor((Math.min(5.333e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 96000.0)) * (512.0 / 96000.0)
+              );
+              const cRawTsNoPlay = await restartFreshMicSession(48000);
+              const rawTsNoPlay750 = await runSustainedDrift(
+                cRawTsNoPlay,
+                750,
+                (b, bd) => b * bd + Math.min(5.333, 0.1 * Math.max(0, b - 320)),
+                (b, basePerf, bd) => {
+                  const dMs = Math.min(5.333, 0.1 * Math.max(0, b - 320));
+                  const pSec = 256.0 / 48000.0;
+                  const pulls = Math.floor(((dMs + 1.0) * 1e-3) / pSec);
+                  return {
+                    contextTime: 1.0 + (b * 2048.0) / 48000.0 + pulls * pSec,
+                    performanceTime: basePerf + b * bd - 1.0 + pulls * pSec * 1000.0,
+                  };
+                },
+                null,
+                true
+              );
+              const cBare48kPosP12 = await restartFreshMicSession(48000);
+              const bare48kLatePosP12 = await runSustainedDrift(
+                cBare48kPosP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBare48kNegP12 = await restartFreshMicSession(48000);
+              const bare48kLateNegP12 = await runSustainedDrift(
+                cBare48kNegP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtx48kPosP12 = await restartFreshMicSession(48000);
+              const ctx48kLatePosP12 = await runSustainedDrift(
+                cCtx48kPosP12,
+                3320,
+                (b, bd) => b * bd + 2.667 * (Math.floor(b / 6) % 2) + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => {
+                  const jitSec = 2.667e-3 * (Math.floor(b / 6) % 2);
+                  const pSec = 256.0 / 48000.0;
+                  return 1.0 + (b * 2048.0) / 48000.0 + Math.floor((jitSec + 1e-3) / pSec) * pSec;
+                }
+              );
+              const cIntermittentTs = await restartFreshMicSession(48000);
+              const intermittentNullTs4320 = await runSustainedDrift(
+                cIntermittentTs,
+                4320,
+                (b, bd) => b * bd + 0.02 * Math.max(0, b - 3000),
+                (b, basePerf, bd) => (
+                  b % 16 === 0
+                    ? null
+                    : {
+                        contextTime: 1.0 + (b * 2048.0) / 48000.0,
+                        performanceTime: basePerf + b * bd + 0.02 * Math.max(0, b - 3000) - bd,
+                      }
+                ),
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const makeRandJitArr = (seedInit, len, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  arr[k] = (sd >>> 31) * qMs;
+                }
+                return arr;
+              };
+              const makeHeldUnifJitArr = (seedInit, len, hold, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                let cur = 0.0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  if (k % hold === 0) cur = qMs * (sd / 4294967296.0);
+                  arr[k] = cur;
+                }
+                return arr;
+              };
+              const randJit1Pos = makeRandJitArr(1, 3320, 2.667);
+              const randJit7Neg = makeRandJitArr(7, 3320, 2.667);
+              const randJit44kBenign = makeRandJitArr(5, 750, 2.9025);
+              const holdJit2Pos = makeHeldUnifJitArr(2, 3320, 20, 2.667);
+              const holdJit3Neg = makeHeldUnifJitArr(3, 3320, 20, 2.667);
+              const holdJit50Benign = makeHeldUnifJitArr(50, 750, 20, 2.667);
+              const cBareRand1Pos = await restartFreshMicSession(48000);
+              const bareRandSeed1Pos = await runSustainedDrift(
+                cBareRand1Pos,
+                3320,
+                (b, bd) => b * bd + randJit1Pos[b] + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBareRand7Neg = await restartFreshMicSession(48000);
+              const bareRandSeed7Neg = await runSustainedDrift(
+                cBareRand7Neg,
+                3320,
+                (b, bd) => b * bd + randJit7Neg[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxRand1Pos = await restartFreshMicSession(48000);
+              const ctxRandSeed1Pos = await runSustainedDrift(
+                cCtxRand1Pos,
+                3320,
+                (b, bd) => b * bd + randJit1Pos[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((randJit1Pos[b] * 1e-3 + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+              );
+              const cCtxRand7Neg = await restartFreshMicSession(48000);
+              const ctxRandSeed7Neg = await runSustainedDrift(
+                cCtxRand7Neg,
+                3320,
+                (b, bd) => b * bd + randJit7Neg[b] - 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + Math.floor((randJit7Neg[b] * 1e-3 + 1e-3) / (256.0 / 48000.0)) * (256.0 / 48000.0)
+              );
+              const cCtxRandBenign = await restartFreshMicSession(44100);
+              const ctxRandBenign512Pull = await runSustainedDrift(
+                cCtxRandBenign,
+                750,
+                (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 44100.0 + Math.floor((randJit44kBenign[b] * 1e-3 + Math.min(11.589e-3, 1e-4 * Math.max(0, b - 320)) + 1e-3) / (512.0 / 44100.0)) * (512.0 / 44100.0)
+              );
+              const cBareHold20Pos = await restartFreshMicSession(48000);
+              const bareHold20Seed2Pos = await runSustainedDrift(
+                cBareHold20Pos,
+                3320,
+                (b, bd) => b * bd + holdJit2Pos[b] + 0.02 * Math.max(0, b - 3000)
+              );
+              const cBareHold20Neg = await restartFreshMicSession(48000);
+              const bareHold20Seed3Neg = await runSustainedDrift(
+                cBareHold20Neg,
+                3320,
+                (b, bd) => b * bd + holdJit3Neg[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxHold20Pos = await restartFreshMicSession(48000);
+              const ctxHold20Seed2Pos = await runSustainedDrift(
+                cCtxHold20Pos,
+                3320,
+                (b, bd) => b * bd + holdJit2Pos[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const cCtxHold20Neg = await restartFreshMicSession(48000);
+              const ctxHold20Seed3Neg = await runSustainedDrift(
+                cCtxHold20Neg,
+                3320,
+                (b, bd) => b * bd + holdJit3Neg[b] - 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const cCtxHold20Benign = await restartFreshMicSession(48000);
+              const ctxHold20Seed50Benign = await runSustainedDrift(
+                cCtxHold20Benign,
+                750,
+                (b, bd) => b * bd + holdJit50Benign[b] + Math.min(8.0, 0.1 * Math.max(0, b - 320)),
+                null,
+                (b) => {
+                  const p = 512.0 / 48000.0;
+                  const d = Math.min(8.0, 0.1 * Math.max(0, b - 320));
+                  return 1.0 + (b * 2048.0) / 48000.0 + Math.floor(((holdJit50Benign[b] + d + 1.0) * 1e-3) / p) * p;
+                }
+              );
+              const cBareRand44kBenign = await restartFreshMicSession(44100);
+              const bareRand44kSeed5Benign = await runSustainedDrift(
+                cBareRand44kBenign,
+                750,
+                (b, bd) => b * bd + randJit44kBenign[b] + Math.min(11.589, 0.1 * Math.max(0, b - 320))
+              );
+              const makeHeldBernJitArr = (seedInit, len, hold, qMs) => {
+                const arr = new Float64Array(len);
+                let sd = seedInit >>> 0;
+                let cur = 0.0;
+                for (let k = 0; k < len; k++) {
+                  sd = (Math.imul(sd, 1664525) + 1013904223) >>> 0;
+                  if (k % hold === 0) cur = (sd >>> 31) * qMs;
+                  arr[k] = cur;
+                }
+                return arr;
+              };
+              const q48Ms = (128.0 * 1000.0) / 48000.0;
+              const bernHold23Seed2 = makeHeldBernJitArr(2, 3320, 23, q48Ms);
+              const unifHold14Seed2 = makeHeldUnifJitArr(2, 3320, 14, q48Ms);
+              const unifHold25Seed2 = makeHeldUnifJitArr(2, 3320, 25, q48Ms);
+              const p512Sec48 = 512.0 / 48000.0;
+              const cBareHold23Bern = await restartFreshMicSession(48000);
+              const bareHold23BernSeed2Neg20 = await runSustainedDrift(
+                cBareHold23Bern,
+                3320,
+                (b, bd) => b * bd + bernHold23Seed2[b] - 0.02 * Math.max(0, b - 3000)
+              );
+              const cCtxPh96Hold14 = await restartFreshMicSession(48000);
+              const ctx512Ph96Hold14Seed2Pos20 = await runSustainedDrift(
+                cCtxPh96Hold14,
+                3320,
+                (b, bd) => b * bd + unifHold14Seed2[b] + 0.02 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((unifHold14Seed2[b] + 9.6) / (1000.0 * p512Sec48))
+              );
+              const cCtxPh96Hold25 = await restartFreshMicSession(48000);
+              const ctx512Ph96Hold25Seed2Pos60 = await runSustainedDrift(
+                cCtxPh96Hold25,
+                3320,
+                (b, bd) => b * bd + unifHold25Seed2[b] + 0.06 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((unifHold25Seed2[b] + 9.6) / (1000.0 * p512Sec48))
+              );
+              const cBareSlow5ms = await restartFreshMicSession(48000);
+              const bareBenignSlow5ms1100 = await runSustainedDrift(
+                cBareSlow5ms,
+                1100,
+                (b, bd) => b * bd + Math.min(5.0, 0.025 * Math.max(0, b - 320))
+              );
+              const cCtxSlow5ms = await restartFreshMicSession(48000);
+              const ctx512BenignSlow5ms1100 = await runSustainedDrift(
+                cCtxSlow5ms,
+                1100,
+                (b, bd) => b * bd + Math.min(5.0, 0.025 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((Math.min(5.0, 0.025 * Math.max(0, b - 320)) + 1.0) / (1000.0 * p512Sec48))
+              );
+              const cCtx23p5ms = await restartFreshMicSession(48000);
+              const ctx512Benign23p5ms750 = await runSustainedDrift(
+                cCtx23p5ms,
+                750,
+                (b, bd) => b * bd + Math.min(23.5, 0.04 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p512Sec48 * Math.floor((Math.min(23.5, 0.04 * Math.max(0, b - 320)) + 0.2) / (1000.0 * p512Sec48))
+              );
+              const cSlowCleanPos = await restartFreshMicSession(48000);
+              const slowCleanPos15us3701 = await runSustainedDrift(
+                cSlowCleanPos,
+                3701,
+                (b, bd) => b * bd + 0.015 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0
+              );
+              const p128Sec48 = 128.0 / 48000.0;
+              const cSlowCleanNeg = await restartFreshMicSession(48000);
+              const slowCleanNeg15us3701 = await runSustainedDrift(
+                cSlowCleanNeg,
+                3701,
+                (b, bd) => b * bd - 0.015 * Math.max(0, b - 3000),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0 + p128Sec48 * Math.floor(1.0 / (1000.0 * p128Sec48))
+              );
+              const q441Ms = (128.0 * 1000.0) / 44100.0;
+              const p128Sec441 = 128.0 / 44100.0;
+              const p512Sec441 = 512.0 / 44100.0;
+              const unifHold14Seed2_441 = makeHeldUnifJitArr(2, 1000, 14, q441Ms);
+              const cDisp44k128 = await restartFreshMicSession(44100);
+              const dispatch44kHeld128Cap5 = await runSustainedDrift(
+                cDisp44k128,
+                1000,
+                (b, bd) => b * bd + unifHold14Seed2_441[b] + Math.min(5.0, 0.02 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 44100.0 + p128Sec441 * Math.floor((unifHold14Seed2_441[b] + Math.min(5.0, 0.02 * Math.max(0, b - 320))) / (1000.0 * p128Sec441))
+              );
+              const cDisp44k512 = await restartFreshMicSession(44100);
+              const dispatch44kHeld512Cap11p589 = await runSustainedDrift(
+                cDisp44k512,
+                1000,
+                (b, bd) => b * bd + unifHold14Seed2_441[b] + Math.min(11.589, 0.02 * Math.max(0, b - 320)),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 44100.0 + p512Sec441 * Math.floor((unifHold14Seed2_441[b] + Math.min(11.589, 0.02 * Math.max(0, b - 320)) + 10.448979591836734) / (1000.0 * p512Sec441))
+              );
+              const q96Ms = (128.0 * 1000.0) / 96000.0;
+              const p512Sec96 = 512.0 / 96000.0;
+              const unifHold20Seed1_96 = makeHeldUnifJitArr(1, 680, 20, q96Ms);
+              const cDrift96k = await restartFreshMicSession(96000);
+              const drift96kHold20Neg20 = await runSustainedDrift(
+                cDrift96k,
+                680,
+                (b, bd) => b * bd + unifHold20Seed1_96[b] - 0.02 * Math.max(0, b - 360),
+                null,
+                (b) => 1.0 + (b * 2048.0) / 96000.0 + p512Sec96 * Math.floor((unifHold20Seed1_96[b] + 5.28) / (1000.0 * p512Sec96))
+              );
+              const cRvfcCaptureDrift = await restartFreshMicSession(48000);
+              const rvfcCaptureVideoDrift650 = await runSustainedDrift(
+                cRvfcCaptureDrift,
+                650,
+                (b, bd) => b * bd,
+                null,
+                (b) => 1.0 + (b * 2048.0) / 48000.0,
+                false,
+                0.06
+              );
+
+              return {
+                initialGumCount,
+                initialGumAudio,
+                ctxBeforeWelch,
+                lateGumCount,
+                lateGumAudioOnly,
+                gumCountFinal: gumCountAfterNormal,
+                ctxCountDuringGap,
+                c1ClosedDuringGap,
+                ctxCountAfterGapAdd,
+                c2Closed: Boolean(c2 && c2.closed),
+                ctxCountFinal: ctxCountBeforeExtra,
+                c2BoundTrackIds: c2 ? c2.boundTrackIds : [],
+                cLastBoundTrackIds: cLast ? cLast.boundTrackIds : [],
+                trackBId: trackB.id,
+                trackCId: trackC.id,
+                prePumpCount,
+                pushedCount: pushedBeforeDriftCount,
+                pushedSkews: pushedAudioMsgs.slice(0, 4).map((m) => m.estSkewUs),
+                postAudioReason,
+                combAudioEndedAfterOff,
+                combTracksLeftAfterOff,
+                staleATracksEnded,
+                staleB1TracksEnded,
+                staleBTracksIds,
+                staleFinalBoundIds: cStaleFinal ? cStaleFinal.boundTrackIds : [],
+                trackStaleB2Id: trackStaleB2.id,
+                driftPos,
+                driftNeg,
+                lateDriftPosP4,
+                lateDriftNegP4,
+                dispatchDelay5333,
+                hwDispatchDelay25ms,
+                hwLateDriftP4,
+                ctxPullDisp5333,
+                bare44k1LatePosP4,
+                bare44k1LateNegP4,
+                ctx512Pull48k8000,
+                ctx512Pull96k5333,
+                rawTsNoPlay750,
+                bare48kLatePosP12,
+                bare48kLateNegP12,
+                ctx48kLatePosP12,
+                intermittentNullTs4320,
+                bareRandSeed1Pos,
+                bareRandSeed7Neg,
+                ctxRandSeed1Pos,
+                ctxRandSeed7Neg,
+                ctxRandBenign512Pull,
+                bareHold20Seed2Pos,
+                bareHold20Seed3Neg,
+                ctxHold20Seed2Pos,
+                ctxHold20Seed3Neg,
+                ctxHold20Seed50Benign,
+                bareRand44kSeed5Benign,
+                bareHold23BernSeed2Neg20,
+                ctx512Ph96Hold14Seed2Pos20,
+                ctx512Ph96Hold25Seed2Pos60,
+                bareBenignSlow5ms1100,
+                ctx512BenignSlow5ms1100,
+                ctx512Benign23p5ms750,
+                slowCleanPos15us3701,
+                slowCleanNeg15us3701,
+                dispatch44kHeld128Cap5,
+                dispatch44kHeld512Cap11p589,
+                drift96kHold20Neg20,
+                rvfcCaptureVideoDrift650,
+              };
+            } finally {
+              performance.now = origPerfNow;
+              Worker.prototype.postMessage = origPostMessage;
+              window.AudioContext = origAudioCtx;
+              window.webkitAudioContext = origWebkitAudioCtx;
+              if (origMediaDevicesDesc) {
+                Object.defineProperty(navigator, 'mediaDevices', origMediaDevicesDesc);
+              } else {
+                delete navigator.mediaDevices;
+              }
+              stream.getTracks().forEach((tr) => tr.stop());
+              combStream.getTracks().forEach((tr) => tr.stop());
+              streamStaleA.getTracks().forEach((tr) => tr.stop());
+              streamStaleB.getTracks().forEach((tr) => tr.stop());
+              trackStaleA.stop();
+              trackStaleB1.stop();
+              trackStaleB2.stop();
+              trackDriftNeg.stop();
+              driftExtraTracks.forEach((tr) => tr.stop());
+              await realAc.close().catch(() => {});
+              const rmSel = document.getElementById('rsVibroModeSelect');
+              if (rmSel) { rmSel.value = '0'; rmSel.dispatchEvent(new Event('change', { bubbles: true })); }
+              document.getElementById('btnResHd')?.click();
+              document.getElementById('btnSrcTestbench')?.click();
+              await new Promise((r) => setTimeout(r, 40));
+            }
+          })()`
+        );
+        if (
+          !webcamAudioCheck ||
+          webcamAudioCheck.initialGumCount !== 1 ||
+          webcamAudioCheck.initialGumAudio ||
+          webcamAudioCheck.ctxBeforeWelch !== 0 ||
+          webcamAudioCheck.lateGumCount !== 2 ||
+          !webcamAudioCheck.lateGumAudioOnly ||
+          webcamAudioCheck.gumCountFinal !== 2 ||
+          webcamAudioCheck.prePumpCount !== 0 ||
+          webcamAudioCheck.pushedCount !== 4 ||
+          webcamAudioCheck.pushedSkews.some((s) => !Number.isFinite(s) || Math.abs(s) > 250.0) ||
+          (webcamAudioCheck.postAudioReason & 32) !== 0 ||
+          !webcamAudioCheck.c1ClosedDuringGap ||
+          webcamAudioCheck.ctxCountDuringGap !== 1 ||
+          webcamAudioCheck.ctxCountAfterGapAdd < 2 ||
+          !webcamAudioCheck.c2Closed ||
+          webcamAudioCheck.ctxCountFinal < 3 ||
+          webcamAudioCheck.c2BoundTrackIds.length !== 1 ||
+          webcamAudioCheck.c2BoundTrackIds[0] !== webcamAudioCheck.trackBId ||
+          webcamAudioCheck.cLastBoundTrackIds.length !== 1 ||
+          webcamAudioCheck.cLastBoundTrackIds[0] !== webcamAudioCheck.trackCId ||
+          !webcamAudioCheck.combAudioEndedAfterOff ||
+          webcamAudioCheck.combTracksLeftAfterOff !== 0 ||
+          !webcamAudioCheck.staleATracksEnded ||
+          !webcamAudioCheck.staleB1TracksEnded ||
+          webcamAudioCheck.staleBTracksIds.length !== 1 ||
+          webcamAudioCheck.staleBTracksIds[0] !== webcamAudioCheck.trackStaleB2Id ||
+          webcamAudioCheck.staleFinalBoundIds.length !== 1 ||
+          webcamAudioCheck.staleFinalBoundIds[0] !== webcamAudioCheck.trackStaleB2Id ||
+          !webcamAudioCheck.driftPos ||
+          webcamAudioCheck.driftPos.pushedCount !== 320 ||
+          webcamAudioCheck.driftPos.maxAbsSkew <= 20000 ||
+          webcamAudioCheck.driftPos.lastSkew >= -20000 ||
+          webcamAudioCheck.driftPos.acceptedBlocks <= 0 ||
+          webcamAudioCheck.driftPos.acceptedBlocks >= 180 ||
+          webcamAudioCheck.driftPos.state !== 4 ||
+          (webcamAudioCheck.driftPos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.driftPos.welchK !== 0 ||
+          webcamAudioCheck.driftPos.stampValid ||
+          !webcamAudioCheck.driftNeg ||
+          webcamAudioCheck.driftNeg.pushedCount !== 320 ||
+          webcamAudioCheck.driftNeg.maxAbsSkew <= 20000 ||
+          webcamAudioCheck.driftNeg.lastSkew <= 20000 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks <= 0 ||
+          webcamAudioCheck.driftNeg.acceptedBlocks >= 180 ||
+          webcamAudioCheck.driftNeg.state !== 4 ||
+          (webcamAudioCheck.driftNeg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.driftNeg.welchK !== 0 ||
+          webcamAudioCheck.driftNeg.stampValid ||
+          !webcamAudioCheck.lateDriftPosP4 ||
+          webcamAudioCheck.lateDriftPosP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.lateDriftPosP4.lastSkew) <= 500 ||
+          webcamAudioCheck.lateDriftPosP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftPosP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.lateDriftPosP4.state !== 4 ||
+          (webcamAudioCheck.lateDriftPosP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftPosP4.welchK !== 0 ||
+          webcamAudioCheck.lateDriftPosP4.stampValid ||
+          !webcamAudioCheck.lateDriftNegP4 ||
+          webcamAudioCheck.lateDriftNegP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.lateDriftNegP4.lastSkew) <= 500 ||
+          webcamAudioCheck.lateDriftNegP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.lateDriftNegP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.lateDriftNegP4.state !== 4 ||
+          (webcamAudioCheck.lateDriftNegP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.lateDriftNegP4.welchK !== 0 ||
+          webcamAudioCheck.lateDriftNegP4.stampValid ||
+          !webcamAudioCheck.dispatchDelay5333 ||
+          webcamAudioCheck.dispatchDelay5333.pushedCount !== 410 ||
+          webcamAudioCheck.dispatchDelay5333.maxAbsSkew > 500 ||
+          webcamAudioCheck.dispatchDelay5333.acceptedBlocks !== 410 ||
+          webcamAudioCheck.dispatchDelay5333.state === 4 ||
+          (webcamAudioCheck.dispatchDelay5333.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.hwDispatchDelay25ms ||
+          webcamAudioCheck.hwDispatchDelay25ms.pushedCount !== 410 ||
+          webcamAudioCheck.hwDispatchDelay25ms.maxAbsSkew !== 0 ||
+          webcamAudioCheck.hwDispatchDelay25ms.acceptedBlocks !== 410 ||
+          webcamAudioCheck.hwDispatchDelay25ms.state === 4 ||
+          (webcamAudioCheck.hwDispatchDelay25ms.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.hwLateDriftP4 ||
+          webcamAudioCheck.hwLateDriftP4.pushedCount !== 3320 ||
+          webcamAudioCheck.hwLateDriftP4.lastSkew >= -4000 ||
+          webcamAudioCheck.hwLateDriftP4.acceptedBlocks <= 3050 ||
+          webcamAudioCheck.hwLateDriftP4.acceptedBlocks >= 3200 ||
+          webcamAudioCheck.hwLateDriftP4.state !== 4 ||
+          (webcamAudioCheck.hwLateDriftP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.hwLateDriftP4.welchK !== 0 ||
+          webcamAudioCheck.hwLateDriftP4.stampValid ||
+          !webcamAudioCheck.ctxPullDisp5333 ||
+          webcamAudioCheck.ctxPullDisp5333.pushedCount !== 410 ||
+          webcamAudioCheck.ctxPullDisp5333.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctxPullDisp5333.acceptedBlocks !== 410 ||
+          webcamAudioCheck.ctxPullDisp5333.state === 4 ||
+          (webcamAudioCheck.ctxPullDisp5333.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bare44k1LatePosP4 ||
+          webcamAudioCheck.bare44k1LatePosP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare44k1LatePosP4.lastSkew) <= 500 ||
+          webcamAudioCheck.bare44k1LatePosP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare44k1LatePosP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare44k1LatePosP4.state !== 4 ||
+          (webcamAudioCheck.bare44k1LatePosP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare44k1LatePosP4.welchK !== 0 ||
+          webcamAudioCheck.bare44k1LatePosP4.stampValid ||
+          !webcamAudioCheck.bare44k1LateNegP4 ||
+          webcamAudioCheck.bare44k1LateNegP4.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare44k1LateNegP4.lastSkew) <= 500 ||
+          webcamAudioCheck.bare44k1LateNegP4.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare44k1LateNegP4.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare44k1LateNegP4.state !== 4 ||
+          (webcamAudioCheck.bare44k1LateNegP4.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare44k1LateNegP4.welchK !== 0 ||
+          webcamAudioCheck.bare44k1LateNegP4.stampValid ||
+          !webcamAudioCheck.ctx512Pull48k8000 ||
+          webcamAudioCheck.ctx512Pull48k8000.pushedCount !== 410 ||
+          webcamAudioCheck.ctx512Pull48k8000.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Pull48k8000.acceptedBlocks !== 410 ||
+          webcamAudioCheck.ctx512Pull48k8000.state === 4 ||
+          (webcamAudioCheck.ctx512Pull48k8000.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512Pull96k5333 ||
+          webcamAudioCheck.ctx512Pull96k5333.pushedCount !== 410 ||
+          webcamAudioCheck.ctx512Pull96k5333.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Pull96k5333.acceptedBlocks !== 410 ||
+          webcamAudioCheck.ctx512Pull96k5333.state === 4 ||
+          (webcamAudioCheck.ctx512Pull96k5333.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.rawTsNoPlay750 ||
+          webcamAudioCheck.rawTsNoPlay750.pushedCount !== 750 ||
+          webcamAudioCheck.rawTsNoPlay750.maxAbsSkew !== 0 ||
+          webcamAudioCheck.rawTsNoPlay750.acceptedBlocks !== 750 ||
+          webcamAudioCheck.rawTsNoPlay750.state === 4 ||
+          (webcamAudioCheck.rawTsNoPlay750.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bare48kLatePosP12 ||
+          webcamAudioCheck.bare48kLatePosP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare48kLatePosP12.lastSkew) <= 500 ||
+          webcamAudioCheck.bare48kLatePosP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare48kLatePosP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare48kLatePosP12.state !== 4 ||
+          (webcamAudioCheck.bare48kLatePosP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare48kLatePosP12.welchK !== 0 ||
+          webcamAudioCheck.bare48kLatePosP12.stampValid ||
+          !webcamAudioCheck.bare48kLateNegP12 ||
+          webcamAudioCheck.bare48kLateNegP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bare48kLateNegP12.lastSkew) <= 500 ||
+          webcamAudioCheck.bare48kLateNegP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bare48kLateNegP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bare48kLateNegP12.state !== 4 ||
+          (webcamAudioCheck.bare48kLateNegP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bare48kLateNegP12.welchK !== 0 ||
+          webcamAudioCheck.bare48kLateNegP12.stampValid ||
+          !webcamAudioCheck.ctx48kLatePosP12 ||
+          webcamAudioCheck.ctx48kLatePosP12.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx48kLatePosP12.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx48kLatePosP12.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx48kLatePosP12.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx48kLatePosP12.state !== 4 ||
+          (webcamAudioCheck.ctx48kLatePosP12.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx48kLatePosP12.welchK !== 0 ||
+          webcamAudioCheck.ctx48kLatePosP12.stampValid ||
+          !webcamAudioCheck.intermittentNullTs4320 ||
+          webcamAudioCheck.intermittentNullTs4320.pushedCount !== 4320 ||
+          Math.abs(webcamAudioCheck.intermittentNullTs4320.lastSkew) <= 500 ||
+          webcamAudioCheck.intermittentNullTs4320.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.intermittentNullTs4320.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.intermittentNullTs4320.state !== 4 ||
+          (webcamAudioCheck.intermittentNullTs4320.reasonMask & 32) === 0 ||
+          webcamAudioCheck.intermittentNullTs4320.welchK !== 0 ||
+          webcamAudioCheck.intermittentNullTs4320.stampValid ||
+          !webcamAudioCheck.bareRandSeed1Pos ||
+          webcamAudioCheck.bareRandSeed1Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareRandSeed1Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.bareRandSeed1Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareRandSeed1Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareRandSeed1Pos.state !== 4 ||
+          (webcamAudioCheck.bareRandSeed1Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareRandSeed1Pos.welchK !== 0 ||
+          webcamAudioCheck.bareRandSeed1Pos.stampValid ||
+          !webcamAudioCheck.bareRandSeed7Neg ||
+          webcamAudioCheck.bareRandSeed7Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareRandSeed7Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.bareRandSeed7Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareRandSeed7Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareRandSeed7Neg.state !== 4 ||
+          (webcamAudioCheck.bareRandSeed7Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareRandSeed7Neg.welchK !== 0 ||
+          webcamAudioCheck.bareRandSeed7Neg.stampValid ||
+          !webcamAudioCheck.ctxRandSeed1Pos ||
+          webcamAudioCheck.ctxRandSeed1Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxRandSeed1Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxRandSeed1Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxRandSeed1Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxRandSeed1Pos.state !== 4 ||
+          (webcamAudioCheck.ctxRandSeed1Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxRandSeed1Pos.welchK !== 0 ||
+          webcamAudioCheck.ctxRandSeed1Pos.stampValid ||
+          !webcamAudioCheck.ctxRandSeed7Neg ||
+          webcamAudioCheck.ctxRandSeed7Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxRandSeed7Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxRandSeed7Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxRandSeed7Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxRandSeed7Neg.state !== 4 ||
+          (webcamAudioCheck.ctxRandSeed7Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxRandSeed7Neg.welchK !== 0 ||
+          webcamAudioCheck.ctxRandSeed7Neg.stampValid ||
+          !webcamAudioCheck.ctxRandBenign512Pull ||
+          webcamAudioCheck.ctxRandBenign512Pull.pushedCount !== 750 ||
+          webcamAudioCheck.ctxRandBenign512Pull.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctxRandBenign512Pull.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctxRandBenign512Pull.state === 4 ||
+          (webcamAudioCheck.ctxRandBenign512Pull.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareHold20Seed2Pos ||
+          webcamAudioCheck.bareHold20Seed2Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold20Seed2Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold20Seed2Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold20Seed2Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold20Seed2Pos.state !== 4 ||
+          (webcamAudioCheck.bareHold20Seed2Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold20Seed2Pos.welchK !== 0 ||
+          webcamAudioCheck.bareHold20Seed2Pos.stampValid ||
+          !webcamAudioCheck.bareHold20Seed3Neg ||
+          webcamAudioCheck.bareHold20Seed3Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold20Seed3Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold20Seed3Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold20Seed3Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold20Seed3Neg.state !== 4 ||
+          (webcamAudioCheck.bareHold20Seed3Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold20Seed3Neg.welchK !== 0 ||
+          webcamAudioCheck.bareHold20Seed3Neg.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed2Pos ||
+          webcamAudioCheck.ctxHold20Seed2Pos.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxHold20Seed2Pos.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.state !== 4 ||
+          (webcamAudioCheck.ctxHold20Seed2Pos.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.welchK !== 0 ||
+          webcamAudioCheck.ctxHold20Seed2Pos.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed3Neg ||
+          webcamAudioCheck.ctxHold20Seed3Neg.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctxHold20Seed3Neg.lastSkew) <= 500 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.state !== 4 ||
+          (webcamAudioCheck.ctxHold20Seed3Neg.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.welchK !== 0 ||
+          webcamAudioCheck.ctxHold20Seed3Neg.stampValid ||
+          !webcamAudioCheck.ctxHold20Seed50Benign ||
+          webcamAudioCheck.ctxHold20Seed50Benign.pushedCount !== 750 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctxHold20Seed50Benign.state === 4 ||
+          (webcamAudioCheck.ctxHold20Seed50Benign.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareRand44kSeed5Benign ||
+          webcamAudioCheck.bareRand44kSeed5Benign.pushedCount !== 750 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.maxAbsSkew !== 0 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.acceptedBlocks !== 750 ||
+          webcamAudioCheck.bareRand44kSeed5Benign.state === 4 ||
+          (webcamAudioCheck.bareRand44kSeed5Benign.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.bareHold23BernSeed2Neg20 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.bareHold23BernSeed2Neg20.lastSkew) <= 500 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.state !== 4 ||
+          (webcamAudioCheck.bareHold23BernSeed2Neg20.reasonMask & 32) === 0 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.welchK !== 0 ||
+          webcamAudioCheck.bareHold23BernSeed2Neg20.stampValid ||
+          !webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.state !== 4 ||
+          (webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.welchK !== 0 ||
+          webcamAudioCheck.ctx512Ph96Hold14Seed2Pos20.stampValid ||
+          !webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.pushedCount !== 3320 ||
+          Math.abs(webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.lastSkew) <= 500 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.acceptedBlocks <= 3000 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.acceptedBlocks >= 3320 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.state !== 4 ||
+          (webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.reasonMask & 32) === 0 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.welchK !== 0 ||
+          webcamAudioCheck.ctx512Ph96Hold25Seed2Pos60.stampValid ||
+          !webcamAudioCheck.bareBenignSlow5ms1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.pushedCount !== 1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.maxAbsSkew !== 0 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.acceptedBlocks !== 1100 ||
+          webcamAudioCheck.bareBenignSlow5ms1100.state === 4 ||
+          (webcamAudioCheck.bareBenignSlow5ms1100.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512BenignSlow5ms1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.pushedCount !== 1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.acceptedBlocks !== 1100 ||
+          webcamAudioCheck.ctx512BenignSlow5ms1100.state === 4 ||
+          (webcamAudioCheck.ctx512BenignSlow5ms1100.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.ctx512Benign23p5ms750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.pushedCount !== 750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.maxAbsSkew !== 0 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.acceptedBlocks !== 750 ||
+          webcamAudioCheck.ctx512Benign23p5ms750.state === 4 ||
+          (webcamAudioCheck.ctx512Benign23p5ms750.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.slowCleanPos15us3701 ||
+          webcamAudioCheck.slowCleanPos15us3701.pushedCount !== 3701 ||
+          Math.abs(webcamAudioCheck.slowCleanPos15us3701.lastSkew) <= 500 ||
+          webcamAudioCheck.slowCleanPos15us3701.acceptedBlocks >= 3701 ||
+          webcamAudioCheck.slowCleanPos15us3701.state !== 4 ||
+          (webcamAudioCheck.slowCleanPos15us3701.reasonMask & 32) === 0 ||
+          webcamAudioCheck.slowCleanPos15us3701.welchK !== 0 ||
+          webcamAudioCheck.slowCleanPos15us3701.stampValid ||
+          !webcamAudioCheck.slowCleanNeg15us3701 ||
+          webcamAudioCheck.slowCleanNeg15us3701.pushedCount !== 3701 ||
+          Math.abs(webcamAudioCheck.slowCleanNeg15us3701.lastSkew) <= 500 ||
+          webcamAudioCheck.slowCleanNeg15us3701.acceptedBlocks >= 3701 ||
+          webcamAudioCheck.slowCleanNeg15us3701.state !== 4 ||
+          (webcamAudioCheck.slowCleanNeg15us3701.reasonMask & 32) === 0 ||
+          webcamAudioCheck.slowCleanNeg15us3701.welchK !== 0 ||
+          webcamAudioCheck.slowCleanNeg15us3701.stampValid ||
+          !webcamAudioCheck.dispatch44kHeld128Cap5 ||
+          webcamAudioCheck.dispatch44kHeld128Cap5.pushedCount !== 1000 ||
+          webcamAudioCheck.dispatch44kHeld128Cap5.maxAbsSkew !== 0 ||
+          webcamAudioCheck.dispatch44kHeld128Cap5.acceptedBlocks !== 1000 ||
+          webcamAudioCheck.dispatch44kHeld128Cap5.state === 4 ||
+          (webcamAudioCheck.dispatch44kHeld128Cap5.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.dispatch44kHeld512Cap11p589 ||
+          webcamAudioCheck.dispatch44kHeld512Cap11p589.pushedCount !== 1000 ||
+          webcamAudioCheck.dispatch44kHeld512Cap11p589.maxAbsSkew !== 0 ||
+          webcamAudioCheck.dispatch44kHeld512Cap11p589.acceptedBlocks !== 1000 ||
+          webcamAudioCheck.dispatch44kHeld512Cap11p589.state === 4 ||
+          (webcamAudioCheck.dispatch44kHeld512Cap11p589.reasonMask & 32) !== 0 ||
+          !webcamAudioCheck.drift96kHold20Neg20 ||
+          webcamAudioCheck.drift96kHold20Neg20.pushedCount !== 680 ||
+          Math.abs(webcamAudioCheck.drift96kHold20Neg20.lastSkew) <= 500 ||
+          webcamAudioCheck.drift96kHold20Neg20.acceptedBlocks >= 680 ||
+          webcamAudioCheck.drift96kHold20Neg20.state !== 4 ||
+          (webcamAudioCheck.drift96kHold20Neg20.reasonMask & 32) === 0 ||
+          webcamAudioCheck.drift96kHold20Neg20.welchK !== 0 ||
+          webcamAudioCheck.drift96kHold20Neg20.stampValid ||
+          !webcamAudioCheck.rvfcCaptureVideoDrift650 ||
+          webcamAudioCheck.rvfcCaptureVideoDrift650.pushedCount !== 650 ||
+          Math.abs(webcamAudioCheck.rvfcCaptureVideoDrift650.lastSkew) <= 500 ||
+          webcamAudioCheck.rvfcCaptureVideoDrift650.acceptedBlocks >= 650 ||
+          webcamAudioCheck.rvfcCaptureVideoDrift650.state !== 4 ||
+          (webcamAudioCheck.rvfcCaptureVideoDrift650.reasonMask & 32) === 0 ||
+          webcamAudioCheck.rvfcCaptureVideoDrift650.welchK !== 0 ||
+          webcamAudioCheck.rvfcCaptureVideoDrift650.stampValid
+        ) {
+          throw new Error('Step 10e webcam live audio anchoring / track swap gate failed: ' + JSON.stringify(webcamAudioCheck));
+        }
+
+        const w2DeckClsPost10e = await cdp.evalJs(
+          w2Session,
+          `(() => {
+            if (window.__e2eW2DeckClsPo) window.__e2eW2DeckClsPo.disconnect();
+            return window.__e2eW2DeckCls || 0;
+          })()`
+        );
+        if (w2DeckClsPost10e >= 0.000001) {
+          throw new Error(`Step 10e: Expected 0.000000 CLS across Wave-2 Deck + Step 10e flows, got ${w2DeckClsPost10e}`);
+        }
+
+        console.log(
+          `  [PASS] Step 10 (Wave-2 Hodge 40x22, Calibrated RS+Welch & Exposure Null, Occluded AMBIGUOUS Conservation): hodge=(state=${hodgeState.state}, co=${hodgeState.coexactFrac.toFixed(3)}, orth=${hodgeState.orthEcRel.toExponential(1)}, hud=${w2HudBytes}B), rsWelch=(K=${rv.welchK}, f=${rv.domFreqHz.toFixed(2)}Hz, g2=${rv.maxCohGamma2.toFixed(4)}, cells=${rv.coupledCellsCount}), expNull=(H=${nv.sincH.toFixed(4)}, sev=${rsWelchReport.nullSev}), occl=(st=${oc.status}, mask=${oc.ambiguityMask}, diag="${consReport.diagCons}"), CLS=${w2DeckClsPost10e.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: w2TargetId }).catch(() => {});
+      }
+    }
+
     if (pageErrors.length > 0) {
       throw new Error(`Browser reported ${pageErrors.length} error(s):\n${pageErrors.join('\n')}`);
     }
@@ -3498,7 +6690,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error('E2E FAILED:', err.message || err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('E2E FAILED:', err.message || err);
+    process.exit(1);
+  });

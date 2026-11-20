@@ -2,9 +2,11 @@
 // ============================================================================
 // CHRONOS-SPECTRAL // Deterministic Headless Chrome CDP Documentation Media Capture
 // Generates:
-//   - docs/assets/demos/demo_starling_swarm.gif (Starling murmuration, Hero 16 HIDDEN)
-//   - docs/assets/demos/demo_model_rockets.gif  (Model rockets launch, separation & chutes)
-//   - docs/assets/panels/01..15.png             (2x Retina screenshots of every Command Deck panel)
+//   - docs/assets/demos/demo_starling_swarm.gif   (Starling murmuration, Hero 16 HIDDEN)
+//   - docs/assets/demos/demo_model_rockets.gif    (Model rockets launch, separation & chutes)
+//   - docs/assets/demos/demo_bos_thermal_plume.gif (BOS thermal plume refraction, Hero 16 HIDDEN)
+//   - docs/assets/demos/demo_hodge_vortex.gif     (40x22 Hodge coexact curl* psi on vortex swarm)
+//   - docs/assets/panels/01..15.png               (2x Retina screenshots of every Command Deck panel)
 // ============================================================================
 
 import fs from 'node:fs';
@@ -498,6 +500,215 @@ async function main() {
           }
         },
       });
+
+      // ------------------------------------------------------------------------
+      // Phase 2b: Demo GIF #3 — BOS Thermal Plume Schlieren (Hero 16 HIDDEN)
+      // ------------------------------------------------------------------------
+      console.log('\n[Phase 2b] Capturing BOS Thermal Plume GIF (Hero 16 HIDDEN)...');
+      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          document.querySelector('.showcase-btn[data-showcase="bos_plume"]')?.click();
+          return true;
+        })()`
+      );
+      await setHeroToggle(cdp, sessionId, false);
+      await waitForCondition(
+        cdp,
+        sessionId,
+        'bos_plume playing and BOS READY after 16f reference lock',
+        `(() => {
+          const v = document.getElementById('hiddenVideoSource');
+          const btn = document.querySelector('.showcase-btn[data-showcase="bos_plume"]');
+          const bos = window.__chronosWave1Probe?.getLastWave1()?.bos;
+          const diag = document.getElementById('diagBosState')?.textContent || '';
+          return {
+            ok: Boolean(
+              btn?.getAttribute('aria-pressed') === 'true' &&
+              v &&
+              v.readyState >= 2 &&
+              !v.paused &&
+              v.currentTime >= 1.1 &&
+              v.currentTime <= 3.5 &&
+              bos &&
+              bos.state === 2 &&
+              diag.startsWith('READY · ')
+            ),
+            t: v?.currentTime,
+            state: bos?.state,
+            diag,
+          };
+        })()`,
+        22000
+      );
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const v = document.getElementById('hiddenVideoSource');
+          if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click();
+          return true;
+        })()`
+      );
+      await waitForCondition(cdp, sessionId, 'bos_plume paused', `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`);
+
+      const bosClip = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const hud = document.getElementById('hudPanel');
+          hud.scrollIntoView({ block: 'start', inline: 'nearest' });
+          window.scrollTo(0, Math.max(0, Math.floor(hud.getBoundingClientRect().top + window.scrollY - 8)));
+          return new Promise((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const r = hud.getBoundingClientRect();
+              resolve({
+                x: Math.max(0, Math.floor(r.left - 4)),
+                y: Math.max(0, Math.floor(r.top - 4)),
+                width: Math.ceil(r.width + 8),
+                height: Math.ceil(r.height + 8),
+                scale: 1,
+              });
+            }));
+          });
+        })()`
+      );
+      const bosFrameDir = path.join(tmpDir, 'gif_bos_plume');
+      fs.mkdirSync(bosFrameDir, { recursive: true });
+      for (let i = 0; i < 64; i++) {
+        await stepForwardNFrames(cdp, sessionId, 2);
+        await cdp.evalJs(sessionId, `new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`);
+        const shot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: bosClip },
+          sessionId
+        );
+        fs.writeFileSync(path.join(bosFrameDir, `frame_${String(i).padStart(4, '0')}.png`), Buffer.from(shot.data, 'base64'));
+      }
+      await encodeGifFromFrames(ffmpegBin, bosFrameDir, path.join(DEMOS_DIR, 'demo_bos_thermal_plume.gif'), 16, 640);
+      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const resetSel = (id, val) => {
+            const el = document.getElementById(id);
+            if (el && el.value !== val) {
+              el.value = val;
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+          };
+          resetSel('bosModeSelect', '0');
+          resetSel('metrologyModeSelect', '0');
+          resetSel('fieldOverlayModeSelect', '0');
+          const chkNative = document.getElementById('chkNativeRoi');
+          if (chkNative && chkNative.checked) {
+            chkNative.checked = false;
+            chkNative.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          return true;
+        })()`
+      );
+      await setHeroToggle(cdp, sessionId, true);
+
+      // ------------------------------------------------------------------------
+      // Phase 2c: Demo GIF #4 — 40x22 Mesh Hodge Coexact Vortex Decomposition
+      // ------------------------------------------------------------------------
+      console.log('\n[Phase 2c] Capturing 40x22 Mesh Hodge Vortex GIF (Hero 16 HIDDEN)...');
+      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          document.querySelector('.showcase-btn[data-showcase="vortex_1200"]')?.click();
+          return true;
+        })()`
+      );
+      await setHeroToggle(cdp, sessionId, false);
+      await waitForCondition(
+        cdp,
+        sessionId,
+        'vortex_1200 showcase active and swarm ready',
+        `(() => {
+          const btn = document.querySelector('.showcase-btn[data-showcase="vortex_1200"]');
+          const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
+          return {
+            ok: Boolean(btn?.getAttribute('aria-pressed') === 'true' && meta.startsWith('SWARM: ACTIVE')),
+            meta,
+          };
+        })()`,
+        20000
+      );
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const hm = document.getElementById('hodgeModeSelect');
+          if (hm) { hm.value = '2'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
+          const ov = document.getElementById('fieldOverlayModeSelect');
+          if (ov) { ov.value = '9'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
+          return true;
+        })()`
+      );
+      await waitForCondition(
+        cdp,
+        sessionId,
+        '40x22 Mesh Hodge converged on vortex_1200 (state=2, coexactFrac > 0.85)',
+        `(() => {
+          const h = window.__chronosWave2Probe?.getLastWave2()?.hodge;
+          const diag = document.getElementById('diagHodge2Complex')?.textContent || '';
+          return {
+            ok: Boolean(h && h.state === 2 && h.converged === true && h.coexactFrac > 0.85 && diag.startsWith('READY · ')),
+            state: h?.state,
+            converged: h?.converged,
+            coexactFrac: h?.coexactFrac,
+            diag,
+          };
+        })()`,
+        20000
+      );
+
+      const hodgeClip = await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const hud = document.getElementById('hudPanel');
+          hud.scrollIntoView({ block: 'start', inline: 'nearest' });
+          window.scrollTo(0, Math.max(0, Math.floor(hud.getBoundingClientRect().top + window.scrollY - 8)));
+          return new Promise((resolve) => {
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              const r = hud.getBoundingClientRect();
+              resolve({
+                x: Math.max(0, Math.floor(r.left - 4)),
+                y: Math.max(0, Math.floor(r.top - 4)),
+                width: Math.ceil(r.width + 8),
+                height: Math.ceil(r.height + 8),
+                scale: 1,
+              });
+            }));
+          });
+        })()`
+      );
+      const hodgeFrameDir = path.join(tmpDir, 'gif_hodge_vortex');
+      fs.mkdirSync(hodgeFrameDir, { recursive: true });
+      for (let i = 0; i < 56; i++) {
+        await sleep(62);
+        await cdp.evalJs(sessionId, `new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`);
+        const shot = await cdp.send(
+          'Page.captureScreenshot',
+          { format: 'png', captureBeyondViewport: false, clip: hodgeClip },
+          sessionId
+        );
+        fs.writeFileSync(path.join(hodgeFrameDir, `frame_${String(i).padStart(4, '0')}.png`), Buffer.from(shot.data, 'base64'));
+      }
+      await encodeGifFromFrames(ffmpegBin, hodgeFrameDir, path.join(DEMOS_DIR, 'demo_hodge_vortex.gif'), 16, 640);
+      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+      await cdp.evalJs(
+        sessionId,
+        `(() => {
+          const hm = document.getElementById('hodgeModeSelect');
+          if (hm) { hm.value = '0'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
+          const ov = document.getElementById('fieldOverlayModeSelect');
+          if (ov) { ov.value = '0'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
+          return true;
+        })()`
+      );
+      await setHeroToggle(cdp, sessionId, true);
     } else {
       // Panels-only refresh: capture 03_hud_starling_swarm.png cleanly with Hero 16 HIDDEN
       console.log('\n[Panels-Only] Capturing 03_hud_starling_swarm.png (Hero 16 HIDDEN)...');
@@ -699,6 +910,11 @@ async function main() {
         const sel = document.getElementById('benchScenarioSelect');
         sel.value = 'murmuration_1200';
         sel.dispatchEvent(new Event('change', { bubbles: true }));
+        const hm = document.getElementById('hodgeModeSelect');
+        if (hm && hm.value !== '2') {
+          hm.value = '2';
+          hm.dispatchEvent(new Event('change', { bubbles: true }));
+        }
         return true;
       })()`
     );
@@ -725,6 +941,11 @@ async function main() {
           const hud = document.getElementById('hudCanvas');
           const r = hud.getBoundingClientRect();
           hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * ${nx}, clientY: r.top + r.height * ${ny} }));
+          const hm = document.getElementById('hodgeModeSelect');
+          if (hm && hm.value !== '2') {
+            hm.value = '2';
+            hm.dispatchEvent(new Event('change', { bubbles: true }));
+          }
           document.getElementById('expertDiagnosticsDrawer').open = true;
           return true;
         })()`
@@ -735,7 +956,15 @@ async function main() {
     }
     await sleep(320);
     await captureBoundingSelectors(cdp, sessionId, '#continuumFieldPanel', path.join(PANELS_DIR, '12_continuum_swarm_panel.png'));
-    await cdp.evalJs(sessionId, `document.getElementById('expertDiagnosticsDrawer').open = false; true;`);
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        const hm = document.getElementById('hodgeModeSelect');
+        if (hm) { hm.value = '0'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
+        document.getElementById('expertDiagnosticsDrawer').open = false;
+        return true;
+      })()`
+    );
 
     // Region 5 Live Stream Suite modal
     await cdp.evalJs(sessionId, `document.getElementById('btnSrcLiveStream').click(); true;`);

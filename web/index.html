@@ -1456,7 +1456,8 @@
       text-overflow: ellipsis;
     }
 
-    .select-field select {
+    .select-field select,
+    .select-field input[type="number"] {
       font-family: var(--font-mono);
       font-size: 0.72rem;
       font-weight: 600;
@@ -1469,13 +1470,20 @@
       cursor: pointer;
       inline-size: 100%;
       min-inline-size: 0;
+      box-sizing: border-box;
     }
 
-    .select-field select:hover {
+    .select-field input[type="number"] {
+      cursor: text;
+    }
+
+    .select-field select:hover,
+    .select-field input[type="number"]:hover {
       border-color: var(--border-accent);
     }
 
-    .select-field select:focus-visible {
+    .select-field select:focus-visible,
+    .select-field input[type="number"]:focus-visible {
       outline: 2px solid var(--brand-color);
       outline-offset: 2px;
     }
@@ -1731,6 +1739,7 @@
       button,
       .file-upload-label,
       .select-field select,
+      .select-field input[type="number"],
       .cal-field input {
         min-block-size: 36px;
       }
@@ -1762,7 +1771,82 @@
         outline: 2px solid Highlight;
       }
     }
-    /* CHRONOS-1000 Zero-CLS Continuum Field Panel & Progressive Disclosure Drawer */
+    .acq-status-banner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      block-size: 1.75rem;
+      min-block-size: 1.75rem;
+      max-block-size: 1.75rem;
+      padding-inline: 0.56rem;
+      border-radius: 4px;
+      border: 1px solid #1e3354;
+      background-color: #060d19;
+      color: #a8c0df;
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums lining-nums;
+      font-size: 0.67rem;
+      line-height: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      contain: layout style paint;
+    }
+
+    .acq-status-banner[data-severity="ok"] {
+      border-color: #218c4a;
+      background-color: #071913;
+      color: #86efac;
+    }
+
+    .acq-status-banner[data-severity="warn"] {
+      border-color: #c89628;
+      background-color: #1f1707;
+      color: #fde68a;
+    }
+
+    .acq-status-banner[data-severity="danger"] {
+      border-color: #d9385a;
+      background-color: #270b14;
+      color: #fecdd3;
+    }
+
+    .roi-control-well {
+      display: grid;
+      gap: 0.42rem;
+      padding: 0.48rem 0.54rem;
+      border-radius: 4px;
+      border: 1px solid #1d2e4d;
+      background-color: #08101e;
+    }
+
+    .roi-control-well .slider-val {
+      inline-size: 13ch;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roi-control-header {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr);
+      gap: 0.16rem;
+    }
+
+    #roiGeomMeta {
+      inline-size: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .roi-control-title {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.03em;
+      text-transform: uppercase;
+      color: var(--text-secondary);
+    }
+
     .continuum-panel {
       contain: layout style paint;
     }
@@ -1772,6 +1856,10 @@
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 0.44rem;
       margin-block-end: 0.52rem;
+    }
+
+    .continuum-rs-calib-row {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
     }
 
     @media (max-width: 640px) {
@@ -2575,6 +2663,7 @@
           <input type="range" id="showcaseWipeSlider" min="0" max="100" step="1" value="28" aria-valuetext="28% raw video, 72% spectral wavefield" />
           <span id="showcaseWipeReadout" class="wipe-bar-readout">28% RAW · 72% SPECTRAL</span>
         </div>
+        <p id="acquisitionStatusBanner" class="acq-status-banner" role="status" aria-live="polite" data-severity="info">ACQUISITION STANDBY · MONOTONIC PTS &amp; TRIPOD GUARD READY</p>
       </div>
       </div>
 
@@ -2582,6 +2671,7 @@
         <div id="showcaseToolbar" class="showcase-toolbar" role="toolbar" focusgroup="toolbar wrap" aria-label="Hero showcase scenes and local optical inputs" aria-controls="hudCanvas">
           <div class="showcase-toolbar-group" role="group" aria-label="Featured real-camera physics scenes">
             <button type="button" id="btnHeroStarlings" class="hero-scene-btn" data-hero-scene="starling_1000" aria-pressed="true">🐦 Starling Swarm (1,400+ Birds)</button>
+            <button type="button" id="btnHeroBosPlume" class="hero-scene-btn" data-hero-scene="bos_plume" aria-pressed="false">🔥 Thermal Plume (BOS)</button>
             <button type="button" id="btnHeroRockets" class="hero-scene-btn" data-hero-scene="model_rockets" aria-pressed="false">🚀 Model Rockets (Smoke Bridge &amp; Chutes)</button>
             <button type="button" id="btnHeroPendulum" class="hero-scene-btn" data-hero-scene="chaos_pendulum" aria-pressed="false">🧲 Chaotic Pendulum (ODE Discovery)</button>
             <button type="button" id="btnHeroBilliards" class="hero-scene-btn" data-hero-scene="billiards" aria-pressed="false">🎱 Carom Billiards (L1 Impacts)</button>
@@ -2597,7 +2687,7 @@
           <div class="showcase-proof-card">
             <span class="showcase-proof-label">Wasm SIMD128 Latency</span>
             <span class="showcase-proof-val" id="scValKernel">-- ms / frame</span>
-            <span class="showcase-proof-sub" id="scSubKernel">2.13 MiB · 0 heap allocs · 320 pages</span>
+            <span class="showcase-proof-sub" id="scSubKernel">2.13 MiB · 0 heap allocs · 448 pages</span>
           </div>
           <div class="showcase-proof-card">
             <span class="showcase-proof-label">Live Tracked State</span>
@@ -3058,15 +3148,88 @@
             </select>
           </div>
           <div class="select-field">
-            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22)</label>
+            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22 / BOS 128x64)</label>
             <select id="fieldOverlayModeSelect" name="fieldOverlayMode">
               <option value="0" selected>Micro-Tracks + Rigid Hulls</option>
               <option value="1">Velocity |v| Field (40x22)</option>
               <option value="2">Vorticity Curl v (dv/dx - du/dy)</option>
               <option value="3">FTLE Coherent Ridges (16f)</option>
               <option value="4">Modal Vibration Phase ([-pi, pi])</option>
+              <option value="5">BOS Refraction |eps| (128x64)</option>
+              <option value="6">BOS Neumann Potential Phi (128x64)</option>
+              <option value="7">BOS Curl Check (dv/dx - du/dy)</option>
+              <option value="8">Hodge Exact |grad phi| (40x22)</option>
+              <option value="9">Hodge Coexact |curl* psi| (40x22)</option>
+              <option value="10">Hodge Harmonic |h| (40x22)</option>
+              <option value="11">RS Welch Coherence gamma^2 (40x22)</option>
             </select>
           </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="bosModeSelect">BOS Schlieren Mode (Static Tripod)</label>
+            <select id="bosModeSelect" name="bosMode">
+              <option value="0" selected>Off (Standard Tracking)</option>
+              <option value="1">Mode 1 · Static Ref (Freeze @ 16f)</option>
+              <option value="2">Mode 2 · Clear-Only Slow Ref</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="metrologyModeSelect">Track 2x2 Covariance Metrology</label>
+            <select id="metrologyModeSelect" name="metrologyMode">
+              <option value="0" selected>Off (Fast Baseline)</option>
+              <option value="1">Lossless 2x2 Cov + LOO Bench</option>
+              <option value="2">H.264 2x2 Cov + Hero Promo</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="hodgeModeSelect">Mesh Hodge 2-Complex (40x22)</label>
+            <select id="hodgeModeSelect" name="hodgeMode">
+              <option value="0" selected>Off (Velocity Only)</option>
+              <option value="1">Mode 1 · Staggered 2f (40x22)</option>
+              <option value="2">Mode 2 · Every Frame (40x22)</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="rsVibroModeSelect">Rolling-Shutter Vibrometry</label>
+            <select id="rsVibroModeSelect" name="rsVibroMode">
+              <option value="0" selected>Off (No RS Vibro)</option>
+              <option value="1">Mode 1 · Calibrated RS Only</option>
+              <option value="2">Mode 2 · RS + Welch Audio</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="continuum-controls-row continuum-rs-calib-row">
+          <div class="select-field">
+            <label for="inpRsDtRowUs">RS Row dt (us)</label>
+            <input type="number" id="inpRsDtRowUs" name="rsDtRowUs" min="0" max="1000" step="0.5" value="40" />
+          </div>
+          <div class="select-field">
+            <label for="inpRsExposureUs">RS Exposure (us)</label>
+            <input type="number" id="inpRsExposureUs" name="rsExposureUs" min="0" max="200000" step="1" value="200" />
+          </div>
+          <div class="select-field">
+            <label for="selRsScanDir">RS Scan Axis</label>
+            <select id="selRsScanDir" name="rsScanDir">
+              <option value="-1">Unset (Fail Closed)</option>
+              <option value="0" selected>Top -&gt; Bottom (+Y)</option>
+              <option value="1">Bottom -&gt; Top (-Y)</option>
+              <option value="2">Left -&gt; Right (+X)</option>
+              <option value="3">Right -&gt; Left (-X)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="toggle-list" style="margin-block-end: 0.48rem;">
+          <label class="toggle-item" for="chkCovEllipses">
+            <input type="checkbox" id="chkCovEllipses" name="showCovEllipses" />
+            <span>Overlay 2x2 Position Covariance Ellipses (95% Contour)</span>
+          </label>
         </div>
 
         <div class="kpi-grid continuum-kpi-grid">
@@ -3141,6 +3304,42 @@
               <span class="kpi-label">MEAN GRAPH STRAIN</span>
               <span class="kpi-value" id="diagMeanStrain">-- s⁻¹</span>
             </div>
+            <div class="kpi-card">
+              <span class="kpi-label">INGEST EPOCH / SEQ / GAP</span>
+              <span class="kpi-value" id="diagWave1Ingest">EP 0 · #0 · OK</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">WAVE-1 STAMPS (u·G·F·M·H·B)</span>
+              <span class="kpi-value" id="diagWave1Stamps">--</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">NATIVE ROI &amp; CROP</span>
+              <span class="kpi-value" id="diagRoiGeom">FULL / SCALE</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">BOS STATE · PCG · RES</span>
+              <span class="kpi-value" id="diagBosState">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">2x2 COV · HERO CANDS</span>
+              <span class="kpi-value" id="diagMetrologyCov">0 usable · 0 cand</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">WAVE-2 STAMPS (V·H·C)</span>
+              <span class="kpi-value" id="diagWave2Stamps" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">--</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">RS VIBRO · WELCH COH</span>
+              <span class="kpi-value" id="diagRsWelch" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">HODGE 2-COMPLEX (Ex·Co·Ha)</span>
+              <span class="kpi-value" id="diagHodge2Complex" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">OCCLUDED CONSERVATION</span>
+              <span class="kpi-value" id="diagOcclConservation" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">NONE</span>
+            </div>
           </div>
         </details>
       </section>
@@ -3167,6 +3366,8 @@
           <button type="button" class="showcase-btn" data-showcase="newtons_cradle" aria-pressed="false">⚪ Newton's Cradle (45s)</button>
           <button type="button" class="showcase-btn" data-showcase="starling_1000" aria-pressed="false">🐦 Starling Murmuration (1,000+)</button>
           <button type="button" class="showcase-btn" data-showcase="vortex_1200" aria-pressed="false">🌀 Lamb-Oseen Vortex (1,200)</button>
+          <button type="button" class="showcase-btn" data-showcase="bos_plume" aria-pressed="false">🔥 Thermal Plume BOS (640×360)</button>
+          <button type="button" class="showcase-btn" data-showcase="bos_handheld_failure" aria-pressed="false">⚠ Handheld Tripod Fail (BOS)</button>
         </div>
       </div>
 
@@ -3212,6 +3413,11 @@
             </optgroup>
             <optgroup label="High-Density Continuum Swarms (1,000+ Targets)">
               <option value="./samples/starling_murmuration_1000.mp4" data-fps="30" data-lab="0" data-swarm="2">Starling Murmuration (13.0s · 30 fps · 1,353 extrema)</option>
+            </optgroup>
+            <optgroup label="Wave-1 BOS &amp; Failure Validation (640x360)">
+              <option value="./samples/bos_thermal_plume.mp4" data-fps="25" data-lab="0" data-swarm="2">Thermal Plume BOS (640×360 · 25 fps · Static Tripod)</option>
+              <option value="./samples/bos_handheld_failure.mp4" data-fps="25" data-lab="0" data-swarm="2">Handheld Shock / Sway Failure (640×360 · 25 fps · Tripod Guard)</option>
+              <option value="./samples/perspective_flyby_decoy.mp4" data-fps="25" data-lab="0" data-swarm="2">Perspective Flyby + Pan Decoy (640×360 · 25 fps · 3D Loom Gate)</option>
             </optgroup>
           </select>
         </div>
@@ -3263,6 +3469,31 @@
               <button type="button" id="btnVidStepFwd" class="action-btn">⏭ +1f</button>
               <button type="button" id="btnVidReplay" class="action-btn">↺ Replay</button>
             </div>
+          </div>
+        </div>
+
+        <div class="roi-control-well">
+          <div class="roi-control-header">
+            <span class="roi-control-title">Native 1:1 Sensor ROI Window</span>
+            <span class="panel-meta" id="roiGeomMeta">FULL / LETTERBOX</span>
+          </div>
+          <label class="toggle-item" for="chkNativeRoi">
+            <input type="checkbox" id="chkNativeRoi" name="nativeRoi" />
+            <span>Native 1:1 Crop (Zero Implicit Rescale)</span>
+          </label>
+          <div class="control-group">
+            <div class="slider-label-row">
+              <label for="rangeRoiX0">ROI Crop Offset X (crop_x0)</label>
+              <span class="slider-val" id="valRoiX0">50% (0 px)</span>
+            </div>
+            <input type="range" id="rangeRoiX0" min="0" max="100" step="1" value="50" aria-valuetext="50% horizontal crop offset" />
+          </div>
+          <div class="control-group">
+            <div class="slider-label-row">
+              <label for="rangeRoiY0">ROI Crop Offset Y (crop_y0)</label>
+              <span class="slider-val" id="valRoiY0">50% (0 px)</span>
+            </div>
+            <input type="range" id="rangeRoiY0" min="0" max="100" step="1" value="50" aria-valuetext="50% vertical crop offset" />
           </div>
         </div>
 
@@ -3582,6 +3813,8 @@
     let activeSurface = isInitialDeckSurface ? 'deck' : 'showcase';
     let isStaticHostMode = document.body.dataset.staticHost === 'true';
     let initialShowcaseBooted = false;
+    let workerKernelReady = false;
+    let pendingHeroSceneBeforeReady = null;
 
     const worker = new Worker('./worker.js?v=20261115c1k');
     worker.addEventListener('error', (err) => {
@@ -3880,7 +4113,10 @@
     let activeSourceMode = 'testbench'; // 'testbench' | 'webcam' | 'video' | 'live'
     let activeVideoFps = 30.0;
     let lastMediaTime = -1;
+    let lastPresentedFrames = -1;
+    let pendingVideoGapMask = 0;
     let lastPumpPerfMs = 0;
+    let pumpStartPerfMs = 0;
     let activeResMode = 0;
     let activeFrameW = 320;
     let activeFrameH = 180;
@@ -3890,6 +4126,8 @@
     let queuedPendingFrame = null;
     let pumpDroppedFrames = 0;
     let bitmapCaptureBusy = false;
+    let bitmapCaptureToken = 0;
+    let activeCaptureToken = 0;
     const fallbackCapCanvas = document.createElement('canvas');
     const fallbackCapCtx = fallbackCapCanvas.getContext('2d', { willReadFrequently: true });
 
@@ -3954,6 +4192,21 @@
       continuumSummaryMeta: document.getElementById('continuumSummaryMeta'),
       swarmModeSelect: document.getElementById('swarmModeSelect'),
       fieldOverlayModeSelect: document.getElementById('fieldOverlayModeSelect'),
+      bosModeSelect: document.getElementById('bosModeSelect'),
+      metrologyModeSelect: document.getElementById('metrologyModeSelect'),
+      hodgeModeSelect: document.getElementById('hodgeModeSelect'),
+      rsVibroModeSelect: document.getElementById('rsVibroModeSelect'),
+      inpRsDtRowUs: document.getElementById('inpRsDtRowUs'),
+      inpRsExposureUs: document.getElementById('inpRsExposureUs'),
+      selRsScanDir: document.getElementById('selRsScanDir'),
+      chkCovEllipses: document.getElementById('chkCovEllipses'),
+      chkNativeRoi: document.getElementById('chkNativeRoi'),
+      rangeRoiX0: document.getElementById('rangeRoiX0'),
+      rangeRoiY0: document.getElementById('rangeRoiY0'),
+      valRoiX0: document.getElementById('valRoiX0'),
+      valRoiY0: document.getElementById('valRoiY0'),
+      roiGeomMeta: document.getElementById('roiGeomMeta'),
+      acquisitionStatusBanner: document.getElementById('acquisitionStatusBanner'),
       kpiSwarmConfirmed: document.getElementById('kpiSwarmConfirmed'),
       kpiSwarmPeak: document.getElementById('kpiSwarmPeak'),
       kpiSwarmUnique: document.getElementById('kpiSwarmUnique'),
@@ -3973,6 +4226,15 @@
       diagKuramotoCom: document.getElementById('diagKuramotoCom'),
       diagFieldBackend: document.getElementById('diagFieldBackend'),
       diagMeanStrain: document.getElementById('diagMeanStrain'),
+      diagWave1Ingest: document.getElementById('diagWave1Ingest'),
+      diagWave1Stamps: document.getElementById('diagWave1Stamps'),
+      diagRoiGeom: document.getElementById('diagRoiGeom'),
+      diagBosState: document.getElementById('diagBosState'),
+      diagMetrologyCov: document.getElementById('diagMetrologyCov'),
+      diagWave2Stamps: document.getElementById('diagWave2Stamps'),
+      diagRsWelch: document.getElementById('diagRsWelch'),
+      diagHodge2Complex: document.getElementById('diagHodge2Complex'),
+      diagOcclConservation: document.getElementById('diagOcclConservation'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -4145,7 +4407,8 @@
           showAllOverlays: Boolean(st.overlays.showAllOverlays),
           showEcaOverlay: Boolean(st.overlays.showEcaOverlay),
           showKalman: Boolean(st.overlays.showKalman),
-          fieldOverlayMode: Math.max(0, Math.min(4, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
+          showCovEllipses: Boolean(st.overlays.showCovEllipses),
+          fieldOverlayMode: Math.max(0, Math.min(11, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
         }),
         pointerTool: st.pointerTool,
         viewport: st.viewport,
@@ -4181,9 +4444,10 @@
           showAllOverlays: typeof event.showAllOverlays === 'boolean' ? event.showAllOverlays : state.overlays.showAllOverlays,
           showEcaOverlay: typeof event.showEcaOverlay === 'boolean' ? event.showEcaOverlay : state.overlays.showEcaOverlay,
           showKalman: typeof event.showKalman === 'boolean' ? event.showKalman : state.overlays.showKalman,
+          showCovEllipses: typeof event.showCovEllipses === 'boolean' ? event.showCovEllipses : state.overlays.showCovEllipses,
           fieldOverlayMode:
             typeof event.fieldOverlayMode === 'number' && Number.isFinite(event.fieldOverlayMode)
-              ? Math.max(0, Math.min(4, Math.round(event.fieldOverlayMode)))
+              ? Math.max(0, Math.min(11, Math.round(event.fieldOverlayMode)))
               : state.overlays.fieldOverlayMode,
         };
         if (
@@ -4191,6 +4455,7 @@
           ov.showAllOverlays !== state.overlays.showAllOverlays ||
           ov.showEcaOverlay !== state.overlays.showEcaOverlay ||
           ov.showKalman !== state.overlays.showKalman ||
+          ov.showCovEllipses !== state.overlays.showCovEllipses ||
           ov.fieldOverlayMode !== state.overlays.fieldOverlayMode
         ) {
           nextOverlays = ov;
@@ -4254,6 +4519,7 @@
         showAllOverlays: false,
         showEcaOverlay: false,
         showKalman: true,
+        showCovEllipses: false,
         fieldOverlayMode: 0,
       },
       pointerTool: 'INSPECT_TARGET',
@@ -4273,6 +4539,9 @@
       }
       if (dom.chkKalman && dom.chkKalman.checked !== ov.showKalman) {
         dom.chkKalman.checked = ov.showKalman;
+      }
+      if (dom.chkCovEllipses && dom.chkCovEllipses.checked !== ov.showCovEllipses) {
+        dom.chkCovEllipses.checked = ov.showCovEllipses;
       }
       if (dom.fieldOverlayModeSelect && dom.fieldOverlayModeSelect.value !== String(ov.fieldOverlayMode)) {
         dom.fieldOverlayModeSelect.value = String(ov.fieldOverlayMode);
@@ -4390,13 +4659,1131 @@
       }
       queuedPendingFrame = null;
       workerFrameBusy = false;
+      activeCaptureToken++;
       bitmapCaptureBusy = false;
     }
 
+    let rsAudioCaptureCtx = null;
+    let rsAudioCaptureSource = null;
+    let rsAudioCaptureProc = null;
+    let rsAudioCaptureGain = null;
+    let rsAudioCaptureStream = null;
+    let rsAudioCaptureTrack = null;
+    let rsAudioCaptureStreamCleanup = null;
+    let rsAudioCaptureTrackCleanup = null;
+    let rsAudioCaptureRateHz = 48000.0;
+    let rsAudioCaptureBaseUs = 0;
+    let rsAudioCaptureCursor = 0;
+    let rsAudioCaptureAnchored = false;
+    let rsAudioAnchorRefineLeft = 0;
+    let rsAudioTrackPollId = 0;
+    let rsAudioMicReqStream = null;
+    let rsAudioMicReqSeq = 0;
+    let rsAudioMicInFlightSeq = 0;
+    let rsSupplementalFallbackTrack = null;
+    let rsOwnedWebcamAudioTracks = [];
+    let rsVidClockOffsetUs = 0.0;
+    let rsVidClockValid = false;
+    let rsVidClockCaptureTimed = false;
+    let rsAudioLastSentTEndUs = 0;
+    const rsAudioSkewState = {
+      warm: 0,
+      tsCleanRun: 0,
+      hasRefOrigin: false,
+      refOriginUs: 0.0,
+      hasTsOrigin: false,
+      tsOriginSec: 0.0,
+      hasCtOrigin: false,
+      ctOriginSec: 0.0,
+      kindSeen: new Uint8Array(4),
+      kindOriginUs: new Float64Array(4),
+      r0: 0.0,
+      r1: 0.0,
+      r2: 0.0,
+      r3: 0.0,
+      r4: 0.0,
+      rCount: 0,
+      t0: 0.0,
+      t1: 0.0,
+      t2: 0.0,
+      t3: 0.0,
+      t4: 0.0,
+      tCount: 0,
+      prevM: 0.0,
+      prevM0: 0.0,
+      prevT1: 0.0,
+      prevT2: 0.0,
+      maxStep2: 0.0,
+      uAt6: 0.0,
+      b12: new Float64Array(12),
+      b12Idx: 0,
+      b12Count: 0,
+      b12Sum: 0.0,
+      b16: new Float64Array(16),
+      b16Idx: 0,
+      b16Count: 0,
+      b16Sum: 0.0,
+      t12: new Float64Array(12),
+      t12Idx: 0,
+      t12Count: 0,
+      t12Sum: 0.0,
+      b36: new Float64Array(36),
+      b36Idx: 0,
+      b36Count: 0,
+      b36Sum: 0.0,
+      zRing: new Float64Array(512),
+      zIdx: 0,
+      zCount: 0,
+      runMinT: 0.0,
+      runMaxT: 0.0,
+      hasPullInit: false,
+      a3Min: 0.0,
+      a3Max: 0.0,
+      pullMinUs: 0.0,
+      pullMaxUs: 0.0,
+      prevPullStepUs: 0.0,
+      pullUnitUs: 0.0,
+      ctPullWarmMin: 0.0,
+      ctPullWarmMax: 0.0,
+      warmPullTot: 0,
+      warmPullAtMin: 0,
+      pRing: new Float64Array(96),
+      pIdx: 0,
+      pCount: 0,
+      stripY: new Float64Array(505),
+      stripPreMin: new Float64Array(313),
+      stripPreMax: new Float64Array(313),
+      stripSufMin: new Float64Array(313),
+      stripSufMax: new Float64Array(313),
+      uFirst: 0.0,
+      baseU: 0.0,
+      baseCount: 0,
+      wFirst: 0.0,
+      baseW: 0.0,
+      baseWCount: 0,
+      driftSign: 0,
+    };
+
+    function resetRsAudioSkewState() {
+      rsAudioSkewState.warm = 0;
+      rsAudioSkewState.tsCleanRun = 0;
+      rsAudioSkewState.hasRefOrigin = false;
+      rsAudioSkewState.refOriginUs = 0.0;
+      rsAudioSkewState.hasTsOrigin = false;
+      rsAudioSkewState.tsOriginSec = 0.0;
+      rsAudioSkewState.hasCtOrigin = false;
+      rsAudioSkewState.ctOriginSec = 0.0;
+      rsAudioSkewState.kindSeen.fill(0);
+      rsAudioSkewState.kindOriginUs.fill(0.0);
+      rsAudioSkewState.r0 = 0.0;
+      rsAudioSkewState.r1 = 0.0;
+      rsAudioSkewState.r2 = 0.0;
+      rsAudioSkewState.r3 = 0.0;
+      rsAudioSkewState.r4 = 0.0;
+      rsAudioSkewState.rCount = 0;
+      rsAudioSkewState.t0 = 0.0;
+      rsAudioSkewState.t1 = 0.0;
+      rsAudioSkewState.t2 = 0.0;
+      rsAudioSkewState.t3 = 0.0;
+      rsAudioSkewState.t4 = 0.0;
+      rsAudioSkewState.tCount = 0;
+      rsAudioSkewState.prevM = 0.0;
+      rsAudioSkewState.prevM0 = 0.0;
+      rsAudioSkewState.prevT1 = 0.0;
+      rsAudioSkewState.prevT2 = 0.0;
+      rsAudioSkewState.maxStep2 = 0.0;
+      rsAudioSkewState.uAt6 = 0.0;
+      rsAudioSkewState.b12.fill(0.0);
+      rsAudioSkewState.b12Idx = 0;
+      rsAudioSkewState.b12Count = 0;
+      rsAudioSkewState.b12Sum = 0.0;
+      rsAudioSkewState.b16.fill(0.0);
+      rsAudioSkewState.b16Idx = 0;
+      rsAudioSkewState.b16Count = 0;
+      rsAudioSkewState.b16Sum = 0.0;
+      rsAudioSkewState.t12.fill(0.0);
+      rsAudioSkewState.t12Idx = 0;
+      rsAudioSkewState.t12Count = 0;
+      rsAudioSkewState.t12Sum = 0.0;
+      rsAudioSkewState.b36.fill(0.0);
+      rsAudioSkewState.b36Idx = 0;
+      rsAudioSkewState.b36Count = 0;
+      rsAudioSkewState.b36Sum = 0.0;
+      rsAudioSkewState.zRing.fill(0.0);
+      rsAudioSkewState.zIdx = 0;
+      rsAudioSkewState.zCount = 0;
+      rsAudioSkewState.runMinT = 0.0;
+      rsAudioSkewState.runMaxT = 0.0;
+      rsAudioSkewState.hasPullInit = false;
+      rsAudioSkewState.a3Min = 0.0;
+      rsAudioSkewState.a3Max = 0.0;
+      rsAudioSkewState.pullMinUs = 0.0;
+      rsAudioSkewState.pullMaxUs = 0.0;
+      rsAudioSkewState.prevPullStepUs = 0.0;
+      rsAudioSkewState.pullUnitUs = 0.0;
+      rsAudioSkewState.ctPullWarmMin = 0.0;
+      rsAudioSkewState.ctPullWarmMax = 0.0;
+      rsAudioSkewState.warmPullTot = 0;
+      rsAudioSkewState.warmPullAtMin = 0;
+      rsAudioSkewState.pRing.fill(0.0);
+      rsAudioSkewState.pIdx = 0;
+      rsAudioSkewState.pCount = 0;
+      rsAudioSkewState.uFirst = 0.0;
+      rsAudioSkewState.baseU = 0.0;
+      rsAudioSkewState.baseCount = 0;
+      rsAudioSkewState.wFirst = 0.0;
+      rsAudioSkewState.baseW = 0.0;
+      rsAudioSkewState.baseWCount = 0;
+      rsAudioSkewState.driftSign = 0;
+    }
+
+    function med5Skew(a, b, c, d, e) {
+      const arr = [a, b, c, d, e];
+      arr.sort((x, y) => x - y);
+      return arr[2];
+    }
+
+    function softThreshSkew(val, margin) {
+      const av = Math.abs(val);
+      if (av <= margin) return 0.0;
+      return val < 0.0 ? -(av - margin) : (av - margin);
+    }
+
+    function clearRsAudioTrackPoll() {
+      if (rsAudioTrackPollId) {
+        clearInterval(rsAudioTrackPollId);
+        rsAudioTrackPollId = 0;
+      }
+    }
+
+    function stopRsSupplementalMic(streamForDetach = null) {
+      const owned = rsOwnedWebcamAudioTracks;
+      rsOwnedWebcamAudioTracks = [];
+      rsSupplementalFallbackTrack = null;
+      for (let i = 0; i < owned.length; i++) {
+        const trk = owned[i];
+        if (!trk) continue;
+        if (streamForDetach && typeof streamForDetach.removeTrack === 'function') {
+          try {
+            streamForDetach.removeTrack(trk);
+          } catch (_e) {}
+        }
+        try {
+          if (typeof trk.stop === 'function') trk.stop();
+        } catch (_e) {}
+      }
+    }
+
+    function getLiveAudioTrack(stream) {
+      if (!stream || typeof stream.getAudioTracks !== 'function') return null;
+      const tracks = stream.getAudioTracks();
+      if (tracks && tracks.length > 0) {
+        for (let i = 0; i < tracks.length; i++) {
+          const t = tracks[i];
+          if (t && (!t.readyState || t.readyState === 'live')) {
+            return t;
+          }
+        }
+      }
+      if (
+        stream === activeMediaStream &&
+        rsSupplementalFallbackTrack &&
+        (!rsSupplementalFallbackTrack.readyState || rsSupplementalFallbackTrack.readyState === 'live')
+      ) {
+        return rsSupplementalFallbackTrack;
+      }
+      return null;
+    }
+
+    function stopRsLiveAudioCapture(unwatchStream = true) {
+      if (unwatchStream) {
+        clearRsAudioTrackPoll();
+      }
+      if (rsAudioCaptureTrackCleanup) {
+        try {
+          rsAudioCaptureTrackCleanup();
+        } catch (_e) {}
+        rsAudioCaptureTrackCleanup = null;
+      }
+      if (unwatchStream && rsAudioCaptureStreamCleanup) {
+        try {
+          rsAudioCaptureStreamCleanup();
+        } catch (_e) {}
+        rsAudioCaptureStreamCleanup = null;
+        rsAudioCaptureStream = null;
+      }
+      rsAudioCaptureTrack = null;
+      if (rsAudioCaptureProc) {
+        try {
+          rsAudioCaptureProc.onaudioprocess = null;
+          rsAudioCaptureProc.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureProc = null;
+      }
+      if (rsAudioCaptureSource) {
+        try {
+          rsAudioCaptureSource.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureSource = null;
+      }
+      if (rsAudioCaptureGain) {
+        try {
+          rsAudioCaptureGain.disconnect();
+        } catch (_e) {}
+        rsAudioCaptureGain = null;
+      }
+      if (rsAudioCaptureCtx) {
+        try {
+          rsAudioCaptureCtx.close();
+        } catch (_e) {}
+        rsAudioCaptureCtx = null;
+      }
+      rsAudioCaptureBaseUs = 0;
+      rsAudioCaptureCursor = 0;
+      rsAudioCaptureAnchored = false;
+      rsAudioAnchorRefineLeft = 0;
+      rsAudioLastSentTEndUs = 0;
+      resetRsAudioSkewState();
+      if (unwatchStream) {
+        rsAudioMicReqSeq++;
+        rsAudioMicInFlightSeq = 0;
+        stopRsSupplementalMic(activeMediaStream);
+        rsAudioMicReqStream = null;
+      }
+    }
+
+    function bindRsAudioStreamWatcher(stream) {
+      if (rsAudioCaptureStream === stream) return;
+      if (rsAudioCaptureStreamCleanup) {
+        try {
+          rsAudioCaptureStreamCleanup();
+        } catch (_e) {}
+        rsAudioCaptureStreamCleanup = null;
+      }
+      rsAudioCaptureStream = stream || null;
+      if (!stream) return;
+      const onStreamTrackChanged = () => syncRsLiveAudioCapture();
+      const hasEv = typeof stream.addEventListener === 'function';
+      if (hasEv) {
+        stream.addEventListener('addtrack', onStreamTrackChanged);
+        stream.addEventListener('removetrack', onStreamTrackChanged);
+      }
+      const hadOwnAdd = Object.prototype.hasOwnProperty.call(stream, 'addTrack');
+      const hadOwnRemove = Object.prototype.hasOwnProperty.call(stream, 'removeTrack');
+      const origAdd = typeof stream.addTrack === 'function' ? stream.addTrack : null;
+      const origRemove = typeof stream.removeTrack === 'function' ? stream.removeTrack : null;
+      if (origAdd) {
+        stream.addTrack = function (...args) {
+          const r = origAdd.apply(this, args);
+          syncRsLiveAudioCapture();
+          return r;
+        };
+      }
+      if (origRemove) {
+        stream.removeTrack = function (...args) {
+          const r = origRemove.apply(this, args);
+          syncRsLiveAudioCapture();
+          return r;
+        };
+      }
+      rsAudioCaptureStreamCleanup = () => {
+        if (hasEv && typeof stream.removeEventListener === 'function') {
+          stream.removeEventListener('addtrack', onStreamTrackChanged);
+          stream.removeEventListener('removetrack', onStreamTrackChanged);
+        }
+        if (origAdd) {
+          if (hadOwnAdd) stream.addTrack = origAdd;
+          else delete stream.addTrack;
+        }
+        if (origRemove) {
+          if (hadOwnRemove) stream.removeTrack = origRemove;
+          else delete stream.removeTrack;
+        }
+      };
+    }
+
+    function requestRsLiveMicrophone(targetStream, reqEpoch) {
+      if (
+        !targetStream ||
+        rsAudioMicInFlightSeq !== 0 ||
+        rsAudioMicReqStream === targetStream ||
+        activeSourceMode !== 'webcam' ||
+        !navigator.mediaDevices ||
+        typeof navigator.mediaDevices.getUserMedia !== 'function'
+      ) {
+        return;
+      }
+      rsAudioMicReqStream = targetStream;
+      const myReqSeq = ++rsAudioMicReqSeq;
+      rsAudioMicInFlightSeq = myReqSeq;
+      Promise.resolve()
+        .then(() => navigator.mediaDevices.getUserMedia({ audio: true, video: false }))
+        .then((micStream) => {
+          if (myReqSeq !== rsAudioMicInFlightSeq) {
+            if (micStream && micStream !== activeMediaStream && typeof micStream.getTracks === 'function') {
+              micStream.getTracks().forEach((t) => {
+                if (t && typeof t.stop === 'function') t.stop();
+              });
+            }
+            return;
+          }
+          rsAudioMicInFlightSeq = 0;
+          const rmNow = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+          const stillValid =
+            reqEpoch === sourceEpoch &&
+            activeMediaStream === targetStream &&
+            activeSourceMode === 'webcam' &&
+            rmNow === 2;
+          if (!stillValid) {
+            if (micStream && micStream !== targetStream && typeof micStream.getTracks === 'function') {
+              micStream.getTracks().forEach((t) => {
+                if (t && typeof t.stop === 'function') t.stop();
+              });
+            }
+            if (rsAudioMicReqStream === targetStream) {
+              rsAudioMicReqStream = null;
+            }
+            return;
+          }
+          if (!micStream) return;
+          if (micStream !== targetStream && typeof micStream.getVideoTracks === 'function') {
+            const existingVid = typeof targetStream.getVideoTracks === 'function' ? targetStream.getVideoTracks() : [];
+            micStream.getVideoTracks().forEach((vt) => {
+              if (vt && !existingVid.includes(vt) && typeof vt.stop === 'function') vt.stop();
+            });
+          }
+          let micTrack = getLiveAudioTrack(micStream);
+          if (!micTrack && typeof micStream.getTracks === 'function') {
+            const all = micStream.getTracks();
+            for (let i = 0; i < all.length; i++) {
+              const t = all[i];
+              if (t && t.kind === 'audio' && (!t.readyState || t.readyState === 'live')) {
+                micTrack = t;
+                break;
+              }
+            }
+          }
+          if (!micTrack) return;
+          if (micStream !== targetStream && !rsOwnedWebcamAudioTracks.includes(micTrack)) {
+            rsOwnedWebcamAudioTracks.push(micTrack);
+          }
+          let inStream = false;
+          if (typeof targetStream.getAudioTracks === 'function' && targetStream.getAudioTracks().includes(micTrack)) {
+            inStream = true;
+          } else if (micStream !== targetStream && typeof targetStream.addTrack === 'function') {
+            try {
+              targetStream.addTrack(micTrack);
+            } catch (_e) {}
+            inStream =
+              typeof targetStream.getAudioTracks === 'function' &&
+              targetStream.getAudioTracks().includes(micTrack);
+          }
+          rsSupplementalFallbackTrack = inStream ? null : micTrack;
+          syncRsLiveAudioCapture();
+        })
+        .catch(() => {
+          if (myReqSeq === rsAudioMicInFlightSeq) {
+            rsAudioMicInFlightSeq = 0;
+          }
+        });
+    }
+
+    function syncRsLiveAudioCapture() {
+      const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+      if (!activeMediaStream || rm !== 2) {
+        stopRsLiveAudioCapture(true);
+        return;
+      }
+      bindRsAudioStreamWatcher(activeMediaStream);
+      const curTrack = getLiveAudioTrack(activeMediaStream);
+      if (!curTrack) {
+        stopRsLiveAudioCapture(false);
+        requestRsLiveMicrophone(activeMediaStream, sourceEpoch);
+        if (!rsAudioTrackPollId) {
+          rsAudioTrackPollId = setInterval(syncRsLiveAudioCapture, 40);
+        }
+        return;
+      }
+      clearRsAudioTrackPoll();
+      if (rsAudioCaptureCtx && rsAudioCaptureStream === activeMediaStream && rsAudioCaptureTrack === curTrack) {
+        return;
+      }
+      if (rsAudioCaptureCtx) {
+        stopRsLiveAudioCapture(false);
+      }
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      try {
+        const ctx = new AC();
+        let sourceStream = null;
+        if (typeof MediaStream === 'function') {
+          try {
+            sourceStream = new MediaStream([curTrack]);
+          } catch (_msErr) {
+            sourceStream = null;
+          }
+        }
+        if (!sourceStream) {
+          sourceStream = {
+            id: 'chronos-live-audio',
+            active: true,
+            getAudioTracks: () => [curTrack],
+            getVideoTracks: () => [],
+            getTracks: () => [curTrack],
+          };
+        }
+        const src = ctx.createMediaStreamSource(sourceStream);
+        const proc = ctx.createScriptProcessor(2048, 1, 1);
+        const gain = ctx.createGain();
+        gain.gain.value = 0.0;
+        rsAudioCaptureRateHz = ctx.sampleRate || 48000.0;
+        rsAudioCaptureStream = activeMediaStream;
+        rsAudioCaptureTrack = curTrack;
+        rsAudioCaptureBaseUs = 0;
+        rsAudioCaptureCursor = 0;
+        rsAudioCaptureAnchored = false;
+        rsAudioAnchorRefineLeft = 0;
+        resetRsAudioSkewState();
+        const onTrackChanged = () => syncRsLiveAudioCapture();
+        if (typeof curTrack.addEventListener === 'function') {
+          curTrack.addEventListener('ended', onTrackChanged);
+          rsAudioCaptureTrackCleanup = () => {
+            if (typeof curTrack.removeEventListener === 'function') {
+              curTrack.removeEventListener('ended', onTrackChanged);
+            }
+          };
+        }
+        const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 40.0;
+        const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 200.0;
+        worker.postMessage({
+          type: 'set_rs_calib',
+          rsMode: 2,
+          dtRowUs,
+          exposureUs,
+          audioRateHz: rsAudioCaptureRateHz,
+          maxSkewUs: 500.0,
+        });
+        proc.onaudioprocess = (ev) => {
+          const activeTrackNow = activeMediaStream ? getLiveAudioTrack(activeMediaStream) : null;
+          if (activeMediaStream !== rsAudioCaptureStream || activeTrackNow !== rsAudioCaptureTrack) {
+            syncRsLiveAudioCapture();
+            return;
+          }
+          const ch = ev.inputBuffer && ev.inputBuffer.numberOfChannels > 0
+            ? ev.inputBuffer.getChannelData(0)
+            : null;
+          if (!ch || ch.length === 0) return;
+          const hasPumpRef = lastMediaTime >= 0 && lastPumpPerfMs > 0;
+          if (!hasPumpRef) return;
+          const nowPerf = performance.now();
+          const mediaNowUs = rsVidClockValid
+            ? Math.round(nowPerf * 1000.0 + rsVidClockOffsetUs)
+            : Math.round(lastMediaTime * 1_000_000.0 + (nowPerf - lastPumpPerfMs) * 1000.0);
+          if (!Number.isFinite(mediaNowUs) || mediaNowUs < 0) return;
+          const samples = new Float32Array(ch.length);
+          samples.set(ch);
+          let outSamples = samples;
+          let didResetBase = false;
+          if (!rsAudioCaptureAnchored) {
+            const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
+            if (availSamples <= 0) {
+              return;
+            }
+            if (availSamples < samples.length) {
+              outSamples = samples.slice(samples.length - availSamples);
+            }
+            const outDurUs = Math.round((outSamples.length * 1_000_000.0) / rsAudioCaptureRateHz);
+            const candidateBase = Math.max(0, mediaNowUs - outDurUs);
+            const candidateEnd = candidateBase + outDurUs;
+            rsAudioCaptureBaseUs =
+              rsAudioLastSentTEndUs > 0 && candidateEnd <= rsAudioLastSentTEndUs
+                ? rsAudioLastSentTEndUs
+                : candidateBase;
+            rsAudioCaptureCursor = 0;
+            rsAudioCaptureAnchored = true;
+            rsAudioAnchorRefineLeft = 4;
+            didResetBase = true;
+          } else if (rsAudioAnchorRefineLeft > 0) {
+            rsAudioAnchorRefineLeft--;
+            const availSamples = Math.floor((mediaNowUs * rsAudioCaptureRateHz) / 1_000_000.0);
+            const estNextEndUs = rsAudioCaptureBaseUs + Math.round(((rsAudioCaptureCursor + outSamples.length) * 1_000_000.0) / rsAudioCaptureRateHz);
+            const tentativeSkewUs = estNextEndUs - mediaNowUs;
+            if (tentativeSkewUs > 200.0 && availSamples > 0) {
+              if (tentativeSkewUs <= 800.0 && rsAudioCaptureBaseUs >= tentativeSkewUs) {
+                const newBase = rsAudioCaptureBaseUs - Math.round(tentativeSkewUs);
+                const newEnd = newBase + Math.round(((rsAudioCaptureCursor + outSamples.length) * 1_000_000.0) / rsAudioCaptureRateHz);
+                if (newEnd > rsAudioLastSentTEndUs) {
+                  rsAudioCaptureBaseUs = newBase;
+                  didResetBase = true;
+                }
+              } else {
+                let nextSlice = outSamples;
+                if (availSamples < nextSlice.length) {
+                  nextSlice = nextSlice.slice(nextSlice.length - availSamples);
+                }
+                const outDurUs = Math.round((nextSlice.length * 1_000_000.0) / rsAudioCaptureRateHz);
+                const newBase = Math.max(0, mediaNowUs - outDurUs);
+                const newEnd = newBase + outDurUs;
+                if (newEnd > rsAudioLastSentTEndUs) {
+                  outSamples = nextSlice;
+                  rsAudioCaptureBaseUs = newBase;
+                  rsAudioCaptureCursor = 0;
+                  didResetBase = true;
+                }
+              }
+            }
+          }
+          const s = rsAudioSkewState;
+          if (didResetBase) {
+            resetRsAudioSkewState();
+          }
+          rsAudioCaptureCursor += outSamples.length;
+          const safeRateHz = Math.max(8000.0, rsAudioCaptureRateHz);
+          const cursorSec = rsAudioCaptureCursor / safeRateHz;
+          const tEndUs = rsAudioCaptureBaseUs + Math.round((rsAudioCaptureCursor * 1_000_000.0) / rsAudioCaptureRateHz);
+          if (!s.hasRefOrigin) {
+            const candidateRefUs = rsVidClockValid
+              ? rsVidClockOffsetUs
+              : lastMediaTime * 1_000_000.0 - lastPumpPerfMs * 1000.0;
+            s.refOriginUs = Number.isFinite(candidateRefUs) ? candidateRefUs : 0.0;
+            s.hasRefOrigin = true;
+          }
+          const skewFromPerfMs = (perfMs) => {
+            const mUs = Math.round(perfMs * 1000.0 + s.refOriginUs);
+            return tEndUs - (Number.isFinite(mUs) ? mUs : mediaNowUs);
+          };
+
+          const raw0 = skewFromPerfMs(nowPerf);
+          if (!s.kindSeen[0]) {
+            s.kindOriginUs[0] = raw0 - s.prevM;
+            s.kindSeen[0] = 1;
+          }
+
+          let hasCt = false;
+          let raw3 = 0.0;
+          if (typeof ctx.currentTime === 'number' && Number.isFinite(ctx.currentTime) && ctx.currentTime > 0) {
+            if (!s.hasCtOrigin || Math.abs(cursorSec + s.ctOriginSec - ctx.currentTime) >= 10.0) {
+              s.ctOriginSec = ctx.currentTime - cursorSec;
+              s.hasCtOrigin = true;
+            }
+            const obsPullSec = ctx.currentTime - (cursorSec + s.ctOriginSec);
+            raw3 = skewFromPerfMs(nowPerf - obsPullSec * 1000.0);
+            hasCt = true;
+            if (!s.kindSeen[3]) {
+              s.kindOriginUs[3] = raw3 - s.prevM;
+              s.kindSeen[3] = 1;
+            }
+          }
+
+          let hasTs = false;
+          let rawTs = 0.0;
+          let tsKind = 1;
+          if (typeof ctx.getOutputTimestamp === 'function') {
+            try {
+              const ts = ctx.getOutputTimestamp();
+              if (
+                ts &&
+                typeof ts.performanceTime === 'number' &&
+                Number.isFinite(ts.performanceTime) &&
+                ts.performanceTime > 0 &&
+                typeof ts.contextTime === 'number' &&
+                Number.isFinite(ts.contextTime) &&
+                ts.contextTime > 0
+              ) {
+                if (!s.hasTsOrigin || Math.abs(cursorSec + s.tsOriginSec - ts.contextTime) >= 10.0) {
+                  s.tsOriginSec = ts.contextTime - cursorSec;
+                  s.hasTsOrigin = true;
+                }
+                const raw1 = skewFromPerfMs(ts.performanceTime + (cursorSec + s.tsOriginSec - ts.contextTime) * 1000.0);
+                if (!s.kindSeen[1]) {
+                  s.kindOriginUs[1] = raw1 - s.prevM;
+                  s.kindSeen[1] = 1;
+                }
+                if (
+                  ev &&
+                  typeof ev.playbackTime === 'number' &&
+                  Number.isFinite(ev.playbackTime) &&
+                  ev.playbackTime > 0 &&
+                  Math.abs(ev.playbackTime - ts.contextTime) < 10.0
+                ) {
+                  const raw2 = skewFromPerfMs(ts.performanceTime + (ev.playbackTime - ts.contextTime) * 1000.0);
+                  if (!s.kindSeen[2]) {
+                    s.kindOriginUs[2] = raw2 - s.prevM;
+                    s.kindSeen[2] = 1;
+                  }
+                  rawTs = raw2;
+                  tsKind = 2;
+                } else {
+                  rawTs = raw1;
+                  tsKind = 1;
+                }
+                hasTs = true;
+              }
+            } catch (_tsErr) {}
+          }
+
+          const aligned0 = raw0 - s.kindOriginUs[0];
+          const aligned3 = hasCt ? raw3 - s.kindOriginUs[3] : aligned0;
+          let alignedUs = aligned0;
+          let trendInputUs = aligned0;
+          if (hasTs) {
+            alignedUs = rawTs - s.kindOriginUs[tsKind];
+            trendInputUs = alignedUs;
+            s.tsCleanRun++;
+          } else {
+            s.tsCleanRun = 0;
+            if (hasCt) {
+              alignedUs = aligned3;
+            }
+          }
+
+          let estSkewUs = 0;
+          if (!didResetBase) {
+            s.warm++;
+            const quantumUs = (128.0 * 1_000_000.0) / safeRateHz;
+            const pull512Us = (512.0 * 1_000_000.0) / safeRateHz;
+            const stepClamp = Math.max(3500.0, 1.35 * pull512Us);
+
+            // 1) Hampel outlier guard + rate-scaled step clamp rejects >1.5-pull spikes without inflating [0, Q] random jitter
+            s.r0 = s.r1;
+            s.r1 = s.r2;
+            s.r2 = s.r3;
+            s.r3 = s.r4;
+            s.r4 = alignedUs;
+            if (s.rCount < 5) s.rCount++;
+            let rawMed;
+            if (s.rCount < 5) {
+              const sl = [s.r0, s.r1, s.r2, s.r3, s.r4].slice(5 - s.rCount).sort((x, y) => x - y);
+              rawMed = sl[sl.length >> 1];
+            } else {
+              rawMed = med5Skew(s.r0, s.r1, s.r2, s.r3, s.r4);
+            }
+            const despiked = Math.abs(alignedUs - rawMed) > 1.5 * pull512Us ? rawMed : alignedUs;
+            const mClamped =
+              s.warm <= 5
+                ? despiked
+                : s.prevM + Math.max(-stepClamp, Math.min(stepClamp, despiked - s.prevM));
+            s.prevM = mClamped;
+            if (s.warm === 6) s.uAt6 = mClamped;
+
+            // 2) Fast offset branch u = Boxcar(12) * Boxcar(16) + linear unwrapped trend branch w36 = Boxcar(12)*Boxcar(36), v = Boxcar(48)(w36)
+            if (s.b12Count < 12) {
+              s.b12[s.b12Count++] = mClamped;
+              s.b12Sum += mClamped;
+            } else {
+              s.b12Sum += mClamped - s.b12[s.b12Idx];
+              s.b12[s.b12Idx] = mClamped;
+              s.b12Idx = (s.b12Idx + 1) % 12;
+            }
+            const avg12 = s.b12Sum / s.b12Count;
+
+            if (s.b16Count < 16) {
+              s.b16[s.b16Count++] = avg12;
+              s.b16Sum += avg12;
+            } else {
+              s.b16Sum += avg12 - s.b16[s.b16Idx];
+              s.b16[s.b16Idx] = avg12;
+              s.b16Idx = (s.b16Idx + 1) & 15;
+            }
+            const u = s.b16Sum / s.b16Count;
+
+            s.t0 = s.t1;
+            s.t1 = s.t2;
+            s.t2 = s.t3;
+            s.t3 = s.t4;
+            s.t4 = trendInputUs;
+            if (s.tCount < 5) s.tCount++;
+            let rawMedT;
+            if (s.tCount < 5) {
+              const slT = [s.t0, s.t1, s.t2, s.t3, s.t4].slice(5 - s.tCount).sort((x, y) => x - y);
+              rawMedT = slT[slT.length >> 1];
+            } else {
+              rawMedT = med5Skew(s.t0, s.t1, s.t2, s.t3, s.t4);
+            }
+            const despikedT = Math.abs(trendInputUs - rawMedT) > 1.5 * pull512Us ? rawMedT : trendInputUs;
+            const mTrend =
+              s.warm <= 5
+                ? despikedT
+                : s.prevM0 + Math.max(-stepClamp, Math.min(stepClamp, despikedT - s.prevM0));
+            s.prevM0 = mTrend;
+            if (s.warm >= 3) {
+              const step2 = Math.abs(mTrend - 2.0 * s.prevT1 + s.prevT2);
+              if (s.warm >= 8 && step2 > s.maxStep2) s.maxStep2 = step2;
+            }
+            s.prevT2 = s.prevT1;
+            s.prevT1 = mTrend;
+            if (s.warm === 1) {
+              s.runMinT = mTrend;
+              s.runMaxT = mTrend;
+            } else {
+              if (mTrend < s.runMinT) s.runMinT = mTrend;
+              if (mTrend > s.runMaxT) s.runMaxT = mTrend;
+            }
+            s.zRing[s.zIdx] = mTrend;
+            s.zIdx = (s.zIdx + 1) & 511;
+            if (s.zCount < 512) s.zCount++;
+
+            const pullStepUs = !hasTs && hasCt ? aligned3 - aligned0 : 0.0;
+            const warmPullGate = s.maxStep2 <= 180.0 ? 250.0 : quantumUs + 150.0;
+            if (!hasTs && hasCt) {
+              if (!s.hasPullInit) {
+                s.hasPullInit = true;
+                s.a3Min = aligned3;
+                s.a3Max = aligned3;
+                s.pullMinUs = pullStepUs;
+                s.pullMaxUs = pullStepUs;
+                s.prevPullStepUs = pullStepUs;
+                s.ctPullWarmMin = pullStepUs;
+                s.ctPullWarmMax = pullStepUs;
+                s.warmPullTot = 1;
+                s.warmPullAtMin = 1;
+              } else {
+                if (aligned3 < s.a3Min) s.a3Min = aligned3;
+                if (aligned3 > s.a3Max) s.a3Max = aligned3;
+                if (pullStepUs < s.pullMinUs) s.pullMinUs = pullStepUs;
+                if (pullStepUs > s.pullMaxUs) s.pullMaxUs = pullStepUs;
+                const dp = Math.abs(pullStepUs - s.prevPullStepUs);
+                if (dp >= 0.8 * quantumUs && (s.pullUnitUs === 0.0 || dp < s.pullUnitUs)) {
+                  s.pullUnitUs = dp;
+                }
+                s.prevPullStepUs = pullStepUs;
+                if (s.warm <= 200 && Math.abs(aligned0) <= warmPullGate) {
+                  if (pullStepUs < s.ctPullWarmMin) {
+                    s.ctPullWarmMin = pullStepUs;
+                    s.warmPullAtMin = 1;
+                  } else if (pullStepUs <= s.ctPullWarmMin + 0.4 * quantumUs) {
+                    s.warmPullAtMin++;
+                  }
+                  if (pullStepUs > s.ctPullWarmMax) s.ctPullWarmMax = pullStepUs;
+                  s.warmPullTot++;
+                }
+              }
+              s.pRing[s.pIdx] = pullStepUs;
+              s.pIdx = (s.pIdx + 1) % 96;
+              if (s.pCount < 96) s.pCount++;
+            }
+
+            if (s.t12Count < 12) {
+              s.t12[s.t12Count++] = mTrend;
+              s.t12Sum += mTrend;
+            } else {
+              s.t12Sum += mTrend - s.t12[s.t12Idx];
+              s.t12[s.t12Idx] = mTrend;
+              s.t12Idx = (s.t12Idx + 1) % 12;
+            }
+            const tAvg12 = s.t12Sum / s.t12Count;
+
+            if (s.b36Count < 36) {
+              s.b36[s.b36Count++] = tAvg12;
+              s.b36Sum += tAvg12;
+            } else {
+              s.b36Sum += tAvg12 - s.b36[s.b36Idx];
+              s.b36[s.b36Idx] = tAvg12;
+              s.b36Idx = (s.b36Idx + 1) % 36;
+            }
+            const w36 = s.b36Sum / s.b36Count;
+
+            const baseGate = Math.max(2200.0, 0.85 * quantumUs);
+            if (s.warm === 16 || (hasTs && s.tsCleanRun === 28 && Math.abs(u - s.uFirst) <= 4500.0)) {
+              s.uFirst = u;
+              s.baseU = u;
+              s.baseCount = 1;
+            } else if (s.warm > 16 && s.baseCount < 32 && Math.abs(u - s.uFirst) <= baseGate) {
+              s.baseCount++;
+              s.baseU += (u - s.baseU) / s.baseCount;
+            }
+
+            if (s.warm === 36) {
+              s.wFirst = w36;
+              s.baseW = w36;
+              s.baseWCount = 1;
+            } else if (s.warm > 36 && s.baseWCount < 72 && Math.abs(w36 - s.wFirst) <= baseGate) {
+              s.baseWCount++;
+              s.baseW += (w36 - s.baseW) / s.baseWCount;
+            }
+
+            let audioSkew = 0.0;
+            if (s.warm >= 10 && s.warm < 24) {
+              audioSkew = softThreshSkew(mClamped - s.uAt6, Math.max(16000.0, 1.5 * pull512Us));
+            } else if (s.warm >= 24) {
+              const cushionUs =
+                s.tsCleanRun >= 64
+                  ? 1750.0
+                  : Math.max(9200.0, Math.min(36000.0, pull512Us + quantumUs + 450.0));
+              const devU = u - s.baseU;
+              const devW = w36 - s.baseW;
+              const offSkew = softThreshSkew(devU, cushionUs);
+
+              let pRecentMin = pullStepUs;
+              if (!hasTs && hasCt) {
+                for (let k = 0; k < s.pCount; k++) {
+                  const pv = s.pRing[k];
+                  if (pv < pRecentMin) pRecentMin = pv;
+                }
+              }
+              const effPullPeriod = s.pullUnitUs > 0.0 ? Math.min(pull512Us + 50.0, s.pullUnitUs) : pull512Us;
+              const spanA3 = s.hasPullInit ? s.a3Max - s.a3Min : 0.0;
+              const hasNewPosPull = s.pullMaxUs > s.ctPullWarmMax + 0.75 * quantumUs;
+              const warmBimodalCleared =
+                s.ctPullWarmMax - s.ctPullWarmMin >= 0.75 * quantumUs &&
+                s.warmPullTot >= 24 &&
+                s.warmPullAtMin >= 0.12 * s.warmPullTot &&
+                pRecentMin > s.ctPullWarmMin + 0.75 * quantumUs;
+              const hasNewNegPull =
+                s.ctPullWarmMax - s.ctPullWarmMin < 0.4 * quantumUs &&
+                s.pullMinUs < s.ctPullWarmMin - 0.75 * quantumUs;
+              const multiPullDispOnly =
+                !hasTs &&
+                hasCt &&
+                spanA3 <= effPullPeriod + 25.0 &&
+                ((devW < 0.0 && (hasNewPosPull || warmBimodalCleared)) || (devW > 0.0 && hasNewNegPull));
+
+              let trendSkew = 0.0;
+              if (!hasTs && hasCt && s.hasPullInit && spanA3 > effPullPeriod + 350.0) {
+                const sgnCt = devW !== 0.0 ? (devW < 0.0 ? -1 : 1) : (aligned0 < 0.0 ? -1 : 1);
+                trendSkew = softThreshSkew(sgnCt * (spanA3 - effPullPeriod), 350.0);
+              }
+
+              const certMargin = Math.max(1800.0, 0.55 * quantumUs + 350.0);
+              if (multiPullDispOnly) {
+                s.driftSign = 0;
+              } else if (s.driftSign !== 0 && s.driftSign * devW <= certMargin) {
+                s.driftSign = 0;
+              }
+
+              if (!multiPullDispOnly && !hasTs && s.driftSign === 0) {
+                const stripCap =
+                  s.maxStep2 <= 180.0
+                    ? Math.max(220.0, 2.2 * s.maxStep2 + 80.0)
+                    : quantumUs + 15.0;
+                let stripHitSpan = 0.0;
+
+                if (s.zCount >= 309) {
+                  const W = 308;
+                  const zEnd = s.zRing[(s.zIdx + 511) & 511];
+                  const zStart = s.zRing[(s.zIdx + 511 - W) & 511];
+                  const spanZ = zEnd - zStart;
+                  const sgnZ = spanZ >= 0.0 ? 1 : -1;
+                  const runSpan = s.runMaxT - s.runMinT;
+                  const lo1 = sgnZ > 0 || s.maxStep2 <= 180.0 ? 14.2 : 19.65;
+                  const hi1 = 23.6;
+                  const reqSpan1 = sgnZ > 0 ? 5200.0 : (s.maxStep2 <= 180.0 ? 5550.0 : 6050.0);
+                  const minDevW1 = Math.max(2400.0, 5600.0 - quantumUs - 150.0);
+                  if (
+                    runSpan >= reqSpan1 &&
+                    sgnZ * devW >= minDevW1 &&
+                    sgnZ * spanZ >= W * lo1 - quantumUs - 15.0
+                  ) {
+                    const y = s.stripY;
+                    for (let m = 0; m <= W; m++) {
+                      y[m] = s.zRing[(s.zIdx + 511 - (W - m)) & 511];
+                    }
+                    const evalW = (bt) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W; m++) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      return mx - mn;
+                    };
+                    const evalWF = (bt) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W; m += 2) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      return mx - mn;
+                    };
+
+                    let a1 = lo1;
+                    let b1 = hi1;
+                    for (let it = 0; it < 12; it++) {
+                      const m1 = a1 + (b1 - a1) / 3.0;
+                      const m2 = b1 - (b1 - a1) / 3.0;
+                      if (evalW(sgnZ * m1) <= evalW(sgnZ * m2)) b1 = m2;
+                      else a1 = m1;
+                    }
+                    const mag1 = 0.5 * (a1 + b1);
+                    if (evalW(sgnZ * mag1) <= stripCap) {
+                      stripHitSpan = sgnZ * mag1 * W;
+                    } else {
+                      const reqSpanB2 =
+                        sgnZ < 0 && s.maxStep2 > 180.0
+                          ? Math.max(6500.0, 5000.0 + quantumUs + 25.0)
+                          : 6500.0;
+                      if (
+                        runSpan >= reqSpanB2 &&
+                        sgnZ * devW >= Math.max(3000.0, 6500.0 - quantumUs - 150.0)
+                      ) {
+                        let a2 = hi1;
+                        let b2 = Math.max(hi1 + 0.6, (Math.abs(spanZ) + quantumUs) / W + 0.5);
+                        for (let it = 0; it < 12; it++) {
+                          const m1 = a2 + (b2 - a2) / 3.0;
+                          const m2 = b2 - (b2 - a2) / 3.0;
+                          if (evalWF(sgnZ * m1) <= evalWF(sgnZ * m2)) b2 = m2;
+                          else a2 = m1;
+                        }
+                        const mag2 = 0.5 * (a2 + b2);
+                        if (evalW(sgnZ * mag2) <= stripCap) {
+                          const preMin = s.stripPreMin;
+                          const preMax = s.stripPreMax;
+                          const sufMin = s.stripSufMin;
+                          const sufMax = s.stripSufMax;
+                          preMin[0] = y[0];
+                          preMax[0] = y[0];
+                          for (let m = 1; m <= W; m++) {
+                            preMin[m] = Math.min(preMin[m - 1], y[m]);
+                            preMax[m] = Math.max(preMax[m - 1], y[m]);
+                          }
+                          sufMin[W] = y[W];
+                          sufMax[W] = y[W];
+                          for (let m = W - 1; m >= 0; m--) {
+                            sufMin[m] = Math.min(sufMin[m + 1], y[m]);
+                            sufMax[m] = Math.max(sufMax[m + 1], y[m]);
+                          }
+                          const Lr = 136;
+                          const pCap = stripCap + 5.0;
+                          let isShift =
+                            sufMax[Lr] - sufMin[Lr] <= pCap ||
+                            preMax[W - Lr] - preMin[W - Lr] <= pCap;
+                          for (let m0 = 0; !isShift && m0 + Lr <= W; m0 += 2) {
+                            if (preMax[m0] - preMin[m0] <= pCap && sufMax[m0 + Lr] - sufMin[m0 + Lr] <= pCap) {
+                              isShift = true;
+                            }
+                          }
+                          if (!isShift) {
+                            stripHitSpan = sgnZ * mag2 * W;
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+
+                if (stripHitSpan === 0.0 && s.zCount >= 501) {
+                  const W2 = 500;
+                  const zEnd2 = s.zRing[(s.zIdx + 511) & 511];
+                  const zQ1 = s.zRing[(s.zIdx + 511 - 333) & 511];
+                  const zQ2 = s.zRing[(s.zIdx + 511 - 166) & 511];
+                  const zStart2 = s.zRing[(s.zIdx + 511 - W2) & 511];
+                  const spanZ2 = zEnd2 - zStart2;
+                  const sgnZ2 = spanZ2 >= 0.0 ? 1 : -1;
+                  const reqSpan2 =
+                    sgnZ2 > 0
+                      ? 5200.0
+                      : (s.maxStep2 <= 180.0 ? 5550.0 : Math.max(6200.0, 5000.0 + quantumUs + 25.0));
+                  const thirds2 =
+                    sgnZ2 * (zQ1 - zStart2) >= 167 * 9.5 - quantumUs - 20.0 &&
+                    sgnZ2 * (zQ2 - zQ1) >= 167 * 9.5 - quantumUs - 20.0 &&
+                    sgnZ2 * (zEnd2 - zQ2) >= 166 * 9.5 - quantumUs - 20.0;
+                  if (
+                    s.runMaxT - s.runMinT >= reqSpan2 &&
+                    thirds2 &&
+                    sgnZ2 * devW >= 3600.0 &&
+                    sgnZ2 * spanZ2 >= W2 * 9.5 - quantumUs - 15.0
+                  ) {
+                    const y = s.stripY;
+                    for (let m = 0; m <= W2; m++) {
+                      y[m] = s.zRing[(s.zIdx + 511 - (W2 - m)) & 511];
+                    }
+                    const evalW2 = (bt) => {
+                      let mn = 1e18;
+                      let mx = -1e18;
+                      for (let m = 0; m <= W2; m += 2) {
+                        const r = y[m] - bt * m;
+                        if (r < mn) mn = r;
+                        if (r > mx) mx = r;
+                      }
+                      return mx - mn;
+                    };
+                    let aS = 9.5;
+                    let bS = 20.0;
+                    for (let it = 0; it < 12; it++) {
+                      const m1 = aS + (bS - aS) / 3.0;
+                      const m2 = bS - (bS - aS) / 3.0;
+                      if (evalW2(sgnZ2 * m1) <= evalW2(sgnZ2 * m2)) bS = m2;
+                      else aS = m1;
+                    }
+                    const magS = 0.5 * (aS + bS);
+                    let mnF = 1e18;
+                    let mxF = -1e18;
+                    for (let m = 0; m <= W2; m++) {
+                      const r = y[m] - sgnZ2 * magS * m;
+                      if (r < mnF) mnF = r;
+                      if (r > mxF) mxF = r;
+                    }
+                    if (mxF - mnF <= stripCap) {
+                      stripHitSpan = sgnZ2 * magS * W2;
+                    }
+                  }
+                }
+
+                if (stripHitSpan !== 0.0) {
+                  const tStrip = softThreshSkew(stripHitSpan, 2500.0);
+                  if (Math.abs(tStrip) > Math.abs(trendSkew)) trendSkew = tStrip;
+                }
+              }
+
+              if (!multiPullDispOnly && Math.abs(trendSkew) > 500.0) {
+                s.driftSign = trendSkew > 0.0 ? 1 : -1;
+              }
+              if (s.driftSign !== 0 && !multiPullDispOnly) {
+                const certSkew = softThreshSkew(devW, certMargin);
+                if (Math.abs(certSkew) > Math.abs(trendSkew)) trendSkew = certSkew;
+              }
+
+              audioSkew = Math.abs(trendSkew) > Math.abs(offSkew) ? trendSkew : offSkew;
+            }
+
+            if (s.warm >= 10) {
+              const curVidRefUs = rsVidClockValid
+                ? rsVidClockOffsetUs
+                : lastMediaTime * 1_000_000.0 - lastPumpPerfMs * 1000.0;
+              const vidRefDeltaUs = Number.isFinite(curVidRefUs) ? curVidRefUs - s.refOriginUs : 0.0;
+              const vidCushionUs = rsVidClockValid && rsVidClockCaptureTimed ? 4500.0 : 17200.0;
+              const vidSkewUs = s.warm >= 12 ? softThreshSkew(vidRefDeltaUs, vidCushionUs) : 0.0;
+              estSkewUs = Math.round(audioSkew - vidSkewUs);
+            }
+          }
+          rsAudioLastSentTEndUs = tEndUs;
+          worker.postMessage(
+            {
+              type: 'push_audio_pcm',
+              samples: outSamples,
+              tEndUs,
+              sampleRateHz: rsAudioCaptureRateHz,
+              estSkewUs,
+            },
+            [outSamples.buffer]
+          );
+        };
+        src.connect(proc);
+        proc.connect(gain);
+        gain.connect(ctx.destination);
+        if (ctx.state === 'suspended') ctx.resume();
+        rsAudioCaptureCtx = ctx;
+        rsAudioCaptureSource = src;
+        rsAudioCaptureProc = proc;
+        rsAudioCaptureGain = gain;
+      } catch (_e) {
+        stopRsLiveAudioCapture();
+      }
+    }
+
     function stopMediaCapture(preserveLiveRetry = false) {
+      stopRsLiveAudioCapture();
+      rsVidClockOffsetUs = 0.0;
+      rsVidClockValid = false;
+      rsVidClockCaptureTimed = false;
       sourceEpoch++;
       videoPumpActive = false;
       lastMediaTime = -1;
+      lastPresentedFrames = -1;
+      pendingVideoGapMask = 0;
       lastPumpPerfMs = 0;
       pumpDroppedFrames = 0;
       flushPendingQueue();
@@ -4429,84 +5816,263 @@
     function dispatchBitmapFrameToWorker(item) {
       if (!item || item.epoch !== sourceEpoch) {
         if (item && item.bitmap && typeof item.bitmap.close === 'function') item.bitmap.close();
-        return;
+        return false;
       }
       if (!workerFrameBusy) {
         workerFrameBusy = true;
-        worker.postMessage(
-          {
-            type: 'video_frame',
-            epoch: item.epoch,
-            seq: item.seq,
-            bitmap: item.bitmap,
-            dtSec: item.dtSec,
-            mediaTimeSec: item.mediaTimeSec,
-          },
-          [item.bitmap]
-        );
+        try {
+          worker.postMessage(
+            {
+              type: 'video_frame',
+              epoch: item.epoch,
+              seq: item.seq,
+              bitmap: item.bitmap,
+              dtSec: item.dtSec,
+              mediaTimeSec: item.mediaTimeSec,
+              tSrcUs: item.tSrcUs,
+              captureAgeMs: item.captureAgeMs,
+              enqueuedEpochMs: item.enqueuedEpochMs,
+              gapMask: item.gapMask,
+              geom: item.geom,
+            },
+            [item.bitmap]
+          );
+          return true;
+        } catch (_postErr) {
+          workerFrameBusy = false;
+          if (item.bitmap && typeof item.bitmap.close === 'function') item.bitmap.close();
+          pendingVideoGapMask = (pendingVideoGapMask | (item.gapMask || 0) | 1) & 0x3f;
+          return false;
+        }
       } else {
-        if (queuedPendingFrame && queuedPendingFrame.bitmap) {
-          queuedPendingFrame.bitmap.close();
+        if (queuedPendingFrame) {
+          item.gapMask = ((item.gapMask || 0) | (queuedPendingFrame.gapMask || 0) | 1) & 0x3f;
+          if (queuedPendingFrame.bitmap && typeof queuedPendingFrame.bitmap.close === 'function') {
+            queuedPendingFrame.bitmap.close();
+          }
           pumpDroppedFrames++;
         }
         queuedPendingFrame = item;
+        return true;
       }
     }
 
-    async function captureAndSendCurrentVideoFrame(dtSec, mediaTimeSec, expectedEpoch = sourceEpoch) {
-      if (videoEl.readyState < 2 || bitmapCaptureBusy || expectedEpoch !== sourceEpoch) return;
+    async function captureAndSendCurrentVideoFrame(
+      dtSec,
+      mediaTimeSec,
+      expectedEpoch = sourceEpoch,
+      metaExtras = null
+    ) {
+      const extras = metaExtras || {};
+      const incomingGap = (extras.gapMask || 0) & 0x3f;
+      if (videoEl.readyState < 2 || bitmapCaptureBusy || expectedEpoch !== sourceEpoch) {
+        if (expectedEpoch === sourceEpoch) {
+          const busyDropBit = bitmapCaptureBusy && videoEl.readyState >= 2 ? 1 : 0;
+          const missedMask = (incomingGap | busyDropBit) & 0x3f;
+          if (missedMask !== 0) {
+            pendingVideoGapMask = (pendingVideoGapMask | missedMask) & 0x3f;
+          }
+        }
+        return false;
+      }
       bitmapCaptureBusy = true;
+      const myCaptureToken = ++bitmapCaptureToken;
+      activeCaptureToken = myCaptureToken;
+      const effectiveGapMask = (pendingVideoGapMask | incomingGap) & 0x3f;
+      pendingVideoGapMask = 0;
       const seq = ++frameSeq;
+      const enqueuedEpochMs = performance.timeOrigin + performance.now();
+      const tSrcUs = Number.isFinite(extras.tSrcUs) && extras.tSrcUs >= 0
+        ? Math.round(extras.tSrcUs)
+        : (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0
+            ? Math.round(mediaTimeSec * 1_000_000)
+            : null);
+      const srcW = Math.max(0, Math.trunc(videoEl.videoWidth || 0));
+      const srcH = Math.max(0, Math.trunc(videoEl.videoHeight || 0));
+      const certifyVideo1to1 = (sampleW, sampleH) => {
+        if (extras.sar1to1 === true) return true;
+        if (typeof VideoFrame !== 'function') return false;
+        let vf = null;
+        try {
+          vf = new VideoFrame(videoEl);
+          return Boolean(
+            vf?.visibleRect?.width > 0 &&
+            vf.displayWidth === vf.visibleRect.width &&
+            vf.displayHeight === vf.visibleRect.height &&
+            sampleW === vf.visibleRect.width &&
+            sampleH === vf.visibleRect.height
+          );
+        } catch (_vfErr) {
+          return false;
+        } finally {
+          if (vf && typeof vf.close === 'function') {
+            vf.close();
+          }
+        }
+      };
+      const commitCaptureMetadata = () => {
+        if (typeof extras.presentedFrames === 'number' && Number.isFinite(extras.presentedFrames) && extras.presentedFrames >= 0) {
+          lastPresentedFrames = extras.presentedFrames;
+        }
+        if (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0) {
+          lastMediaTime = mediaTimeSec;
+        }
+        if (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0) {
+          lastPumpPerfMs = extras.nowPerfMs;
+        }
+        const hasCaptureTime =
+          typeof extras.captureTimeMs === 'number' &&
+          Number.isFinite(extras.captureTimeMs) &&
+          extras.captureTimeMs > 0 &&
+          (typeof extras.nowPerfMs !== 'number' || !Number.isFinite(extras.nowPerfMs) || extras.captureTimeMs <= extras.nowPerfMs);
+        const refPerf = hasCaptureTime
+          ? extras.captureTimeMs
+          : (typeof extras.nowPerfMs === 'number' && Number.isFinite(extras.nowPerfMs) && extras.nowPerfMs > 0
+              ? extras.nowPerfMs
+              : performance.now());
+        if (Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0 && Number.isFinite(refPerf) && refPerf > 0) {
+          const obsOffsetUs = mediaTimeSec * 1_000_000.0 - refPerf * 1000.0;
+          if (!rsVidClockValid || Math.abs(obsOffsetUs - rsVidClockOffsetUs) > 50_000.0) {
+            rsVidClockOffsetUs = obsOffsetUs;
+            rsVidClockValid = true;
+          } else {
+            rsVidClockOffsetUs += 0.15 * (obsOffsetUs - rsVidClockOffsetUs);
+          }
+          rsVidClockCaptureTimed = hasCaptureTime;
+        }
+      };
+      let dispatched = false;
       try {
         const bitmap = await createImageBitmap(videoEl);
         if (expectedEpoch !== sourceEpoch) {
           bitmap.close();
-          return;
+          return false;
         }
-        dispatchBitmapFrameToWorker({
+        const preScaledFrame = !certifyVideo1to1(bitmap.width, bitmap.height);
+        dispatched = dispatchBitmapFrameToWorker({
           epoch: expectedEpoch,
           seq,
           bitmap,
           dtSec,
           mediaTimeSec,
+          tSrcUs,
+          captureAgeMs: typeof extras.captureAgeMs === 'number' ? extras.captureAgeMs : -1.0,
+          enqueuedEpochMs,
+          gapMask: effectiveGapMask,
+          geom: extras.geom || {
+            visibleRect: {
+              x: 0,
+              y: 0,
+              width: Math.max(1, bitmap.width || srcW || activeFrameW),
+              height: Math.max(1, bitmap.height || srcH || activeFrameH),
+            },
+            preScaled: preScaledFrame,
+          },
         });
+        if (dispatched) {
+          commitCaptureMetadata();
+        } else if (expectedEpoch === sourceEpoch) {
+          pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
+        }
+        return dispatched;
       } catch (_err) {
         if (expectedEpoch === sourceEpoch && !workerFrameBusy) {
           try {
-            if (fallbackCapCanvas.width !== activeFrameW || fallbackCapCanvas.height !== activeFrameH) {
-              fallbackCapCanvas.width = activeFrameW;
-              fallbackCapCanvas.height = activeFrameH;
+            const capW = srcW > 0 ? srcW : activeFrameW;
+            const capH = srcH > 0 ? srcH : activeFrameH;
+            const fallbackPreScaled = srcW <= 0 || srcH <= 0 || !certifyVideo1to1(capW, capH);
+            if (fallbackCapCanvas.width !== capW || fallbackCapCanvas.height !== capH) {
+              fallbackCapCanvas.width = capW;
+              fallbackCapCanvas.height = capH;
             }
-            fallbackCapCtx.drawImage(videoEl, 0, 0, activeFrameW, activeFrameH);
-            const img = fallbackCapCtx.getImageData(0, 0, activeFrameW, activeFrameH);
+            fallbackCapCtx.imageSmoothingEnabled = false;
+            fallbackCapCtx.drawImage(videoEl, 0, 0, capW, capH);
+            const img = fallbackCapCtx.getImageData(0, 0, capW, capH);
             const copy = new Uint8Array(img.data);
-            worker.postMessage(
-              { type: 'video_rgba', buffer: copy.buffer, dtSec, mediaTimeSec },
-              [copy.buffer]
-            );
+            workerFrameBusy = true;
+            try {
+              worker.postMessage(
+                {
+                  type: 'video_rgba',
+                  epoch: expectedEpoch,
+                  seq,
+                  buffer: copy.buffer,
+                  dtSec,
+                  mediaTimeSec,
+                  tSrcUs,
+                  captureAgeMs: typeof extras.captureAgeMs === 'number' ? extras.captureAgeMs : -1.0,
+                  enqueuedEpochMs,
+                  gapMask: effectiveGapMask,
+                  fallbackScaled: fallbackPreScaled,
+                  geom: extras.geom || {
+                    srcW: capW,
+                    srcH: capH,
+                    preScaled: fallbackPreScaled,
+                  },
+                },
+                [copy.buffer]
+              );
+              commitCaptureMetadata();
+              dispatched = true;
+              return true;
+            } catch (_postErr) {
+              workerFrameBusy = false;
+              pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
+            }
           } catch (_fallbackErr) {
-            // Ignore transient decode or CORS probe race
+            pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
           }
+        } else if (expectedEpoch === sourceEpoch) {
+          pendingVideoGapMask = (pendingVideoGapMask | effectiveGapMask | 1) & 0x3f;
         }
+        return dispatched;
       } finally {
-        bitmapCaptureBusy = false;
+        if (activeCaptureToken === myCaptureToken) {
+          bitmapCaptureBusy = false;
+        }
       }
     }
 
-    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs, pumpEpoch) {
+    async function forwardUniqueVideoFrame(mediaTimeSec, nowPerfMs, pumpEpoch, rVfcMeta = null) {
       if (!videoPumpActive || pumpEpoch !== sourceEpoch || videoEl.readyState < 2 || videoEl.paused || videoEl.ended) {
-        return;
+        return false;
       }
       const hasValidPts = Number.isFinite(mediaTimeSec) && mediaTimeSec >= 0;
-      if (hasValidPts && mediaTimeSec === lastMediaTime && (activeSourceMode === 'video' || activeSourceMode === 'live')) {
-        return;
+      const hasPresented = rVfcMeta && typeof rVfcMeta.presentedFrames === 'number' && Number.isFinite(rVfcMeta.presentedFrames);
+      const presentedNow = hasPresented ? rVfcMeta.presentedFrames : -1;
+      if (hasPresented) {
+        if (lastPresentedFrames >= 0 && presentedNow === lastPresentedFrames) {
+          return false;
+        }
+      } else if (hasValidPts && mediaTimeSec === lastMediaTime && (activeSourceMode === 'video' || activeSourceMode === 'live')) {
+        return false;
       }
 
+      let gapMask = 0;
+      if (hasPresented && lastPresentedFrames >= 0 && presentedNow > lastPresentedFrames + 1) {
+        gapMask |= 1; // FRAME_GAP_SEQ
+      }
+
+      if (activeMediaStream) {
+        syncRsLiveAudioCapture();
+      }
       // Detect <video loop> wrap-around or any backward seek (> 1 ms reversal) so tracks and PTS clocks reset cleanly
       if (hasValidPts && lastMediaTime >= 0 && mediaTimeSec + 1e-3 < lastMediaTime) {
+        gapMask |= 8; // FRAME_GAP_SEEK_RESTART
         worker.postMessage({ type: 'lab_action', action: 'reset' });
         lastMediaTime = -1;
+        lastPresentedFrames = -1;
+        pendingVideoGapMask = 0;
         lastPumpPerfMs = 0;
+        rsVidClockOffsetUs = 0.0;
+        rsVidClockValid = false;
+        rsVidClockCaptureTimed = false;
+        rsAudioCaptureBaseUs = 0;
+        rsAudioCaptureCursor = 0;
+        rsAudioCaptureAnchored = false;
+        rsAudioAnchorRefineLeft = 0;
+        resetRsAudioSkewState();
+        rsAudioLastSentTEndUs = 0;
       }
 
       const nomDt = 1.0 / Math.max(8.0, activeVideoFps);
@@ -4518,8 +6084,17 @@
         const rawPerfDt = (nowPerfMs - lastPumpPerfMs) * 0.001;
         dtSec = rawPerfDt > 0.5 ? nomDt : Math.max(0.002, rawPerfDt);
       }
-      if (hasValidPts) lastMediaTime = mediaTimeSec;
-      lastPumpPerfMs = nowPerfMs;
+
+      let captureAgeMs = -1.0;
+      if (
+        rVfcMeta &&
+        typeof rVfcMeta.captureTime === 'number' &&
+        Number.isFinite(rVfcMeta.captureTime) &&
+        rVfcMeta.captureTime > 0 &&
+        nowPerfMs >= rVfcMeta.captureTime
+      ) {
+        captureAgeMs = nowPerfMs - rVfcMeta.captureTime;
+      }
 
       // Live MSE edge maintenance: preserve multi-segment HLS cushion (~10-22s) while bounding extreme drift (>35s)
       if (activeSourceMode === 'live' && activeMseMediaSource && videoEl.buffered.length > 0) {
@@ -4530,27 +6105,43 @@
       }
 
       updateVideoTimeLabel();
-      await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch);
+      const captureTimeMs =
+        rVfcMeta && typeof rVfcMeta.captureTime === 'number' && Number.isFinite(rVfcMeta.captureTime) && rVfcMeta.captureTime > 0
+          ? rVfcMeta.captureTime
+          : -1.0;
+      return await captureAndSendCurrentVideoFrame(dtSec, hasValidPts ? mediaTimeSec : -1.0, pumpEpoch, {
+        captureAgeMs,
+        gapMask,
+        presentedFrames: hasPresented ? presentedNow : -1,
+        nowPerfMs,
+        captureTimeMs,
+      });
     }
 
     function startVideoPump() {
       videoPumpActive = true;
       lastMediaTime = -1;
+      lastPresentedFrames = -1;
+      pendingVideoGapMask = 0;
       lastPumpPerfMs = 0;
+      rsVidClockOffsetUs = 0.0;
+      rsVidClockValid = false;
+      rsVidClockCaptureTimed = false;
+      pumpStartPerfMs = performance.now();
       const myEpoch = sourceEpoch;
 
       if (typeof videoEl.requestVideoFrameCallback === 'function') {
         const onVideoFrame = (now, metadata) => {
           if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           videoEl.requestVideoFrameCallback(onVideoFrame);
-          forwardUniqueVideoFrame(metadata.mediaTime, now, myEpoch);
+          forwardUniqueVideoFrame(metadata.mediaTime, now, myEpoch, metadata);
         };
         videoEl.requestVideoFrameCallback(onVideoFrame);
       } else {
         const onRafFallback = (now) => {
           if (!videoPumpActive || myEpoch !== sourceEpoch) return;
           requestAnimationFrame(onRafFallback);
-          forwardUniqueVideoFrame(videoEl.currentTime, now, myEpoch);
+          forwardUniqueVideoFrame(videoEl.currentTime, now, myEpoch, null);
         };
         requestAnimationFrame(onRafFallback);
       }
@@ -5023,9 +6614,288 @@
       });
     }
 
+    function updateWave1DomUi(m) {
+      const w1 = m.wave1;
+      const roi = m.roi;
+      const bos = m.bos;
+      const met = m.metrology;
+      window.__chronosLastWave1Snap = {
+        frameIdx: m.frameIdx,
+        activeTargets: m.activeTargets,
+        wave1: w1,
+        roi,
+        bos,
+        metrology: met,
+      };
+
+      if (roi && dom.roiGeomMeta) {
+        const roiTxt = roi.native1to1Active
+          ? `1:1 NATIVE (${roi.cropX0},${roi.cropY0} ${roi.cropW}x${roi.cropH})`
+          : (roi.fallbackScale ? 'FALLBACK RESCALE (SRC < ROI)' : `FIT ${roi.cropW}x${roi.cropH}->${roi.engineW}x${roi.engineH}`);
+        setTextIfChanged(dom.roiGeomMeta, roiTxt);
+        if (dom.valRoiX0 && dom.rangeRoiX0) {
+          const pctX = Math.round(Number(dom.rangeRoiX0.value) || 0);
+          setTextIfChanged(dom.valRoiX0, `${pctX}% (${roi.cropX0} px)`);
+        }
+        if (dom.valRoiY0 && dom.rangeRoiY0) {
+          const pctY = Math.round(Number(dom.rangeRoiY0.value) || 0);
+          setTextIfChanged(dom.valRoiY0, `${pctY}% (${roi.cropY0} px)`);
+        }
+        setTextIfChanged(dom.diagRoiGeom, roiTxt);
+      }
+
+      if (w1 && w1.available) {
+        const dm = w1.dispMeta;
+        const gapTag = dm && dm.frameGapFlag !== 0 && dm.gapLabels && dm.gapLabels.length
+          ? dm.gapLabels.join('|')
+          : 'OK';
+        const seqTxt = dm ? `${dm.sourceEpoch}:${dm.sourceSeq}` : `0:${m.frameIdx || 0}`;
+        setTextIfChanged(
+          dom.diagWave1Ingest,
+          `EP ${w1.continuityEpoch} · ${seqTxt} · ${gapTag} · ${w1.totalCommits}c`
+        );
+        const st = w1.stamps || {};
+        const sc = (s) => (!s || !s.valid ? '-' : (s.held ? 'H' : 'V'));
+        const stampTxt = `${sc(st.micro)}${sc(st.grad)}${sc(st.ftle)}${sc(st.modalField)}${sc(st.heroPhysics)}${sc(st.bos)} · ${w1.validRowCount}r`;
+        setTextIfChanged(dom.diagWave1Stamps, stampTxt);
+      }
+
+      if (bos && dom.diagBosState) {
+        const bosResTxt = bos.available && bos.state === 2
+          ? `READY · ${bos.validDisp}/8192 · ${bos.pcgIters}it · res ${bos.trueRelRes.toExponential(1)}`
+          : bos.available && bos.state === 3
+          ? `DISTURBED · ${(bos.reasonFlags || []).slice(0, 3).join('+') || 'MOTION'}`
+          : bos.available && bos.state === 1
+          ? `WARMING ${bos.warmupCnt}/16`
+          : (bos.available ? 'OFF' : 'STANDBY');
+        setTextIfChanged(dom.diagBosState, bosResTxt);
+      }
+
+      if (met && dom.diagMetrologyCov) {
+        const covTxt = met.available
+          ? `${met.usableCovCount} usable · ${met.loomRejectedCount} loom · ${met.promotedCandidates} cand`
+          : 'STANDBY';
+        setTextIfChanged(dom.diagMetrologyCov, covTxt);
+      }
+
+      if (dom.acquisitionStatusBanner) {
+        let severity = 'info';
+        let bannerTxt = 'ACQUISITION STEADY · MONOTONIC PTS & 100% RING COMMIT';
+        const dm = w1 && w1.dispMeta;
+        const bosActive = bos && bos.available && bos.reqMode > 0;
+        const w2 = m.wave2;
+        const w2v = w2 && w2.vibro && w2.vibro.available ? w2.vibro : null;
+        const w2vActive = Boolean(w2v && w2v.reqMode > 0);
+        const w2h = w2 && w2.hodge && w2.hodge.available ? w2.hodge : null;
+        const w2hActive = Boolean(w2h && w2h.reqMode > 0);
+        const w2c = w2 && w2.conservation && w2.conservation.available ? w2.conservation : null;
+        const w2vNull = Boolean(w2v && (w2v.exposureNullFlag || ((w2v.reasonMask || 0) & 64) !== 0));
+        const w2vHardFail = Boolean(w2v && (((w2v.reasonMask || 0) & ((1 << 4) | (1 << 5))) !== 0));
+        if (bosActive && bos.state === 3) {
+          severity = 'danger';
+          const reasons = (bos.reasonFlags || []).join(', ') || 'CAMERA MOTION';
+          bannerTxt = `⚠ TRIPOD FAILURE / DISTURBED (${reasons}) · SHIFT (${bos.shiftX.toFixed(2)}, ${bos.shiftY.toFixed(2)}) px · REF INVALIDATED`;
+        } else if (w2vActive && (w2v.state === 4 || w2vNull)) {
+          severity = w2vHardFail ? 'danger' : 'warn';
+          const sincAbs = Number.isFinite(w2v.sincH) ? Math.abs(w2v.sincH).toFixed(3) : '--';
+          const rTxt = (w2v.reasonFlags || []).slice(0, 3).join('+') || (w2vNull ? 'EXPOSURE_NULL' : 'DISTURBED');
+          bannerTxt = w2vNull
+            ? `⚠ RS EXPOSURE_NULL (|H|=${sincAbs} < 0.05) · ${rTxt}`
+            : `⚠ RS VIBRO DISTURBED (${rTxt})`;
+        } else if (w2hActive && w2h.state === 3) {
+          severity = 'warn';
+          bannerTxt = '⚠ HODGE PCG UNCONVERGED · FIELD INVALIDATED';
+        } else if (w2c && w2c.status === 3) {
+          severity = 'warn';
+          bannerTxt = `⚠ OCCLUDED CONSERVATION VIOLATED · T${w2c.tidA || 0}-T${w2c.tidB || 0}`;
+        } else if (dm && dm.frameGapFlag !== 0) {
+          severity = 'warn';
+          bannerTxt = `⚠ ACQUISITION GAP [${(dm.gapLabels || []).join('+')}] · EP ${w1.continuityEpoch} · PTS MONOTONIC GUARD`;
+        } else if (roi && roi.fallbackScale) {
+          severity = 'warn';
+          bannerTxt = `⚠ NATIVE 1:1 UNAVAILABLE (${roi.srcW}x${roi.srcH} < ${roi.engineW}x${roi.engineH}) · RESCALED`;
+        } else if (w2vActive && w2v.state === 1) {
+          severity = 'warn';
+          bannerTxt = `⚠ RS CALIBRATION REQUIRED (${(w2v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'})`;
+        } else if (bosActive && bos.state === 2) {
+          severity = 'ok';
+          bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/8192 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
+        } else if (w2vActive && w2v.state === 3) {
+          severity = 'ok';
+          const fTxt = Number.isFinite(w2v.domFreqHz) ? w2v.domFreqHz.toFixed(1) : '--';
+          const gTxt = Number.isFinite(w2v.maxCohGamma2) ? w2v.maxCohGamma2.toFixed(3) : '--';
+          bannerTxt = `◆ RS VIBROMETRY READY · K=${w2v.welchK || 0} · ${fTxt} Hz · g2=${gTxt}`;
+        } else if (bosActive && bos.state === 1) {
+          severity = 'info';
+          bannerTxt = `BOS REFERENCE WARMING (${bos.warmupCnt}/16) · KEEP CAMERA STATIC ON TRIPOD`;
+        } else if (w2vActive && w2v.state === 2) {
+          severity = 'info';
+          bannerTxt = `RS WELCH WARMING · ${w2v.activeFramesInRun || 0}f · K=${w2v.welchK || 0}/8`;
+        } else if (w2c && w2c.status === 2) {
+          severity = 'info';
+          bannerTxt = `◆ OCCLUDED CONSERVATION AMBIGUOUS (${(w2c.hypotheses || []).join(' / ') || 'H0_SWAP / H1_KEEP'})`;
+        } else if (roi && roi.native1to1Active) {
+          severity = 'ok';
+          bannerTxt = `◆ NATIVE 1:1 ROI (${roi.cropX0},${roi.cropY0} ${roi.cropW}x${roi.cropH}) · ZERO IMPLICIT RESCALE`;
+        }
+        if (dom.acquisitionStatusBanner.dataset.severity !== severity) {
+          dom.acquisitionStatusBanner.dataset.severity = severity;
+        }
+        setTextIfChanged(dom.acquisitionStatusBanner, bannerTxt);
+      }
+    }
+
+    function updateWave2DomUi(m) {
+      const w2 = m && m.wave2 ? m.wave2 : null;
+      window.__chronosLastWave2Snap = w2;
+      if (!w2) return;
+
+      if (dom.diagWave2Stamps) {
+        if (w2.available && w2.stamps) {
+          const st = w2.stamps;
+          const sc = (s) => (!s || !s.valid ? '-' : (s.held ? 'H' : 'V'));
+          setTextIfChanged(
+            dom.diagWave2Stamps,
+            `${sc(st.vibro)}${sc(st.hodge)}${sc(st.conservation)} · EP ${w2.continuityEpoch || 0}`
+          );
+        } else {
+          setTextIfChanged(dom.diagWave2Stamps, '--');
+        }
+      }
+
+      if (dom.diagRsWelch) {
+        const v = w2.vibro;
+        let rsTxt = 'OFF';
+        if (v && v.available) {
+          if (v.state === 3) {
+            const fTxt = Number.isFinite(v.domFreqHz) ? v.domFreqHz.toFixed(1) : '--';
+            const gTxt = Number.isFinite(v.maxCohGamma2) ? v.maxCohGamma2.toFixed(2) : '--';
+            rsTxt = `READY · K=${v.welchK || 0} · ${fTxt}Hz · g2=${gTxt}`;
+          } else if (v.state === 2) {
+            rsTxt = `WARMING · K=${v.welchK || 0}`;
+          } else if (v.state === 1) {
+            rsTxt = `UNCALIB · ${(v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'}`;
+          } else if (v.state === 4) {
+            rsTxt = `DISTURBED · ${(v.reasonFlags || []).slice(0, 2).join('+') || 'FAULT'}`;
+          }
+        }
+        setTextIfChanged(dom.diagRsWelch, rsTxt);
+      }
+
+      if (dom.diagHodge2Complex) {
+        const h = w2.hodge;
+        let hTxt = 'OFF';
+        if (h && h.available) {
+          if (h.state === 2) {
+            const ex = Number.isFinite(h.exactFrac) ? (h.exactFrac * 100).toFixed(0) : '--';
+            const co = Number.isFinite(h.coexactFrac) ? (h.coexactFrac * 100).toFixed(0) : '--';
+            const ha = Number.isFinite(h.harmFrac) ? (h.harmFrac * 100).toFixed(0) : '--';
+            hTxt = `READY · ${ex}/${co}/${ha}% · b1=${h.beta1 || 0}`;
+          } else if (h.state === 3) {
+            hTxt = 'UNCONV';
+          } else if (h.state === 1) {
+            hTxt = 'STANDBY';
+          }
+        }
+        setTextIfChanged(dom.diagHodge2Complex, hTxt);
+      }
+
+      if (dom.diagOcclConservation) {
+        const c = w2.conservation;
+        let cTxt = 'NONE';
+        if (c && c.available && (c.status || 0) > 0) {
+          const hyps = (c.hypotheses || []).join('/') || `T${c.tidA || 0}-T${c.tidB || 0}`;
+          cTxt = `${c.statusLabel || 'NONE'} · ${hyps}`;
+        }
+        setTextIfChanged(dom.diagOcclConservation, cTxt);
+      }
+    }
+
+    let lastWorkerAckOrReject = null;
+    let pendingWorkerAckWaiter = null;
+    let nextW2ReqId = 1;
+    const pendingW2Requests = new Map();
+
+    function sendWave2Rpc(msgType, fields, timeoutMs = 4000) {
+      return new Promise((resolve) => {
+        const reqId = nextW2ReqId++;
+        const timer = setTimeout(() => {
+          pendingW2Requests.delete(reqId);
+          resolve({ timeout: true, reqId });
+        }, timeoutMs);
+        pendingW2Requests.set(reqId, (ack) => {
+          clearTimeout(timer);
+          resolve(ack);
+        });
+        worker.postMessage({ type: msgType, reqId, wantAck: true, ...fields });
+      });
+    }
+
+    window.__chronosWave1Probe = {
+      postWorkerMsg: (payload, transfers = []) => {
+        worker.postMessage(payload, transfers);
+      },
+      submitTestFrame: (payload, transfers = []) => new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          pendingWorkerAckWaiter = null;
+          resolve({ timeout: true });
+        }, 4000);
+        pendingWorkerAckWaiter = (msg) => {
+          clearTimeout(timer);
+          resolve(msg);
+        };
+        worker.postMessage(payload, transfers);
+      }),
+      getBusyState: () => ({ workerFrameBusy, bitmapCaptureBusy, lastPresentedFrames, pendingVideoGapMask, sourceEpoch, frameSeq, lastWorkerAckOrReject }),
+      dispatchBitmapFrame: (item) => dispatchBitmapFrameToWorker(item),
+      forwardVideoFrameForTest: (mt, perfMs, rVfcMeta) => forwardUniqueVideoFrame(mt, perfMs, sourceEpoch, rVfcMeta),
+      setCaptureBusyForTest: (busy) => {
+        if (busy) activeCaptureToken = ++bitmapCaptureToken;
+        bitmapCaptureBusy = Boolean(busy);
+      },
+      simulateEpochFlushForTest: () => {
+        sourceEpoch++;
+        lastMediaTime = -1;
+        lastPresentedFrames = -1;
+        pendingVideoGapMask = 0;
+        flushPendingQueue();
+        return sourceEpoch;
+      },
+      getLastWave1: () => window.__chronosLastWave1Snap || null,
+    };
+
+    window.__chronosWave2Probe = {
+      postWorkerMsg: (payload, transfers = []) => {
+        worker.postMessage(payload, transfers);
+      },
+      getLastWave2: () => window.__chronosLastWave2Snap || null,
+      submitAudioBlock: ({ samples, tEndUs, sampleRateHz, estSkewUs = 0.0 }) =>
+        sendWave2Rpc('push_audio_pcm', { samples, tEndUs, sampleRateHz, estSkewUs }),
+      evalOccludedPair: (input) =>
+        sendWave2Rpc('eval_occluded_pair_test', { input }),
+    };
+
     worker.onmessage = (ev) => {
       const m = ev.data;
-      if (m.type === 'frame_ack') {
+      if (m.type === 'wave2_audio_ack' || m.type === 'wave2_cons_test_ack') {
+        if (m.type === 'wave2_cons_test_ack' && m.conservation && window.__chronosLastWave2Snap) {
+          window.__chronosLastWave2Snap.conservation = m.conservation;
+          updateWave2DomUi({ wave2: window.__chronosLastWave2Snap });
+        }
+        const cb = typeof m.reqId === 'number' ? pendingW2Requests.get(m.reqId) : null;
+        if (cb) {
+          pendingW2Requests.delete(m.reqId);
+          cb(m);
+        }
+        return;
+      }
+      if (m.type === 'frame_ack' || m.type === 'ingest_rejected') {
+        lastWorkerAckOrReject = { ...m };
+        if (pendingWorkerAckWaiter) {
+          const cb = pendingWorkerAckWaiter;
+          pendingWorkerAckWaiter = null;
+          cb(m);
+        }
         if (m.epoch === sourceEpoch) {
           workerFrameBusy = false;
           if (queuedPendingFrame) {
@@ -5037,6 +6907,7 @@
         return;
       }
       if (m.type === 'ready') {
+        workerKernelReady = true;
         dom.pillKernel.textContent = '◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS';
         dom.pillArena.textContent = `ARENA: ${m.pages} PAGES / ${(m.memoryBytes / 1048576).toFixed(2)} MB`;
         applyResolutionUi(m.resMode, m.frameW, m.frameH, m.pipDim);
@@ -5050,7 +6921,9 @@
         }
         if (activeSurface === 'showcase' && !initialShowcaseBooted) {
           initialShowcaseBooted = true;
-          activateHeroScene('starling_1000');
+          const targetScene = pendingHeroSceneBeforeReady || 'starling_1000';
+          pendingHeroSceneBeforeReady = null;
+          activateHeroScene(targetScene);
         }
       } else if (m.type === 'init_error') {
         dom.pillKernel.textContent = '⚠ KERNEL INIT FAILED';
@@ -5299,6 +7172,8 @@
 
         updateSlotRosterUi(m.slotRoster);
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+        updateWave1DomUi(m);
+        updateWave2DomUi(m);
         if (activeSurface === 'showcase' && typeof updateShowcaseProofCards === 'function') {
           updateShowcaseProofCards(m, medMs);
         }
@@ -5371,10 +7246,154 @@
 
     if (dom.fieldOverlayModeSelect) {
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
-        const om = Math.max(0, Math.min(4, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        const om = Math.max(0, Math.min(11, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
+        if (om >= 5 && om <= 7 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
+          dom.bosModeSelect.value = '1';
+          worker.postMessage({ type: 'set_bos_config', bosMode: 1, overlayKind: om - 5, gaugeRoi: [4, 4, 18, 60] });
+        } else if (om >= 8 && om <= 10 && dom.hodgeModeSelect && dom.hodgeModeSelect.value === '0') {
+          dom.hodgeModeSelect.value = '1';
+          worker.postMessage({ type: 'set_hodge_config', hodgeMode: 1 });
+        } else if (om === 11 && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
+          dom.rsVibroModeSelect.value = '2';
+          sendRsControlToWorker(true);
+        }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
+    }
+
+    if (dom.bosModeSelect) {
+      dom.bosModeSelect.addEventListener('change', () => {
+        const bm = Math.max(0, Math.min(2, parseInt(dom.bosModeSelect.value || '0', 10) || 0));
+        const om = dom.fieldOverlayModeSelect ? (parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0) : 0;
+        const okind = om >= 5 && om <= 7 ? om - 5 : 0;
+        const payload = { type: 'set_bos_config', bosMode: bm, overlayKind: okind };
+        if (bm > 0) payload.gaugeRoi = [4, 4, 18, 60];
+        worker.postMessage(payload);
+      });
+    }
+
+    if (dom.metrologyModeSelect) {
+      dom.metrologyModeSelect.addEventListener('change', () => {
+        const mm = Math.max(0, Math.min(2, parseInt(dom.metrologyModeSelect.value || '0', 10) || 0));
+        const showEll = mm > 0 && dom.chkCovEllipses ? dom.chkCovEllipses.checked : false;
+        worker.postMessage({ type: 'set_metrology_config', metrologyMode: mm, showCovEllipses: showEll });
+      });
+    }
+
+    if (dom.hodgeModeSelect) {
+      dom.hodgeModeSelect.addEventListener('change', () => {
+        const hm = Math.max(0, Math.min(2, parseInt(dom.hodgeModeSelect.value || '0', 10) || 0));
+        worker.postMessage({ type: 'set_hodge_config', hodgeMode: hm });
+      });
+    }
+
+    function readRsUiScanDir() {
+      const sdRaw = dom.selRsScanDir ? parseInt(dom.selRsScanDir.value, 10) : -1;
+      return Number.isInteger(sdRaw) && sdRaw >= 0 && sdRaw <= 3 ? sdRaw : 0xffffffff;
+    }
+
+    function sendRsControlToWorker(autoEnableNative = false) {
+      const rm = dom.rsVibroModeSelect
+        ? Math.max(0, Math.min(2, parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0))
+        : 0;
+      const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 0.0;
+      const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 0.0;
+      const scanDir = readRsUiScanDir();
+      if (rm > 0 && autoEnableNative && dom.chkNativeRoi && !dom.chkNativeRoi.checked) {
+        dom.chkNativeRoi.checked = true;
+      }
+      const n1 = Boolean(dom.chkNativeRoi && dom.chkNativeRoi.checked);
+      const xPct = dom.rangeRoiX0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiX0.value) || 0)) : 50;
+      const yPct = dom.rangeRoiY0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiY0.value) || 0)) : 50;
+      worker.postMessage({
+        type: 'set_roi',
+        native1to1: n1,
+        normX: xPct / 100.0,
+        normY: yPct / 100.0,
+        scanDir,
+      });
+      worker.postMessage({
+        type: 'set_rs_calib',
+        rsMode: rm,
+        dtRowUs,
+        exposureUs,
+        audioRateHz: rsAudioCaptureRateHz || 48000.0,
+        maxSkewUs: 500.0,
+      });
+      syncRsLiveAudioCapture();
+    }
+
+    if (dom.rsVibroModeSelect) {
+      dom.rsVibroModeSelect.addEventListener('change', () => {
+        const rm = Math.max(0, Math.min(2, parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0));
+        sendRsControlToWorker(rm > 0);
+      });
+    }
+    if (dom.inpRsDtRowUs) {
+      dom.inpRsDtRowUs.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) sendRsControlToWorker(false);
+      });
+    }
+    if (dom.inpRsExposureUs) {
+      dom.inpRsExposureUs.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) sendRsControlToWorker(false);
+      });
+    }
+    if (dom.selRsScanDir) {
+      dom.selRsScanDir.addEventListener('change', () => {
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm > 0) {
+          sendRsControlToWorker(false);
+        } else {
+          worker.postMessage({ type: 'set_roi', scanDir: readRsUiScanDir() });
+        }
+      });
+    }
+
+    if (dom.chkCovEllipses) {
+      dom.chkCovEllipses.addEventListener('change', (e) => {
+        const on = Boolean(e.target.checked);
+        dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: on });
+        if (on && dom.metrologyModeSelect && dom.metrologyModeSelect.value === '0') {
+          dom.metrologyModeSelect.value = '2';
+          worker.postMessage({ type: 'set_metrology_config', metrologyMode: 2, showCovEllipses: true });
+        } else {
+          worker.postMessage({ type: 'set_metrology_config', showCovEllipses: on });
+        }
+      });
+    }
+
+    function sendRoiControlToWorker() {
+      const n1 = Boolean(dom.chkNativeRoi && dom.chkNativeRoi.checked);
+      const xPct = dom.rangeRoiX0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiX0.value) || 0)) : 50;
+      const yPct = dom.rangeRoiY0 ? Math.max(0, Math.min(100, Number(dom.rangeRoiY0.value) || 0)) : 50;
+      if (dom.rangeRoiX0) {
+        dom.rangeRoiX0.setAttribute('aria-valuetext', `${xPct}% horizontal crop offset`);
+        syncRangeFallbackProgress(dom.rangeRoiX0);
+      }
+      if (dom.rangeRoiY0) {
+        dom.rangeRoiY0.setAttribute('aria-valuetext', `${yPct}% vertical crop offset`);
+        syncRangeFallbackProgress(dom.rangeRoiY0);
+      }
+      worker.postMessage({
+        type: 'set_roi',
+        native1to1: n1,
+        normX: xPct / 100.0,
+        normY: yPct / 100.0,
+      });
+    }
+
+    if (dom.chkNativeRoi) {
+      dom.chkNativeRoi.addEventListener('change', sendRoiControlToWorker);
+    }
+    if (dom.rangeRoiX0) {
+      dom.rangeRoiX0.addEventListener('input', sendRoiControlToWorker);
+    }
+    if (dom.rangeRoiY0) {
+      dom.rangeRoiY0.addEventListener('input', sendRoiControlToWorker);
     }
 
     function syncSwarmControlsForConfig(resTarget, swarmTarget, overlayTarget, postSwarmMode = false) {
@@ -6093,10 +8112,19 @@
       const reqEpoch = sourceEpoch;
       let stream = null;
       try {
-        stream = await navigator.mediaDevices.getUserMedia({
-          video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
-          audio: false,
-        });
+        const wantAudio = Boolean(dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '2');
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
+            audio: wantAudio,
+          });
+        } catch (audioErr) {
+          if (!wantAudio) throw audioErr;
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
+            audio: false,
+          });
+        }
         if (reqEpoch !== sourceEpoch) {
           stream.getTracks().forEach((t) => t.stop());
           return;
@@ -6105,6 +8133,16 @@
         const myEpoch = sourceEpoch;
         sampleVideoSelect.value = '';
         activeMediaStream = stream;
+        if (wantAudio && typeof stream.getAudioTracks === 'function') {
+          const audTracks = stream.getAudioTracks();
+          for (let i = 0; i < audTracks.length; i++) {
+            const atr = audTracks[i];
+            if (atr && !rsOwnedWebcamAudioTracks.includes(atr)) {
+              rsOwnedWebcamAudioTracks.push(atr);
+            }
+          }
+        }
+        rsAudioMicReqStream = wantAudio ? stream : null;
         activeVideoFps = 60.0;
         videoEl.srcObject = stream;
         await videoEl.play();
@@ -6114,6 +8152,7 @@
         syncContextualSourceUi('webcam');
         dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
         worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
+        syncRsLiveAudioCapture();
         startVideoPump();
       } catch (err) {
         if (stream && activeMediaStream !== stream) {
@@ -6134,8 +8173,22 @@
       setTextIfChanged(dom.scSubKernel, `2.13 MiB · 0 heap allocs · ${m.resMode ? '640×360 HD' : '320×180 SD'}`);
 
       const c1k = m.chronos1000;
+      const bos = m.bos;
       const shownSwaps = m.sourceMode === 'testbench' ? (m.oracleSwaps ?? 0) : (m.padicSwaps ?? 0);
-      if (c1k && c1k.swarmActive) {
+      if (bos && bos.available && bos.reqMode > 0) {
+        const usable = m.metrology ? m.metrology.usableCovCount : 0;
+        const heroCands = m.metrology ? m.metrology.promotedCandidates : 0;
+        setTextIfChanged(dom.scValTracks, `BOS ${bos.stateLabel} · ${bos.validDisp}/8192 cells`);
+        setTextIfChanged(dom.scSubTracks, `${usable} 2x2 cov · ${heroCands} hero promo · 1:1 ${m.roi && m.roi.native1to1Active ? 'ON' : 'OFF'}`);
+        const bosStat = bos.state === 3
+          ? `TRIPOD DISTURBED (${(bos.reasonFlags || []).slice(0, 2).join('+') || 'MOTION'})`
+          : bos.state === 2
+          ? `RMS ${bos.rmsDisp.toFixed(3)} px · curl ${bos.curlRms.toFixed(3)}`
+          : `WARM ${bos.warmupCnt}/16 frames`;
+        setTextIfChanged(dom.scValPhysics, bosStat);
+        setTextIfChanged(dom.scSubPhysics, `Neumann Phi · PCG ${bos.pcgIters} iters · res ${bos.trueRelRes.toExponential(1)}`);
+        setTextIfChanged(dom.scValInspect, m.roi && m.roi.native1to1Active ? `1:1 Native ROI (${m.roi.cropW}x${m.roi.cropH})` : 'Click canvas to inspect micro-track');
+      } else if (c1k && c1k.swarmActive) {
         setTextIfChanged(dom.scValTracks, `${fmtIntOrDash(c1k.confirmedCount)} active (peak ${fmtIntOrDash(c1k.peakSimultaneous)})`);
         setTextIfChanged(dom.scSubTracks, `unique ${fmtIntOrDash(c1k.uniqueTracks)} · coast ${fmtIntOrDash(c1k.coastingCount)} · IDSW ${shownSwaps}`);
         const hasFtle = Number.isFinite(c1k.maxFtleS1) && c1k.maxFtleS1 > -900.0;
@@ -6258,8 +8311,11 @@
       chaos_pendulum: { url: './samples/chaotic_magnetic_pendulum.mp4', cal: 'preset' },
       coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
       newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
-      starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1 },
-      vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2 },
+      starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
+      bos_plume: { url: './samples/bos_thermal_plume.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      bos_handheld_failure: { url: './samples/bos_handheld_failure.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      perspective_flyby_decoy: { url: './samples/perspective_flyby_decoy.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 0, bosMode: 0, native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
       juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
       gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
       galileo: { url: './samples/galileo_pendulum_peg.mp4', cal: 'preset' },
@@ -6269,6 +8325,46 @@
 
     let pendingShowcaseCal = '';
 
+    function applyWave1PresetToUiAndWorker(cfg) {
+      const nextBosMode = cfg && typeof cfg.bosMode === 'number' ? cfg.bosMode : 0;
+      const nextMetMode = cfg && typeof cfg.metrologyMode === 'number' ? cfg.metrologyMode : 0;
+      const nextShowCov = Boolean(cfg && cfg.showCovEllipses);
+      const nextNativeRoi = Boolean(cfg && cfg.native1to1);
+      const nextHodgeMode = cfg && typeof cfg.hodgeMode === 'number' ? cfg.hodgeMode : 0;
+      const nextRsMode = cfg && typeof cfg.rsMode === 'number' ? cfg.rsMode : 0;
+      if (dom.bosModeSelect) dom.bosModeSelect.value = String(nextBosMode);
+      if (dom.metrologyModeSelect) dom.metrologyModeSelect.value = String(nextMetMode);
+      if (dom.hodgeModeSelect) dom.hodgeModeSelect.value = String(nextHodgeMode);
+      if (dom.rsVibroModeSelect) dom.rsVibroModeSelect.value = String(nextRsMode);
+      if (dom.chkNativeRoi) dom.chkNativeRoi.checked = nextNativeRoi;
+      dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: nextShowCov });
+      worker.postMessage({
+        type: 'set_bos_config',
+        bosMode: nextBosMode,
+        overlayKind: cfg && typeof cfg.overlayMode === 'number' && cfg.overlayMode >= 5 && cfg.overlayMode <= 7 ? cfg.overlayMode - 5 : 0,
+        gaugeRoi: cfg && Array.isArray(cfg.bosGauge) ? cfg.bosGauge : [0, 0, 0, 0],
+        resetRef: nextBosMode > 0,
+      });
+      worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
+      worker.postMessage({ type: 'set_hodge_config', hodgeMode: nextHodgeMode });
+      worker.postMessage({ type: 'set_rs_calib', rsMode: nextRsMode });
+      syncRsLiveAudioCapture();
+      worker.postMessage({ type: 'set_roi', native1to1: nextNativeRoi });
+      if (typeof (cfg && cfg.overlayMode) !== 'number' && dom.fieldOverlayModeSelect) {
+        const curOm = parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0;
+        const orphanedBos = curOm >= 5 && curOm <= 7 && nextBosMode === 0;
+        const orphanedHodge = curOm >= 8 && curOm <= 10 && nextHodgeMode === 0;
+        const orphanedRs = curOm === 11 && nextRsMode === 0;
+        if (orphanedBos || orphanedHodge || orphanedRs) {
+          dom.fieldOverlayModeSelect.value = '0';
+          dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: 0 });
+          worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: 0, overlaySyncSeq: nextOverlaySyncSeq() });
+        }
+      }
+    }
+
+    let pendingShowcaseEntryActive = false;
+
     sampleVideoSelect.addEventListener('change', async () => {
       const url = sampleVideoSelect.value;
       const selOpt = sampleVideoSelect.selectedOptions[0];
@@ -6276,6 +8372,14 @@
       if (url && Number.isFinite(reqSwarm)) {
         syncSwarmControlsForConfig(1, reqSwarm, undefined, false);
       }
+      if (!pendingShowcaseEntryActive && url) {
+        const matchedEntry = Object.values(showcaseClipMap).find((c) => c && c.url === url) || {};
+        if (typeof matchedEntry.overlayMode === 'number') {
+          syncSwarmControlsForConfig(matchedEntry.resMode ?? 1, matchedEntry.swarmMode ?? reqSwarm, matchedEntry.overlayMode, false);
+        }
+        applyWave1PresetToUiAndWorker(matchedEntry);
+      }
+      pendingShowcaseEntryActive = false;
       const queuedCal = pendingShowcaseCal;
       pendingShowcaseCal = '';
       if (!url) return;
@@ -6378,6 +8482,7 @@
       }
       const cfg = showcaseClipMap[key];
       if (!cfg) return;
+      applyWave1PresetToUiAndWorker(cfg);
       if (cfg.benchScenario) {
         stopMediaCapture();
         sampleVideoSelect.value = '';
@@ -6393,17 +8498,24 @@
         syncSwarmControlsForConfig(cfg.resMode, cfg.swarmMode, cfg.overlayMode, false);
       }
       pendingShowcaseCal = cfg.cal;
+      pendingShowcaseEntryActive = true;
       sampleVideoSelect.value = cfg.url;
       sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
 
     function activateHeroScene(sceneKey) {
       if (sceneKey !== 'live_i80' && !showcaseClipMap[sceneKey]) return;
+      if (!workerKernelReady && activeSurface === 'showcase') {
+        pendingHeroSceneBeforeReady = sceneKey;
+        setHeroScenePressed(sceneKey);
+        return;
+      }
+      initialShowcaseBooted = true;
       showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
       setHeroScenePressed(sceneKey);
       const curWipe = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 0;
       const keepWipe = curWipe > 0 && curWipe < 100;
-      if (sceneKey === 'starling_1000') {
+      if (sceneKey === 'starling_1000' || sceneKey === 'bos_plume') {
         setShowcaseWipePercent(keepWipe ? curWipe : 28);
         setHeroTargetsVisible(false);
       } else {
@@ -6788,7 +8900,7 @@
       }
     }
 
-    [sliderK, sliderEca, sliderLambda, sliderGain].forEach(syncRangeFallbackProgress);
+    [sliderK, sliderEca, sliderLambda, sliderGain, dom.rangeRoiX0, dom.rangeRoiY0].filter(Boolean).forEach(syncRangeFallbackProgress);
 
     sliderK.addEventListener('input', () => {
       const k = parseInt(sliderK.value, 10);

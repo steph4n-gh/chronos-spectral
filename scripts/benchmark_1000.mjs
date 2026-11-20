@@ -35,9 +35,11 @@ const TELEM_RESERVED_TAIL_START = 1550;
 
 // Locked Wave-2 C-ABI constants (aligned with #64, #67, #72, #75, #76, #83)
 const WASM_PAGE_BYTES = 65536;
-const EXPECTED_WASM_PAGES = 320;
-const EXPECTED_WASM_MEM_BYTES = EXPECTED_WASM_PAGES * WASM_PAGE_BYTES; // 20,971,520 B
-const MAX_ARENA_BYTES = 20_800_000;
+const EXPECTED_WASM_PAGES = 448;
+const EXPECTED_WASM_MEM_BYTES = EXPECTED_WASM_PAGES * WASM_PAGE_BYTES; // 29,360,128 B
+const MAX_ARENA_BYTES = 24_117_248;
+const WAVE1_MAX_STATIC_END = 24_248_320;
+const FULL_RING_SLOT_BYTES = HD_W * HD_H * 4; // 921,600 B backing size even in SD
 const MAX_MICRO = 1536;
 const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
 const FIELD_COLS = 40;
@@ -2624,9 +2626,9 @@ function auditWasmBinaryAndAbi(wasm) {
       wasm.mem.grow(1);
       grew = true;
     } catch (_) {
-      // Expected RangeError on non-growable fixed 320-page Wasm memory
+      // Expected RangeError on non-growable fixed 448-page Wasm memory
     }
-    if (grew) errors.push('wasmMemoryGrowSucceeded (expected fixed non-growable max=320 pages)');
+    if (grew) errors.push(`wasmMemoryGrowSucceeded (expected fixed non-growable max=${EXPECTED_WASM_PAGES} pages)`);
   }
 
   const od = wasm.objdumpReport;
@@ -2668,6 +2670,23 @@ function auditWasmBinaryAndAbi(wasm) {
     const staticReserve = EXPECTED_WASM_MEM_BYTES - maxDataEnd;
     if (staticReserve < 65536) {
       errors.push(`wasmStaticReserve=${staticReserve}<65536 (maxDataEnd=${maxDataEnd})`);
+    }
+    let linkedStaticEnd = 0;
+    let ring0PlusArena = 0;
+    if (wasm.exp && typeof wasm.exp.chronos_init === 'function') {
+      wasm.exp.chronos_init();
+      const telemP = typeof wasm.exp.chronos_get_telemetry_ptr === 'function' ? wasm.exp.chronos_get_telemetry_ptr() : 0;
+      const arenaB = telemP > 0 ? Math.round(new Float32Array(wasm.mem.buffer, telemP, TELEMETRY_LEN)[20]) : 0;
+      const ring0 = typeof wasm.exp.chronos_get_ring_slot_ptr === 'function' ? wasm.exp.chronos_get_ring_slot_ptr(0) : 0;
+      if (ring0 > 0 && arenaB > 0) ring0PlusArena = ring0 + arenaB;
+      if (typeof wasm.exp.chronos_get_wave1_telemetry_ptr === 'function') {
+        const w1P = wasm.exp.chronos_get_wave1_telemetry_ptr();
+        if (w1P > 0) linkedStaticEnd = new Uint32Array(wasm.mem.buffer, w1P, 192)[12] >>> 0;
+      }
+    }
+    const wave1StaticEnd = Math.max(maxDataEnd, ring0PlusArena, linkedStaticEnd);
+    if (wave1StaticEnd > WAVE1_MAX_STATIC_END) {
+      errors.push(`wave1StaticEnd=${wave1StaticEnd}>${WAVE1_MAX_STATIC_END}`);
     }
     if (od.v128Count < 20) errors.push(`objdumpSimdV128Count=${od.v128Count}<20`);
     if (od.clzCount < 1) errors.push(`objdumpI32ClzCount=${od.clzCount}<1`);
@@ -2741,21 +2760,84 @@ function setupHdSession(exp, mem, swarmMode = 2, resMode = 1, staticDataEnd = 0)
   const modalPtr = exp.chronos_get_modal_field_ptr();
   const ringPtrs = Array.from({ length: 12 }, (_, slot) => exp.chronos_get_ring_slot_ptr(slot));
 
-  const ptrErrors = validatePointerLayout(
-    mem.buffer.byteLength,
-    [
-      { name: 'telemetry', ptr: telemPtr, bytes: TELEMETRY_LEN * 4, align: 4 },
-      { name: 'laplacian', ptr: lapPtr, bytes: 1024 * 4, align: 4 },
-      { name: 'fiedler', ptr: fiedlerPtr, bytes: 32 * 4, align: 4 },
-      { name: 'micro_tracks', ptr: microPtr, bytes: MAX_MICRO * MICRO_STRIDE * 4, align: 4 },
-      { name: 'continuum_field', ptr: fieldPtr, bytes: FIELD_CELLS * FIELD_STRIDE * 4, align: 4 },
-      { name: 'rigid_bodies', ptr: bodiesPtr, bytes: MAX_RIGID_BODIES * BODY_STRIDE * 4, align: 4 },
-      { name: 'swarm_telemetry', ptr: swarmPtr, bytes: SWARM_TELEM_LEN * 4, align: 4 },
-      { name: 'modal_field', ptr: modalPtr, bytes: FIELD_CELLS * 4, align: 4 },
-      ...ringPtrs.map((ptr, slot) => ({ name: `ring_${slot}`, ptr, bytes: frameBytes, align: 4 })),
-    ],
-    staticDataEnd
-  );
+  const ptrRanges = [
+    { name: 'telemetry', ptr: telemPtr, bytes: TELEMETRY_LEN * 4, align: 4 },
+    { name: 'laplacian', ptr: lapPtr, bytes: 1024 * 4, align: 4 },
+    { name: 'fiedler', ptr: fiedlerPtr, bytes: 32 * 4, align: 4 },
+    { name: 'micro_tracks', ptr: microPtr, bytes: MAX_MICRO * MICRO_STRIDE * 4, align: 4 },
+    { name: 'continuum_field', ptr: fieldPtr, bytes: FIELD_CELLS * FIELD_STRIDE * 4, align: 4 },
+    { name: 'rigid_bodies', ptr: bodiesPtr, bytes: MAX_RIGID_BODIES * BODY_STRIDE * 4, align: 4 },
+    { name: 'swarm_telemetry', ptr: swarmPtr, bytes: SWARM_TELEM_LEN * 4, align: 4 },
+    { name: 'modal_field', ptr: modalPtr, bytes: FIELD_CELLS * 4, align: 4 },
+    ...ringPtrs.map((ptr, slot) => ({ name: `ring_${slot}`, ptr, bytes: FULL_RING_SLOT_BYTES, align: 4 })),
+  ];
+  let w1TelemPtr = 0;
+  if (typeof exp.chronos_get_ring_meta_ptr === 'function') {
+    ptrRanges.push({ name: 'ring_meta', ptr: exp.chronos_get_ring_meta_ptr(), bytes: 12 * 24 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_row_luma_ptr === 'function') {
+    ptrRanges.push({ name: 'row_luma_means', ptr: exp.chronos_get_row_luma_ptr(), bytes: 12 * 360 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_wave1_telemetry_ptr === 'function') {
+    w1TelemPtr = exp.chronos_get_wave1_telemetry_ptr();
+    ptrRanges.push({ name: 'wave1_telem', ptr: w1TelemPtr, bytes: 192 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_micro_cov_ptr === 'function') {
+    ptrRanges.push({ name: 'micro_cov', ptr: exp.chronos_get_micro_cov_ptr(), bytes: 3 * MAX_MICRO * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_micro_residual_ptr === 'function') {
+    ptrRanges.push({ name: 'micro_residual', ptr: exp.chronos_get_micro_residual_ptr(), bytes: 3 * MAX_MICRO * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_micro_loom_ptr === 'function') {
+    ptrRanges.push({ name: 'micro_loom', ptr: exp.chronos_get_micro_loom_ptr(), bytes: MAX_MICRO * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_micro_quality_ptr === 'function') {
+    ptrRanges.push({ name: 'micro_quality', ptr: exp.chronos_get_micro_quality_ptr(), bytes: MAX_MICRO * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hero_candidates_ptr === 'function') {
+    ptrRanges.push({ name: 'hero_candidates', ptr: exp.chronos_get_hero_candidates_ptr(), bytes: (4 + 16 * 8) * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_bos_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'bos_telemetry', ptr: exp.chronos_get_bos_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_bos_planes_ptr === 'function') {
+    ptrRanges.push({ name: 'bos_planes', ptr: exp.chronos_get_bos_planes_ptr(), bytes: 6 * 8192 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_bos_valid_ptr === 'function') {
+    ptrRanges.push({ name: 'bos_valid', ptr: exp.chronos_get_bos_valid_ptr(), bytes: 8192, align: 4 });
+  }
+  if (typeof exp.chronos_get_bos_rgba_ptr === 'function') {
+    ptrRanges.push({ name: 'bos_rgba', ptr: exp.chronos_get_bos_rgba_ptr(), bytes: 4 * 8192, align: 4 });
+  }
+  if (typeof exp.chronos_get_wave2_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'wave2_telem', ptr: exp.chronos_get_wave2_telemetry_ptr(), bytes: 64 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_audio_staging_ptr === 'function') {
+    ptrRanges.push({ name: 'audio_staging', ptr: exp.chronos_get_audio_staging_ptr(), bytes: 4096 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_vibro_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'vibro_telem', ptr: exp.chronos_get_vibro_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_vibro_planes_ptr === 'function') {
+    ptrRanges.push({ name: 'vibro_planes', ptr: exp.chronos_get_vibro_planes_ptr(), bytes: (3 * 880 + 64) * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_telem', ptr: exp.chronos_get_hodge_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_planes_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_planes', ptr: exp.chronos_get_hodge_planes_ptr(), bytes: 7 * 880 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_hodge_inject_ptr === 'function') {
+    ptrRanges.push({ name: 'hodge_inject', ptr: exp.chronos_get_hodge_inject_ptr(), bytes: 3 * 880 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_conservation_telemetry_ptr === 'function') {
+    ptrRanges.push({ name: 'conservation_telem', ptr: exp.chronos_get_conservation_telemetry_ptr(), bytes: 32 * 4, align: 4 });
+  }
+  if (typeof exp.chronos_get_conservation_input_ptr === 'function') {
+    ptrRanges.push({ name: 'conservation_input', ptr: exp.chronos_get_conservation_input_ptr(), bytes: 32 * 4, align: 4 });
+  }
+
+  const ptrErrors = validatePointerLayout(mem.buffer.byteLength, ptrRanges, staticDataEnd);
   if (ptrErrors.length > 0) {
     throw new Error(`Wasm C-ABI pointer layout violation: ${ptrErrors.join('; ')}`);
   }
@@ -2767,7 +2849,14 @@ function setupHdSession(exp, mem, swarmMode = 2, resMode = 1, staticDataEnd = 0)
   }
   const arenaBytes = Math.round(rawArena);
   if (arenaBytes < 17_000_000 || arenaBytes > MAX_ARENA_BYTES) {
-    throw new Error(`Arena size ${arenaBytes} B outside Wave-2 [17000000, ${MAX_ARENA_BYTES}]`);
+    throw new Error(`Arena size ${arenaBytes} B outside Wave-1 [17000000, ${MAX_ARENA_BYTES}]`);
+  }
+  const linkedEnd = w1TelemPtr > 0 ? (new Uint32Array(mem.buffer, w1TelemPtr, 192)[12] >>> 0) : 0;
+  const dualStaticEnd = Math.max(staticDataEnd, ringPtrs[0] + arenaBytes, linkedEnd);
+  if (dualStaticEnd > WAVE1_MAX_STATIC_END || dualStaticEnd > EXPECTED_WASM_MEM_BYTES - 65536) {
+    throw new Error(
+      `Dual static-end breach: max(segment=${staticDataEnd}, ring0+arena=${ringPtrs[0] + arenaBytes}, __heap_base=${linkedEnd})=${dualStaticEnd} > ${WAVE1_MAX_STATIC_END}`
+    );
   }
 
   const laplacian = new Float32Array(mem.buffer, lapPtr, 1024);
@@ -7890,11 +7979,11 @@ function runSelfTests() {
 
   // 12. Binary & disassembly fail-closed checks (reserve, 14336B stack, allocator symbols, incomplete disasm)
   {
-    const mem320 = new WebAssembly.Memory({ initial: 320, maximum: 320 });
+    const mem448 = new WebAssembly.Memory({ initial: EXPECTED_WASM_PAGES, maximum: EXPECTED_WASM_PAGES });
     const baseOd = {
       available: true,
-      memInitialPages: 320,
-      memMaxPages: 320,
+      memInitialPages: EXPECTED_WASM_PAGES,
+      memMaxPages: EXPECTED_WASM_PAGES,
       stackPointerInit: 16384,
       dataSegments: [{ init: 16384, size: 1024, end: 17408 }],
       maxDataEnd: 17408,
@@ -7916,26 +8005,26 @@ function runSelfTests() {
       importCount: 0,
       hasMemorySection: true,
       hasExportSection: true,
-      memories: [{ flags: 1, initial: 320, max: 320 }],
+      memories: [{ flags: 1, initial: EXPECTED_WASM_PAGES, max: EXPECTED_WASM_PAGES }],
       globals: [{ initI32: 16384 }],
       dataSegments: [],
       maxDataEnd: 17408,
     };
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: baseOd }).length === 0, 'audit baseline ok');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { available: false } }).length > 0, 'fail without objdump');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, stackCycles: 1 } }).length > 0, 'fail on call cycle');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, callIndirectCount: 1 } }).length > 0, 'fail on call_indirect');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, maxShadowStackDepth: 15000 } }).length > 0, 'fail on 15000B stack (>14336)');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, clzCount: 0 } }).length > 0, 'fail on 0 i32.clz');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, disassemblyComplete: false } }).length > 0, 'fail on incomplete disasm');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, analyzedFuncCount: 0 } }).length > 0, 'fail on 0 analyzed funcs');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, missingExportFuncs: 1 } }).length > 0, 'fail on missing export disasm');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, allocatorCallCount: 1 } }).length > 0, 'fail on allocator calls');
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: { ...baseOd, allocatorReachableCount: 1 } }).length > 0, 'fail on reachable allocator');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: baseOd }).length === 0, 'audit baseline ok');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { available: false } }).length > 0, 'fail without objdump');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, stackCycles: 1 } }).length > 0, 'fail on call cycle');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, callIndirectCount: 1 } }).length > 0, 'fail on call_indirect');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, maxShadowStackDepth: 15000 } }).length > 0, 'fail on 15000B stack (>14336)');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, clzCount: 0 } }).length > 0, 'fail on 0 i32.clz');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, disassemblyComplete: false } }).length > 0, 'fail on incomplete disasm');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, analyzedFuncCount: 0 } }).length > 0, 'fail on 0 analyzed funcs');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, missingExportFuncs: 1 } }).length > 0, 'fail on missing export disasm');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, allocatorCallCount: 1 } }).length > 0, 'fail on allocator calls');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: { ...baseOd, allocatorReachableCount: 1 } }).length > 0, 'fail on reachable allocator');
     assert(
       auditWasmBinaryAndAbi({
         imports: [],
-        mem: mem320,
+        mem: mem448,
         binaryMeta: { ...okMeta, maxDataEnd: EXPECTED_WASM_MEM_BYTES - 1 },
         objdumpReport: { ...baseOd, maxDataEnd: EXPECTED_WASM_MEM_BYTES - 1 },
       }).length > 0,
@@ -7944,7 +8033,7 @@ function runSelfTests() {
     // Verify real objdump parser catches allocator symbol reachable from export & incomplete disasm
     const synX = [
       'Sections:',
-      ' - memory[0] pages: initial=320 max=320',
+      ` - memory[0] pages: initial=${EXPECTED_WASM_PAGES} max=${EXPECTED_WASM_PAGES}`,
       ' - global[0] i32 mutable=1 - init i32=16384',
       ' - func[0] <chronos_post_tick> -> "chronos_post_tick"',
       ' - segment[0] <.rodata> memory=0 size=1024 - init i32=16384',
@@ -7988,7 +8077,7 @@ function runSelfTests() {
     ].join('\n');
     const parsedAddStack = analyzeObjdumpStatic(synX, synDAddStack);
     assert(parsedAddStack.maxShadowStackDepth === 15000, `parser detects i32.const -15000; i32.add stack frame (got ${parsedAddStack.maxShadowStackDepth})`);
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: parsedAddStack }).length > 0, 'audit rejects 15000B add-prologue frame');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: parsedAddStack }).length > 0, 'audit rejects 15000B add-prologue frame');
     const synDBypass = [
       '000000 func[0] <chronos_post_tick>:',
       '   global.get 0',
@@ -8003,7 +8092,7 @@ function runSelfTests() {
     ].join('\n');
     const parsedBypass = analyzeObjdumpStatic(synX, synDBypass);
     assert(parsedBypass.unknownStackWriteCount >= 1, `parser rejects SP-bypass local.set/add=0 (got ${parsedBypass.unknownStackWriteCount})`);
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: parsedBypass }).length > 0, 'audit rejects SP bypass');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: parsedBypass }).length > 0, 'audit rejects SP bypass');
     const synDClobber = [
       '000000 func[0] <chronos_post_tick>:',
       '   global.get 0',
@@ -8053,7 +8142,7 @@ function runSelfTests() {
 
     const parsedSeqLeak = analyzeObjdumpStatic(synX, wrapOps([...proOps(8000), ...proOps(8000)]));
     assert(parsedSeqLeak.maxShadowStackDepth === 16000, `parser detects sequentialDepthLeak=16000B (got ${parsedSeqLeak.maxShadowStackDepth})`);
-    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem320, binaryMeta: okMeta, objdumpReport: parsedSeqLeak }).length > 0, 'audit rejects sequential 16000B stack');
+    assert(auditWasmBinaryAndAbi({ imports: [], mem: mem448, binaryMeta: okMeta, objdumpReport: parsedSeqLeak }).length > 0, 'audit rejects sequential 16000B stack');
 
     const parsedBalancedLoop = analyzeObjdumpStatic(
       synX,

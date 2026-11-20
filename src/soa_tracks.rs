@@ -11,7 +11,73 @@ use core::arch::wasm32::*;
 use crate::fast_expf;
 #[cfg(target_arch = "wasm32")]
 use crate::simd_ops::hsum_f32x4;
-use crate::{wasm_floorf, wasm_sqrtf};
+use crate::{wasm_floorf, wasm_sqrt_f64, wasm_sqrtf};
+
+pub const METROLOGY_OFF: u32 = 0;
+#[allow(dead_code)]
+pub const METROLOGY_LOSSLESS: u32 = 1;
+pub const METROLOGY_H264: u32 = 2;
+
+#[allow(dead_code)]
+pub const EST_INACTIVE: u32 = 0;
+pub const EST_SEED: u32 = 1;
+pub const EST_LK_8X8: u32 = 2;
+pub const EST_LK_4X8: u32 = 3;
+pub const EST_PEAK_FALLBACK: u32 = 4;
+pub const EST_COAST: u32 = 5;
+
+pub const QUAL_EST_MASK: u32 = 0x7;
+pub const QUAL_COV_USABLE: u32 = 1 << 3;
+pub const QUAL_BENCH_RES_USABLE: u32 = 1 << 4;
+pub const QUAL_AMBIGUOUS: u32 = 1 << 5;
+pub const QUAL_REACQUIRED: u32 = 1 << 6;
+pub const QUAL_COV_BOUND_EXCEEDED: u32 = 1 << 7;
+pub const QUAL_NEIGHBOR_SHIFT: u32 = 8;
+pub const QUAL_NEIGHBOR_MASK: u32 = 0xFF << 8;
+pub const QUAL_BENCH_TRANSLATION_ONLY: u32 = 1 << 16;
+pub const QUAL_LOOM_USABLE: u32 = 1 << 17;
+pub const QUAL_PROMO_CANDIDATE: u32 = 1 << 18;
+pub const QUAL_PROMO_BOUND_HERO: u32 = 1 << 19;
+
+pub const MAX_HERO_CANDIDATES: usize = 16;
+pub const HERO_CAND_HEADER_LEN: usize = 4;
+pub const HERO_CAND_STRIDE: usize = 8;
+
+const COV_EIG_MIN: f64 = 1.0e-4;
+const COV_EIG_MAX: f64 = 256.0;
+const COV_C_CAL_LOSSLESS: f64 = 0.76;
+const COV_C_CAL_H264: f64 = 1.04;
+const COV_SIGMA_INTERP_PX: f64 = 0.0123;
+const COV_SIGMA_CODEC_H264_PX: f64 = 0.0680;
+const COV_VEL_CONSERVATIVE_MUL: f64 = 2.0;
+
+const LOOM_MIN_CHORD_SEC: f64 = 0.075;
+const LOOM_ROLL_CHORD_SEC: f64 = 0.14;
+const LOOM_MIN_STEPS: u32 = 2;
+const LOOM_ROLL_STEPS: u32 = 4;
+const HERO_ENTER_BENCH_D2: f32 = 18.42;
+const HERO_ENTER_LOOM_D2: f32 = 13.82;
+const HERO_HOLD_BENCH_D2: f32 = 9.21;
+const HERO_HOLD_LOOM_D2: f32 = 7.38;
+const HERO_ENTER_STREAK: u32 = 3;
+const HERO_EXIT_STREAK: u32 = 5;
+const HERO_COOLDOWN_FRAMES: u32 = 6;
+
+const HYST_STAGE_MASK: u32 = 0x3;
+const HYST_CNT_SHIFT: u32 = 2;
+const HYST_CNT_MASK: u32 = 0x3F << 2;
+const HYST_ON_SHIFT: u32 = 8;
+const HYST_ON_MASK: u32 = 0xFF << 8;
+const HYST_OFF_SHIFT: u32 = 16;
+const HYST_OFF_MASK: u32 = 0xF << 16;
+const HYST_COOL_SHIFT: u32 = 20;
+const HYST_COOL_MASK: u32 = 0xF << 20;
+const HYST_FLAG_PROMO: u32 = 1 << 24;
+const HYST_FLAG_LOOM_VALID: u32 = 1 << 25;
+const HYST_FLAG_WAIT_ANCHOR: u32 = 1 << 26;
+const HYST_FLAG_BOUND_HERO: u32 = 1 << 27;
+const HYST_FLAG_NEWLY_PROMO: u32 = 1 << 28;
+const HYST_FLAG_LOOM_FRESH: u32 = 1 << 29;
 
 pub const MAX_MICRO: usize = 1536;
 pub const MAX_MICRO_PEAKS: usize = 2048;
@@ -184,6 +250,196 @@ const CSR_CELL_W: usize = 64;
 const CSR_CELL_H: usize = 36;
 const CSR_CELLS: usize = CSR_CELL_W * CSR_CELL_H;
 
+/// Arena-resident Wave-1 metrology, residual, 3-chord looming, and Hero hysteresis state (`240,160 B`).
+#[repr(C, align(16))]
+pub struct MetrologyState {
+    pub export_micro_cov: [f32; 3 * MAX_MICRO],
+    pub export_micro_residual: [f32; 3 * MAX_MICRO],
+    pub export_micro_quality: [u32; MAX_MICRO],
+    pub export_micro_loom_d2: [f32; MAX_MICRO],
+    pub export_hero_candidates: [u32; HERO_CAND_HEADER_LEN + MAX_HERO_CANDIDATES * HERO_CAND_STRIDE],
+    pub last_obs_cov: [f32; 3 * MAX_MICRO],
+    pub last_obs_ts: [u32; 2 * MAX_MICRO],
+    pub obs_vel_cov: [f32; 5 * MAX_MICRO],
+    pub loom_anchor: [f32; 5 * MAX_MICRO],
+    pub loom_anchor_ts: [u32; 2 * MAX_MICRO],
+    pub loom_chord0: [f32; 6 * MAX_MICRO],
+    pub loom_chord1: [f32; 5 * MAX_MICRO],
+    pub loom_chord1_ts: [u32; 2 * MAX_MICRO],
+    pub loom_hyst_packed: [u32; MAX_MICRO],
+    pub metrology_ctrl: [u32; 4], // [mode, cur_epoch, obs_frames_total, promo_epoch]
+}
+
+const _: () = assert!(core::mem::size_of::<MetrologyState>() == 240_160);
+
+impl MetrologyState {
+    pub const fn zeroed() -> Self {
+        Self {
+            export_micro_cov: [0.0; 3 * MAX_MICRO],
+            export_micro_residual: [0.0; 3 * MAX_MICRO],
+            export_micro_quality: [0; MAX_MICRO],
+            export_micro_loom_d2: [0.0; MAX_MICRO],
+            export_hero_candidates: [0; HERO_CAND_HEADER_LEN + MAX_HERO_CANDIDATES * HERO_CAND_STRIDE],
+            last_obs_cov: [0.0; 3 * MAX_MICRO],
+            last_obs_ts: [0; 2 * MAX_MICRO],
+            obs_vel_cov: [0.0; 5 * MAX_MICRO],
+            loom_anchor: [0.0; 5 * MAX_MICRO],
+            loom_anchor_ts: [0; 2 * MAX_MICRO],
+            loom_chord0: [0.0; 6 * MAX_MICRO],
+            loom_chord1: [0.0; 5 * MAX_MICRO],
+            loom_chord1_ts: [0; 2 * MAX_MICRO],
+            loom_hyst_packed: [0; MAX_MICRO],
+            metrology_ctrl: [0; 4],
+        }
+    }
+
+    #[inline(always)]
+    pub fn mode(&self) -> u32 {
+        self.metrology_ctrl[0]
+    }
+
+    #[inline(always)]
+    pub fn cur_epoch(&self) -> u32 {
+        self.metrology_ctrl[1]
+    }
+
+    #[inline(never)]
+    pub fn clear_slot(&mut self, ti: usize) {
+        if ti >= MAX_MICRO {
+            return;
+        }
+        self.export_micro_cov[ti] = 0.0;
+        self.export_micro_cov[MAX_MICRO + ti] = 0.0;
+        self.export_micro_cov[2 * MAX_MICRO + ti] = 0.0;
+        self.export_micro_residual[ti] = 0.0;
+        self.export_micro_residual[MAX_MICRO + ti] = 0.0;
+        self.export_micro_residual[2 * MAX_MICRO + ti] = 0.0;
+        self.export_micro_quality[ti] = 0;
+        self.export_micro_loom_d2[ti] = 0.0;
+        self.last_obs_cov[ti] = 0.0;
+        self.last_obs_cov[MAX_MICRO + ti] = 0.0;
+        self.last_obs_cov[2 * MAX_MICRO + ti] = 0.0;
+        self.last_obs_ts[ti] = 0;
+        self.last_obs_ts[MAX_MICRO + ti] = 0;
+        let mut k = 0usize;
+        while k < 5 {
+            self.obs_vel_cov[k * MAX_MICRO + ti] = 0.0;
+            self.loom_anchor[k * MAX_MICRO + ti] = 0.0;
+            self.loom_chord1[k * MAX_MICRO + ti] = 0.0;
+            k += 1;
+        }
+        self.loom_anchor_ts[ti] = 0;
+        self.loom_anchor_ts[MAX_MICRO + ti] = 0;
+        self.loom_chord1_ts[ti] = 0;
+        self.loom_chord1_ts[MAX_MICRO + ti] = 0;
+        let mut c = 0usize;
+        while c < 6 {
+            self.loom_chord0[c * MAX_MICRO + ti] = 0.0;
+            c += 1;
+        }
+        self.loom_hyst_packed[ti] = 0;
+    }
+
+    #[inline(never)]
+    pub fn clear_slot_temporal(&mut self, ti: usize) {
+        if ti >= MAX_MICRO {
+            return;
+        }
+        self.export_micro_residual[ti] = 0.0;
+        self.export_micro_residual[MAX_MICRO + ti] = 0.0;
+        self.export_micro_residual[2 * MAX_MICRO + ti] = 0.0;
+        self.export_micro_loom_d2[ti] = 0.0;
+        self.export_micro_quality[ti] &= !(QUAL_BENCH_RES_USABLE
+            | QUAL_BENCH_TRANSLATION_ONLY
+            | QUAL_LOOM_USABLE
+            | QUAL_PROMO_CANDIDATE
+            | QUAL_PROMO_BOUND_HERO
+            | QUAL_NEIGHBOR_MASK);
+        let mut k = 0usize;
+        while k < 5 {
+            self.obs_vel_cov[k * MAX_MICRO + ti] = 0.0;
+            self.loom_anchor[k * MAX_MICRO + ti] = 0.0;
+            self.loom_chord1[k * MAX_MICRO + ti] = 0.0;
+            k += 1;
+        }
+        self.loom_anchor_ts[ti] = 0;
+        self.loom_anchor_ts[MAX_MICRO + ti] = 0;
+        self.loom_chord1_ts[ti] = 0;
+        self.loom_chord1_ts[MAX_MICRO + ti] = 0;
+        let mut c = 0usize;
+        while c < 6 {
+            self.loom_chord0[c * MAX_MICRO + ti] = 0.0;
+            c += 1;
+        }
+        self.loom_hyst_packed[ti] = 0;
+    }
+
+    #[inline(never)]
+    pub fn seed_slot(&mut self, ti: usize) {
+        if ti >= MAX_MICRO {
+            return;
+        }
+        self.clear_slot(ti);
+        if self.mode() != METROLOGY_OFF {
+            self.export_micro_cov[ti] = 1.0;
+            self.export_micro_cov[MAX_MICRO + ti] = 0.0;
+            self.export_micro_cov[2 * MAX_MICRO + ti] = 1.0;
+            self.export_micro_quality[ti] = EST_SEED;
+        }
+    }
+
+    #[inline(never)]
+    pub fn invalidate_all_keep_mode(&mut self) {
+        self.export_micro_cov.fill(0.0);
+        self.export_micro_residual.fill(0.0);
+        self.export_micro_quality.fill(0);
+        self.export_micro_loom_d2.fill(0.0);
+        let prev_promo_epoch = self.metrology_ctrl[3].wrapping_add(1);
+        self.metrology_ctrl[3] = prev_promo_epoch;
+        self.export_hero_candidates.fill(0);
+        self.export_hero_candidates[1] = prev_promo_epoch;
+        self.last_obs_cov.fill(0.0);
+        self.last_obs_ts.fill(0);
+        self.obs_vel_cov.fill(0.0);
+        self.loom_anchor.fill(0.0);
+        self.loom_anchor_ts.fill(0);
+        self.loom_chord0.fill(0.0);
+        self.loom_chord1.fill(0.0);
+        self.loom_chord1_ts.fill(0);
+        self.loom_hyst_packed.fill(0);
+        self.metrology_ctrl[2] = 0;
+    }
+
+    #[inline(never)]
+    pub fn invalidate_temporal_keep_mode(&mut self) {
+        self.export_micro_residual.fill(0.0);
+        self.export_micro_loom_d2.fill(0.0);
+        let mut i = 0usize;
+        while i < MAX_MICRO {
+            self.export_micro_quality[i] &= !(QUAL_BENCH_RES_USABLE
+                | QUAL_BENCH_TRANSLATION_ONLY
+                | QUAL_LOOM_USABLE
+                | QUAL_PROMO_CANDIDATE
+                | QUAL_PROMO_BOUND_HERO
+                | QUAL_NEIGHBOR_MASK);
+            i += 1;
+        }
+        let prev_promo_epoch = self.metrology_ctrl[3].wrapping_add(1);
+        self.metrology_ctrl[3] = prev_promo_epoch;
+        self.export_hero_candidates.fill(0);
+        self.export_hero_candidates[1] = prev_promo_epoch;
+        self.last_obs_cov.fill(0.0);
+        self.last_obs_ts.fill(0);
+        self.obs_vel_cov.fill(0.0);
+        self.loom_anchor.fill(0.0);
+        self.loom_anchor_ts.fill(0);
+        self.loom_chord0.fill(0.0);
+        self.loom_chord1.fill(0.0);
+        self.loom_chord1_ts.fill(0);
+        self.loom_hyst_packed.fill(0);
+    }
+}
+
 /// Complete Arena-resident state and zero-stack scratch for `soa_tracks`.
 #[repr(C, align(16))]
 pub struct MicroSwarmState {
@@ -249,6 +505,7 @@ pub struct MicroSwarmState {
     pub id_wrapped: u8,
     pub auction_incomplete: u8,
     pub probe_peak_count: u16,
+    pub ingest_clock_valid: u8,
     pub num_peaks: usize,
     pub next_micro_id: u32,
     pub reset_base_micro_id: u32,
@@ -278,6 +535,10 @@ pub struct MicroSwarmState {
     pub cell_py: [f32; MAX_MICRO_PEAKS + 4],
     pub cell_psig: [u32; MAX_MICRO_PEAKS],
     pub cell_pidx: [u16; MAX_MICRO_PEAKS],
+    pub ingest_t_lo: u32,
+    pub ingest_t_hi: u32,
+    pub ingest_continuity_epoch: u32,
+    pub metrology: MetrologyState,
 }
 
 impl MicroSwarmState {
@@ -332,6 +593,7 @@ impl MicroSwarmState {
             id_wrapped: 0,
             auction_incomplete: 0,
             probe_peak_count: 0,
+            ingest_clock_valid: 0,
             num_peaks: 0,
             next_micro_id: 1,
             reset_base_micro_id: 1,
@@ -358,6 +620,10 @@ impl MicroSwarmState {
             cell_py: [0.0; MAX_MICRO_PEAKS + 4],
             cell_psig: [0; MAX_MICRO_PEAKS],
             cell_pidx: [0; MAX_MICRO_PEAKS],
+            ingest_t_lo: 0,
+            ingest_t_hi: 0,
+            ingest_continuity_epoch: 0,
+            metrology: MetrologyState::zeroed(),
         }
     }
 
@@ -366,7 +632,7 @@ impl MicroSwarmState {
     /// `reset()` or `reset_active_keep_mode()` to preserve continuum telemetry `[16..63]`.
     #[inline(never)]
     pub fn init_in_place(&mut self) {
-        // SAFETY: `MicroSwarmState` is plain data (primitives/arrays); zeroing in place avoids ~400 KiB stack moves.
+        // SAFETY: `MicroSwarmState` is plain data (primitives/arrays); zeroing in place avoids ~600 KiB stack moves.
         unsafe {
             core::ptr::write_bytes(
                 self as *mut Self as *mut u8,
@@ -390,6 +656,132 @@ impl MicroSwarmState {
         self.reset_base_micro_id = 1;
     }
 
+    #[inline(always)]
+    pub fn set_micro_metrology_mode(&mut self, mode: u32) -> u32 {
+        if mode > METROLOGY_H264 {
+            return 0;
+        }
+        if self.metrology.metrology_ctrl[0] != mode {
+            self.metrology.metrology_ctrl[0] = mode;
+            self.metrology.invalidate_all_keep_mode();
+        }
+        1
+    }
+
+    #[inline(always)]
+    pub fn get_micro_metrology_mode(&self) -> u32 {
+        self.metrology.metrology_ctrl[0]
+    }
+
+    #[inline(always)]
+    pub fn set_ingest_clock(&mut self, t_src_us_lo: u32, t_src_us_hi: u32, continuity_epoch: u32) {
+        self.ingest_t_lo = t_src_us_lo;
+        self.ingest_t_hi = t_src_us_hi;
+        self.ingest_continuity_epoch = continuity_epoch;
+        self.ingest_clock_valid = 1;
+        if self.metrology.metrology_ctrl[1] != continuity_epoch {
+            self.metrology.invalidate_temporal_keep_mode();
+            self.metrology.metrology_ctrl[1] = continuity_epoch;
+        }
+    }
+
+    #[inline(always)]
+    pub fn micro_cov_ptr(&self) -> *const f32 {
+        self.metrology.export_micro_cov.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn micro_residual_ptr(&self) -> *const f32 {
+        self.metrology.export_micro_residual.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn micro_loom_ptr(&self) -> *const f32 {
+        self.metrology.export_micro_loom_d2.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn micro_quality_ptr(&self) -> *const u32 {
+        self.metrology.export_micro_quality.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn hero_candidates_ptr(&self) -> *const u32 {
+        self.metrology.export_hero_candidates.as_ptr()
+    }
+
+    #[inline(always)]
+    pub fn hero_candidates_slice(&self) -> &[u32] {
+        &self.metrology.export_hero_candidates
+    }
+
+    #[inline(never)]
+    pub fn sync_bound_hero_tids(&mut self, bound_micro_tids: &[u32]) {
+        if self.metrology.mode() == METROLOGY_OFF {
+            if self.metrology.export_hero_candidates[2] != 0 {
+                self.metrology.export_hero_candidates[2] = 0;
+            }
+            return;
+        }
+        let mut bound_cnt = 0u32;
+        let num_cands = (self.metrology.export_hero_candidates[0] as usize).min(MAX_HERO_CANDIDATES);
+        let mut i = 0usize;
+        while i < MAX_MICRO {
+            if self.tracks.state[i] != MICRO_STATE_INACTIVE {
+                let tid = self.tracks.track_id[i];
+                let mut is_bound = false;
+                let mut b = 0usize;
+                while b < bound_micro_tids.len() {
+                    if tid != 0 && bound_micro_tids[b] == tid {
+                        is_bound = true;
+                        break;
+                    }
+                    b += 1;
+                }
+                if is_bound {
+                    self.metrology.export_micro_quality[i] |= QUAL_PROMO_BOUND_HERO;
+                    self.metrology.loom_hyst_packed[i] |= 1u32 << 27;
+                } else {
+                    self.metrology.export_micro_quality[i] &= !QUAL_PROMO_BOUND_HERO;
+                    self.metrology.loom_hyst_packed[i] &= !(1u32 << 27);
+                }
+            } else {
+                self.metrology.export_micro_quality[i] &= !QUAL_PROMO_BOUND_HERO;
+                self.metrology.loom_hyst_packed[i] &= !(1u32 << 27);
+            }
+            i += 1;
+        }
+        let mut k = 0usize;
+        while k < num_cands {
+            let base = HERO_CAND_HEADER_LEN + k * HERO_CAND_STRIDE;
+            let tid = self.metrology.export_hero_candidates[base];
+            let mut is_bound = false;
+            let mut b = 0usize;
+            while b < bound_micro_tids.len() {
+                if tid != 0 && bound_micro_tids[b] == tid {
+                    is_bound = true;
+                    break;
+                }
+                b += 1;
+            }
+            if is_bound {
+                self.metrology.export_hero_candidates[base + 2] |= 1 << 1;
+                bound_cnt += 1;
+            } else {
+                self.metrology.export_hero_candidates[base + 2] &= !(1 << 1);
+            }
+            k += 1;
+        }
+        self.metrology.export_hero_candidates[2] = bound_cnt;
+    }
+
+    #[inline(never)]
+    pub fn invalidate_metrology_temporal(&mut self) {
+        if self.metrology.mode() != METROLOGY_OFF || self.metrology.metrology_ctrl[2] != 0 {
+            self.metrology.invalidate_temporal_keep_mode();
+        }
+    }
+
     /// Invalidates staggered FTLE anchor banks and modal/continuity state across tracks
     /// on frame gaps, seeks, or invalid frames without touching `swarm_mode` or `[16..63]`.
     #[inline(never)]
@@ -408,6 +800,9 @@ impl MicroSwarmState {
             self.tracks.modal_amp[i] = 0.0;
             i += 1;
         }
+        if self.metrology.mode() != METROLOGY_OFF || self.metrology.metrology_ctrl[2] != 0 {
+            self.metrology.invalidate_temporal_keep_mode();
+        }
     }
 
     #[inline(never)]
@@ -424,6 +819,11 @@ impl MicroSwarmState {
         self.probe_backoff = 0;
         self.probe_fail_streak = 0;
         self.peak_simultaneous_confirmed = 0;
+        self.ingest_t_lo = 0;
+        self.ingest_t_hi = 0;
+        self.ingest_continuity_epoch = 0;
+        self.ingest_clock_valid = 0;
+        self.metrology.metrology_ctrl[1] = 0;
     }
 
     #[inline(never)]
@@ -483,7 +883,831 @@ impl MicroSwarmState {
         self.inspected_micro_tid = 0;
         self.inspected_body_id = 0;
         self.mean_ic_lk_res = 0.0;
+        if self.metrology.mode() != METROLOGY_OFF || self.metrology.metrology_ctrl[2] != 0 {
+            self.metrology.invalidate_all_keep_mode();
+        }
     }
+
+    #[inline(never)]
+    pub fn begin_obs_tick(&mut self, safe_dt: f32) -> u64 {
+        if self.metrology.metrology_ctrl[0] == METROLOGY_OFF {
+            self.ingest_clock_valid = 0;
+            return 0;
+        }
+        let t_cur_us = if self.ingest_clock_valid != 0 {
+            self.ingest_clock_valid = 0;
+            ((self.ingest_t_hi as u64) << 32) | (self.ingest_t_lo as u64)
+        } else {
+            let step_us = ((safe_dt as f64) * 1_000_000.0 + 0.5).clamp(1.0, 1_000_000.0) as u64;
+            let prev = ((self.ingest_t_hi as u64) << 32) | (self.ingest_t_lo as u64);
+            let cur = if self.metrology.metrology_ctrl[2] == 0 && prev == 0 {
+                0
+            } else {
+                prev.saturating_add(step_us)
+            };
+            self.ingest_t_lo = cur as u32;
+            self.ingest_t_hi = (cur >> 32) as u32;
+            cur
+        };
+        self.metrology.metrology_ctrl[2] = self.metrology.metrology_ctrl[2].saturating_add(1);
+        t_cur_us
+    }
+}
+
+#[inline(never)]
+pub(crate) fn clamp_cov2_f64_to_f32(
+    cxx: f64,
+    cxy: f64,
+    cyy: f64,
+) -> (f32, f32, f32, bool, bool) {
+    if !cxx.is_finite() || !cxy.is_finite() || !cyy.is_finite() {
+        return (COV_EIG_MAX as f32, 0.0, COV_EIG_MAX as f32, false, true);
+    }
+    let tr = cxx + cyy;
+    let diff = cxx - cyy;
+    let disc = wasm_sqrt_f64((diff * diff + 4.0 * cxy * cxy).max(0.0));
+    let lam_max = 0.5 * (tr + disc);
+    let lam_min = 0.5 * (tr - disc);
+    let bound_exceeded = !lam_max.is_finite() || !lam_min.is_finite() || lam_max > COV_EIG_MAX;
+    let l1 = lam_max.clamp(COV_EIG_MIN, COV_EIG_MAX);
+    let l2 = lam_min.clamp(COV_EIG_MIN, COV_EIG_MAX);
+    let (oxx, oxy, oyy) = if disc > 1.0e-18 {
+        let avg = 0.5 * (l1 + l2);
+        let scale = (l1 - l2) / disc;
+        (avg + 0.5 * diff * scale, cxy * scale, avg - 0.5 * diff * scale)
+    } else {
+        let iso = 0.5 * (l1 + l2);
+        (iso, 0.0, iso)
+    };
+    let fxx = oxx as f32;
+    let fxy = oxy as f32;
+    let fyy = oyy as f32;
+    let det_f = (fxx as f64) * (fyy as f64) - (fxy as f64) * (fxy as f64);
+    if !fxx.is_finite()
+        || !fxy.is_finite()
+        || !fyy.is_finite()
+        || fxx <= 0.0
+        || fyy <= 0.0
+        || !det_f.is_finite()
+        || det_f <= 0.0
+    {
+        return (COV_EIG_MAX as f32, 0.0, COV_EIG_MAX as f32, false, true);
+    }
+    (fxx, fxy, fyy, !bound_exceeded, bound_exceeded)
+}
+
+#[inline(never)]
+fn compute_calibrated_cov2(
+    h_xx: f32,
+    h_xy: f32,
+    h_yy: f32,
+    lk_abs_res: f32,
+    mode: u32,
+) -> (f32, f32, f32, bool, bool) {
+    let hxx = h_xx as f64;
+    let hxy = h_xy as f64;
+    let hyy = h_yy as f64;
+    if !hxx.is_finite() || !hxy.is_finite() || !hyy.is_finite() || !lk_abs_res.is_finite() {
+        return (COV_EIG_MAX as f32, 0.0, COV_EIG_MAX as f32, false, true);
+    }
+    let tr_h = hxx + hyy;
+    let lam = 0.005 * tr_h + 1.0e-6;
+    let dxx = hxx + lam;
+    let dyy = hyy + lam;
+    let det_d = dxx * dyy - hxy * hxy;
+    if !det_d.is_finite() || det_d <= 1.0e-12 {
+        return (COV_EIG_MAX as f32, 0.0, COV_EIG_MAX as f32, false, true);
+    }
+    let sigma_i = (1.2533141373155002 * (lk_abs_res as f64).max(0.0)).max(0.004);
+    let (c_cal, sigma_codec2) = if mode == METROLOGY_H264 {
+        (
+            COV_C_CAL_H264,
+            COV_SIGMA_CODEC_H264_PX * COV_SIGMA_CODEC_H264_PX,
+        )
+    } else {
+        (COV_C_CAL_LOSSLESS, 0.0)
+    };
+    let var_r = c_cal * sigma_i * sigma_i;
+    let iso_floor = COV_SIGMA_INTERP_PX * COV_SIGMA_INTERP_PX + sigma_codec2;
+    let inv_det = 1.0 / det_d;
+    let cxx = var_r * (dyy * inv_det) + iso_floor;
+    let cxy = -var_r * (hxy * inv_det);
+    let cyy = var_r * (dxx * inv_det) + iso_floor;
+    clamp_cov2_f64_to_f32(cxx, cxy, cyy)
+}
+
+#[inline(never)]
+fn compute_coast_cov2(
+    last_cxx: f32,
+    last_cxy: f32,
+    last_cyy: f32,
+    tau_s: f64,
+) -> (f32, f32, f32, bool) {
+    let co_xx = last_cxx as f64;
+    let co_xy = last_cxy as f64;
+    let co_yy = last_cyy as f64;
+    if !(co_xx > 0.0 && co_yy > 0.0)
+        || !co_xx.is_finite()
+        || !co_xy.is_finite()
+        || !co_yy.is_finite()
+        || !tau_s.is_finite()
+        || tau_s < 0.0
+    {
+        return (1.0, 0.0, 1.0, false);
+    }
+    let tr = co_xx + co_yy;
+    let diff = co_xx - co_yy;
+    let disc = wasm_sqrt_f64((diff * diff + 4.0 * co_xy * co_xy).max(0.0));
+    let lam_max = (0.5 * (tr + disc)).max(COV_EIG_MIN);
+    let s = wasm_sqrt_f64(lam_max).max(1.0e-4);
+    let u = 30.0 * tau_s + 50.0 * tau_s * tau_s;
+    let mul = 1.0 + u / s;
+    let add_iso = u * u + u * s;
+    let (cxx, cxy, cyy, _, bound_exceeded) =
+        clamp_cov2_f64_to_f32(mul * co_xx + add_iso, mul * co_xy, mul * co_yy + add_iso);
+    (cxx, cxy, cyy, bound_exceeded)
+}
+
+#[inline(always)]
+pub(crate) fn inv_2x2_quad_f64(
+    cxx: f64,
+    cxy: f64,
+    cyy: f64,
+    rx: f64,
+    ry: f64,
+) -> Option<f64> {
+    let det = cxx * cyy - cxy * cxy;
+    if !det.is_finite() || det <= 1.0e-12 || cxx <= 0.0 || cyy <= 0.0 {
+        return None;
+    }
+    let d2 = (cyy * rx * rx - 2.0 * cxy * rx * ry + cxx * ry * ry) / det;
+    if d2.is_finite() {
+        Some(d2.max(0.0))
+    } else {
+        None
+    }
+}
+
+#[inline(always)]
+fn conj_2x2_sym_f64(
+    j00: f64,
+    j01: f64,
+    j10: f64,
+    j11: f64,
+    cxx: f64,
+    cxy: f64,
+    cyy: f64,
+) -> (f64, f64, f64) {
+    let a0 = j00 * cxx + j01 * cxy;
+    let a1 = j00 * cxy + j01 * cyy;
+    let b0 = j10 * cxx + j11 * cxy;
+    let b1 = j10 * cxy + j11 * cyy;
+    (
+        a0 * j00 + a1 * j01,
+        a0 * j10 + a1 * j11,
+        b0 * j10 + b1 * j11,
+    )
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn eval_loom_3chord_d2(
+    u0x: f64,
+    u0y: f64,
+    c0xx: f64,
+    c0xy: f64,
+    c0yy: f64,
+    dt01: f64,
+    u1x: f64,
+    u1y: f64,
+    c1xx: f64,
+    c1xy: f64,
+    c1yy: f64,
+    u2x: f64,
+    u2y: f64,
+    c2xx: f64,
+    c2xy: f64,
+    c2yy: f64,
+    dt12: f64,
+) -> (f64, bool) {
+    if !(dt01 > 1.0e-4 && dt12 > 1.0e-4) {
+        return (0.0, false);
+    }
+    let norm2_v2 = u2x * u2x + u2y * u2y;
+    let norm_v2 = wasm_sqrt_f64(norm2_v2);
+    let sig_disc = 0.03 * norm_v2 + 0.2;
+    let disc_var = sig_disc * sig_disc;
+
+    let wx = u0x + u1x;
+    let wy = u0y + u1y;
+    let r = wasm_sqrt_f64(wx * wx + wy * wy);
+    let snr_ok = inv_2x2_quad_f64(c0xx + c1xx, c0xy + c1xy, c0yy + c1yy, wx, wy)
+        .map_or(false, |q| q >= 9.0);
+    let dot01 = u0x * u1x + u0y * u1y;
+
+    let mut use_case_b = r > 1.0e-4 && snr_ok && dot01 > 0.0;
+    let mut ex = 0.0f64;
+    let mut ey = 0.0f64;
+    let mut s0 = 0.0f64;
+    let mut s1 = 0.0f64;
+    let mut g_hat2 = 0.0f64;
+    if use_case_b {
+        let inv_r = 1.0 / r;
+        ex = wx * inv_r;
+        ey = wy * inv_r;
+        s0 = ex * u0x + ey * u0y;
+        s1 = ex * u1x + ey * u1y;
+        let s2 = ex * u2x + ey * u2y;
+        if s0 <= 1.0 || s1 <= 1.0 || s2 <= 1.0 {
+            use_case_b = false;
+        } else {
+            let g0 = 1.0 / wasm_sqrt_f64(s0);
+            let g1 = 1.0 / wasm_sqrt_f64(s1);
+            let rho = dt12 / dt01;
+            g_hat2 = g1 + rho * (g1 - g0);
+            if !g_hat2.is_finite() || g_hat2 <= 0.35 * g1 {
+                use_case_b = false;
+            }
+        }
+    }
+
+    if !use_case_b {
+        let rx = u2x - u1x;
+        let ry = u2y - u1y;
+        let sxx = c2xx + c1xx + disc_var;
+        let sxy = c2xy + c1xy;
+        let syy = c2yy + c1yy + disc_var;
+        return match inv_2x2_quad_f64(sxx, sxy, syy, rx, ry) {
+            Some(d2) => (d2, true),
+            None => (0.0, false),
+        };
+    }
+
+    let rho = dt12 / dt01;
+    let s2_hat = 1.0 / (g_hat2 * g_hat2);
+    let upx = s2_hat * ex;
+    let upy = s2_hat * ey;
+
+    let a0 = -rho * (s2_hat / s0) * wasm_sqrt_f64(s2_hat / s0);
+    let a1 = (1.0 + rho) * (s2_hat / s1) * wasm_sqrt_f64(s2_hat / s1);
+    let inv_r = 1.0 / r;
+    let pxx = 1.0 - ex * ex;
+    let pxy = -ex * ey;
+    let pyy = 1.0 - ey * ey;
+    let vpx = pxx * u0x + pxy * u0y;
+    let vpy = pxy * u0x + pyy * u0y;
+
+    let c_perp = (a0 - a1) * inv_r;
+    let grad_s0_x = a0 * ex + c_perp * vpx;
+    let grad_s0_y = a0 * ey + c_perp * vpy;
+    let grad_s1_x = a1 * ex + c_perp * vpx;
+    let grad_s1_y = a1 * ey + c_perp * vpy;
+
+    let s2_r = s2_hat * inv_r;
+    let j0_00 = ex * grad_s0_x + s2_r * pxx;
+    let j0_01 = ex * grad_s0_y + s2_r * pxy;
+    let j0_10 = ey * grad_s0_x + s2_r * pxy;
+    let j0_11 = ey * grad_s0_y + s2_r * pyy;
+
+    let j1_00 = ex * grad_s1_x + s2_r * pxx;
+    let j1_01 = ex * grad_s1_y + s2_r * pxy;
+    let j1_10 = ey * grad_s1_x + s2_r * pxy;
+    let j1_11 = ey * grad_s1_y + s2_r * pyy;
+
+    let (q0xx, q0xy, q0yy) = conj_2x2_sym_f64(j0_00, j0_01, j0_10, j0_11, c0xx, c0xy, c0yy);
+    let (q1xx, q1xy, q1yy) = conj_2x2_sym_f64(j1_00, j1_01, j1_10, j1_11, c1xx, c1xy, c1yy);
+
+    let sxx = c2xx + q0xx + q1xx + disc_var;
+    let sxy = c2xy + q0xy + q1xy;
+    let syy = c2yy + q0yy + q1yy + disc_var;
+    let rx = u2x - upx;
+    let ry = u2y - upy;
+    match inv_2x2_quad_f64(sxx, sxy, syy, rx, ry) {
+        Some(d2) => (d2, true),
+        None => (0.0, false),
+    }
+}
+
+#[inline(always)]
+fn reset_loom_keep_hyst(metro: &mut MetrologyState, ti: usize) {
+    let keep_mask = HYST_ON_MASK
+        | HYST_OFF_MASK
+        | HYST_COOL_MASK
+        | HYST_FLAG_PROMO
+        | HYST_FLAG_BOUND_HERO
+        | HYST_FLAG_NEWLY_PROMO;
+    metro.loom_hyst_packed[ti] &= keep_mask;
+    metro.export_micro_loom_d2[ti] = 0.0;
+    metro.export_micro_quality[ti] &= !QUAL_LOOM_USABLE;
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn update_loom_3chord(
+    metro: &mut MetrologyState,
+    ti: usize,
+    nx: f32,
+    ny: f32,
+    cxx: f32,
+    cxy: f32,
+    cyy: f32,
+    t_cur_us: u64,
+) {
+    let mut packed = metro.loom_hyst_packed[ti] & !HYST_FLAG_LOOM_FRESH;
+    let stage = packed & HYST_STAGE_MASK;
+    let wait_anchor = (packed & HYST_FLAG_WAIT_ANCHOR) != 0;
+
+    if stage == 0 || wait_anchor {
+        metro.loom_anchor[ti] = nx;
+        metro.loom_anchor[MAX_MICRO + ti] = ny;
+        metro.loom_anchor[2 * MAX_MICRO + ti] = cxx;
+        metro.loom_anchor[3 * MAX_MICRO + ti] = cxy;
+        metro.loom_anchor[4 * MAX_MICRO + ti] = cyy;
+        metro.loom_anchor_ts[ti] = t_cur_us as u32;
+        metro.loom_anchor_ts[MAX_MICRO + ti] = (t_cur_us >> 32) as u32;
+        let next_stage = if stage == 0 { 1 } else { stage };
+        packed = (packed & !(HYST_STAGE_MASK | HYST_CNT_MASK | HYST_FLAG_WAIT_ANCHOR)) | next_stage;
+        metro.loom_hyst_packed[ti] = packed;
+        if (packed & HYST_FLAG_LOOM_VALID) != 0 {
+            metro.export_micro_quality[ti] |= QUAL_LOOM_USABLE;
+        }
+        return;
+    }
+
+    let t_a_us = ((metro.loom_anchor_ts[MAX_MICRO + ti] as u64) << 32)
+        | (metro.loom_anchor_ts[ti] as u64);
+    if t_cur_us <= t_a_us {
+        metro.loom_hyst_packed[ti] = packed;
+        if (packed & HYST_FLAG_LOOM_VALID) != 0 {
+            metro.export_micro_quality[ti] |= QUAL_LOOM_USABLE;
+        }
+        return;
+    }
+    let cnt = (((packed & HYST_CNT_MASK) >> HYST_CNT_SHIFT) + 1).min(63);
+    packed = (packed & !HYST_CNT_MASK) | (cnt << HYST_CNT_SHIFT);
+
+    let dt_chord = ((t_cur_us - t_a_us) as f64) * 1.0e-6;
+    if dt_chord < LOOM_MIN_CHORD_SEC || cnt < LOOM_MIN_STEPS {
+        metro.loom_hyst_packed[ti] = packed;
+        if (packed & HYST_FLAG_LOOM_VALID) != 0 {
+            metro.export_micro_quality[ti] |= QUAL_LOOM_USABLE;
+        }
+        return;
+    }
+
+    let ax = metro.loom_anchor[ti] as f64;
+    let ay = metro.loom_anchor[MAX_MICRO + ti] as f64;
+    let acxx = metro.loom_anchor[2 * MAX_MICRO + ti] as f64;
+    let acxy = metro.loom_anchor[3 * MAX_MICRO + ti] as f64;
+    let acyy = metro.loom_anchor[4 * MAX_MICRO + ti] as f64;
+    let inv_dt = 1.0 / dt_chord;
+    let inv_dt2 = inv_dt * inv_dt;
+    let ux = ((nx as f64) - ax) * inv_dt;
+    let uy = ((ny as f64) - ay) * inv_dt;
+    let cu_xx = ((cxx as f64) + acxx) * inv_dt2;
+    let cu_xy = ((cxy as f64) + acxy) * inv_dt2;
+    let cu_yy = ((cyy as f64) + acyy) * inv_dt2;
+    let t_mid_us = t_a_us + ((t_cur_us - t_a_us) >> 1);
+
+    if stage == 1 {
+        metro.loom_chord0[ti] = ux as f32;
+        metro.loom_chord0[MAX_MICRO + ti] = uy as f32;
+        metro.loom_chord0[2 * MAX_MICRO + ti] = 0.0;
+        metro.loom_chord0[3 * MAX_MICRO + ti] = cu_xx as f32;
+        metro.loom_chord0[4 * MAX_MICRO + ti] = cu_xy as f32;
+        metro.loom_chord0[5 * MAX_MICRO + ti] = cu_yy as f32;
+        metro.loom_chord1_ts[ti] = t_mid_us as u32;
+        metro.loom_chord1_ts[MAX_MICRO + ti] = (t_mid_us >> 32) as u32;
+        packed = (packed & !(HYST_STAGE_MASK | HYST_CNT_MASK | HYST_FLAG_LOOM_VALID))
+            | 2
+            | HYST_FLAG_WAIT_ANCHOR;
+        metro.loom_hyst_packed[ti] = packed;
+        return;
+    }
+
+    if stage == 2 {
+        let t0_mid_us = ((metro.loom_chord1_ts[MAX_MICRO + ti] as u64) << 32)
+            | (metro.loom_chord1_ts[ti] as u64);
+        if t_mid_us <= t0_mid_us {
+            reset_loom_keep_hyst(metro, ti);
+            return;
+        }
+        let dt01_s = ((t_mid_us - t0_mid_us) as f64) * 1.0e-6;
+        metro.loom_chord0[2 * MAX_MICRO + ti] = dt01_s as f32;
+        metro.loom_chord1[ti] = ux as f32;
+        metro.loom_chord1[MAX_MICRO + ti] = uy as f32;
+        metro.loom_chord1[2 * MAX_MICRO + ti] = cu_xx as f32;
+        metro.loom_chord1[3 * MAX_MICRO + ti] = cu_xy as f32;
+        metro.loom_chord1[4 * MAX_MICRO + ti] = cu_yy as f32;
+        metro.loom_chord1_ts[ti] = t_mid_us as u32;
+        metro.loom_chord1_ts[MAX_MICRO + ti] = (t_mid_us >> 32) as u32;
+        packed = (packed & !(HYST_STAGE_MASK | HYST_CNT_MASK | HYST_FLAG_LOOM_VALID))
+            | 3
+            | HYST_FLAG_WAIT_ANCHOR;
+        metro.loom_hyst_packed[ti] = packed;
+        return;
+    }
+
+    // stage == 3: evaluate 3-chord pinhole looming predictor
+    let t1_mid_us = ((metro.loom_chord1_ts[MAX_MICRO + ti] as u64) << 32)
+        | (metro.loom_chord1_ts[ti] as u64);
+    let dt01_s = metro.loom_chord0[2 * MAX_MICRO + ti] as f64;
+    if t_mid_us <= t1_mid_us || !(dt01_s > 1.0e-4) {
+        reset_loom_keep_hyst(metro, ti);
+        return;
+    }
+    let dt12_s = ((t_mid_us - t1_mid_us) as f64) * 1.0e-6;
+    let u0x = metro.loom_chord0[ti] as f64;
+    let u0y = metro.loom_chord0[MAX_MICRO + ti] as f64;
+    let c0xx = metro.loom_chord0[3 * MAX_MICRO + ti] as f64;
+    let c0xy = metro.loom_chord0[4 * MAX_MICRO + ti] as f64;
+    let c0yy = metro.loom_chord0[5 * MAX_MICRO + ti] as f64;
+    let u1x = metro.loom_chord1[ti] as f64;
+    let u1y = metro.loom_chord1[MAX_MICRO + ti] as f64;
+    let c1xx = metro.loom_chord1[2 * MAX_MICRO + ti] as f64;
+    let c1xy = metro.loom_chord1[3 * MAX_MICRO + ti] as f64;
+    let c1yy = metro.loom_chord1[4 * MAX_MICRO + ti] as f64;
+
+    let (d2, ok) = eval_loom_3chord_d2(
+        u0x, u0y, c0xx, c0xy, c0yy, dt01_s, u1x, u1y, c1xx, c1xy, c1yy, ux, uy, cu_xx, cu_xy,
+        cu_yy, dt12_s,
+    );
+    if ok {
+        metro.export_micro_loom_d2[ti] = d2 as f32;
+        metro.export_micro_quality[ti] |= QUAL_LOOM_USABLE;
+        packed |= HYST_FLAG_LOOM_VALID | HYST_FLAG_LOOM_FRESH;
+    } else {
+        metro.export_micro_loom_d2[ti] = 0.0;
+        metro.export_micro_quality[ti] &= !QUAL_LOOM_USABLE;
+        packed &= !(HYST_FLAG_LOOM_VALID | HYST_FLAG_LOOM_FRESH);
+    }
+
+    if (dt_chord >= LOOM_ROLL_CHORD_SEC && cnt >= LOOM_ROLL_STEPS) || dt_chord >= 0.22 {
+        metro.loom_chord0[ti] = u1x as f32;
+        metro.loom_chord0[MAX_MICRO + ti] = u1y as f32;
+        metro.loom_chord0[2 * MAX_MICRO + ti] = dt12_s as f32;
+        metro.loom_chord0[3 * MAX_MICRO + ti] = c1xx as f32;
+        metro.loom_chord0[4 * MAX_MICRO + ti] = c1xy as f32;
+        metro.loom_chord0[5 * MAX_MICRO + ti] = c1yy as f32;
+
+        metro.loom_chord1[ti] = ux as f32;
+        metro.loom_chord1[MAX_MICRO + ti] = uy as f32;
+        metro.loom_chord1[2 * MAX_MICRO + ti] = cu_xx as f32;
+        metro.loom_chord1[3 * MAX_MICRO + ti] = cu_xy as f32;
+        metro.loom_chord1[4 * MAX_MICRO + ti] = cu_yy as f32;
+        metro.loom_chord1_ts[ti] = t_mid_us as u32;
+        metro.loom_chord1_ts[MAX_MICRO + ti] = (t_mid_us >> 32) as u32;
+
+        packed = (packed & !HYST_CNT_MASK) | HYST_FLAG_WAIT_ANCHOR;
+    }
+    metro.loom_hyst_packed[ti] = packed;
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn commit_slot_obs_metrology(
+    metro: &mut MetrologyState,
+    ti: usize,
+    nx: f32,
+    ny: f32,
+    prev_obs_x: f32,
+    prev_obs_y: f32,
+    t_cur_us: u64,
+    cxx: f32,
+    cxy: f32,
+    cyy: f32,
+    qual_base: u32,
+    is_verified_lk: bool,
+    was_coasting: bool,
+    ambig: bool,
+    chr_shock: bool,
+) {
+    let keep_promo = metro.export_micro_quality[ti]
+        & (QUAL_PROMO_CANDIDATE | QUAL_PROMO_BOUND_HERO);
+    let extra_flags = (if was_coasting { QUAL_REACQUIRED } else { 0 })
+        | (if ambig || chr_shock { QUAL_AMBIGUOUS } else { 0 });
+    metro.export_micro_cov[ti] = cxx;
+    metro.export_micro_cov[MAX_MICRO + ti] = cxy;
+    metro.export_micro_cov[2 * MAX_MICRO + ti] = cyy;
+    metro.export_micro_quality[ti] = qual_base | extra_flags | keep_promo;
+
+    let cov_usable = (qual_base & QUAL_COV_USABLE) != 0;
+    if !is_verified_lk || !cov_usable || was_coasting || ambig || chr_shock {
+        metro.obs_vel_cov[4 * MAX_MICRO + ti] = 0.0;
+        reset_loom_keep_hyst(metro, ti);
+        if is_verified_lk && cov_usable && !ambig && !chr_shock {
+            metro.last_obs_cov[ti] = cxx;
+            metro.last_obs_cov[MAX_MICRO + ti] = cxy;
+            metro.last_obs_cov[2 * MAX_MICRO + ti] = cyy;
+            metro.last_obs_ts[ti] = t_cur_us as u32;
+            metro.last_obs_ts[MAX_MICRO + ti] = (t_cur_us >> 32) as u32;
+            if was_coasting {
+                update_loom_3chord(metro, ti, nx, ny, cxx, cxy, cyy, t_cur_us);
+            }
+        } else {
+            metro.last_obs_cov[ti] = 0.0;
+            metro.last_obs_cov[MAX_MICRO + ti] = 0.0;
+            metro.last_obs_cov[2 * MAX_MICRO + ti] = 0.0;
+        }
+        return;
+    }
+
+    let prev_cxx = metro.last_obs_cov[ti];
+    let t_prev_us = ((metro.last_obs_ts[MAX_MICRO + ti] as u64) << 32)
+        | (metro.last_obs_ts[ti] as u64);
+    let mut vel_ok = false;
+    if prev_cxx > 0.0 && t_cur_us > t_prev_us {
+        let dt_obs = ((t_cur_us - t_prev_us) as f64) * 1.0e-6;
+        if dt_obs >= 1.0e-4 && dt_obs <= 1.0 {
+            let inv_dt = 1.0 / dt_obs;
+            let inv_dt2 = inv_dt * inv_dt * COV_VEL_CONSERVATIVE_MUL;
+            let vx = ((nx as f64) - (prev_obs_x as f64)) * inv_dt;
+            let vy = ((ny as f64) - (prev_obs_y as f64)) * inv_dt;
+            let cvxx = ((cxx as f64) + (prev_cxx as f64)) * inv_dt2;
+            let cvxy = ((cxy as f64) + (metro.last_obs_cov[MAX_MICRO + ti] as f64)) * inv_dt2;
+            let cvyy = ((cyy as f64) + (metro.last_obs_cov[2 * MAX_MICRO + ti] as f64)) * inv_dt2;
+            if vx.is_finite()
+                && vy.is_finite()
+                && cvxx.is_finite()
+                && cvxy.is_finite()
+                && cvyy.is_finite()
+                && cvyy > 0.0
+                && cvxx * cvyy - cvxy * cvxy > 1.0e-12
+            {
+                metro.obs_vel_cov[ti] = vx as f32;
+                metro.obs_vel_cov[MAX_MICRO + ti] = vy as f32;
+                metro.obs_vel_cov[2 * MAX_MICRO + ti] = cvxx as f32;
+                metro.obs_vel_cov[3 * MAX_MICRO + ti] = cvxy as f32;
+                metro.obs_vel_cov[4 * MAX_MICRO + ti] = cvyy as f32;
+                vel_ok = true;
+            }
+        }
+    }
+    if !vel_ok {
+        metro.obs_vel_cov[4 * MAX_MICRO + ti] = 0.0;
+    }
+
+    metro.last_obs_cov[ti] = cxx;
+    metro.last_obs_cov[MAX_MICRO + ti] = cxy;
+    metro.last_obs_cov[2 * MAX_MICRO + ti] = cyy;
+    metro.last_obs_ts[ti] = t_cur_us as u32;
+    metro.last_obs_ts[MAX_MICRO + ti] = (t_cur_us >> 32) as u32;
+    update_loom_3chord(metro, ti, nx, ny, cxx, cxy, cyy, t_cur_us);
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn update_slot_metrology_matched(
+    metro: &mut MetrologyState,
+    ti: usize,
+    nx: f32,
+    ny: f32,
+    prev_obs_x: f32,
+    prev_obs_y: f32,
+    t_cur_us: u64,
+    lk_abs_res: f32,
+    h_xx: f32,
+    h_xy: f32,
+    h_yy: f32,
+    est_mode: u32,
+    was_coasting: bool,
+    ambig: bool,
+    chr_shock: bool,
+) {
+    let mode = metro.mode();
+    let is_verified_lk = est_mode == EST_LK_8X8 || est_mode == EST_LK_4X8;
+    let (cxx, cxy, cyy, cov_usable, bound_exceeded) = if is_verified_lk {
+        compute_calibrated_cov2(h_xx, h_xy, h_yy, lk_abs_res, mode)
+    } else {
+        (1.0, 0.0, 1.0, false, false)
+    };
+    let qual_base = (est_mode & QUAL_EST_MASK)
+        | (if cov_usable { QUAL_COV_USABLE } else { 0 })
+        | (if bound_exceeded { QUAL_COV_BOUND_EXCEEDED } else { 0 });
+    commit_slot_obs_metrology(
+        metro,
+        ti,
+        nx,
+        ny,
+        prev_obs_x,
+        prev_obs_y,
+        t_cur_us,
+        cxx,
+        cxy,
+        cyy,
+        qual_base,
+        is_verified_lk,
+        was_coasting,
+        ambig,
+        chr_shock,
+    );
+}
+
+#[inline(never)]
+fn update_slot_metrology_after_coast_or_retire(
+    metro: &mut MetrologyState,
+    state: u8,
+    ambig: bool,
+    t_cur_us: u64,
+    ti: usize,
+) {
+    if state == MICRO_STATE_INACTIVE {
+        metro.clear_slot(ti);
+        return;
+    }
+    let last_cxx = metro.last_obs_cov[ti];
+    let t_obs_us = ((metro.last_obs_ts[MAX_MICRO + ti] as u64) << 32)
+        | (metro.last_obs_ts[ti] as u64);
+    let tau_s = if last_cxx > 0.0 && t_cur_us >= t_obs_us {
+        ((t_cur_us - t_obs_us) as f64) * 1.0e-6
+    } else {
+        0.0
+    };
+    let (cxx, cxy, cyy, bound_exceeded) = if last_cxx > 0.0 {
+        compute_coast_cov2(
+            last_cxx,
+            metro.last_obs_cov[MAX_MICRO + ti],
+            metro.last_obs_cov[2 * MAX_MICRO + ti],
+            tau_s,
+        )
+    } else {
+        (1.0, 0.0, 1.0, false)
+    };
+    let keep_promo = metro.export_micro_quality[ti]
+        & (QUAL_PROMO_CANDIDATE | QUAL_PROMO_BOUND_HERO);
+    metro.export_micro_cov[ti] = cxx;
+    metro.export_micro_cov[MAX_MICRO + ti] = cxy;
+    metro.export_micro_cov[2 * MAX_MICRO + ti] = cyy;
+    metro.export_micro_residual[ti] = 0.0;
+    metro.export_micro_residual[MAX_MICRO + ti] = 0.0;
+    metro.export_micro_residual[2 * MAX_MICRO + ti] = 0.0;
+    metro.export_micro_quality[ti] = EST_COAST
+        | (if bound_exceeded { QUAL_COV_BOUND_EXCEEDED } else { 0 })
+        | (if ambig { QUAL_AMBIGUOUS } else { 0 })
+        | keep_promo;
+    metro.obs_vel_cov[4 * MAX_MICRO + ti] = 0.0;
+    metro.loom_hyst_packed[ti] &= !HYST_FLAG_LOOM_FRESH;
+}
+
+#[inline(never)]
+pub fn update_hero_candidates_hysteresis(ms: &mut MicroSwarmState) {
+    if ms.metrology.mode() == METROLOGY_OFF || ms.swarm_active == 0 {
+        ms.metrology.export_hero_candidates.fill(0);
+        return;
+    }
+
+    let mut promo_changed = false;
+    let mut cand_cnt = 0usize;
+    let mut i = 0usize;
+    while i < HERO_CAND_HEADER_LEN + MAX_HERO_CANDIDATES * HERO_CAND_STRIDE {
+        ms.metrology.export_hero_candidates[i] = 0;
+        i += 1;
+    }
+
+    let mut ti = 0usize;
+    while ti < MAX_MICRO {
+        if ms.tracks.state[ti] == MICRO_STATE_INACTIVE {
+            ms.metrology.loom_hyst_packed[ti] = 0;
+            ti += 1;
+            continue;
+        }
+        let q = ms.metrology.export_micro_quality[ti];
+        let mut packed = ms.metrology.loom_hyst_packed[ti];
+        let was_promo = (packed & HYST_FLAG_PROMO) != 0;
+        let mut is_promo = was_promo;
+        let mut newly_promo = false;
+        let mut on_streak = (packed & HYST_ON_MASK) >> HYST_ON_SHIFT;
+        let mut off_streak = (packed & HYST_OFF_MASK) >> HYST_OFF_SHIFT;
+        let mut cooldown = (packed & HYST_COOL_MASK) >> HYST_COOL_SHIFT;
+
+        let loom_valid = (q & QUAL_LOOM_USABLE) != 0 && (packed & HYST_FLAG_LOOM_VALID) != 0;
+        let loom_fresh = (packed & HYST_FLAG_LOOM_FRESH) != 0;
+        let clean_track = ms.tracks.state[ti] == MICRO_STATE_CONFIRMED
+            && ms.tracks.coasting[ti] == 0
+            && ms.tracks.ambiguous_flag[ti] == 0
+            && ms.tracks.reacq_flag[ti] == 0;
+        let eligible = clean_track
+            && (q & QUAL_COV_USABLE) != 0
+            && (q & QUAL_BENCH_RES_USABLE) != 0
+            && (q & QUAL_BENCH_TRANSLATION_ONLY) == 0
+            && loom_valid;
+
+        let d2_bench = ms.metrology.export_micro_residual[2 * MAX_MICRO + ti];
+        let d2_loom = ms.metrology.export_micro_loom_d2[ti];
+
+        if is_promo {
+            if eligible {
+                let hold = d2_bench.is_finite()
+                    && d2_loom.is_finite()
+                    && d2_bench >= HERO_HOLD_BENCH_D2
+                    && d2_loom >= HERO_HOLD_LOOM_D2;
+                if hold {
+                    off_streak = 0;
+                } else {
+                    off_streak = (off_streak + 1).min(15);
+                    if off_streak >= HERO_EXIT_STREAK {
+                        is_promo = false;
+                        on_streak = 0;
+                        off_streak = 0;
+                        cooldown = HERO_COOLDOWN_FRAMES;
+                        promo_changed = true;
+                    }
+                }
+            }
+        } else if cooldown > 0 {
+            cooldown -= 1;
+            on_streak = 0;
+        } else if eligible && loom_fresh {
+            let enter = d2_bench.is_finite()
+                && d2_loom.is_finite()
+                && d2_bench >= HERO_ENTER_BENCH_D2
+                && d2_loom >= HERO_ENTER_LOOM_D2;
+            if enter {
+                on_streak = (on_streak + 1).min(255);
+                if on_streak >= HERO_ENTER_STREAK {
+                    is_promo = true;
+                    newly_promo = true;
+                    off_streak = 0;
+                    promo_changed = true;
+                }
+            } else {
+                on_streak = 0;
+            }
+        } else {
+            on_streak = 0;
+        }
+
+        packed = (packed
+            & !(HYST_ON_MASK
+                | HYST_OFF_MASK
+                | HYST_COOL_MASK
+                | HYST_FLAG_PROMO
+                | HYST_FLAG_NEWLY_PROMO))
+            | (on_streak << HYST_ON_SHIFT)
+            | (off_streak << HYST_OFF_SHIFT)
+            | (cooldown << HYST_COOL_SHIFT)
+            | (if is_promo { HYST_FLAG_PROMO } else { 0 })
+            | (if newly_promo { HYST_FLAG_NEWLY_PROMO } else { 0 });
+        ms.metrology.loom_hyst_packed[ti] = packed;
+        if is_promo {
+            ms.metrology.export_micro_quality[ti] |= QUAL_PROMO_CANDIDATE;
+        } else {
+            ms.metrology.export_micro_quality[ti] &= !QUAL_PROMO_CANDIDATE;
+        }
+
+        if is_promo {
+            let tid = ms.tracks.track_id[ti];
+            let score = d2_bench.min(d2_loom);
+            let flags = 1u32
+                | (if (q & QUAL_PROMO_BOUND_HERO) != 0 { 2 } else { 0 })
+                | (if newly_promo { 4 } else { 0 })
+                | ((on_streak & 0xFF) << 8)
+                | ((off_streak & 0xFF) << 16)
+                | ((cooldown & 0xFF) << 24);
+
+            let mut ins = cand_cnt;
+            while ins > 0 {
+                let prev_base = HERO_CAND_HEADER_LEN + (ins - 1) * HERO_CAND_STRIDE;
+                let prev_score = f32::from_bits(ms.metrology.export_hero_candidates[prev_base + 3]);
+                let prev_tid = ms.metrology.export_hero_candidates[prev_base];
+                if score > prev_score || (score == prev_score && tid < prev_tid) {
+                    if ins < MAX_HERO_CANDIDATES {
+                        let dst_base = HERO_CAND_HEADER_LEN + ins * HERO_CAND_STRIDE;
+                        let mut k = 0usize;
+                        while k < HERO_CAND_STRIDE {
+                            ms.metrology.export_hero_candidates[dst_base + k] =
+                                ms.metrology.export_hero_candidates[prev_base + k];
+                            k += 1;
+                        }
+                    }
+                    ins -= 1;
+                } else {
+                    break;
+                }
+            }
+            if ins < MAX_HERO_CANDIDATES {
+                let base = HERO_CAND_HEADER_LEN + ins * HERO_CAND_STRIDE;
+                ms.metrology.export_hero_candidates[base] = tid;
+                ms.metrology.export_hero_candidates[base + 1] = ti as u32;
+                ms.metrology.export_hero_candidates[base + 2] = flags;
+                ms.metrology.export_hero_candidates[base + 3] = score.to_bits();
+                ms.metrology.export_hero_candidates[base + 4] = d2_bench.to_bits();
+                ms.metrology.export_hero_candidates[base + 5] = d2_loom.to_bits();
+                ms.metrology.export_hero_candidates[base + 6] = ms.tracks.pos_x[ti].to_bits();
+                ms.metrology.export_hero_candidates[base + 7] = ms.tracks.pos_y[ti].to_bits();
+                if cand_cnt < MAX_HERO_CANDIDATES {
+                    cand_cnt += 1;
+                }
+            }
+        }
+        ti += 1;
+    }
+
+    if promo_changed {
+        ms.metrology.metrology_ctrl[3] = ms.metrology.metrology_ctrl[3].wrapping_add(1);
+    }
+    ms.metrology.export_hero_candidates[0] = cand_cnt as u32;
+    ms.metrology.export_hero_candidates[1] = ms.metrology.metrology_ctrl[3];
 }
 
 #[inline(always)]
@@ -737,6 +1961,8 @@ unsafe fn local_noble_from_rows_4x(
     rp1_b: v128,
     active_mask: v128,
     vmin_c2: v128,
+    vgain_sq: v128,
+    v_safe_floor: v128,
 ) -> v128 {
     let rm1_0 = i32x4_shuffle::<2, 3, 4, 5>(rm1_a, rm1_b);
     let r0_0 = i32x4_shuffle::<2, 3, 4, 5>(r0_a, r0_b);
@@ -756,15 +1982,6 @@ unsafe fn local_noble_from_rows_4x(
         f32x4_add(tb_xx_lo, f32x4_add(tb_xx_c, tb_xx_hi)),
         f32x4_add(f32x4_mul(gxm_lo, gxm_lo), f32x4_mul(gxm_hi, gxm_hi)),
     );
-
-    // Since det/trace = (sxx*syy - sxy^2)/(sxx+syy) < min(sxx, syy), skip rows +-2 & syy/sxy/div
-    // whenever no active lane in `sxx` can exceed `0.999 * min_c2` (zero false rejections).
-    let vzero = f32x4_splat(0.0);
-    let vmin_guard = f32x4_mul(vmin_c2, f32x4_splat(0.999));
-    let cand_x = v128_and(active_mask, f32x4_gt(sxx, vmin_guard));
-    if !v128_any_true(cand_x) {
-        return vzero;
-    }
 
     let p_m2 = lp_q.offset(-2 * wi);
     let rm2_a = core::ptr::read_unaligned(p_m2.offset(-2) as *const v128);
@@ -795,10 +2012,6 @@ unsafe fn local_noble_from_rows_4x(
         f32x4_add(tb_yy_lo, f32x4_add(tb_yy_c, tb_yy_hi)),
         f32x4_add(f32x4_mul(gym_lo, gym_lo), f32x4_mul(gym_hi, gym_hi)),
     );
-    let cand_xy = v128_and(cand_x, f32x4_gt(syy, vmin_guard));
-    if !v128_any_true(cand_xy) {
-        return vzero;
-    }
 
     let tb_xy_lo = f32x4_add(f32x4_mul(gxt_lo, gyt_lo), f32x4_mul(gxb_lo, gyb_lo));
     let tb_xy_hi = f32x4_add(f32x4_mul(gxt_hi, gyt_hi), f32x4_mul(gxb_hi, gyb_hi));
@@ -812,12 +2025,15 @@ unsafe fn local_noble_from_rows_4x(
     let det = f32x4_sub(f32x4_mul(sxx, syy), f32x4_mul(sxy, sxy));
     let veps = f32x4_splat(1e-6);
     let likely = v128_and(
-        cand_xy,
-        v128_and(f32x4_gt(trace, veps), f32x4_gt(det, f32x4_mul(trace, vmin_c2))),
+        active_mask,
+        v128_and(
+            f32x4_gt(trace, veps),
+            v128_and(
+                f32x4_gt(det, f32x4_mul(trace, vmin_c2)),
+                f32x4_gt(f32x4_mul(det, vgain_sq), f32x4_mul(trace, v_safe_floor)),
+            ),
+        ),
     );
-    if !v128_any_true(likely) {
-        return vzero;
-    }
     v128_and(f32x4_div(det, f32x4_pmax(trace, veps)), likely)
 }
 
@@ -849,6 +2065,8 @@ unsafe fn local_noble_corner_4x(
         rp1_b,
         active_mask,
         vmin_c2,
+        f32x4_splat(1.0),
+        f32x4_splat(0.0),
     )
 }
 
@@ -868,6 +2086,55 @@ unsafe fn nms_mark_disk_ptr(
     h: usize,
     words_per_row: usize,
 ) {
+    if r_nms == 5 && cx >= 4 && cx + 4 < w && cy >= 4 && cy + 4 < h {
+        let x0 = cx - 4;
+        let b = x0 & 63;
+        let w0 = x0 >> 6;
+        let base = bitmap.add(cy * words_per_row + w0);
+        let wi = words_per_row as isize;
+        if b <= 55 {
+            let m4 = 0x1FFu64 << b;
+            let m3 = 0x0FEu64 << b;
+            let m2 = 0x07Cu64 << b;
+            *base.offset(-4 * wi) |= m2;
+            *base.offset(-3 * wi) |= m3;
+            *base.offset(-2 * wi) |= m4;
+            *base.offset(-wi) |= m4;
+            *base |= m4;
+            *base.offset(wi) |= m4;
+            *base.offset(2 * wi) |= m4;
+            *base.offset(3 * wi) |= m3;
+            *base.offset(4 * wi) |= m2;
+        } else {
+            let sh = 64 - b;
+            let lo4 = 0x1FFu64 << b;
+            let hi4 = 0x1FFu64 >> sh;
+            let lo3 = 0x0FEu64 << b;
+            let hi3 = 0x0FEu64 >> sh;
+            let lo2 = 0x07Cu64 << b;
+            let hi2 = 0x07Cu64 >> sh;
+            *base.offset(-4 * wi) |= lo2;
+            *base.offset(-4 * wi + 1) |= hi2;
+            *base.offset(-3 * wi) |= lo3;
+            *base.offset(-3 * wi + 1) |= hi3;
+            *base.offset(-2 * wi) |= lo4;
+            *base.offset(-2 * wi + 1) |= hi4;
+            *base.offset(-wi) |= lo4;
+            *base.offset(-wi + 1) |= hi4;
+            *base |= lo4;
+            *base.add(1) |= hi4;
+            *base.offset(wi) |= lo4;
+            *base.offset(wi + 1) |= hi4;
+            *base.offset(2 * wi) |= lo4;
+            *base.offset(2 * wi + 1) |= hi4;
+            *base.offset(3 * wi) |= lo3;
+            *base.offset(3 * wi + 1) |= hi3;
+            *base.offset(4 * wi) |= lo2;
+            *base.offset(4 * wi + 1) |= hi2;
+        }
+        return;
+    }
+
     let r_is = (r_nms as isize) - 1;
     let y_lo = (cy as isize - r_is).max(0) as usize;
     let y_hi = (cy as isize + r_is).min(h as isize - 1) as usize;
@@ -1140,7 +2407,7 @@ fn radix_sort_u16_keys(
 
 /// Samples a bilinear 8x8 patch around sub-pixel `(px, py)` (scalar builds scratch into `lk_buf`),
 /// quantizes to zero-mean `[i8; 64]` in `dst_tpl8`, and returns 32-bit Haar-Morton code.
-#[inline(always)]
+#[inline(never)]
 fn extract_8x8_patch_and_sig_simd128(
     luma: &[f32],
     w: usize,
@@ -1188,21 +2455,21 @@ fn extract_8x8_patch_and_sig_simd128(
         let mut vacc = f32x4_splat(0.0);
         let ptr = luma.as_ptr();
 
-        let p_init = y0 * w + x0;
-        let top0 = core::ptr::read_unaligned(ptr.add(p_init) as *const v128);
-        let top1 = core::ptr::read_unaligned(ptr.add(p_init + 4) as *const v128);
+        let mut p_row = y0 * w + x0;
+        let top0 = core::ptr::read_unaligned(ptr.add(p_row) as *const v128);
+        let top1 = core::ptr::read_unaligned(ptr.add(p_row + 4) as *const v128);
         let top0_s = i32x4_shuffle::<1, 2, 3, 4>(top0, top1);
-        let top1_s = core::ptr::read_unaligned(ptr.add(p_init + 5) as *const v128);
+        let top1_s = core::ptr::read_unaligned(ptr.add(p_row + 5) as *const v128);
         let mut htop_a = f32x4_add(top0, f32x4_mul(vfx, f32x4_sub(top0_s, top0)));
         let mut htop_b = f32x4_add(top1, f32x4_mul(vfx, f32x4_sub(top1_s, top1)));
 
         macro_rules! interp_row {
             (@row $y_off:expr, $advance:tt) => {{
-                let p1 = (y0 + $y_off + 1) * w + x0;
-                let bot0 = core::ptr::read_unaligned(ptr.add(p1) as *const v128);
-                let bot1 = core::ptr::read_unaligned(ptr.add(p1 + 4) as *const v128);
+                p_row += w;
+                let bot0 = core::ptr::read_unaligned(ptr.add(p_row) as *const v128);
+                let bot1 = core::ptr::read_unaligned(ptr.add(p_row + 4) as *const v128);
                 let bot0_s = i32x4_shuffle::<1, 2, 3, 4>(bot0, bot1);
-                let bot1_s = core::ptr::read_unaligned(ptr.add(p1 + 5) as *const v128);
+                let bot1_s = core::ptr::read_unaligned(ptr.add(p_row + 5) as *const v128);
                 let hbot_a = f32x4_add(bot0, f32x4_mul(vfx, f32x4_sub(bot0_s, bot0)));
                 let hbot_b = f32x4_add(bot1, f32x4_mul(vfx, f32x4_sub(bot1_s, bot1)));
                 let pa = f32x4_add(htop_a, f32x4_mul(vfy, f32x4_sub(hbot_a, htop_a)));
@@ -1246,6 +2513,33 @@ fn extract_8x8_patch_and_sig_simd128(
 
         let mean = hsum_f32x4(vacc) * (1.0 / 64.0);
         let vmean = f32x4_splat(mean);
+
+        // Quantize directly from live NEON registers -> `[i8; 64]` first so all 16 row vectors
+        // can retire before evaluating 4x4 Haar & center-outer bitmasks.
+        let vscale = f32x4_splat(127.0);
+        let vmin_i8 = i8x16_splat(-127);
+        let dst_ptr = dst_tpl8.as_mut_ptr() as *mut v128;
+
+        macro_rules! quant4 {
+            ($idx:expr, $p0:expr, $p1:expr, $p2:expr, $p3:expr) => {{
+                let r0 = f32x4_nearest(f32x4_mul(f32x4_sub($p0, vmean), vscale));
+                let r1 = f32x4_nearest(f32x4_mul(f32x4_sub($p1, vmean), vscale));
+                let r2 = f32x4_nearest(f32x4_mul(f32x4_sub($p2, vmean), vscale));
+                let r3 = f32x4_nearest(f32x4_mul(f32x4_sub($p3, vmean), vscale));
+                let i01 = i16x8_narrow_i32x4(i32x4_trunc_sat_f32x4(r0), i32x4_trunc_sat_f32x4(r1));
+                let i23 = i16x8_narrow_i32x4(i32x4_trunc_sat_f32x4(r2), i32x4_trunc_sat_f32x4(r3));
+                core::ptr::write_unaligned(
+                    dst_ptr.add($idx),
+                    i8x16_max(vmin_i8, i8x16_narrow_i16x8(i01, i23)),
+                );
+            }};
+        }
+
+        quant4!(0, r0a, r0b, r1a, r1b);
+        quant4!(1, r2a, r2b, r3a, r3b);
+        quant4!(2, r4a, r4b, r5a, r5b);
+        quant4!(3, r6a, r6b, r7a, r7b);
+
         let b0 = i32x4_bitmask(f32x4_gt(m4_0, vmean)) as u32;
         let b1 = i32x4_bitmask(f32x4_gt(m4_1, vmean)) as u32;
         let b2 = i32x4_bitmask(f32x4_gt(m4_2, vmean)) as u32;
@@ -1288,31 +2582,6 @@ fn extract_8x8_patch_and_sig_simd128(
         } else {
             4u32
         };
-
-        // Quantize directly from live NEON registers -> `[i8; 64]` with zero `lk_buf` round-trip
-        let vscale = f32x4_splat(127.0);
-        let vmin_i8 = i8x16_splat(-127);
-        let dst_ptr = dst_tpl8.as_mut_ptr() as *mut v128;
-
-        macro_rules! quant4 {
-            ($idx:expr, $p0:expr, $p1:expr, $p2:expr, $p3:expr) => {{
-                let r0 = f32x4_nearest(f32x4_mul(f32x4_sub($p0, vmean), vscale));
-                let r1 = f32x4_nearest(f32x4_mul(f32x4_sub($p1, vmean), vscale));
-                let r2 = f32x4_nearest(f32x4_mul(f32x4_sub($p2, vmean), vscale));
-                let r3 = f32x4_nearest(f32x4_mul(f32x4_sub($p3, vmean), vscale));
-                let i01 = i16x8_narrow_i32x4(i32x4_trunc_sat_f32x4(r0), i32x4_trunc_sat_f32x4(r1));
-                let i23 = i16x8_narrow_i32x4(i32x4_trunc_sat_f32x4(r2), i32x4_trunc_sat_f32x4(r3));
-                core::ptr::write_unaligned(
-                    dst_ptr.add($idx),
-                    i8x16_max(vmin_i8, i8x16_narrow_i16x8(i01, i23)),
-                );
-            }};
-        }
-
-        quant4!(0, r0a, r0b, r1a, r1b);
-        quant4!(1, r2a, r2b, r3a, r3b);
-        quant4!(2, r4a, r4b, r5a, r5b);
-        quant4!(3, r6a, r6b, r7a, r7b);
 
         return (is_chr << 31)
             | (rg_p << 29)
@@ -2196,6 +3465,104 @@ pub fn extract_micro_peaks_simd128(
 #[cfg(target_arch = "wasm32")]
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
+unsafe fn eval_cand_8px_pair(
+    sr_p: *mut f32,
+    row_lp: *const f32,
+    wi: isize,
+    x0: usize,
+    va0: v128,
+    vd0: v128,
+    ee0: v128,
+    dd0: v128,
+    hit0: v128,
+    va1: v128,
+    vd1: v128,
+    ee1: v128,
+    dd1: v128,
+    hit1: v128,
+    min_c_eca_2: f32,
+    min_c_trem_2: f32,
+    v_score_floor: v128,
+    v_safe_floor: v128,
+) -> u32 {
+    let mut mask = 0u32;
+    let run0 = v128_any_true(hit0);
+    let run1 = v128_any_true(hit1);
+    let (mut rm1_b, mut r0_b, mut rp1_b) = if run0 {
+        let lp_q = row_lp.add(x0);
+        let rm1_a = core::ptr::read_unaligned(lp_q.offset(-wi - 2) as *const v128);
+        let r0_a = core::ptr::read_unaligned(lp_q.offset(-2) as *const v128);
+        let rp1_a = core::ptr::read_unaligned(lp_q.offset(wi - 2) as *const v128);
+        let b0 = core::ptr::read_unaligned(lp_q.offset(-wi + 2) as *const v128);
+        let b1 = core::ptr::read_unaligned(lp_q.offset(2) as *const v128);
+        let b2 = core::ptr::read_unaligned(lp_q.offset(wi + 2) as *const v128);
+        if eval_cand_4px_rows(
+            sr_p,
+            x0,
+            lp_q,
+            wi,
+            va0,
+            vd0,
+            ee0,
+            dd0,
+            min_c_eca_2,
+            min_c_trem_2,
+            v_score_floor,
+            v_safe_floor,
+            rm1_a,
+            b0,
+            r0_a,
+            b1,
+            rp1_a,
+            b2,
+        ) {
+            mask |= 1;
+        }
+        (b0, b1, b2)
+    } else {
+        let z = f32x4_splat(0.0);
+        (z, z, z)
+    };
+    if run1 {
+        let x1 = x0 + 4;
+        let lp_q1 = row_lp.add(x1);
+        if !run0 {
+            rm1_b = core::ptr::read_unaligned(lp_q1.offset(-wi - 2) as *const v128);
+            r0_b = core::ptr::read_unaligned(lp_q1.offset(-2) as *const v128);
+            rp1_b = core::ptr::read_unaligned(lp_q1.offset(wi - 2) as *const v128);
+        }
+        let rm1_c = core::ptr::read_unaligned(lp_q1.offset(-wi + 2) as *const v128);
+        let r0_c = core::ptr::read_unaligned(lp_q1.offset(2) as *const v128);
+        let rp1_c = core::ptr::read_unaligned(lp_q1.offset(wi + 2) as *const v128);
+        if eval_cand_4px_rows(
+            sr_p,
+            x1,
+            lp_q1,
+            wi,
+            va1,
+            vd1,
+            ee1,
+            dd1,
+            min_c_eca_2,
+            min_c_trem_2,
+            v_score_floor,
+            v_safe_floor,
+            rm1_b,
+            rm1_c,
+            r0_b,
+            r0_c,
+            rp1_b,
+            rp1_c,
+        ) {
+            mask |= 2;
+        }
+    }
+    mask
+}
+
+#[cfg(target_arch = "wasm32")]
+#[inline(always)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px_rows(
     sr_row: *mut f32,
     px: usize,
@@ -2207,6 +3574,8 @@ unsafe fn eval_cand_4px_rows(
     d: v128,
     min_c_eca_2: f32,
     min_c_trem_2: f32,
+    v_score_floor: v128,
+    v_safe_floor: v128,
     rm1_a: v128,
     rm1_b: v128,
     r0_a: v128,
@@ -2219,12 +3588,17 @@ unsafe fn eval_cand_4px_rows(
     let fin_d = f32x4_lt(vd, v_maxfin);
     let eca = v128_and(e, fin_a);
     let m = v128_or(eca, v128_and(d, fin_d));
+    let diff = f32x4_pmax(
+        v128_and(va, fin_a),
+        f32x4_mul(v128_and(vd, fin_d), f32x4_splat(0.85)),
+    );
+    let g = f32x4_add(f32x4_splat(0.35), f32x4_mul(f32x4_splat(1.50), diff));
+    let vgain_sq = f32x4_mul(g, g);
     let vmin_c2 = v128_bitselect(
         f32x4_splat(min_c_eca_2),
         f32x4_splat(min_c_trem_2),
         eca,
     );
-    let vzero = f32x4_splat(0.0);
     let vnoble = local_noble_from_rows_4x(
         lp_q,
         wi,
@@ -2236,19 +3610,11 @@ unsafe fn eval_cand_4px_rows(
         rp1_b,
         m,
         vmin_c2,
+        vgain_sq,
+        v_safe_floor,
     );
-    let ok_c = v128_and(m, f32x4_gt(vnoble, vzero));
-    if !v128_any_true(ok_c) {
-        return false;
-    }
-    let diff = f32x4_pmax(
-        v128_and(va, fin_a),
-        f32x4_mul(v128_and(vd, fin_d), f32x4_splat(0.85)),
-    );
-    let g = f32x4_add(f32x4_splat(0.35), f32x4_mul(f32x4_splat(1.50), diff));
-    let vgain_sq = f32x4_mul(g, g);
     let cand_s2 = f32x4_mul(vnoble, vgain_sq);
-    let valid = v128_and(ok_c, f32x4_le(cand_s2, v_maxfin));
+    let valid = v128_and(f32x4_gt(cand_s2, v_score_floor), f32x4_le(cand_s2, v_maxfin));
     if !v128_any_true(valid) {
         return false;
     }
@@ -2258,7 +3624,7 @@ unsafe fn eval_cand_4px_rows(
 }
 
 #[cfg(target_arch = "wasm32")]
-#[inline(always)]
+#[inline(never)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px(
     lum_base: *const f32,
@@ -2272,6 +3638,8 @@ unsafe fn eval_cand_4px(
     d: v128,
     min_c_eca_2: f32,
     min_c_trem_2: f32,
+    v_score_floor: v128,
+    v_safe_floor: v128,
 ) -> bool {
     let wi = w as isize;
     let lp_q = lum_base.offset((y as isize) * wi + (px as isize));
@@ -2292,6 +3660,8 @@ unsafe fn eval_cand_4px(
         d,
         min_c_eca_2,
         min_c_trem_2,
+        v_score_floor,
+        v_safe_floor,
         rm1_a,
         rm1_b,
         r0_a,
@@ -2301,6 +3671,7 @@ unsafe fn eval_cand_4px(
     )
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_scalar_range(
@@ -2400,42 +3771,42 @@ unsafe fn extract_phase1a_3x3_max(
                 }
                 let m_l = core::ptr::read_unaligned(p_mid.sub(1) as *const v128);
                 let m_r = core::ptr::read_unaligned(p_mid.add(1) as *const v128);
-                let mid_win = v128_and(above_floor, v128_and(f32x4_ge(vs, m_l), f32x4_gt(vs, m_r)));
-                if v128_any_true(mid_win) {
-                    let p_top = sp.add(r_top + cx4);
-                    let top_l = core::ptr::read_unaligned(p_top.sub(1) as *const v128);
-                    let top_r = core::ptr::read_unaligned(p_top.add(1) as *const v128);
-                    let top_c = i32x4_shuffle::<1, 2, 5, 6>(top_l, top_r);
-                    let top_max = f32x4_pmax(f32x4_pmax(top_l, top_r), top_c);
-                    let top_win = v128_and(mid_win, f32x4_ge(vs, top_max));
-                    if v128_any_true(top_win) {
-                        let p_bot = sp.add(r_bot + cx4);
-                        let bot_l = core::ptr::read_unaligned(p_bot.sub(1) as *const v128);
-                        let bot_r = core::ptr::read_unaligned(p_bot.add(1) as *const v128);
-                        let bot_c = i32x4_shuffle::<1, 2, 5, 6>(bot_l, bot_r);
-                        let bot_max = f32x4_pmax(f32x4_pmax(bot_l, bot_r), bot_c);
+                let p_top = sp.add(r_top + cx4);
+                let top_l = core::ptr::read_unaligned(p_top.sub(1) as *const v128);
+                let top_r = core::ptr::read_unaligned(p_top.add(1) as *const v128);
+                let top_c = i32x4_shuffle::<1, 2, 5, 6>(top_l, top_r);
+                let top_max = f32x4_pmax(f32x4_pmax(top_l, top_r), top_c);
+                let p_bot = sp.add(r_bot + cx4);
+                let bot_l = core::ptr::read_unaligned(p_bot.sub(1) as *const v128);
+                let bot_r = core::ptr::read_unaligned(p_bot.add(1) as *const v128);
+                let bot_c = i32x4_shuffle::<1, 2, 5, 6>(bot_l, bot_r);
+                let bot_max = f32x4_pmax(f32x4_pmax(bot_l, bot_r), bot_c);
 
-                        let win = v128_and(top_win, f32x4_gt(vs, bot_max));
-                        let mut mm = i32x4_bitmask(win);
-                        let any_hit = mm != 0;
-                        while mm != 0 {
-                            let lane = mm.trailing_zeros() as usize;
-                            mm &= mm - 1;
-                            let cx = cx4 + lane;
-                            if cx >= 6 && cx < x_limit {
-                                let s0 = *p_mid.add(lane);
+                let mid_ok = v128_and(f32x4_ge(vs, m_l), f32x4_gt(vs, m_r));
+                let tb_ok = v128_and(f32x4_ge(vs, top_max), f32x4_gt(vs, bot_max));
+                let win = v128_and(above_floor, v128_and(mid_ok, tb_ok));
+                let mm = i32x4_bitmask(win) & 0xF;
+                if mm != 0 {
+                    macro_rules! push_lane {
+                        ($lane:literal) => {
+                            if (mm & (1 << $lane)) != 0 && cx4 + $lane >= 6 && cx4 + $lane < x_limit
+                            {
                                 heap_state = raw_heap_push_lazy_packed(
                                     raw_scores,
                                     raw_xy,
                                     heap_state,
-                                    s0,
-                                    ((cx as u16) as u32) | y_hi_bits,
+                                    f32x4_extract_lane::<$lane>(vs),
+                                    (((cx4 + $lane) as u16) as u32) | y_hi_bits,
                                 );
                             }
-                        }
-                        if any_hit && (heap_state & 0x1_0000) != 0 {
-                            vfloor = f32x4_splat(*raw_scores);
-                        }
+                        };
+                    }
+                    push_lane!(0);
+                    push_lane!(1);
+                    push_lane!(2);
+                    push_lane!(3);
+                    if (heap_state & 0x1_0000) != 0 {
+                        vfloor = f32x4_splat(*raw_scores);
                     }
                 }
             }
@@ -2557,7 +3928,12 @@ pub fn extract_phase1a_raw(
     let min_c_eca_2 = min_c_eca * min_c_eca;
     let min_c_trem_2 = min_c_trem * min_c_trem;
     #[cfg(target_arch = "wasm32")]
-    let (vadapt, vtrem) = (f32x4_splat(adaptive_floor), f32x4_splat(tremor_floor));
+    let (vadapt, vtrem, mut v_score_floor, mut v_safe_floor) = (
+        f32x4_splat(adaptive_floor),
+        f32x4_splat(tremor_floor),
+        f32x4_splat(0.0),
+        f32x4_splat(0.0),
+    );
 
     let mut y = 5usize;
     while y < y_end {
@@ -2625,34 +4001,41 @@ pub fn extract_phase1a_raw(
         }
 
         #[cfg(target_arch = "wasm32")]
-        let x = unsafe {
+        unsafe {
             let eca_p = eca_base.add(row_off);
             let lum_p = lum_base.add(row_off);
             let bg_p = bg_base.add(row_off);
             let sr_p = sr_base.add(cur_off);
 
-            let bx_end = 8usize.min(x_end);
-            if 5 < bx_end
-                && eval_cand_scalar_range(
-                    luma,
-                    bg_base,
-                    eca_base,
+            let left_mask = i32x4(0, -1, -1, -1);
+            let va_l = f32x4_abs(core::ptr::read_unaligned(eca_p.add(4) as *const v128));
+            let vd_l = f32x4_abs(f32x4_sub(
+                core::ptr::read_unaligned(lum_p.add(4) as *const v128),
+                core::ptr::read_unaligned(bg_p.add(4) as *const v128),
+            ));
+            let ee_l = v128_and(f32x4_gt(va_l, vadapt), left_mask);
+            let dd_l = v128_and(f32x4_gt(vd_l, vtrem), left_mask);
+            if v128_any_true(v128_or(ee_l, dd_l))
+                && eval_cand_4px(
+                    lum_base,
                     sr_p,
-                    lum_p,
                     w,
-                    5,
-                    bx_end,
+                    4,
                     y,
-                    adaptive_floor,
-                    tremor_floor,
-                    min_c_eca,
-                    min_c_trem,
-                ) != 0
+                    va_l,
+                    vd_l,
+                    ee_l,
+                    dd_l,
+                    min_c_eca_2,
+                    min_c_trem_2,
+                    v_score_floor,
+                    v_safe_floor,
+                )
             {
                 cm0 |= 1u64 << 1;
             }
 
-            let mut x = bx_end;
+            let mut x = 8usize.min(x_end);
             let wi = w as isize;
             let row_lp = lum_base.offset((y as isize) * wi);
             while x + 8 <= x_end {
@@ -2676,77 +4059,49 @@ pub fn extract_phase1a_raw(
                 let hit1 = v128_or(ee1, dd1);
 
                 if v128_any_true(v128_or(hit0, hit1)) {
-                    let mut run0 = v128_any_true(hit0);
-                    let mut do_next = v128_any_true(hit1);
-                    let mut has_prev = false;
-                    let mut px_q = x;
-                    let mut lp_q = row_lp.add(x);
-                    let mut cva = va0;
-                    let mut cvd = vd0;
-                    let mut cee = ee0;
-                    let mut cdd = dd0;
-                    let mut rm1_b = ee0;
-                    let mut r0_b = ee0;
-                    let mut rp1_b = ee0;
-                    loop {
-                        if run0 {
-                            let (rm1_a, r0_a, rp1_a) = if has_prev {
-                                (rm1_b, r0_b, rp1_b)
-                            } else {
-                                (
-                                    core::ptr::read_unaligned(lp_q.offset(-wi - 2) as *const v128),
-                                    core::ptr::read_unaligned(lp_q.offset(-2) as *const v128),
-                                    core::ptr::read_unaligned(lp_q.offset(wi - 2) as *const v128),
-                                )
-                            };
-                            rm1_b = core::ptr::read_unaligned(lp_q.offset(-wi + 2) as *const v128);
-                            r0_b = core::ptr::read_unaligned(lp_q.offset(2) as *const v128);
-                            rp1_b = core::ptr::read_unaligned(lp_q.offset(wi + 2) as *const v128);
-                            if eval_cand_4px_rows(
-                                sr_p,
-                                px_q,
-                                lp_q,
-                                wi,
-                                cva,
-                                cvd,
-                                cee,
-                                cdd,
-                                min_c_eca_2,
-                                min_c_trem_2,
-                                rm1_a,
-                                rm1_b,
-                                r0_a,
-                                r0_b,
-                                rp1_a,
-                                rp1_b,
-                            ) {
-                                mark_chunk!(px_q);
-                            }
-                            has_prev = true;
-                        }
-                        if !do_next {
-                            break;
-                        }
-                        do_next = false;
-                        run0 = true;
-                        px_q = x1;
-                        lp_q = row_lp.add(x1);
-                        cva = va1;
-                        cvd = vd1;
-                        cee = ee1;
-                        cdd = dd1;
+                    let m = eval_cand_8px_pair(
+                        sr_p,
+                        row_lp,
+                        wi,
+                        x,
+                        va0,
+                        vd0,
+                        ee0,
+                        dd0,
+                        hit0,
+                        va1,
+                        vd1,
+                        ee1,
+                        dd1,
+                        hit1,
+                        min_c_eca_2,
+                        min_c_trem_2,
+                        v_score_floor,
+                        v_safe_floor,
+                    );
+                    if (m & 1) != 0 {
+                        mark_chunk!(x);
+                    }
+                    if (m & 2) != 0 {
+                        mark_chunk!(x1);
                     }
                 }
                 x += 8;
             }
-            if x + 4 <= x_end {
+            while x < x_end {
+                let tail_mask = match x_end - x {
+                    1 => i32x4(-1, 0, 0, 0),
+                    2 => i32x4(-1, -1, 0, 0),
+                    3 => i32x4(-1, -1, -1, 0),
+                    _ => i32x4(-1, -1, -1, -1),
+                };
                 let va = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x) as *const v128));
                 let vd = f32x4_abs(f32x4_sub(
                     core::ptr::read_unaligned(lum_p.add(x) as *const v128),
                     core::ptr::read_unaligned(bg_p.add(x) as *const v128),
                 ));
-                let ee = f32x4_gt(va, vadapt);
-                let dd = f32x4_gt(vd, vtrem);
+                let ee = v128_and(f32x4_gt(va, vadapt), tail_mask);
+                let dd = v128_and(f32x4_gt(vd, vtrem), tail_mask);
                 if v128_any_true(v128_or(ee, dd))
                     && eval_cand_4px(
                         lum_base,
@@ -2760,14 +4115,15 @@ pub fn extract_phase1a_raw(
                         dd,
                         min_c_eca_2,
                         min_c_trem_2,
+                        v_score_floor,
+                        v_safe_floor,
                     )
                 {
                     mark_chunk!(x);
                 }
                 x += 4;
             }
-            x
-        };
+        }
         #[cfg(not(target_arch = "wasm32"))]
         let x = {
             let mut x = 5usize;
@@ -2821,6 +4177,7 @@ pub fn extract_phase1a_raw(
             }
             x
         };
+        #[cfg(not(target_arch = "wasm32"))]
         if x < x_end {
             let base_c = x >> 2;
             let mut hm = unsafe {
@@ -2875,6 +4232,12 @@ pub fn extract_phase1a_raw(
                     mid_m1,
                     mid_m2,
                 );
+                #[cfg(target_arch = "wasm32")]
+                if (heap_state & 0x1_0000) != 0 {
+                    let fl = *raw_scores_p;
+                    v_score_floor = f32x4_splat(fl);
+                    v_safe_floor = f32x4_splat(fl * 0.999);
+                }
             }
         }
         let nt0 = mid_m0;
@@ -3354,6 +4717,9 @@ pub fn imm_predict_micro_simd128(
         let state_ptr = ms.tracks.state.as_ptr();
 
         let has_pan = pan_dx_f != 0.0 || pan_dy_f != 0.0;
+        let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
+        let p_loom_ax = ms.metrology.loom_anchor.as_mut_ptr() as *mut v128;
+        let p_loom_ay = ms.metrology.loom_anchor[MAX_MICRO..].as_mut_ptr() as *mut v128;
         let mut blk = 0usize;
         while blk < MAX_MICRO / 4 {
             let base = blk * 4;
@@ -3382,6 +4748,10 @@ pub fn imm_predict_micro_simd128(
                     v128_store(p_ay0.add(blk), f32x4_add(v128_load(p_ay0.add(blk)), v_pan_y));
                     v128_store(p_bx0.add(blk), f32x4_add(v128_load(p_bx0.add(blk)), v_pan_x));
                     v128_store(p_by0.add(blk), f32x4_add(v128_load(p_by0.add(blk)), v_pan_y));
+                    if metro_on {
+                        v128_store(p_loom_ax.add(blk), f32x4_add(v128_load(p_loom_ax.add(blk)), v_pan_x));
+                        v128_store(p_loom_ay.add(blk), f32x4_add(v128_load(p_loom_ay.add(blk)), v_pan_y));
+                    }
                     (x, y, eqx, eqy)
                 } else {
                     (
@@ -3434,6 +4804,10 @@ pub fn imm_predict_micro_simd128(
                             ms.tracks.ftle_a_y0[i] += pan_dy_f;
                             ms.tracks.ftle_b_x0[i] += pan_dx_f;
                             ms.tracks.ftle_b_y0[i] += pan_dy_f;
+                            if metro_on {
+                                ms.metrology.loom_anchor[i] += pan_dx_f;
+                                ms.metrology.loom_anchor[MAX_MICRO + i] += pan_dy_f;
+                            }
                             (x, y, eqx, eqy)
                         } else {
                             (
@@ -3473,6 +4847,8 @@ pub fn imm_predict_micro_simd128(
 
     #[cfg(not(target_arch = "wasm32"))]
     {
+        let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
+        let has_pan = pan_dx_f != 0.0 || pan_dy_f != 0.0;
         let mut i = 0usize;
         while i < MAX_MICRO {
             if ms.tracks.state[i] != MICRO_STATE_INACTIVE {
@@ -3492,6 +4868,10 @@ pub fn imm_predict_micro_simd128(
                 ms.tracks.ftle_a_y0[i] += pan_dy_f;
                 ms.tracks.ftle_b_x0[i] += pan_dx_f;
                 ms.tracks.ftle_b_y0[i] += pan_dy_f;
+                if metro_on && has_pan {
+                    ms.metrology.loom_anchor[i] += pan_dx_f;
+                    ms.metrology.loom_anchor[MAX_MICRO + i] += pan_dy_f;
+                }
 
                 let vx = ms.tracks.vel_x[i];
                 let vy = ms.tracks.vel_y[i];
@@ -3517,6 +4897,7 @@ pub fn imm_predict_micro_simd128(
 
     // Collect active slots (deactivating any corrupted non-finite slot) & sort by Morton order
     let mut act_n = 0usize;
+    let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
     unsafe {
         core::ptr::write_bytes(ms.tracks.reacq_flag.as_mut_ptr(), 0, MAX_MICRO);
         let st_p = ms.tracks.state.as_mut_ptr();
@@ -3561,6 +4942,9 @@ pub fn imm_predict_micro_simd128(
                     ms.tracks.ftle_a_frame[slot] = FTLE_INVALID_FRAME;
                     ms.tracks.ftle_b_frame[slot] = FTLE_INVALID_FRAME;
                     ms.tracks.ftle_val[slot] = 0.0;
+                    if metro_on {
+                        ms.metrology.clear_slot(slot);
+                    }
                     slot += 1;
                     continue;
                 }
@@ -4074,16 +5458,29 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
     let mut by_lo = y_lo;
     let mut by_hi = y_hi;
     let row0 = cy0 * CSR_CELL_W;
-    let mut seg_phase = 0u8;
-    let mut cy_cur = 0usize;
-    let mut seg_s = c0_s;
-    let mut seg_e = c0_e;
     let mut tight_d2_lim = init_d2_lim;
 
-    loop {
-        if seg_s < seg_e {
-            let mut k = seg_s;
-            let e = seg_e.min(MAX_MICRO_PEAKS);
+    macro_rules! tighten_box {
+        ($use_tight_cap:expr) => {
+            if d2_lim < tight_d2_lim {
+                tight_d2_lim = d2_lim;
+                let r_tight = if $use_tight_cap && (d2_lim - tight_cap_d2).abs() <= 1e-6 {
+                    tight_r
+                } else {
+                    wasm_sqrtf(d2_lim.max(0.0)) + 0.015
+                };
+                by_lo = by_lo.max(cell_coord(py - r_tight, inv_ch, cy0));
+                by_hi = by_hi.min(cell_coord(py + r_tight, inv_ch, CSR_CELL_H - 1)).max(cy0);
+                bx_lo = bx_lo.max(cell_coord(px - r_tight, inv_cw, cx0));
+                bx_hi = bx_hi.min(cell_coord(px + r_tight, inv_cw, CSR_CELL_W - 1)).max(cx0);
+            }
+        };
+    }
+
+    macro_rules! scan_range {
+        ($s_expr:expr, $e_expr:expr) => {{
+            let mut k = $s_expr;
+            let e = ($e_expr).min(MAX_MICRO_PEAKS);
             #[cfg(target_arch = "wasm32")]
             while k + 4 <= e {
                 let vx = core::ptr::read_unaligned(px_ptr.add(k) as *const v128);
@@ -4093,17 +5490,18 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                 let vd2 = f32x4_add(f32x4_mul(dx, dx), f32x4_mul(dy, dy));
                 let hit_v = f32x4_le(vd2, v_d2_lim);
                 if v128_any_true(hit_v) {
-                    let mut mask = (i32x4_bitmask(hit_v) as u32) & 0xF;
-                    while mask != 0 {
-                        let lane = mask.trailing_zeros() as usize;
-                        mask &= mask - 1;
-                        let d2 = match lane {
-                            0 => f32x4_extract_lane::<0>(vd2),
-                            1 => f32x4_extract_lane::<1>(vd2),
-                            2 => f32x4_extract_lane::<2>(vd2),
-                            _ => f32x4_extract_lane::<3>(vd2),
-                        };
-                        push_stage1_hit!(k + lane, d2);
+                    let mask = (i32x4_bitmask(hit_v) as u32) & 0xF;
+                    if (mask & 1) != 0 {
+                        push_stage1_hit!(k, f32x4_extract_lane::<0>(vd2));
+                    }
+                    if (mask & 2) != 0 {
+                        push_stage1_hit!(k + 1, f32x4_extract_lane::<1>(vd2));
+                    }
+                    if (mask & 4) != 0 {
+                        push_stage1_hit!(k + 2, f32x4_extract_lane::<2>(vd2));
+                    }
+                    if (mask & 8) != 0 {
+                        push_stage1_hit!(k + 3, f32x4_extract_lane::<3>(vd2));
                     }
                 }
                 k += 4;
@@ -4118,134 +5516,106 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                 }
                 k += 1;
             }
-        }
+        }};
+    }
 
-        if seg_phase == 0 {
-            if single_cell || y_lo > y_hi {
-                break;
-            }
-            if d2_lim < tight_d2_lim {
-                tight_d2_lim = d2_lim;
-                let r_tight = if TOP3 && (d2_lim - tight_cap_d2).abs() <= 1e-6 {
-                    tight_r
-                } else {
-                    wasm_sqrtf(d2_lim.max(0.0)) + 0.015
-                };
-                by_lo = by_lo.max(cell_coord(py - r_tight, inv_ch, cy0));
-                by_hi = by_hi.min(cell_coord(py + r_tight, inv_ch, CSR_CELL_H - 1)).max(cy0);
-                bx_lo = bx_lo.max(cell_coord(px - r_tight, inv_cw, cx0));
-                bx_hi = bx_hi.min(cell_coord(px + r_tight, inv_cw, CSR_CELL_W - 1)).max(cx0);
-            }
-            seg_phase = 1;
-            if bx_lo < cx0 {
-                let ls = *cell_off_ptr.add(row0 + bx_lo) as usize;
-                if ls < c0_s {
-                    seg_s = ls;
-                    seg_e = c0_s;
-                    continue;
-                }
-            }
-        }
-        if seg_phase <= 1 {
-            seg_phase = 2;
-            if bx_hi > cx0 {
-                let re = *cell_off_ptr.add(row0 + bx_hi + 1) as usize;
-                if c0_e < re {
-                    seg_s = c0_e;
-                    seg_e = re;
-                    continue;
-                }
-            }
-        }
-        if seg_phase <= 2 {
-            if y_lo >= y_hi {
-                break;
-            }
-            if d2_lim < tight_d2_lim {
-                tight_d2_lim = d2_lim;
-                let r_tight = if TOP3 && (d2_lim - tight_cap_d2).abs() <= 1e-6 {
-                    tight_r
-                } else {
-                    wasm_sqrtf(d2_lim.max(0.0)) + 0.015
-                };
-                by_lo = by_lo.max(cell_coord(py - r_tight, inv_ch, cy0));
-                by_hi = by_hi.min(cell_coord(py + r_tight, inv_ch, CSR_CELL_H - 1)).max(cy0);
-                bx_lo = bx_lo.max(cell_coord(px - r_tight, inv_cw, cx0));
-                bx_hi = bx_hi.min(cell_coord(px + r_tight, inv_cw, CSR_CELL_W - 1)).max(cx0);
-            }
-            seg_phase = 3;
-            if cy0 > by_lo {
-                let r_cur = cy0 - 1;
-                let dy_row = (py - ((r_cur + 1) as f32) * ch - 0.01).max(0.0);
-                if dy_row * dy_row <= d2_lim {
-                    let ro = r_cur * CSR_CELL_W;
-                    let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
-                    let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
-                    if ss < ee {
-                        seg_s = ss;
-                        seg_e = ee;
-                        continue;
+    if c0_s < c0_e {
+        scan_range!(c0_s, c0_e);
+    }
+    if !(single_cell || by_lo > by_hi) {
+        tighten_box!(TOP3);
+        if !(bx_lo == cx0 && bx_hi == cx0 && by_lo == cy0 && by_hi == cy0) {
+            let mut seg_phase = 1u8;
+            let mut cy_cur = 0usize;
+            'outer: loop {
+                let (seg_s, seg_e) = 'next_seg: loop {
+                    match seg_phase {
+                        1 => {
+                            seg_phase = 2;
+                            if bx_lo < cx0 {
+                                let ls = *cell_off_ptr.add(row0 + bx_lo) as usize;
+                                if ls < c0_s {
+                                    break 'next_seg (ls, c0_s);
+                                }
+                            }
+                        }
+                        2 => {
+                            seg_phase = 3;
+                            if bx_hi > cx0 {
+                                let re = *cell_off_ptr.add(row0 + bx_hi + 1) as usize;
+                                if c0_e < re {
+                                    break 'next_seg (c0_e, re);
+                                }
+                            }
+                        }
+                        3 => {
+                            if by_lo >= by_hi {
+                                break 'outer;
+                            }
+                            tighten_box!(TOP3);
+                            seg_phase = 4;
+                            if cy0 > by_lo {
+                                let r_cur = cy0 - 1;
+                                let dy_row = (py - ((r_cur + 1) as f32) * ch - 0.01).max(0.0);
+                                if dy_row * dy_row <= d2_lim {
+                                    let ro = r_cur * CSR_CELL_W;
+                                    let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
+                                    let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
+                                    if ss < ee {
+                                        break 'next_seg (ss, ee);
+                                    }
+                                }
+                            }
+                        }
+                        4 => {
+                            seg_phase = 5;
+                            if cy0 < by_hi {
+                                let r_cur = cy0 + 1;
+                                let dy_row = ((r_cur as f32) * ch - py - 0.01).max(0.0);
+                                if dy_row * dy_row <= d2_lim {
+                                    let ro = r_cur * CSR_CELL_W;
+                                    let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
+                                    let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
+                                    if ss < ee {
+                                        break 'next_seg (ss, ee);
+                                    }
+                                }
+                            }
+                        }
+                        5 => {
+                            if by_lo + 1 >= cy0 && by_hi <= cy0 + 1 {
+                                break 'outer;
+                            }
+                            tighten_box!(false);
+                            seg_phase = 6;
+                            cy_cur = by_lo;
+                        }
+                        _ => {
+                            while cy_cur <= by_hi {
+                                let r_cur = cy_cur;
+                                cy_cur += 1;
+                                if r_cur + 1 < cy0 || r_cur > cy0 + 1 {
+                                    let dy_row = if r_cur < cy0 {
+                                        (py - ((r_cur + 1) as f32) * ch - 0.01).max(0.0)
+                                    } else {
+                                        ((r_cur as f32) * ch - py - 0.01).max(0.0)
+                                    };
+                                    if dy_row * dy_row <= d2_lim {
+                                        let ro = r_cur * CSR_CELL_W;
+                                        let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
+                                        let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
+                                        if ss < ee {
+                                            break 'next_seg (ss, ee);
+                                        }
+                                    }
+                                }
+                            }
+                            break 'outer;
+                        }
                     }
-                }
-            }
-        }
-        if seg_phase <= 3 {
-            seg_phase = 4;
-            if cy0 < by_hi {
-                let r_cur = cy0 + 1;
-                let dy_row = ((r_cur as f32) * ch - py - 0.01).max(0.0);
-                if dy_row * dy_row <= d2_lim {
-                    let ro = r_cur * CSR_CELL_W;
-                    let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
-                    let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
-                    if ss < ee {
-                        seg_s = ss;
-                        seg_e = ee;
-                        continue;
-                    }
-                }
-            }
-        }
-        if seg_phase <= 4 {
-            if by_lo + 1 >= cy0 && by_hi <= cy0 + 1 {
-                break;
-            }
-            if d2_lim < tight_d2_lim {
-                tight_d2_lim = d2_lim;
-                let r_tight = wasm_sqrtf(d2_lim.max(0.0)) + 0.015;
-                by_lo = by_lo.max(cell_coord(py - r_tight, inv_ch, cy0));
-                by_hi = by_hi.min(cell_coord(py + r_tight, inv_ch, CSR_CELL_H - 1)).max(cy0);
-                bx_lo = bx_lo.max(cell_coord(px - r_tight, inv_cw, cx0));
-                bx_hi = bx_hi.min(cell_coord(px + r_tight, inv_cw, CSR_CELL_W - 1)).max(cx0);
-            }
-            seg_phase = 5;
-            cy_cur = by_lo;
-        }
-        let mut found_row = false;
-        while cy_cur <= by_hi {
-            let r_cur = cy_cur;
-            cy_cur += 1;
-            if r_cur + 1 < cy0 || r_cur > cy0 + 1 {
-                let dy_row = if r_cur < cy0 {
-                    (py - ((r_cur + 1) as f32) * ch - 0.01).max(0.0)
-                } else {
-                    ((r_cur as f32) * ch - py - 0.01).max(0.0)
                 };
-                if dy_row * dy_row <= d2_lim {
-                    let ro = r_cur * CSR_CELL_W;
-                    let ss = *cell_off_ptr.add(ro + bx_lo) as usize;
-                    let ee = *cell_off_ptr.add(ro + bx_hi + 1) as usize;
-                    if ss < ee {
-                        seg_s = ss;
-                        seg_e = ee;
-                        found_row = true;
-                        break;
-                    }
-                }
+                scan_range!(seg_s, seg_e);
             }
-        }
-        if !found_row {
-            break;
         }
     }
 
@@ -5293,12 +6663,25 @@ fn refine_ic_lk_8x8_2iter(
     lk_gy: &mut [f32; 64],
     lk_warp_f: &mut [f32; 64],
     fast_lk: bool,
+    metrology_active: bool,
 ) -> (f32, f32, f32, f32, bool) {
     #[cfg(target_arch = "wasm32")]
     {
         let tr = refine_ic_lk_8x8_2iter_wasm(
-            luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
+            luma,
+            w,
+            h,
+            q,
+            tpl_i8,
+            x0,
+            y0,
+            max_shift,
+            lk_tpl_f,
+            lk_gx,
+            lk_gy,
+            lk_warp_f,
             fast_lk,
+            metrology_active,
         );
         (
             lk_warp_f[0],
@@ -5310,7 +6693,20 @@ fn refine_ic_lk_8x8_2iter(
     }
     #[cfg(not(target_arch = "wasm32"))]
     refine_ic_lk_8x8_2iter_scalar(
-        luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f, fast_lk,
+        luma,
+        w,
+        h,
+        q,
+        tpl_i8,
+        x0,
+        y0,
+        max_shift,
+        lk_tpl_f,
+        lk_gx,
+        lk_gy,
+        lk_warp_f,
+        fast_lk,
+        metrology_active,
     )
 }
 
@@ -5331,15 +6727,21 @@ fn refine_ic_lk_8x8_2iter_wasm(
     lk_gy: &mut [f32; 64],
     lk_warp_f: &mut [f32; 64],
     fast_lk: bool,
+    metrology_active: bool,
 ) -> f32 {
-    if fast_lk {
-        refine_ic_lk_8x8_2iter_wasm_impl::<true>(
+    match (fast_lk, metrology_active) {
+        (true, false) => refine_ic_lk_8x8_2iter_wasm_impl::<true, false>(
             luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-        )
-    } else {
-        refine_ic_lk_8x8_2iter_wasm_impl::<false>(
+        ),
+        (false, false) => refine_ic_lk_8x8_2iter_wasm_impl::<false, false>(
             luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
-        )
+        ),
+        (true, true) => refine_ic_lk_8x8_2iter_wasm_impl::<true, true>(
+            luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
+        ),
+        (false, true) => refine_ic_lk_8x8_2iter_wasm_impl::<false, true>(
+            luma, w, h, q, tpl_i8, x0, y0, max_shift, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
+        ),
     }
 }
 
@@ -5610,7 +7012,7 @@ unsafe fn prep_ic_lk_tpl_8x8(
 #[cfg(target_arch = "wasm32")]
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
-fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
+fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool, const METROLOGY_ACTIVE: bool>(
     luma: &[f32],
     w: usize,
     h: usize,
@@ -5638,6 +7040,11 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
         lk_warp_f[0] = x0;
         lk_warp_f[1] = y0;
         lk_warp_f[2] = 0.0;
+        if METROLOGY_ACTIVE {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return -1.0;
     }
 
@@ -5665,6 +7072,11 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
         lk_warp_f[0] = x0;
         lk_warp_f[1] = y0;
         lk_warp_f[2] = 0.0;
+        if METROLOGY_ACTIVE {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return -1.0;
     }
 
@@ -5677,6 +7089,11 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
         lk_warp_f[0] = x0;
         lk_warp_f[1] = y0;
         lk_warp_f[2] = 0.0;
+        if METROLOGY_ACTIVE {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return -1.0;
     }
 
@@ -5695,6 +7112,11 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
         lk_warp_f[0] = x0;
         lk_warp_f[1] = y0;
         lk_warp_f[2] = safe_abs;
+        if METROLOGY_ACTIVE {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return -1.0;
     }
 
@@ -5753,6 +7175,14 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
             {
                 acc_x = cand_x;
                 acc_y = cand_y;
+                if METROLOGY_ACTIVE {
+                    let lc_early = eval_lk_patch_wasm::<false, FAST_4X8>(
+                        luma, w, h, cand_x, cand_y, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
+                    );
+                    if lc_early < 1.0e30 {
+                        acc_abs = lk_warp_f[1];
+                    }
+                }
                 break;
             }
 
@@ -5790,12 +7220,22 @@ fn refine_ic_lk_8x8_2iter_wasm_impl<const FAST_4X8: bool>(
         lk_warp_f[0] = x0;
         lk_warp_f[1] = y0;
         lk_warp_f[2] = abs0;
+        if METROLOGY_ACTIVE {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return -1.0;
     }
 
     lk_warp_f[0] = acc_x;
     lk_warp_f[1] = acc_y;
     lk_warp_f[2] = acc_abs;
+    if METROLOGY_ACTIVE {
+        lk_warp_f[3] = h_xx;
+        lk_warp_f[4] = h_xy;
+        lk_warp_f[5] = h_yy;
+    }
     if FAST_4X8 { 2.0 * tr_b } else { tr_b }
 }
 
@@ -5816,6 +7256,7 @@ fn refine_ic_lk_8x8_2iter_scalar(
     lk_gy: &mut [f32; 64],
     lk_warp_f: &mut [f32; 64],
     fast_lk: bool,
+    metrology_active: bool,
 ) -> (f32, f32, f32, f32, bool) {
     assert!(luma.len() >= w * h);
     let min_c = 4.5f32;
@@ -5830,6 +7271,11 @@ fn refine_ic_lk_8x8_2iter_scalar(
         || y0 < min_c
         || y0 > max_wy
     {
+        if metrology_active {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return (x0, y0, 0.0, 0.0, false);
     }
 
@@ -5893,6 +7339,11 @@ fn refine_ic_lk_8x8_2iter_scalar(
         || det_raw <= 1e-10
         || tr_b * tr_b > 22.05 * det_raw
     {
+        if metrology_active {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return (x0, y0, 0.0, 0.0, false);
     }
 
@@ -5902,6 +7353,11 @@ fn refine_ic_lk_8x8_2iter_scalar(
     let snr_bound = 0.25 * q;
     let min_sigma_r = 0.004f32;
     if min_sigma_r * min_sigma_r > snr_bound * snr_bound * lambda_min {
+        if metrology_active {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return (x0, y0, 0.0, tr_b, false);
     }
 
@@ -5910,6 +7366,11 @@ fn refine_ic_lk_8x8_2iter_scalar(
     );
     if !ok0 {
         let safe_abs = if abs0.is_finite() { abs0 } else { 0.0 };
+        if metrology_active {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return (x0, y0, safe_abs, tr_b, false);
     }
 
@@ -5968,6 +7429,14 @@ fn refine_ic_lk_8x8_2iter_scalar(
             {
                 acc_x = cand_x;
                 acc_y = cand_y;
+                if metrology_active {
+                    let (_, ac_early, _, _, ok_early) = eval_lk_patch::<false>(
+                        luma, w, h, cand_x, cand_y, tpl_e2, lk_tpl_f, lk_gx, lk_gy, lk_warp_f,
+                    );
+                    if ok_early {
+                        acc_abs = ac_early;
+                    }
+                }
                 break;
             }
 
@@ -5998,9 +7467,19 @@ fn refine_ic_lk_8x8_2iter_scalar(
 
     let sigma_r = (1.2533 * acc_abs).max(0.004);
     if sigma_r * sigma_r > snr_bound * snr_bound * lambda_min {
+        if metrology_active {
+            lk_warp_f[3] = 0.0;
+            lk_warp_f[4] = 0.0;
+            lk_warp_f[5] = 0.0;
+        }
         return (x0, y0, abs0, tr_b, false);
     }
 
+    if metrology_active {
+        lk_warp_f[3] = h_xx;
+        lk_warp_f[4] = h_xy;
+        lk_warp_f[5] = h_yy;
+    }
     (acc_x, acc_y, acc_abs, tr_b, true)
 }
 
@@ -6374,6 +7853,12 @@ pub fn update_step1_matched(
     let tpl8_ptr = ms.tracks.tpl8_i8.as_mut_ptr();
 
     let fast_lk = (act_n >= 1024 && num_peaks >= 1500) || (act_n >= 1176 && num_peaks >= 1184);
+    let metro_on = ms.metrology.mode() != METROLOGY_OFF;
+    let t_cur_us = if metro_on {
+        ((ms.ingest_t_hi as u64) << 32) | (ms.ingest_t_lo as u64)
+    } else {
+        0
+    };
     let advect_dist2 = (3.0 * q) * (3.0 * q);
     let mut res_sum = 0.0f32;
     let mut res_cnt = 0u32;
@@ -6396,44 +7881,45 @@ pub fn update_step1_matched(
                 *peak_matched_ptr.add(pi) = 1;
                 let px0 = *peak_x_ptr.add(pi);
                 let py0 = *peak_y_ptr.add(pi);
-                let (nx, ny, lk_res, ok) =
-                    if fast_lk && *state_ptr.add(ti) != MICRO_STATE_CONFIRMED {
+                let (nx, ny, lk_res, ok) = if fast_lk && *state_ptr.add(ti) != MICRO_STATE_CONFIRMED
+                {
                     (px0, py0, -1.0, false)
                 } else {
-                        let track_fast_lk = fast_lk
-                            || (act_n >= 800 && {
-                                let dxe = px0 - *eq_x_ptr.add(ti);
-                                let dye = py0 - *eq_y_ptr.add(ti);
-                                dxe * dxe + dye * dye >= advect_dist2
-                            });
+                    let track_fast_lk = fast_lk
+                        || (act_n >= 800 && {
+                            let dxe = px0 - *eq_x_ptr.add(ti);
+                            let dye = py0 - *eq_y_ptr.add(ti);
+                            dxe * dxe + dye * dye >= advect_dist2
+                        });
 
-                        let (rx, ry, lk_res, _, ok) = refine_ic_lk_8x8_2iter(
-                            luma,
-                            w,
-                            h,
-                            q,
-                            &*tpl8_ptr.add(ti),
-                            px0,
-                            py0,
-                            1.25 * q,
-                            &mut ms.lk_tpl_f,
-                            &mut ms.lk_gx,
-                            &mut ms.lk_gy,
-                            &mut ms.lk_warp_f,
-                            track_fast_lk,
-                        );
-                        let nx = if ok && rx >= 0.0 && rx < 1.0e30 {
-                            rx
-                        } else {
-                            px0
-                        };
-                        let ny = if ok && ry >= 0.0 && ry < 1.0e30 {
-                            ry
-                        } else {
-                            py0
-                        };
-                        (nx, ny, lk_res, ok)
+                    let (rx, ry, lk_res, _, ok) = refine_ic_lk_8x8_2iter(
+                        luma,
+                        w,
+                        h,
+                        q,
+                        &*tpl8_ptr.add(ti),
+                        px0,
+                        py0,
+                        1.25 * q,
+                        &mut ms.lk_tpl_f,
+                        &mut ms.lk_gx,
+                        &mut ms.lk_gy,
+                        &mut ms.lk_warp_f,
+                        track_fast_lk,
+                        metro_on,
+                    );
+                    let nx = if ok && rx >= 0.0 && rx < 1.0e30 {
+                        rx
+                    } else {
+                        px0
                     };
+                    let ny = if ok && ry >= 0.0 && ry < 1.0e30 {
+                        ry
+                    } else {
+                        py0
+                    };
+                    (nx, ny, lk_res, ok)
+                };
                 if lk_res >= 0.0 && lk_res < 1.0e30 {
                     res_sum += lk_res;
                     res_cnt += 1;
@@ -6629,6 +8115,8 @@ pub fn update_step1_matched(
                     }
                 }
 
+                let prev_obs_x = if metro_on { *last_obs_x_ptr.add(ti) } else { 0.0 };
+                let prev_obs_y = if metro_on { *last_obs_y_ptr.add(ti) } else { 0.0 };
                 *pos_x_ptr.add(ti) = nx;
                 *pos_y_ptr.add(ti) = ny;
                 *last_obs_x_ptr.add(ti) = nx;
@@ -6643,6 +8131,44 @@ pub fn update_step1_matched(
                 } else {
                     MICRO_STATE_TENTATIVE
                 };
+
+                if metro_on {
+                    let lk_hxx = if ok { ms.lk_warp_f[3] } else { 0.0 };
+                    let lk_hxy = if ok { ms.lk_warp_f[4] } else { 0.0 };
+                    let lk_hyy = if ok { ms.lk_warp_f[5] } else { 0.0 };
+                    let track_fast_lk_used = fast_lk
+                        || (act_n >= 800 && {
+                            let dxe = px0 - *eq_x_ptr.add(ti);
+                            let dye = py0 - *eq_y_ptr.add(ti);
+                            dxe * dxe + dye * dye >= advect_dist2
+                        });
+                    let est_mode = if ok && lk_hxx + lk_hyy > 0.0 {
+                        if track_fast_lk_used {
+                            EST_LK_4X8
+                        } else {
+                            EST_LK_8X8
+                        }
+                    } else {
+                        EST_PEAK_FALLBACK
+                    };
+                    update_slot_metrology_matched(
+                        &mut ms.metrology,
+                        ti,
+                        nx,
+                        ny,
+                        prev_obs_x,
+                        prev_obs_y,
+                        t_cur_us,
+                        lk_res,
+                        lk_hxx,
+                        lk_hxy,
+                        lk_hyy,
+                        est_mode,
+                        was_coasting > 0,
+                        *ambig_ptr.add(ti) != 0,
+                        chr_shock,
+                    );
+                }
 
                 // Symmetric truncation-toward-zero template refresh ONLY when IC-LK accepted cleanly
                 if ok && lk_res < 0.14 && !chr_shock {
@@ -6738,6 +8264,13 @@ unsafe fn update_step2_direct_locks(
     let tpl8_ptr = ms.tracks.tpl8_i8.as_ptr();
 
     let fast_lk = act_n >= 1024 && ms.num_peaks >= 1500;
+    let metro_mode = ms.metrology.mode();
+    let metro_on = metro_mode != METROLOGY_OFF;
+    let t_cur_us = if metro_on {
+        ((ms.ingest_t_hi as u64) << 32) | (ms.ingest_t_lo as u64)
+    } else {
+        0
+    };
     let mut accept_cands = 0usize;
     let mut ord_i = 0usize;
     while ord_i < act_n {
@@ -6781,6 +8314,15 @@ unsafe fn update_step2_direct_locks(
                     inv_cw,
                     inv_ch,
                 );
+                if metro_on {
+                    update_slot_metrology_after_coast_or_retire(
+                        &mut ms.metrology,
+                        *state_ptr.add(ti),
+                        *ambig_ptr.add(ti) != 0,
+                        t_cur_us,
+                        ti,
+                    );
+                }
                 *track_match_ptr.add(ti) = -2;
             } else {
                 let (lx, ly, lk_res, grad_tr, ok) = refine_ic_lk_8x8_2iter(
@@ -6797,6 +8339,7 @@ unsafe fn update_step2_direct_locks(
                     &mut ms.lk_gy,
                     &mut ms.lk_warp_f,
                     fast_lk,
+                    metro_on,
                 );
                 if ok
                     && lk_res >= 0.0
@@ -6820,6 +8363,25 @@ unsafe fn update_step2_direct_locks(
                         inv_ch,
                     )
                 {
+                    if metro_on {
+                        let (cxx, cxy, cyy, cov_usable, bound_exceeded) = compute_calibrated_cov2(
+                            ms.lk_warp_f[3],
+                            ms.lk_warp_f[4],
+                            ms.lk_warp_f[5],
+                            lk_res,
+                            metro_mode,
+                        );
+                        let est_mode = if fast_lk { EST_LK_4X8 } else { EST_LK_8X8 };
+                        let qual_base = est_mode
+                            | (if cov_usable { QUAL_COV_USABLE } else { 0 })
+                            | (if bound_exceeded { QUAL_COV_BOUND_EXCEEDED } else { 0 });
+                        ms.metrology.export_micro_cov[ti] = cxx;
+                        ms.metrology.export_micro_cov[MAX_MICRO + ti] = cxy;
+                        ms.metrology.export_micro_cov[2 * MAX_MICRO + ti] = cyy;
+                        let keep_promo = ms.metrology.export_micro_quality[ti]
+                            & (QUAL_PROMO_CANDIDATE | QUAL_PROMO_BOUND_HERO);
+                        ms.metrology.export_micro_quality[ti] = qual_base | keep_promo;
+                    }
                     *score_ring_ptr.add(ti) = lx;
                     *csr_cost_ptr.add(ti * MAX_CSR_K + 1) = ly;
                     *csr_cost_ptr.add(ti * MAX_CSR_K) = lk_res;
@@ -6850,6 +8412,15 @@ unsafe fn update_step2_direct_locks(
                         inv_cw,
                         inv_ch,
                     );
+                    if metro_on {
+                        update_slot_metrology_after_coast_or_retire(
+                            &mut ms.metrology,
+                            *state_ptr.add(ti),
+                            *ambig_ptr.add(ti) != 0,
+                            t_cur_us,
+                            ti,
+                        );
+                    }
                     *track_match_ptr.add(ti) = -2;
                 }
             }
@@ -6893,8 +8464,10 @@ unsafe fn update_step2_direct_locks(
                     inv_ch,
                 ) {
                     let was_coasting = *coasting_ptr.add(ti);
-                    let obs_vx = (lx - *last_obs_x_ptr.add(ti)) * inv_dt;
-                    let obs_vy = (ly - *last_obs_y_ptr.add(ti)) * inv_dt;
+                    let prev_obs_x = *last_obs_x_ptr.add(ti);
+                    let prev_obs_y = *last_obs_y_ptr.add(ti);
+                    let obs_vx = (lx - prev_obs_x) * inv_dt;
+                    let obs_vy = (ly - prev_obs_y) * inv_dt;
                     *vel_x_ptr.add(ti) = 0.35 * *vel_x_ptr.add(ti) + 0.65 * obs_vx;
                     *vel_y_ptr.add(ti) = 0.35 * *vel_y_ptr.add(ti) + 0.65 * obs_vy;
                     *pos_x_ptr.add(ti) = lx;
@@ -6907,6 +8480,31 @@ unsafe fn update_step2_direct_locks(
                     *state_ptr.add(ti) = MICRO_STATE_CONFIRMED;
                     *res_sum += lk_res;
                     *res_cnt += 1;
+
+                    if metro_on {
+                        let cxx = ms.metrology.export_micro_cov[ti];
+                        let cxy = ms.metrology.export_micro_cov[MAX_MICRO + ti];
+                        let cyy = ms.metrology.export_micro_cov[2 * MAX_MICRO + ti];
+                        let qual_base = ms.metrology.export_micro_quality[ti]
+                            & (QUAL_EST_MASK | QUAL_COV_USABLE | QUAL_COV_BOUND_EXCEEDED);
+                        commit_slot_obs_metrology(
+                            &mut ms.metrology,
+                            ti,
+                            lx,
+                            ly,
+                            prev_obs_x,
+                            prev_obs_y,
+                            t_cur_us,
+                            cxx,
+                            cxy,
+                            cyy,
+                            qual_base,
+                            true,
+                            was_coasting > 0,
+                            *ambig_ptr.add(ti) != 0,
+                            false,
+                        );
+                    }
 
                     let cx = cell_coord(lx, inv_cw, MICRO_CELL_W - 1);
                     let cy = cell_coord(ly, inv_ch, MICRO_CELL_H - 1);
@@ -6939,6 +8537,15 @@ unsafe fn update_step2_direct_locks(
                         inv_cw,
                         inv_ch,
                     );
+                    if metro_on {
+                        update_slot_metrology_after_coast_or_retire(
+                            &mut ms.metrology,
+                            *state_ptr.add(ti),
+                            *ambig_ptr.add(ti) != 0,
+                            t_cur_us,
+                            ti,
+                        );
+                    }
                 }
             }
             ord_i += 1;
@@ -7016,6 +8623,12 @@ pub fn update_step2_coast_merge_direct(
     // BEFORE accepting direct locks, so direct locks cannot land within `< r_dup` of a surviving coaster).
     let r_dup2 = (r_nms - 0.5) * (r_nms - 0.5);
     let mut direct_cands = 0usize;
+    let metro_on = ms.metrology.mode() != METROLOGY_OFF;
+    let t_cur_us = if metro_on {
+        ((ms.ingest_t_hi as u64) << 32) | (ms.ingest_t_lo as u64)
+    } else {
+        0
+    };
 
     // SAFETY: All pointers below come from disjoint fields of `ms`, lengths are asserted above,
     // and track indices stored in `track_order`, `track_cell_head`, and `track_next` are in `0..MAX_MICRO`.
@@ -7063,6 +8676,15 @@ pub fn update_step2_coast_merge_direct(
                     inv_cw,
                     inv_ch,
                 );
+                if metro_on {
+                    update_slot_metrology_after_coast_or_retire(
+                        &mut ms.metrology,
+                        *state_ptr.add(ti),
+                        *ambig_ptr.add(ti) != 0,
+                        t_cur_us,
+                        ti,
+                    );
+                }
                 *track_match_ptr.add(ti) = -2;
             } else {
                 direct_cands += 1;
@@ -7136,6 +8758,9 @@ pub fn update_step2_coast_merge_direct(
                     *ftle_b_frame_ptr.add(victim) = FTLE_INVALID_FRAME;
                     *ftle_val_ptr.add(victim) = 0.0;
                     *track_match_ptr.add(victim) = -2;
+                    if metro_on {
+                        ms.metrology.clear_slot(victim);
+                    }
                 }};
             }
 
@@ -7300,6 +8925,7 @@ pub fn update_step3_seed(
 
     let r_seed2 = r_seed * r_seed;
     let r_seed_lim = r_seed.max(0.0);
+    let metro_on = ms.metrology.mode() != METROLOGY_OFF;
     let mut pi = 0usize;
     unsafe {
         let pm_p = ms.peak_matched.as_ptr();
@@ -7401,6 +9027,9 @@ pub fn update_step3_seed(
                     ms.tracks.modal_freq_hz[ti] = 0.0;
                     ms.tracks.modal_amp[ti] = 0.0;
                     ms.tracks.tpl8_i8[ti] = *ms.peak_tpl8.as_ptr().add(pi);
+                    if metro_on {
+                        ms.metrology.seed_slot(ti);
+                    }
 
                     let cx = cell_coord(px, inv_cw, MICRO_CELL_W - 1);
                     let cy = cell_coord(py, inv_ch, MICRO_CELL_H - 1);
@@ -7580,6 +9209,7 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
     let ftle_a_p = ms.tracks.ftle_a_frame.as_mut_ptr();
     let ftle_b_p = ms.tracks.ftle_b_frame.as_mut_ptr();
     let ftle_val_p = ms.tracks.ftle_val.as_mut_ptr();
+    let metro_on = ms.metrology.mode() != METROLOGY_OFF;
 
     // SAFETY: All pointers come from disjoint `MicroSwarmState` fields asserted `>= MAX_MICRO`.
     unsafe {
@@ -7602,6 +9232,9 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
                     *ftle_a_p.add(i) = FTLE_INVALID_FRAME;
                     *ftle_b_p.add(i) = FTLE_INVALID_FRAME;
                     *ftle_val_p.add(i) = 0.0;
+                    if metro_on {
+                        ms.metrology.clear_slot(i);
+                    }
                     st = MICRO_STATE_INACTIVE;
                 }
             }
@@ -7989,6 +9622,7 @@ pub fn soa_step(
             imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, false);
             gather_csr_candidates(ms, w, h, safe_dt);
             solve_epsilon_auction(ms);
+            ms.begin_obs_tick(safe_dt);
             update_lifecycle_and_seed(ms, luma, w, h, safe_dt, frame_idx);
             pack_export_micro(ms);
 
@@ -8019,6 +9653,7 @@ pub fn soa_step(
     imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, false);
     gather_csr_candidates(ms, w, h, safe_dt);
     solve_epsilon_auction(ms);
+    ms.begin_obs_tick(safe_dt);
     update_lifecycle_and_seed(ms, luma, w, h, safe_dt, frame_idx);
     pack_export_micro(ms);
     true

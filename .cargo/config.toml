@@ -3,6 +3,6 @@ target = "wasm32-unknown-unknown"
 rustflags = [
   "-C", "target-feature=+simd128",
   "-C", "link-arg=-zstack-size=16384",
-  "-C", "link-arg=--initial-memory=20971520",
-  "-C", "link-arg=--max-memory=20971520",
+  "-C", "link-arg=--initial-memory=29360128",
+  "-C", "link-arg=--max-memory=29360128",
 ]

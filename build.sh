@@ -70,8 +70,8 @@ fi
 echo "  [PASS] Zero imports verified (0 env / malloc / free allocator imports)"
 
 MEM_LINE="$(echo "$HEADERS" | grep "memory\[0\]" || true)"
-if ! echo "$MEM_LINE" | grep -q "initial=320 max=320"; then
-  echo "FAIL: Expected fixed Wasm linear memory initial=320 max=320, got: ${MEM_LINE}" >&2
+if ! echo "$MEM_LINE" | grep -q "initial=448 max=448"; then
+  echo "FAIL: Expected fixed Wasm linear memory initial=448 max=448, got: ${MEM_LINE}" >&2
   exit 1
 fi
 echo "  [PASS] Contiguous Linear Memory Arena:${MEM_LINE}"
@@ -96,8 +96,11 @@ for m in re.finditer(r"segment\[\d+\][^\n]*?size=(\d+)[^\n]*?(?:init\s+i32=|i32\
     end = int(m.group(2)) + int(m.group(1))
     if end > max_data_end:
         max_data_end = end
-if max_data_end <= 0 or max_data_end > 20905984:
-    print(f"FAIL static data segment end={max_data_end} outside (0, 20905984]")
+if max_data_end <= 0 or max_data_end > 29294592:
+    print(f"FAIL static data segment end={max_data_end} outside (0, 29294592]")
+    sys.exit(0)
+if max_data_end > 24248320:
+    print(f"FAIL Wave-2 static data segment end={max_data_end} exceeds 24248320")
     sys.exit(0)
 
 fn_re = re.compile(r"^[0-9a-f]+\s+func\[(\d+)\]\s+<([^>]+)>:")
@@ -170,7 +173,7 @@ if [ "$STACK_INDIRECT" -ne 0 ] || [ "$STACK_CYCLE" -ne 0 ] || [ "$STACK_MAX_PATH
   echo "FAIL: Wasm call-graph stack check failed (max_path=${STACK_MAX_PATH} B, indirect=${STACK_INDIRECT}, cycle=${STACK_CYCLE}, budget=14336/16384 B)!" >&2
   exit 1
 fi
-echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 20905984 B)"
+echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 24248320 <= 29294592 B)"
 echo "  [PASS] Wasm call-graph max live shadow stack: ${STACK_MAX_PATH} / 16384 B (indirect=${STACK_INDIRECT}, cycles=${STACK_CYCLE})"
 
 V128_COUNT="$(echo "$DISASM" | grep -cE "v128\.|f32x4\.|u32x4\.|i32x4\.")"
@@ -211,13 +214,13 @@ const { instance } = await WebAssembly.instantiate(wasmBytes, {});
 const exp = instance.exports;
 const mem = exp.memory;
 
-if (mem.buffer.byteLength !== 320 * 65536) {
-  throw new Error(`Expected 320 pages (20971520 B), got ${mem.buffer.byteLength}`);
+if (mem.buffer.byteLength !== 448 * 65536) {
+  throw new Error(`Expected 448 pages (29360128 B), got ${mem.buffer.byteLength}`);
 }
 let grewPastMax = false;
 try { mem.grow(1); grewPastMax = true; } catch {}
 if (grewPastMax) {
-  throw new Error('Expected fixed max=320 Wasm memory (mem.grow(1) must fail)');
+  throw new Error('Expected fixed max=448 Wasm memory (mem.grow(1) must fail)');
 }
 
 const telem = new Float32Array(mem.buffer, exp.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
@@ -828,7 +831,7 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
     solveShiftedLanczosFiedler();
     exp.chronos_post_tick(1 / 60);
   }
-  if (mem.buffer.byteLength !== 320 * 65536) {
+  if (mem.buffer.byteLength !== 448 * 65536) {
     throw new Error(`Gate G: Arena grew unexpectedly to ${mem.buffer.byteLength}`);
   }
   if (telem[30] !== 640 || telem[31] !== 360 || pipBuf[16383] !== 255) {
@@ -838,7 +841,7 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
   if (exp.chronos_get_frame_w() !== 320 || exp.chronos_get_pip_dim() !== 32) {
     throw new Error('Gate G: Failed to restore 320x180 SD mode');
   }
-  console.log('  [PASS] Gate G (Dual-Resolution 320x180 SD <-> 640x360 HD Switch): 320 static pages, 64x64 PiP verified');
+  console.log('  [PASS] Gate G (Dual-Resolution 320x180 SD <-> 640x360 HD Switch): 448 static pages, 64x64 PiP verified');
 }
 
 // ----------------------------------------------------------------------------
@@ -2234,16 +2237,21 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
     if (telem.length < TELEMETRY_LEN) {
       throw new Error(`Gate P1 (${label}): telemetry len=${telem.length} < ${TELEMETRY_LEN}`);
     }
-    if (mem.buffer.byteLength !== 320 * 65536) {
-      throw new Error(`Gate P1 (${label}): Wasm memory bytes=${mem.buffer.byteLength} != ${320 * 65536}`);
+    if (mem.buffer.byteLength !== 448 * 65536) {
+      throw new Error(`Gate P1 (${label}): Wasm memory bytes=${mem.buffer.byteLength} != ${448 * 65536}`);
     }
     const arenaBytes = telem[20];
-    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 20_800_000) {
-      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 20_800_000`);
+    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 24_117_248) {
+      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 24_117_248`);
     }
-    const staticDataEnd = exp.chronos_get_ring_slot_ptr(0) + arenaBytes;
-    if (!Number.isFinite(staticDataEnd) || staticDataEnd > 20_905_984) {
-      throw new Error(`Gate P1 (${label}): Static data end=${staticDataEnd} exceeds 20_905_984 (< 65536 B reserve)`);
+    const w1TelemPtr = typeof exp.chronos_get_wave1_telemetry_ptr === 'function' ? exp.chronos_get_wave1_telemetry_ptr() : 0;
+    const w1LinkedEnd = w1TelemPtr > 0 ? (new Uint32Array(mem.buffer, w1TelemPtr, 192)[12] >>> 0) : 0;
+    const staticDataEnd = Math.max(exp.chronos_get_ring_slot_ptr(0) + arenaBytes, w1LinkedEnd);
+    if (!Number.isFinite(staticDataEnd) || staticDataEnd > 29_294_592) {
+      throw new Error(`Gate P1 (${label}): Static data end=${staticDataEnd} exceeds 29_294_592 (< 65536 B reserve)`);
+    }
+    if (staticDataEnd > 24_248_320) {
+      throw new Error(`Gate P1 (${label}): Wave-2 static end=${staticDataEnd} exceeds 24_248_320 (headroom breach)`);
     }
     for (let k = 0; k < TELEMETRY_LEN; k++) {
       if (!Number.isFinite(telem[k])) {
@@ -2650,7 +2658,7 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
   exp.chronos_set_resolution(0);
 
   console.log(
-    `  [PASS] Gate P (P1 ABI=${TELEMETRY_LEN}/320pg/Arena=${Math.round(telem[20])}B | P2 Pend T=${pendMatch.ell_T.toFixed(3)}s vs AGM=${p2aTagm.toFixed(3)}s, R2=${pendMatch.r2.toFixed(3)}, zeta=${pendMatch.zeta.toFixed(4)} | P3 Col m2/m1=${colEvent.massRatio.toFixed(2)}, e=${colEvent.e_n.toFixed(2)}, res=${colEvent.momResid.toFixed(3)} | P4 R=${kurIn.toFixed(2)}/${kurAnti.toFixed(2)}, lyap=${maxLyapChaos.toFixed(2)} vs ${maxLyapPend.toFixed(2)} | P5 SD==HD R2=${p2bSd.lastBal.r2.toFixed(3)}/${p5Hd.lastBal.r2.toFixed(3)})`
+    `  [PASS] Gate P (P1 ABI=${TELEMETRY_LEN}/448pg/Arena=${Math.round(telem[20])}B | P2 Pend T=${pendMatch.ell_T.toFixed(3)}s vs AGM=${p2aTagm.toFixed(3)}s, R2=${pendMatch.r2.toFixed(3)}, zeta=${pendMatch.zeta.toFixed(4)} | P3 Col m2/m1=${colEvent.massRatio.toFixed(2)}, e=${colEvent.e_n.toFixed(2)}, res=${colEvent.momResid.toFixed(3)} | P4 R=${kurIn.toFixed(2)}/${kurAnti.toFixed(2)}, lyap=${maxLyapChaos.toFixed(2)} vs ${maxLyapPend.toFixed(2)} | P5 SD==HD R2=${p2bSd.lastBal.r2.toFixed(3)}/${p5Hd.lastBal.r2.toFixed(3)})`
   );
 }
 
@@ -2907,26 +2915,60 @@ for (const acc of benchStats) {
   if (acc.finalClutterDb < 60.0) {
     throw new Error(`[${acc.label}] Expected > 60 dB uncensored ECA clutter suppression, got ${acc.finalClutterDb.toFixed(2)} dB`);
   }
-  const budgetScale = Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
+  const rawScaleEnv = process.env.CHRONOS_CI_BUDGET_SCALE;
+  const budgetScale = rawScaleEnv === undefined || rawScaleEnv === '' ? 1.0 : Number(rawScaleEnv);
+  if (!Number.isFinite(budgetScale) || budgetScale < 1.0) {
+    throw new Error(`Invalid CHRONOS_CI_BUDGET_SCALE="${rawScaleEnv}" (must be finite >= 1.0)`);
+  }
   const effectiveBudgetMs = acc.budgetMs * budgetScale;
   if (acc.medMean >= effectiveBudgetMs) {
     throw new Error(`[${acc.label}] Per-frame compute budget exceeded: ${acc.medMean.toFixed(4)} ms >= ${effectiveBudgetMs.toFixed(2)} ms`);
   }
 }
 
-const outScale = Math.max(1.0, Number(process.env.CHRONOS_CI_BUDGET_SCALE || '1.0'));
+const rawOutScaleEnv = process.env.CHRONOS_CI_BUDGET_SCALE;
+const outScale = rawOutScaleEnv === undefined || rawOutScaleEnv === '' ? 1.0 : Number(rawOutScaleEnv);
+if (!Number.isFinite(outScale) || outScale < 1.0) {
+  throw new Error(`Invalid CHRONOS_CI_BUDGET_SCALE="${rawOutScaleEnv}" (must be finite >= 1.0)`);
+}
 const hdRatio = benchStats[1].medMean / Math.max(1e-6, benchStats[0].medMean);
 console.log(`  Scaling Limiter     : HD/SD compute ratio = ${hdRatio.toFixed(2)}x for 4.00x pixel count (planar SIMD128 RGBA/ECA memory bandwidth scales 4x; 2x2-pooled 32x32 patch SAD + Lanczos scale sub-linearly)`);
-console.log(`  [PASS] ALL SD (< ${(0.35 * outScale).toFixed(2)} ms) & HD (< ${(1.00 * outScale).toFixed(2)} ms) MATHEMATICAL & LATENCY INVARIANTS VERIFIED`);
+console.log(`  [${outScale > 1.0 ? 'PARTIAL - SCALED BUDGET' : 'PASS'}] ALL SD (< ${(0.35 * outScale).toFixed(2)} ms) & HD (< ${(1.00 * outScale).toFixed(2)} ms) MATHEMATICAL & LATENCY INVARIANTS VERIFIED`);
 EOF
 
 echo ""
 echo "[Gate Q] Running CHRONOS-1000 Swarm & Continuum Gate Suite (scripts/benchmark_1000.mjs --gate)..."
 node scripts/benchmark_1000.mjs --gate
 
+echo ""
+echo "[Gate W1] Running Wave-1 Core Gates (I0/I4 Ingest+ROI, I5 BOS, I1 Metrology, I6 Captures)..."
+node scripts/gate_i0_i4_ingest.mjs
+node scripts/gate_i5_bos.mjs
+node scripts/gate_i1_cov_residual.mjs
+if [ "${1:-}" = "--e2e" ]; then
+  node scripts/gate_i6_captures.mjs
+else
+  node scripts/gate_i6_captures.mjs --no-chrome
+fi
+
+echo ""
+echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation)..."
+node scripts/gate_i2_rs_welch.mjs
+node scripts/gate_i3_hodge.mjs
+node scripts/gate_i5b_conservation.mjs
+
+CERT_PARTIAL=0
+if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
+  CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")
+fi
+
 if [ "${1:-}" = "--check" ]; then
   echo ""
-  echo "[5/5] --check mode complete. Exiting cleanly."
+  if [ "$CERT_PARTIAL" = "1" ]; then
+    echo "[5/5] [PARTIAL - SCALED BUDGET scale=${CHRONOS_CI_BUDGET_SCALE}] --check mode complete. Exiting cleanly."
+  else
+    echo "[5/5] --check mode complete. Exiting cleanly."
+  fi
   exit 0
 fi
 
@@ -2937,7 +2979,11 @@ if [ "${1:-}" = "--e2e" ]; then
   node scripts/calibrate_mp4.mjs --hd --gate
   node scripts/e2e_browser.mjs
   echo ""
-  echo "[PASS] --e2e full-stack verification complete. Exiting cleanly."
+  if [ "$CERT_PARTIAL" = "1" ]; then
+    echo "[PARTIAL - SCALED BUDGET scale=${CHRONOS_CI_BUDGET_SCALE}] --e2e full-stack verification complete. Exiting cleanly."
+  else
+    echo "[PASS] --e2e full-stack verification complete. Exiting cleanly."
+  fi
   exit 0
 fi
 
