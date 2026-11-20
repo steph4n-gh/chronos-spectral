@@ -15,7 +15,7 @@
 //!   fabricates uncalibrated gas density or temperature without external optical/Gladstone-Dale constants.
 
 use crate::simd::{
-    f32x4, f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_gt, f32x4_lt, f32x4_max, f32x4_min,
+    f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_gt, f32x4_lt, f32x4_max, f32x4_min,
     f32x4_mul, f32x4_splat, f32x4_sqrt, f32x4_sub, f64x2, f64x2_add, f64x2_extract_lane,
     f64x2_mul, f64x2_splat, f64x2_sqrt, f64x2_sub, i32x4_bitmask, v128, v128_and,
 };
@@ -458,16 +458,13 @@ fn row_n<const N: usize>(img: &[f32], start: usize) -> &[f32; N] {
 /// `[a[i], a[i + 1], a[i + 2], a[i + 3]]` as one vector (a single unaligned vector load).
 #[inline(always)]
 fn ld4<const N: usize>(a: &[f32; N], i: usize) -> v128 {
-    f32x4(a[i], a[i + 1], a[i + 2], a[i + 3])
+    crate::simd_ops::load_f32x4(a[i..i + 4].try_into().unwrap())
 }
 
-/// Stores the four lanes of `v` to `a[i..i + 4]`.
+/// Stores the four lanes of `v` to `a[i..i + 4]` (a single unaligned vector store).
 #[inline(always)]
 fn st4<const N: usize>(a: &mut [f32; N], i: usize, v: v128) {
-    a[i] = f32x4_extract_lane::<0>(v);
-    a[i + 1] = f32x4_extract_lane::<1>(v);
-    a[i + 2] = f32x4_extract_lane::<2>(v);
-    a[i + 3] = f32x4_extract_lane::<3>(v);
+    crate::simd_ops::store_f32x4((&mut a[i..i + 4]).try_into().unwrap(), v);
 }
 
 struct PatchRefData {

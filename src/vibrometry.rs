@@ -3,7 +3,7 @@
 //! Pure `#![no_std]`, zero host imports, zero heap allocation inside static `VibrometryState`.
 
 use crate::simd::{
-    f32x4, f32x4_add, f32x4_convert_u32x4, f32x4_extract_lane, f32x4_max, f32x4_min, f32x4_mul,
+    f32x4_add, f32x4_convert_u32x4, f32x4_extract_lane, f32x4_max, f32x4_min, f32x4_mul,
     f32x4_splat, f32x4_sub, i16x8_add, i16x8_lt, i16x8_narrow_i32x4, i16x8_splat,
     i32x4_trunc_sat_f32x4, u32x4_extend_low_u16x8, u64x2, u64x2_extract_lane, v128, v128_or,
 };
@@ -2805,8 +2805,8 @@ fn accumulate_ref_q12(dst: &mut [u16], luma: &[f32], n: usize, first: bool) {
         let l: &[f32; 8] = luma[p..p + 8].try_into().unwrap();
         let d: &mut [u16; 8] = (&mut dst[p..p + 8]).try_into().unwrap();
         let q = i16x8_narrow_i32x4(
-            quantize(f32x4(l[0], l[1], l[2], l[3]), zero, one, scale, half),
-            quantize(f32x4(l[4], l[5], l[6], l[7]), zero, one, scale, half),
+            quantize(crate::simd_ops::load_f32x4(l[0..4].try_into().unwrap()), zero, one, scale, half),
+            quantize(crate::simd_ops::load_f32x4(l[4..8].try_into().unwrap()), zero, one, scale, half),
         );
         let v = if first {
             q
@@ -2924,7 +2924,7 @@ fn band_row_sums(
     const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
     #[inline(always)]
     fn ld4(a: &[f32], i: usize) -> v128 {
-        f32x4(a[i], a[i + 1], a[i + 2], a[i + 3])
+        crate::simd_ops::load_f32x4(a[i..i + 4].try_into().unwrap())
     }
     // `q[i..i + 4]` as `f32x4` (exact: the values are below 2^16).
     #[inline(always)]
