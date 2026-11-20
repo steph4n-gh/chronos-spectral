@@ -1610,7 +1610,10 @@ mod tests {
     backend_table!(sse_table, crate::simd::sse);
 
     const SEED: u64 = 0x5EED_C0DE_2026_1119;
-    const N_RANDOM: u32 = 4096;
+    /// Random vectors per table entry, after the edge vectors. Under Miri (`cargo miri test
+    /// --features simd-force-scalar`) every lane op is interpreted, so only a handful of random
+    /// vectors run there; the edge vectors (every pool value and pair) always run in full.
+    const N_RANDOM: u32 = if cfg!(miri) { 4 } else { 4096 };
 
     fn describe(table: &[OpEntry], rec: &MismatchRecord) -> String {
         let e = &table[rec.entry as usize];
@@ -1661,6 +1664,7 @@ mod tests {
 
     #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
     #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot interpret most NEON intrinsics")]
     fn neon_backend_matches_scalar_reference() {
         assert_pair_matches(neon_table::TABLE, scalar_table::TABLE);
     }
@@ -1785,6 +1789,7 @@ mod tests {
     /// `*_extract_lane::<..>`, `*_replace_lane::<..>`, `v128_store*_lane::<..>`) must have its own
     /// table entry, because a native backend may specialise per pattern.
     #[test]
+    #[cfg_attr(miri, ignore = "reads src/ from disk; a pure source scan with no unsafe code")]
     fn every_kernel_const_generic_instantiation_is_in_the_table() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         let mut missing = Vec::new();
@@ -1842,7 +1847,10 @@ mod tests {
 
     #[test]
     fn negative_controls_are_detected_only_in_their_target_op() {
-        for (target, table) in negative_controls::ALL {
+        // Each control is a full table pass of mostly scalar code the other tests already run;
+        // under Miri one control keeps the check without nine more interpreted passes.
+        let controls = if cfg!(miri) { 1 } else { negative_controls::ALL.len() };
+        for (target, table) in &negative_controls::ALL[..controls] {
             let mut report = Box::new(Report::new());
             run_pair(scalar_table::TABLE, table, SEED, N_RANDOM, &mut report).unwrap();
             let (bad, outside) = negative_control_outcome(table, target, &report);

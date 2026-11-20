@@ -1976,7 +1976,8 @@ mod tests {
         let mut rng = Rng::new(16);
         let mut kinds = BTreeSet::new();
         let mut patterns: Vec<[u8; 16]> = Vec::new();
-        for _ in 0..100_000 {
+        // Miri (x86_64 hosts; it interprets the SSE intrinsics) runs a thinned random set.
+        for _ in 0..if cfg!(miri) { 500 } else { 100_000 } {
             patterns.push(shuffle_bytes(random_lanes::<8>(&mut rng, 16)));
             patterns.push(shuffle_bytes(random_lanes::<8>(&mut rng, 8)));
             let from_b = random_lanes::<8>(&mut rng, 8).map(|i| i + 8);
