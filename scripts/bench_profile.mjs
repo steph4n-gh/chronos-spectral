@@ -16,7 +16,12 @@
 // docs/VERIFICATION_AND_BENCHMARKS.md, "Native profile"):
 //   node scripts/bench_profile.mjs --bin=PATH --trace=FILE [--seconds=20]
 //        [--wasm-passes=10] [--top=20] [--lines=8] [--out=DIR] [--no-wasm]
+//        [--reuse]   (re-analyse the recordings already in --out)
 //   node scripts/bench_profile.mjs --demangle <symbol>...
+//   node scripts/bench_profile.mjs --same-code <binary A> <binary B>
+//
+// Shares are converted to milliseconds per pass with the kernel time of a short
+// `--bench` run of the same binary / wasm on the same trace (bench-*.json in --out).
 //
 // Output: report.md and report.json in --out (default target/bench/profile-<trace>).
 // ============================================================================
@@ -320,6 +325,7 @@ const topN = Number(opt('top', '20'));
 const lineN = Number(opt('lines', '8'));
 const withWasm = !argv.includes('--no-wasm');
 const withNative = !argv.includes('--no-native');
+const reuse = argv.includes('--reuse');
 if (!trace || (withNative && !bin)) {
   console.error('usage: node scripts/bench_profile.mjs --bin=PATH --trace=FILE [--seconds=20] [--wasm-passes=10] [--top=20] [--lines=8] [--out=DIR] [--no-wasm] [--no-native]');
   process.exit(2);
@@ -360,6 +366,7 @@ const unxml = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quo
 
 function parseTimeProfile(xml) {
   const frames = new Map();
+  const binaries = new Map();
   const stacks = new Map();
   const cores = new Map();
   const samples = [];
@@ -380,15 +387,17 @@ function parseTimeProfile(xml) {
     const bt = row.match(/<tagged-backtrace id="(\d+)">([\s\S]*?)<\/tagged-backtrace>/);
     if (bt) {
       stack = [];
-      for (const f of bt[2].matchAll(/<frame (?:id="(\d+)"([^>]*?)(\/?)>|ref="(\d+)"\/>)/g)) {
-        if (f[4]) {
-          stack.push(frames.get(f[4]));
+      for (const f of bt[2].matchAll(/<frame (?:id="(\d+)"([^>]*?)(\/?)>(?:<binary (?:id="(\d+)" name="([^"]*)"[^>]*|ref="(\d+)")\/?>)?|ref="(\d+)"\/>)/g)) {
+        if (f[7]) {
+          stack.push(frames.get(f[7]));
           continue;
         }
         const attrs = f[2];
         const name = attrs.match(/name="([^"]*)"/);
         const addr = attrs.match(/addr="(0x[0-9a-f]+)"/);
-        const fr = { name: name ? unxml(name[1]) : '???', addr: addr ? BigInt(addr[1]) : 0n };
+        if (f[4]) binaries.set(f[4], f[5]);
+        const binName = f[4] ? f[5] : f[6] ? binaries.get(f[6]) : '?';
+        const fr = { name: name ? unxml(name[1]) : '???', addr: addr ? BigInt(addr[1]) : 0n, bin: binName };
         frames.set(f[1], fr);
         stack.push(fr);
       }
@@ -412,8 +421,11 @@ function parseTimeProfile(xml) {
 /** Maps addresses to inlined frame chains with atos; returns Map(addr -> [{fn, loc}] innermost first). */
 function symbolize(binary, loadAddr, addrs) {
   const out = new Map();
-  const dsym = `${binary}.dSYM/Contents/Resources/DWARF/${path.basename(binary)}`;
-  const obj = fs.existsSync(dsym) ? dsym : binary;
+  // Cargo names the DWARF file inside the bundle after the hashed deps artifact.
+  const dwarfDir = `${binary}.dSYM/Contents/Resources/DWARF`;
+  const dwarf = fs.existsSync(dwarfDir) ? fs.readdirSync(dwarfDir).map((f) => path.join(dwarfDir, f))[0] : null;
+  if (!dwarf) console.warn(`warning: no ${dwarfDir}: source lines unavailable (build with --profile profiling)`);
+  const obj = dwarf || binary;
   const SENT = '0x1';
   for (let i = 0; i < addrs.length; i += 2000) {
     const chunk = addrs.slice(i, i + 2000);
@@ -450,32 +462,70 @@ function disassemble(binary, loadAddr) {
 
 const isKernelExport = (n) => /^(chronos_|padic_)/.test(n);
 
+/** The binary's text symbols, sorted, slid to the run's load address: PC -> physical function. */
+function symbolTable(binary, loadAddr) {
+  const slide = BigInt(loadAddr) - 0x100000000n;
+  const syms = execFileSync('nm', ['-n', binary], { encoding: 'utf8', maxBuffer: 1 << 28 })
+    .split('\n')
+    .map((l) => l.split(' '))
+    .filter((p) => p.length === 3 && /^[tT]$/.test(p[1]))
+    .map((p) => ({ addr: BigInt(`0x${p[0]}`) + slide, name: p[2].replace(/^_/, '') }));
+  return (pc) => {
+    let lo = 0;
+    let hi = syms.length - 1;
+    if (!syms.length || pc < syms[0].addr) return null;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (syms[mid].addr <= pc) lo = mid;
+      else hi = mid - 1;
+    }
+    return syms[lo].name;
+  };
+}
+
 function analyseNative(xml) {
   const { samples, loadAddr } = parseTimeProfile(xml);
+  // xctrace names frames after inlined functions when it finds a dSYM; attribute by the PC's
+  // physical function in the symbol table instead (inlined frames share their caller's PC).
+  const symOf = symbolTable(bin, loadAddr);
+  const phys = (st) => {
+    const out = [];
+    st.forEach((f, i) => {
+      // Leaf frames are reported as PC + 1, return addresses as RA - 1: both align down to the
+      // sampled or the calling instruction.
+      const pc = f.addr & ~3n;
+      // Only PCs inside the profiled binary map through its symbol table (system libraries such
+      // as libsystem_platform's memset keep xctrace's name).
+      const name = (f.bin === path.basename(bin) && symOf(pc)) || f.name;
+      if (!out.length || out[out.length - 1].name !== name || i === 0) {
+        if (out.length && out[out.length - 1].pc === pc) return; // an inlined frame of the same PC
+        out.push({ name, pc });
+      }
+    });
+    return out;
+  };
   const total = samples.length;
   const pCore = samples.filter((s) => /P Core/.test(s.core)).length;
-  const kernel = samples.filter((s) => s.stack.some((f) => isKernelExport(f.name)));
+  const kernel = samples.map((s) => ({ ...s, ph: phys(s.stack) })).filter((s) => s.ph.some((f) => isKernelExport(f.name)));
   const self = new Map();
   const incl = new Map();
   const byExport = new Map();
   const leafPcs = new Map(); // function -> Map(pc -> count)
   for (const s of kernel) {
-    const leaf = s.stack[0];
+    const leaf = s.ph[0];
     const fn = short(leaf.name);
     self.set(fn, (self.get(fn) || 0) + 1);
-    // Leaf frames are reported as PC + 1 (return-address convention); align to the instruction.
-    const pc = leaf.addr & ~3n;
     if (!leafPcs.has(fn)) leafPcs.set(fn, new Map());
-    leafPcs.get(fn).set(pc, (leafPcs.get(fn).get(pc) || 0) + 1);
+    leafPcs.get(fn).set(leaf.pc, (leafPcs.get(fn).get(leaf.pc) || 0) + 1);
     const seen = new Set();
-    for (const f of s.stack) {
+    for (const f of s.ph) {
       const n = short(f.name);
       if (seen.has(n)) continue;
       seen.add(n);
       incl.set(n, (incl.get(n) || 0) + 1);
     }
     // Outermost kernel export on the stack (the trace call being made).
-    const ex = [...s.stack].reverse().find((f) => isKernelExport(f.name));
+    const ex = [...s.ph].reverse().find((f) => isKernelExport(f.name));
     byExport.set(ex.name, (byExport.get(ex.name) || 0) + 1);
   }
   const K = kernel.length;
@@ -485,25 +535,33 @@ function analyseNative(xml) {
   const pcs = [...new Set(top.flatMap(([fn]) => [...leafPcs.get(fn).keys()]))];
   const sym = symbolize(binary, loadAddr, pcs);
   const dis = disassemble(binary, loadAddr);
+  // Each sampled PC's inline chain (innermost first) is: core::arch intrinsics, then the SIMD layer
+  // op (src/simd/<backend>.rs), then kernel functions. Attribute each sample to the layer op (or
+  // "scalar code" when no layer frame is present), to the innermost kernel function and to its
+  // kernel source line.
+  const LIB = /^(generated|macros|neon|scalar|sse|mod|intrinsics|mod\.rs|num|cmp|f32|f64|ptr|slice|index|iter|range|uint_macros|int_macros|const_ptr|mut_ptr|arith|bit|function)\.rs:/;
+  const LAYER = /^(neon|scalar|sse)\.rs:/;
+  const KSRC = /^(lib|simd_ops|soa_tracks|continuum_physics|physics_id|bos|hodge|vibrometry|native)\.rs:/;
   const detail = top.map(([fn, n]) => {
     const lines = new Map();
     const inl = new Map();
+    const ops = new Map();
     const ins = new Map();
     const insClass = new Map();
+    const add = (m, k, c) => m.set(k, (m.get(k) || 0) + c);
     for (const [pc, c] of leafPcs.get(fn)) {
       const chain = sym.get(pc) || [];
-      const inner = chain[0] || { fn: '?', loc: '?' };
-      const loc = `${inner.loc}`;
-      lines.set(loc, (lines.get(loc) || 0) + c);
-      const innerFn = short(inner.fn);
-      inl.set(innerFn, (inl.get(innerFn) || 0) + c);
+      const layer = chain.find((f) => LAYER.test(f.loc));
+      add(ops, layer ? layer.fn.replace(/<.*$/, '') : '(no layer op: scalar code)', c);
+      const k = chain.find((f) => KSRC.test(f.loc)) || chain.find((f) => !LIB.test(f.loc)) || { fn: '?', loc: '?' };
+      add(lines, `${k.loc}  ${short(k.fn).replace(/^_R.*/, fn)}`, c);
+      add(inl, short(k.fn).replace(/^_R.*/, fn), c);
       const t = dis.get(pc) || '?';
-      ins.set(`${pc.toString(16)}  ${t}`, (ins.get(`${pc.toString(16)}  ${t}`) || 0) + c);
-      const mn = t.split(/\s+/)[0];
-      insClass.set(mn, (insClass.get(mn) || 0) + c);
+      add(ins, `${pc.toString(16)}  ${t}`, c);
+      add(insClass, t.split(/\s+/)[0], c);
     }
     const sorted = (m, k) => [...m].sort((a, b) => b[1] - a[1]).slice(0, k).map(([x, c]) => ({ what: x, samples: c, pct_of_fn: (100 * c) / n }));
-    return { fn, samples: n, pct_kernel: (100 * n) / K, lines: sorted(lines, lineN), inlined: sorted(inl, lineN), instructions: sorted(ins, lineN), mnemonics: sorted(insClass, 10) };
+    return { fn, samples: n, pct_kernel: (100 * n) / K, ops: sorted(ops, lineN), lines: sorted(lines, lineN), inlined: sorted(inl, lineN), instructions: sorted(ins, lineN), mnemonics: sorted(insClass, 10) };
   });
   return {
     total_samples: total,
@@ -559,7 +617,8 @@ function analyseWasm(p) {
       seen.add(nm);
       incl.set(nm, (incl.get(nm) || 0) + hits);
     }
-    const ex = [...stack].reverse().find(isWasm);
+    // Outermost wasm function below V8's js-to-wasm wrapper (whose own time stays in `self`).
+    const ex = [...stack].reverse().find((f) => isWasm(f) && !f.callFrame.functionName.startsWith('js-to-wasm')) || stack.find(isWasm);
     byExport.set(ex.callFrame.functionName, (byExport.get(ex.callFrame.functionName) || 0) + hits);
   }
   return {
@@ -576,9 +635,32 @@ function analyseWasm(p) {
 // Report.
 // ---------------------------------------------------------------------------
 const pct = (x) => (x == null ? '-' : `${x.toFixed(1)}%`);
+const ms = (x) => (x == null ? '-' : x >= 10 ? x.toFixed(1) : x.toFixed(2));
+/** Median kernel ms per pass from a short --bench run (cached in --out). */
+function benchKernelMs(side) {
+  const json = path.join(outDir, `bench-${side}.json`);
+  if (!(reuse && fs.existsSync(json))) {
+    const [cmd, args] =
+      side === 'native'
+        ? [bin, ['--bench', '--warmup=1', '--passes=3', `--json=${json}`, trace]]
+        : [process.execPath, ['--expose-gc', path.join(ROOT, 'scripts/trace_replay.mjs'), '--bench', '--warmup=2', '--passes=3', `--json=${json}`, trace]];
+    const r = spawnSync(cmd, args, { encoding: 'utf8', maxBuffer: 1 << 28 });
+    if (r.status !== 0) throw new Error(`${side} bench failed: ${r.stdout}${r.stderr}`);
+  }
+  const d = JSON.parse(fs.readFileSync(json, 'utf8'));
+  const v = [...d.traces[0].pass_kernel_ns].sort((a, b) => a - b);
+  return v[Math.floor(v.length / 2)] / 1e6;
+}
 if (withNative) {
-  console.log(`native: recording ${seconds} s of ${bin} on ${traceName} ...`);
-  const nat = analyseNative(await recordNative());
+  const xmlPath = path.join(outDir, 'native-time-profile.xml');
+  let xml;
+  if (reuse && fs.existsSync(xmlPath)) xml = fs.readFileSync(xmlPath, 'utf8');
+  else {
+    console.log(`native: recording ${seconds} s of ${bin} on ${traceName} ...`);
+    xml = await recordNative();
+  }
+  const nat = analyseNative(xml);
+  nat.kernel_ms_per_pass = benchKernelMs('native');
   report.native = nat;
   md.push(
     `Native: ${nat.kernel_samples} samples inside kernel calls of ${nat.total_samples} (1 kHz, ${seconds} s; ${((100 * nat.p_core_samples) / nat.total_samples).toFixed(1)}% on P cores).`,
@@ -586,28 +668,51 @@ if (withNative) {
   );
 }
 if (withWasm) {
-  console.log(`wasm: profiling ${wasmPasses} measured passes in V8 ...`);
-  report.wasm = analyseWasm(recordWasm());
+  const cp = path.join(outDir, 'wasm.cpuprofile');
+  let prof;
+  if (reuse && fs.existsSync(cp)) prof = JSON.parse(fs.readFileSync(cp, 'utf8'));
+  else {
+    console.log(`wasm: profiling ${wasmPasses} measured passes in V8 ...`);
+    prof = recordWasm();
+  }
+  report.wasm = analyseWasm(prof);
+  report.wasm.kernel_ms_per_pass = benchKernelMs('wasm');
   md.push(`Wasm (V8): ${report.wasm.kernel_samples} samples inside wasm of ${report.wasm.total_samples} (${report.wasm.interval_us.toFixed(0)} µs interval).`, '');
 }
 const N = report.native;
 const Wm = report.wasm;
-md.push('## Time by export (share of kernel samples)', '', '| export | native | wasm |', '| :--- | ---: | ---: |');
+md.push(`Kernel time per pass (short --bench run): native ${ms(N?.kernel_ms_per_pass)} ms, wasm ${ms(Wm?.kernel_ms_per_pass)} ms. Milliseconds below are share x that time.`, '');
+md.push('## Time by export', '', '| export | native % | wasm % | native ms/pass | wasm ms/pass |', '| :--- | ---: | ---: | ---: | ---: |');
 for (const e of (N || Wm).exports.slice(0, 8)) {
-  md.push(`| ${e.export} | ${pct(N?.exports.find((x) => x.export === e.export)?.pct_kernel)} | ${pct(Wm?.exports.find((x) => x.export === e.export)?.pct_kernel)} |`);
+  const a = N?.exports.find((x) => x.export === e.export)?.pct_kernel;
+  const b = Wm?.exports.find((x) => x.export === e.export)?.pct_kernel;
+  md.push(`| ${e.export} | ${pct(a)} | ${pct(b)} | ${ms(a == null ? null : (a / 100) * N.kernel_ms_per_pass)} | ${ms(b == null ? null : (b / 100) * Wm.kernel_ms_per_pass)} |`);
 }
-md.push('', '## Self time by function (share of kernel samples)', '', '| function | native self | wasm self | native incl. | wasm incl. |', '| :--- | ---: | ---: | ---: | ---: |');
+md.push(
+  '',
+  '## Self time by function',
+  '',
+  '| function | native self % | wasm self % | native ms/pass | wasm ms/pass | native / wasm | native incl. % | wasm incl. % |',
+  '| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
+);
 const names = [...new Set([...(N ? N.self.slice(0, topN) : []), ...(Wm ? Wm.self.slice(0, Math.ceil(topN / 2)) : [])].map((x) => x.fn))];
+report.functions = [];
 for (const fn of names) {
   const g = (side, k) => side?.[k].find((x) => x.fn === fn)?.pct_kernel;
-  md.push(`| \`${fn}\` | ${pct(g(N, 'self'))} | ${pct(g(Wm, 'self'))} | ${pct(g(N, 'inclusive'))} | ${pct(g(Wm, 'inclusive'))} |`);
+  const nm = g(N, 'self') == null ? null : (g(N, 'self') / 100) * N.kernel_ms_per_pass;
+  const wm = g(Wm, 'self') == null ? null : (g(Wm, 'self') / 100) * Wm.kernel_ms_per_pass;
+  report.functions.push({ fn, native_self_pct: g(N, 'self'), wasm_self_pct: g(Wm, 'self'), native_ms: nm, wasm_ms: wm });
+  md.push(
+    `| \`${fn}\` | ${pct(g(N, 'self'))} | ${pct(g(Wm, 'self'))} | ${ms(nm)} | ${ms(wm)} | ${nm != null && wm ? (nm / wm).toFixed(2) : '-'} | ${pct(g(N, 'inclusive'))} | ${pct(g(Wm, 'inclusive'))} |`
+  );
 }
 if (N) {
   md.push('', '## Native hot functions: what dominates', '');
   for (const d of N.detail) {
     md.push(`### \`${d.fn}\`: ${pct(d.pct_kernel)} of kernel samples (${d.samples})`, '');
-    md.push('Innermost inlined function:', '', ...d.inlined.map((x) => `- ${pct(x.pct_of_fn)} \`${x.what}\``), '');
-    md.push('Source line:', '', ...d.lines.map((x) => `- ${pct(x.pct_of_fn)} ${x.what}`), '');
+    md.push('SIMD layer op at the sampled instruction:', '', ...d.ops.map((x) => `- ${pct(x.pct_of_fn)} \`${x.what}\``), '');
+    md.push('Innermost kernel function (inlined):', '', ...d.inlined.map((x) => `- ${pct(x.pct_of_fn)} \`${x.what}\``), '');
+    md.push('Kernel source line:', '', ...d.lines.map((x) => `- ${pct(x.pct_of_fn)} ${x.what}`), '');
     md.push('Sampled instruction mnemonics:', '', d.mnemonics.map((x) => `${x.what} ${pct(x.pct_of_fn)}`).join(', '), '');
     md.push('Hottest instructions:', '', '```', ...d.instructions.map((x) => `${pct(x.pct_of_fn).padStart(6)}  ${x.what}`), '```', '');
   }
