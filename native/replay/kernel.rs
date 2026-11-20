@@ -161,6 +161,7 @@ macro_rules! exports {
 exports! {
     chronos_init();
     chronos_reset_tracks();
+    chronos_test_hook_set_frame_counters(u32, u32, u32);
     chronos_set_ingest_pts(f64);
     chronos_set_focus_target(u32);
     chronos_get_focus_target();

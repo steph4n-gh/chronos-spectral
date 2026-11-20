@@ -5496,6 +5496,23 @@ pub unsafe extern "C" fn chronos_reset_tracks() {
     init_wave1_telemetry(a, true);
 }
 
+/// Test hook, not part of the host API. Sets the engine frame counter `frame_idx` (the `u32`
+/// that `chronos_post_tick` advances with wrapping) and the ingest ring cursor `ring_cursor`
+/// (the monotonic `u64` that selects the ring slot), and nothing else, so test harnesses can
+/// exercise the frame-index wrap at `u32::MAX` without running 2^32 frames. The cursor is
+/// `ring_cursor_hi << 32 | ring_cursor_lo`; pass its current value to move only `frame_idx`.
+///
+/// Ring contents, frame history and track state are left as they are: the kernel sees both
+/// counters jump, exactly as if the host had overwritten the two arena fields. The gates did
+/// that by raw address until v3.1.0 (`scripts/gate_i5_bos.mjs`, `scripts/gate_i0_i4_ingest.mjs`),
+/// which a recorded trace cannot replay on a native build; a call to this export replays on both.
+#[no_mangle]
+pub unsafe extern "C" fn chronos_test_hook_set_frame_counters(frame_idx: u32, ring_cursor_lo: u32, ring_cursor_hi: u32) {
+    let a = arena_mut();
+    a.frame_idx = frame_idx;
+    a.ring_cursor = ((ring_cursor_hi as u64) << 32) | ring_cursor_lo as u64;
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn chronos_set_ingest_pts(pts_sec: f64) {
     if pts_sec.is_finite() && pts_sec >= 0.0 {

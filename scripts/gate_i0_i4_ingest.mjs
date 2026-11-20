@@ -878,7 +878,9 @@ async function runWorkerRejectionHarness(wasmBytes) {
   vm.runInContext(`(() => {
     const ring0 = wasmExports.chronos_get_ring_slot_ptr(0);
     const u32 = new Uint32Array(wasmMemory.buffer, ring0, (wasmMemory.buffer.byteLength - ring0) >>> 2);
-    u32[${resWordIdx} + 1] = 16777214;
+    // frame_idx only: the ring cursor is passed back unchanged.
+    wasmExports.chronos_test_hook_set_frame_counters(16777214, u32[${resWordIdx} - 2], u32[${resWordIdx} - 1]);
+    if (u32[${resWordIdx} + 1] !== 16777214) throw new Error('chronos_test_hook_set_frame_counters did not set frame_idx');
     workerExpectedEngineFrame = 16777214;
   })()`, sandbox);
   for (let i = 0; i < 4; i++) {
@@ -966,7 +968,8 @@ async function runWorkerRejectionHarness(wasmBytes) {
   vm.runInContext(`(() => {
     const ring0 = wasmExports.chronos_get_ring_slot_ptr(0);
     const u32 = new Uint32Array(wasmMemory.buffer, ring0, (wasmMemory.buffer.byteLength - ring0) >>> 2);
-    u32[${resWordIdx} + 1] = 0xfffffffd;
+    wasmExports.chronos_test_hook_set_frame_counters(0xfffffffd, u32[${resWordIdx} - 2], u32[${resWordIdx} - 1]);
+    if (u32[${resWordIdx} + 1] !== 0xfffffffd) throw new Error('chronos_test_hook_set_frame_counters did not set frame_idx');
     workerExpectedEngineFrame = 0xfffffffd;
     const __origRosterForStrike = updateSlotRosterEma;
     let __strikeInjectPending = true;
@@ -1220,7 +1223,7 @@ async function main() {
     'chronos_eval_occluded_pair',
   ];
   const exportNames = Object.keys(exp);
-  assert(exportNames.length === 75, `Expected exact pinned Wasm export count 75, got ${exportNames.length}`);
+  assert(exportNames.length === 76, `Expected exact pinned Wasm export count 76, got ${exportNames.length}`);
   assert(typeof exp.chronos_get_micro_metrology_mode === 'undefined', 'Unpinned export chronos_get_micro_metrology_mode must not exist');
   for (const name of [...requiredWave1, ...requiredWave2]) {
     assert(typeof exp[name] === 'function', `Missing required export: ${name}`);
@@ -1618,9 +1621,12 @@ async function main() {
     const rcLoWord = resWords[0] - 2;
     const rcHiWord = resWords[0] - 1;
     const fIdxWord = resWords[0] + 1;
-    arenaU32[rcLoWord] = 0xfffffffd;
-    arenaU32[rcHiWord] = 0;
-    arenaU32[fIdxWord] = 0xfffffffd;
+    // Through the test-hook export, not a raw write, so recorded traces of this gate replay natively.
+    iso.exp.chronos_test_hook_set_frame_counters(0xfffffffd, 0xfffffffd, 0);
+    assert(
+      arenaU32[rcLoWord] === 0xfffffffd && arenaU32[rcHiWord] === 0 && arenaU32[fIdxWord] === 0xfffffffd,
+      'chronos_test_hook_set_frame_counters must set exactly the located (ring_cursor, frame_idx) words'
+    );
     const seenRoll = [];
     for (let k = 0; k < 5; k++) {
       const fCur = arenaU32[fIdxWord] >>> 0;

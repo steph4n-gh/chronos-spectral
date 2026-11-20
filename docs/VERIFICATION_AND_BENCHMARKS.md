@@ -14,7 +14,7 @@ Ensure Rust (`wasm32-unknown-unknown`), Node.js (`v22+`), and `python3` are inst
 
 Runs nine sequential offline stages:
 1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`).
-2. `wasm-objdump` binary audit (`75` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
+2. `wasm-objdump` binary audit (`76` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
 3. Mathematical counterexample gates (`Gates A-P`, including `N1` and `N2`).
 4. `5x2` interleaved `320x180` SD vs `640x360` HD Blind Pixel Pillar benchmark.
 5. `Gate Q` high-density `1,000+` target swarm and continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
@@ -98,7 +98,7 @@ Measured directly on `web/chronos_spectral.wasm` (`2,474,879 B`):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |
-| Export count & host imports | `75` exports, `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
+| Export count & host imports | `76` exports (`memory` and `75` functions, one of them the test hook `chronos_test_hook_set_frame_counters`), `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
 | Wasm linear memory | `initial=448 max=448` (`29,360,128 B`) | `448` fixed pages, `0` `memory.grow` |
 | Arena size | `22,644,848 B` | `<= 24,117,248 B` (`Arena` static bound) |
 | Static `.rodata` end | `59,216 B` | Unchanged `.rodata` ceiling |
@@ -290,7 +290,7 @@ There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_r
 
 Each `calibrate_mp4.mjs` scenario also has a 0-call trace for its probe instance. Recording costs about 4 ms per kernel call (SD hero tick `0.12 -> 4.1 ms`, Q1 swarm tick `1.3 -> 5.7 ms`). Strict mode with `--memdigest=1` takes about 2.4 times as long as default recording.
 
-Non-portable writes in the set: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` find the private `Arena` fields `ring_cursor`, `res_mode` and `frame_idx` by scanning memory and overwrite them to test frame-index wraparound. No getter exposes those fields, so the writes are `UNMAPPED`. They replay against the wasm, but a native build can follow those three traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Making them portable would need a test-only export for those fields. The native driver stops each of them at that call and reports `portable prefix ended at call N`, which is distinct from both a pass and a failure.
+Portable frame-counter writes: `gate_i5_bos.mjs` and `gate_i0_i4_ingest.mjs` test frame-index wraparound by moving the private `Arena` fields `ring_cursor` and `frame_idx` to just before `u32::MAX`. Up to v3.0.0 they overwrote those fields by raw address (found by scanning memory), which the hook records as `UNMAPPED`, so a native build could follow three canonical traces only up to call `#209` (`bos`), `#58` (`ingest_roi` instance 2) and `#710` (`ingest_roi` instance 6). Since v3.1.0 they make exactly the same change through the test-hook export `chronos_test_hook_set_frame_counters(frame_idx, ring_cursor_lo, ring_cursor_hi)`, which a trace records as an ordinary call, and the canonical set has no `UNMAPPED` record. The native driver still stops a trace that has one at that call and reports `portable prefix ended at call N`, which is distinct from both a pass and a failure.
 
 ### Format
 
