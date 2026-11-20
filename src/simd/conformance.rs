@@ -1647,6 +1647,77 @@ mod tests {
         assert_pair_matches(selected_table::TABLE, scalar_table::TABLE);
     }
 
+    // NEON backend: compared with the scalar reference in every feature configuration (with
+    // `simd-force-scalar` the test above compares the scalar backend with itself).
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    backend_table!(neon_table, crate::simd::neon);
+
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[test]
+    fn neon_backend_matches_scalar_reference() {
+        assert_pair_matches(neon_table::TABLE, scalar_table::TABLE);
+    }
+
+    /// aarch64 runs the NEON backend unless `simd-force-scalar` asks for the reference, so a
+    /// green `selected_backend_matches_scalar_reference` there is never scalar against itself.
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn aarch64_selects_neon_unless_forced_scalar() {
+        use core::any::TypeId;
+        let selected = TypeId::of::<crate::simd::v128>();
+        if cfg!(feature = "simd-force-scalar") {
+            assert_eq!(selected, TypeId::of::<crate::simd::scalar::v128>());
+            return;
+        }
+        #[cfg(target_feature = "neon")]
+        assert_eq!(
+            selected,
+            TypeId::of::<crate::simd::neon::v128>(),
+            "aarch64 build selected a backend other than simd::neon"
+        );
+        #[cfg(not(target_feature = "neon"))]
+        panic!("aarch64 build without the `neon` target feature falls back to simd::scalar");
+    }
+
+    /// Heavy one-off run: NEON against the scalar reference on `CHRONOS_SIMD_HEAVY_RANDOM`
+    /// (default 1,000,000) random vectors per table entry, plus the edge vectors.
+    /// `cargo test --release --target host-tuple -- --ignored neon_backend_heavy --nocapture`
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    #[test]
+    #[ignore]
+    fn neon_backend_heavy() {
+        let n_random = std::env::var("CHRONOS_SIMD_HEAVY_RANDOM")
+            .map(|s| s.parse().expect("CHRONOS_SIMD_HEAVY_RANDOM must be a number"))
+            .unwrap_or(1_000_000u32);
+        let mut report = Box::new(Report::new());
+        let t0 = std::time::Instant::now();
+        run_pair(neon_table::TABLE, scalar_table::TABLE, SEED, n_random, &mut report).unwrap();
+        let details: Vec<String> = report.records[..report.recorded as usize]
+            .iter()
+            .map(|r| describe(neon_table::TABLE, r))
+            .collect();
+        let min_per_entry = report.stats[..report.entries as usize]
+            .iter()
+            .map(|s| s.vectors)
+            .min()
+            .unwrap_or(0);
+        println!(
+            "heavy conformance (neon vs scalar, seed {SEED:#x}): {} ops, {} entries, {} vectors \
+             (at least {min_per_entry} per entry, {n_random} random), {} mismatches, {:.1?}",
+            distinct_ops(neon_table::TABLE),
+            report.entries,
+            report.vectors,
+            report.mismatches,
+            t0.elapsed()
+        );
+        assert_eq!(
+            report.mismatches,
+            0,
+            "conformance mismatches:\n{}",
+            details.join("\n")
+        );
+    }
+
     #[test]
     fn every_layer_item_has_a_conformance_entry() {
         let missing: Vec<&str> = crate::simd::LAYER_ITEMS
