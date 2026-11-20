@@ -132,7 +132,8 @@ layer_items!(layer_item_names!());
 #[cfg(any(not(target_arch = "wasm32"), feature = "simd-conformance"))]
 pub mod scalar;
 
-// Slot: `#[cfg(all(target_arch = "aarch64", target_feature = "neon"))] pub mod neon;`
+#[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+pub mod neon;
 // Slot: `#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3"))] pub mod sse;`
 
 #[cfg(any(test, feature = "simd-conformance"))]
@@ -145,11 +146,14 @@ pub mod conformance;
 #[cfg(target_arch = "wasm32")]
 layer_items!(reexport_layer!(core::arch::wasm32));
 
-// Slot (neon): `#[cfg(all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")))]`
-//              `layer_items!(reexport_layer!(self::neon));`
+#[cfg(all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")))]
+layer_items!(reexport_layer!(self::neon));
 // Slot (sse):  `#[cfg(all(target_arch = "x86_64", target_feature = "sse4.1", target_feature = "ssse3", not(feature = "simd-force-scalar")))]`
 //              `layer_items!(reexport_layer!(self::sse));`
 // When a slot is filled, add its condition to the `not(any(..))` of the scalar line.
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(any(
+    target_arch = "wasm32",
+    all(target_arch = "aarch64", target_feature = "neon", not(feature = "simd-force-scalar")),
+)))]
 layer_items!(reexport_layer!(self::scalar));
