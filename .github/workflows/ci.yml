@@ -29,10 +29,11 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y --no-install-recommends wabt ffmpeg
 
-      - name: Set up Rust stable with wasm32-unknown-unknown
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+      - name: Install the Rust toolchain pinned in rust-toolchain.toml
+        run: |
+          PINNED="$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml)"
+          rustup toolchain install "$PINNED" --profile minimal --target wasm32-unknown-unknown --no-self-update
+          rustc --version
 
       - name: Cache Cargo registry and target build artifacts
         uses: actions/cache@v4
@@ -42,7 +43,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-wasm32-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}
+          key: ${{ runner.os }}-cargo-wasm32-${{ hashFiles('rust-toolchain.toml', 'Cargo.toml', 'Cargo.lock', '.cargo/config.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-wasm32-
 
@@ -64,4 +65,5 @@ jobs:
         env:
           CHROME_BIN: /opt/google/chrome/chrome
           CI: "1"
+          CHRONOS_VERIFY_COMMITTED_WASM: "1"
         run: ./build.sh --e2e

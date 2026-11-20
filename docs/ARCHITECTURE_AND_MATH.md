@@ -90,9 +90,9 @@ Across each target's `64`-frame history ring (`HIST_RING_LEN = 64`), [src/physic
 
 When `K >= 7`, `chronos_post_tick` resamples each target's `hist_t_sec`-timestamped trajectory onto a uniform interval grid, projects displacements onto the principal covariance eigenvector, applies an analytically gain-equalized 15-tap Hamming-windowed FIR Hilbert filter centered at `[t - K]`, enforces a bi-directional turnaround-crossing periodicity gate (zero false frequencies on ballistic or highway trajectories), and forward-predicts phase across lookahead `K * dt` plus hardware WebAudio output latency.
 
-### Zero-unsafe continuum mechanics (`src/continuum_physics.rs`)
+### Continuum mechanics (`src/continuum_physics.rs`)
 
-Operating strictly in safe Rust (`0` `unsafe` tokens) over confirmed micro-tracks:
+Operating in safe Rust over confirmed micro-tracks, apart from `6` `unsafe` tokens (two unaligned `v128` loads and four raw index reads) inside the SIMD128 `k`-NN candidate scan `visit_knn_slice_full_noskip`:
 
 - **Sparse `k=6` strain graph & `SE(2)` rigid bodies:** Tracks persistent spatial neighborhoods (`rigid_streak >= 8`, edge strain `< 0.035`), extracts connected components of `>= 6` members via union-find, solves exact `2D` Procrustes rotations (`atan2`, `det = +1`) for up to `32` rigid bodies, and accumulates unwrapped $\omega$ (`rad/s`) and whole-component `SE(2)` RMSE.
 - **`40x22` Eulerian velocity, vorticity, and divergence:** Aggregates local velocities into normalized `40x22` spatial CSR bins (`FIELD_CELLS = 880`), using ridge-conditioned weighted least squares with minimum rank conditioning to compute $\nabla \mathbf{u}$, scalar vorticity $\zeta = \partial v/\partial x - \partial u/\partial y$, and divergence $\nabla \cdot \mathbf{u}$.
