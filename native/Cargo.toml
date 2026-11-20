@@ -1,0 +1,81 @@
+# Native (host) build of the kernel as a Rust library, for integration tests and host binaries.
+#
+# Why a second manifest: the root package must stay `crate-type = ["cdylib"]`. Adding "rlib"
+# there makes Cargo drop `-C lto=fat` for the whole unit (Cargo never runs LTO when a crate type
+# cannot be LTO'd, and rustc rejects `-C lto` together with an rlib output), which changes the
+# shipped `web/chronos_spectral.wasm`. This package compiles the very same `src/lib.rs` as an
+# `rlib` instead. It is its own workspace, so the root `Cargo.lock` is untouched.
+#
+# Build and test from the repository root (the root `.cargo/config.toml` defaults to wasm32):
+#   cargo test --manifest-path native/Cargo.toml --target host-tuple
+[package]
+name = "chronos_spectral_native"
+version = "3.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "chronos_spectral"
+path = "../src/lib.rs"
+crate-type = ["rlib"]
+# The crate's own unit tests (SIMD conformance and friends) run from the root package:
+# `cargo test --target host-tuple`.
+test = false
+doctest = false
+
+# CSTRACE replay driver: replays kernel traces recorded from the wasm build against this native
+# build and checks every return value and region digest bit for bit (docs/VERIFICATION_AND_BENCHMARKS.md,
+# "Native replay driver").
+[[bin]]
+name = "chronos_replay"
+path = "replay/main.rs"
+
+[dependencies]
+
+# Same feature names as the root package (the shared source refers to them). `native-lib` is on
+# by default: it omits the crate's `#[panic_handler]`, which the consuming `std` binary provides.
+[features]
+default = ["native-lib"]
+native-lib = []
+simd-force-scalar = []
+simd-conformance = []
+
+# Native release profile, chosen by measurement (docs/VERIFICATION_AND_BENCHMARKS.md, "Native
+# build configuration"): these are Cargo's defaults, spelled out so the choice is explicit. On
+# Apple M4 Pro over the 11 canonical workloads (3 interleaved rounds x 3 passes), the wasm's own
+# profile (fat LTO, codegen-units = 1, panic = "abort") was 0.5% slower in geometric mean and 2.2%
+# slower on the 1,200-target swarm in every round; codegen-units = 1 alone and
+# `-C target-cpu=native` gave no gain either (within +-1.4% per workload). None of these settings
+# changes results: Rust never contracts or reorders float operations at any opt-level or CPU, and
+# every configuration measured passes the 29-trace parity replay with 0 mismatches.
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+panic = "unwind"
+debug = false
+
+# The `release` code plus line tables and a .dSYM, for sampling profilers
+# (scripts/bench_profile.mjs). Debug info does not change code generation: every kernel function
+# has the same instructions as in `release` (same opcodes and registers; only addresses differ,
+# because a different profile changes Cargo's metadata hash and with it the code layout).
+# `node scripts/bench_profile.mjs --same-code <release bin> <profiling bin>` checks this.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+split-debuginfo = "packed"
+strip = "none"
+
+# Overflow checks and debug assertions (including core's UB precondition checks) on: arithmetic
+# that silently wraps in the release wasm panics here instead. `opt-level = 1` builds in about
+# two thirds of the release time and replays traces about as fast (`dev` is ~100x slower);
+# results are identical at every opt-level (Rust never contracts or reorders float operations).
+# The native parity gate (scripts/gate_native_parity.mjs) builds the replay driver with it.
+[profile.checked]
+inherits = "release"
+opt-level = 1
+overflow-checks = true
+debug-assertions = true
+
+[workspace]

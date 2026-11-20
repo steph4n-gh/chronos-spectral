@@ -14,7 +14,7 @@
 //! - Outputs apparent refractive displacement (`px`) and relative potential `Phi` (`px^2`); never
 //!   fabricates uncalibrated gas density or temperature without external optical/Gladstone-Dale constants.
 
-use core::arch::wasm32::{
+use crate::simd::{
     f32x4, f32x4_add, f32x4_extract_lane, f32x4_floor, f32x4_max, f32x4_min, f32x4_mul,
     f32x4_splat, f32x4_sqrt, f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat,
     f64x2_sqrt, f64x2_sub,

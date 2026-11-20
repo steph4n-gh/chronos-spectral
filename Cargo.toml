@@ -15,6 +15,25 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
+# Every feature is off by default: the shipped Wasm (`cargo build --release`) is built with none.
+[features]
+# Native builds only: use the portable scalar reference backend (`src/simd/scalar.rs`) even
+# where an arch-specific backend exists. It is the conformance oracle and the Miri target.
+simd-force-scalar = []
+# Adds the `chronos_simd_conformance_*` exports that run the SIMD conformance suite in-module,
+# comparing `core::arch::wasm32` against `simd::scalar`. Built by `scripts/gate_simd_conformance.mjs`
+# into its own target directory; never enabled for `web/chronos_spectral.wasm`.
+simd-conformance = []
+# Set by `native/Cargo.toml`, which compiles this same source as a native `rlib` for Rust
+# consumers (integration tests, host binaries). Such a build links into a `std` binary, so the
+# crate's own `#[panic_handler]` is omitted.
+native-lib = []
+
+# A native `no_std` cdylib cannot unwind (wasm32 aborts by default). Cargo ignores `panic` for
+# test targets, so `cargo test --target host-tuple` still uses the unwinding test harness.
+[profile.dev]
+panic = "abort"
+
 [profile.release]
 opt-level = 3
 lto = "fat"

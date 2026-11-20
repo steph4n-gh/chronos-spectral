@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::arch::wasm32::*;
+use crate::simd::*;
 
 #[inline(always)]
 pub fn morton2d_4x4(bx: usize, by: usize) -> usize {
@@ -22132,7 +22132,7 @@ pub unsafe fn eval_cam_coarse_tile_simd128(
     (best_sad, best_dx, best_dy)
 }
 
-#[target_feature(enable = "simd128")]
+#[cfg_attr(target_arch = "wasm32", target_feature(enable = "simd128"))]
 pub unsafe fn filter_bg_eval_mask_luma_simd128(
     bg_eval_mask: *mut u8,
     luma: *const f32,
