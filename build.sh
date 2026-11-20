@@ -2993,8 +2993,12 @@ echo "[Gate S] Running SIMD Layer Conformance (simd::scalar vs Wasm SIMD128 in V
 node scripts/gate_simd_conformance.mjs
 # Native host: the same conformance table (selected backend vs simd::scalar), scalar math vs std,
 # negative controls and coverage checks; then the native rlib build linked into a std test binary.
-RUSTFLAGS="-D warnings" cargo test --quiet --target host-tuple
-RUSTFLAGS="-D warnings" cargo test --quiet --manifest-path native/Cargo.toml --target host-tuple
+# `-D warnings` goes in as a `target.<cfg>.rustflags` entry, which Cargo joins with the ones in
+# .cargo/config.toml. A RUSTFLAGS variable would replace them, dropping the x86_64 SSSE3/SSE4.1
+# flags so that x86_64 hosts silently test simd::scalar instead of simd::sse.
+DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple
 echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance suite & native library link verified with zero warnings"
 
 CERT_PARTIAL=0
