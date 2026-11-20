@@ -14,9 +14,6 @@ use crate::simd::{
     f32x4, f32x4_add, f32x4_extract_lane, f32x4_gt, f32x4_lt, f32x4_mul, f32x4_nearest,
     f32x4_splat, f32x4_sub, f64x2_extract_lane, f64x2_splat, f64x2_sqrt, v128, v128_bitselect,
 };
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
 #[allow(unused_imports)]
 use crate::{
     fast_atan2f, fast_cosf, fast_expf, fast_log10f, fast_sinf,
@@ -1059,7 +1056,6 @@ fn build_weak_weights(sc: &mut PhysicsIdScratch, n: usize, center_t: f32, half_h
     if amp < 1.0e-6 { None } else { Some((i0, i1, amp)) }
 }
 
-
 #[inline(always)]
 fn fast_sin4_wasm(vx: v128) -> v128 {
     use core::f32::consts::{FRAC_PI_2, PI, TAU};
@@ -1092,7 +1088,6 @@ fn fast_sin4_wasm(vx: v128) -> v128 {
     f32x4_mul(a, poly)
 }
 
-
 #[inline(always)]
 fn hsum_f32x4_f64(v: v128) -> f64 {
     (f32x4_extract_lane::<0>(v) as f64)
@@ -1118,7 +1113,6 @@ fn eval_sinusoid_single(
         return (0.0, 999.0, 0.0);
     }
     let mut i = 0usize;
-
     let (mut sc_sum, mut ss_sum, mut scc_sum, mut scs_sum, mut sss_sum, mut b1_sum, mut b2_sum) = {
         let v_omega = f32x4_splat(omega);
         let v_hpi = f32x4_splat(core::f32::consts::FRAC_PI_2);
@@ -1154,10 +1148,6 @@ fn eval_sinusoid_single(
             hsum_f32x4_f64(v_b2),
         )
     };
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
     while i < lim {
         let (s_p, c_p) = fast_sin_cos(omega * t_arr[i]);
         let sf = s_p as f64;

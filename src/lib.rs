@@ -7810,7 +7810,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
     let mut flat_cnt = 0usize;
     let mut tot_cnt = 0usize;
     let mut y = 2usize;
-
     let (v_gthresh, v_cthresh, v_bg) = {
         use crate::simd::f32x4_splat;
         (f32x4_splat(0.003), f32x4_splat(0.012), f32x4_splat(bg_ref))
@@ -7820,7 +7819,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
         let row1 = row0 + frame_w;
         let mut x = 2usize;
         while x + 5 < frame_w {
-
             {
                 use crate::simd::{
                     f32x4_abs, f32x4_add, f32x4_le, f32x4_sub, i32x4_bitmask, v128, v128_and,
@@ -7841,20 +7839,6 @@ unsafe fn swarm_pan_flat_canvas_reject(
                 flat_cnt += (m as u32).count_ones() as usize;
                 tot_cnt += 4;
             }
-            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
             x += 4;
         }
         if tot_cnt - flat_cnt > max_non_flat {
@@ -12427,7 +12411,6 @@ fn update_physics_and_telemetry(
         a.telemetry[ti] = 0.0;
     }
 
-
     {
         use crate::simd::{f32x4_abs, f32x4_lt, f32x4_splat, v128, v128_and};
         const _: () = assert!(TELEMETRY_LEN % 4 == 0);
@@ -12446,12 +12429,6 @@ fn update_physics_and_telemetry(
             }
         }
     }
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
     true
 }
 

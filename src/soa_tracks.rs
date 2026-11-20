@@ -7,9 +7,6 @@
 
 use crate::simd::*;
 
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
 use crate::simd_ops::hsum_f32x4;
 use crate::{wasm_floorf, wasm_sqrt_f64, wasm_sqrtf};
 
@@ -1752,7 +1749,6 @@ fn cell_coord(pos: f32, inv_span_cells: f32, max_cell: usize) -> usize {
 
 /// Overflow-free 8x8 `i8` patch SAD using exact two's-complement `i8x16_max - i8x16_min` (`0..=254u8`).
 /// Summing all 4 pairwise-widened chunks in `u16x8` stays <= 2,040 (< 65,535) and defers the u32 widen.
-
 #[inline(always)]
 unsafe fn patch_8x8_sad_preloaded_i8_simd128(
     va0: v128,
@@ -1792,7 +1788,6 @@ unsafe fn patch_8x8_sad_preloaded_i8_simd128(
     i32x4_extract_lane::<0>(s2) as u32
 }
 
-
 #[inline(always)]
 pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
     unsafe {
@@ -1806,19 +1801,6 @@ pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
         )
     }
 }
-
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
 
 /// Inline minimum 2-adic distance across current & anchor signatures using hardware `clz`.
 #[inline(always)]
@@ -1839,7 +1821,6 @@ fn padic_min_inline(sig_curr: u32, sig_anc: u32, p_sig: u32) -> f32 {
 #[inline(always)]
 fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) {
     debug_assert!(x >= 2 && x + 2 < w && y >= 2 && (y + 3) * w <= luma.len());
-
     let (sxx, syy, sxy) = unsafe {
         let wi = w as isize;
         let lp = luma.as_ptr().offset((y as isize) * wi + (x as isize));
@@ -1898,42 +1879,6 @@ fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) 
         );
         (hsum_f32x4(vxx), hsum_f32x4(vyy), hsum_f32x4(vxy))
     };
-
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     let trace = sxx + syy;
     let det = sxx * syy - sxy * sxy;
     let noble = if trace > 1e-6 && det > 0.0 {
@@ -1947,7 +1892,6 @@ fn local_noble_corner(luma: &[f32], w: usize, x: usize, y: usize) -> (f32, f32) 
 /// Evaluates `det / trace` Noble cornerness across 4 consecutive pixels `[x..x+4]` using SIMD128,
 /// masking inactive lanes and using per-lane squared thresholds without taking `sqrt`.
 /// Caller guarantees `x >= 2`, `x + 5 < w`, `y >= 2`, and `(y + 3) * w <= luma.len()`.
-
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn local_noble_from_rows_4x(
@@ -2447,7 +2391,6 @@ fn extract_8x8_patch_and_sig_simd128(
         0u32
     };
 
-
     unsafe {
         let vfx = f32x4_splat(fx);
         let vfy = f32x4_splat(fy);
@@ -2590,128 +2533,6 @@ fn extract_8x8_patch_and_sig_simd128(
             | (haar_bits << 16)
             | b16_bits;
     }
-
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /// Samples opponent chroma `(rg, by)` directly from the `2x2` block around `(ix, iy)` in `rgba`.
@@ -2720,7 +2541,6 @@ fn sample_chroma_2x2_rgba(rgba: &[u8], w: usize, ix: usize, iy: usize) -> (f32, 
     let idx00 = (iy * w + ix) * 4;
     let idx01 = idx00 + w * 4;
     debug_assert!(idx01 + 8 <= rgba.len());
-
 
     unsafe {
         let rp = rgba.as_ptr();
@@ -2739,25 +2559,6 @@ fn sample_chroma_2x2_rgba(rgba: &[u8], w: usize, ix: usize, iy: usize) -> (f32, 
         let b = f32x4_extract_lane::<2>(rgba_f);
         return (r - g, 0.5 * (r + g) - b);
     }
-
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 }
 
 /// 1D quadratic parabolic sub-pixel offset `[-0.5, +0.5]` when `v0` is a true extremum.
@@ -2774,7 +2575,6 @@ fn parabolic_1d(vm: f32, v0: f32, vp: f32) -> f32 {
 #[inline(never)]
 fn refine_peak_subpixel_noble_packed(luma: &[f32], w: usize, ix: usize, iy: usize) -> u64 {
     // Polygon vertex / non-extremum shape: refine on 2D cornerness
-
     let (cl, cc, cr) = if ix >= 3 && ix + 5 <= w && iy >= 2 && (iy + 3) * w <= luma.len() {
         unsafe {
             let vc = f32x4_sqrt(local_noble_corner_4x(
@@ -2798,12 +2598,6 @@ fn refine_peak_subpixel_noble_packed(luma: &[f32], w: usize, ix: usize, iy: usiz
             local_noble_corner(luma, w, ix + 1, iy).0,
         )
     };
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
     let (ct, _) = local_noble_corner(luma, w, ix, iy - 1);
     let (cb, _) = local_noble_corner(luma, w, ix, iy + 1);
     let px = ix as f32 + parabolic_1d(cl, cc, cr);
@@ -2886,7 +2680,6 @@ fn count_occupied_cc_cells_simd128(cc_energy: &[f32]) -> u32 {
     let thresh = 0.01f32;
     let mut occ = 0u32;
     let mut i = 0usize;
-
     unsafe {
         let vth = f32x4_splat(thresh);
         let ptr = cc_energy.as_ptr();
@@ -3462,7 +3255,6 @@ pub fn extract_micro_peaks_simd128(
     extract_phase1c_patches(ms, luma, rgba, w, h, raw_heap_len);
 }
 
-
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_8px_pair(
@@ -3560,7 +3352,6 @@ unsafe fn eval_cand_8px_pair(
     mask
 }
 
-
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px_rows(
@@ -3623,7 +3414,6 @@ unsafe fn eval_cand_4px_rows(
     true
 }
 
-
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn eval_cand_4px(
@@ -3671,63 +3461,6 @@ unsafe fn eval_cand_4px(
     )
 }
 
-// [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
 unsafe fn extract_phase1a_3x3_max(
@@ -3746,7 +3479,6 @@ unsafe fn extract_phase1a_3x3_max(
 ) -> u64 {
     let x_limit = x_end - 1;
     let y_hi_bits = ((ym1 as u16) as u32) << 16;
-
     let mut vfloor = f32x4_splat(if (heap_state & 0x1_0000) != 0 { *raw_scores } else { 0.0 });
     let mut w_idx = 0usize;
     while w_idx < 3 {
@@ -3760,7 +3492,6 @@ unsafe fn extract_phase1a_3x3_max(
             let b = bits.trailing_zeros() as usize;
             bits &= bits - 1;
             let cx4 = base_x + (b << 2);
-
 
             {
                 let p_mid = sp.add(r_mid + cx4);
@@ -3810,36 +3541,6 @@ unsafe fn extract_phase1a_3x3_max(
                     }
                 }
             }
-            // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         }
         w_idx += 1;
     }
@@ -3927,7 +3628,6 @@ pub fn extract_phase1a_raw(
     };
     let min_c_eca_2 = min_c_eca * min_c_eca;
     let min_c_trem_2 = min_c_trem * min_c_trem;
-
     let (vadapt, vtrem, mut v_score_floor, mut v_safe_floor) = (
         f32x4_splat(adaptive_floor),
         f32x4_splat(tremor_floor),
@@ -3964,7 +3664,6 @@ pub fn extract_phase1a_raw(
         } else {
             let dirty = cur_m0.count_ones() + cur_m1.count_ones() + cur_m2.count_ones();
             if dirty != 0 {
-
                 if dirty <= 16 {
                     unsafe {
                         let vzero_sr = f32x4_splat(0.0);
@@ -3993,13 +3692,8 @@ pub fn extract_phase1a_raw(
                         core::ptr::write_bytes(sr_base.add(cur_off), 0, w);
                     }
                 }
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
             }
         }
-
 
         unsafe {
             let eca_p = eca_base.add(row_off);
@@ -4124,93 +3818,6 @@ pub fn extract_phase1a_raw(
                 x += 4;
             }
         }
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
         cur_m0 = cm0;
         cur_m1 = cm1;
         cur_m2 = cm2;
@@ -4232,7 +3839,6 @@ pub fn extract_phase1a_raw(
                     mid_m1,
                     mid_m2,
                 );
-
                 if (heap_state & 0x1_0000) != 0 {
                     let fl = *raw_scores_p;
                     v_score_floor = f32x4_splat(fl);
@@ -4683,7 +4289,6 @@ pub fn imm_predict_micro_simd128(
     let inv_w_255 = 255.0 / (w as f32);
     let inv_h_255 = 255.0 / (h as f32);
 
-
     unsafe {
         let v_pan_x = f32x4_splat(pan_dx_f);
         let v_pan_y = f32x4_splat(pan_dy_f);
@@ -4844,56 +4449,6 @@ pub fn imm_predict_micro_simd128(
             blk += 1;
         }
     }
-
-    // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     // Collect active slots (deactivating any corrupted non-finite slot) & sort by Morton order
     let mut act_n = 0usize;
@@ -5358,11 +4913,8 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
     let idx_ptr = ms.cell_pidx.as_ptr();
     let prelim_ptr = ms.prelim_cands.as_mut_ptr();
 
-
     let v_px = f32x4_splat(px);
-
     let v_py = f32x4_splat(py);
-
     let mut v_d2_lim = f32x4_splat(d2_lim);
 
     macro_rules! push_stage1_hit {
@@ -5381,7 +4933,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                         i0 = idx_val;
                         if d2 < tight_hit_d2 && tight_cap_d2 < d2_lim {
                             d2_lim = tight_cap_d2;
-
                             {
                                 v_d2_lim = f32x4_splat(d2_lim);
                             }
@@ -5398,7 +4949,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                     prelim_len += 1;
                     if prelim_len == 3 && d2v < d2_lim {
                         d2_lim = d2v;
-
                         {
                             v_d2_lim = f32x4_splat(d2_lim);
                         }
@@ -5414,7 +4964,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                         i0 = idx_val;
                         if d2 < tight_hit_d2 && tight_cap_d2 < d2_lim {
                             d2_lim = tight_cap_d2;
-
                             {
                                 v_d2_lim = f32x4_splat(d2_lim);
                             }
@@ -5430,7 +4979,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                     }
                     if d2v < d2_lim {
                         d2_lim = d2v;
-
                         {
                             v_d2_lim = f32x4_splat(d2_lim);
                         }
@@ -5445,7 +4993,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
                 ki,
                 d2,
             ) {
-
                 {
                     v_d2_lim = f32x4_splat(d2_lim);
                 }
@@ -5481,7 +5028,6 @@ unsafe fn gather_csr_stage1_track<const TOP3: bool>(
         ($s_expr:expr, $e_expr:expr) => {{
             let mut k = $s_expr;
             let e = ($e_expr).min(MAX_MICRO_PEAKS);
-
             while k + 4 <= e {
                 let vx = core::ptr::read_unaligned(px_ptr.add(k) as *const v128);
                 let vy = core::ptr::read_unaligned(py_ptr.add(k) as *const v128);
@@ -5673,9 +5219,7 @@ unsafe fn gather_csr_stage2_track(
     let csr_peak_ptr = ms.csr_peak_idx.as_mut_ptr();
 
     let tpl_t = &*track_tpl_ptr.add(ti);
-
     let mut tpl_loaded = false;
-
     let (mut t0, mut t1, mut t2, mut t3) = {
         let z = i8x16_splat(0);
         (z, z, z, z)
@@ -5714,7 +5258,6 @@ unsafe fn gather_csr_stage2_track(
             continue;
         }
 
-
         let sad = {
             if !tpl_loaded {
                 let pa = tpl_t.as_ptr() as *const v128;
@@ -5732,8 +5275,6 @@ unsafe fn gather_csr_stage2_track(
                 &*peak_tpl_ptr.add(pi),
             )
         };
-        // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
         if coast == 0 && sad > 1966 {
             continue;
         }
@@ -5876,7 +5417,6 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
             if ph > 0 {
                 let eps_prev = eps_phases[ph - 1];
                 let relax = eps_prev + (eps_prev >> 2);
-
                 let mut j = {
                     let vrelax = i32x4_splat(relax);
                     let vzero = i32x4_splat(0);
@@ -5891,8 +5431,6 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
                     }
                     j
                 };
-                // [simd-layer] non-wasm fallback removed; blank lines keep Wasm panic line numbers
-
                 while j < num_peaks {
                     let p = (*peak_price_ptr.add(j)).saturating_sub(relax);
                     *peak_price_ptr.add(j) = if p > 0 { p } else { 0 };
@@ -6274,7 +5812,6 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
 
 /// Evaluates 8x8 bilinearly warped patch at `(cx, cy)` and accumulates true Huber IRLS
 /// objective, L1 mean residual, Hessian `(H_xx, H_xy, H_yy)`, and gradient residual `(b_x, b_y)`.
-
 #[inline(never)]
 fn eval_lk_patch_wasm<const NEED_GRAD: bool, const ROWS4: bool>(
     luma: &[f32],
