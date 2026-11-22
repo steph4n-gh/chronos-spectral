@@ -117,6 +117,54 @@ pub unsafe extern "C" fn chronos_engine_set_hodge_mode(
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn chronos_engine_set_wind_mode(
+    handle: *mut ChronosEngineHandle,
+    mode: u32,
+) -> u32 {
+    match (handle as *mut ChronosEngine).as_mut() {
+        Some(eng) => eng.set_wind_mode(mode),
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_engine_set_wind_fluid_density(
+    handle: *mut ChronosEngineHandle,
+    rho_kg_m3: f32,
+) -> u32 {
+    match (handle as *mut ChronosEngine).as_mut() {
+        Some(eng) => eng.set_wind_fluid_density(rho_kg_m3),
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_engine_set_elasto_mode(
+    handle: *mut ChronosEngineHandle,
+    mode: u32,
+) -> u32 {
+    match (handle as *mut ChronosEngine).as_mut() {
+        Some(eng) => eng.set_elasto_mode(mode),
+        None => 0,
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_engine_set_elasto_lock_freqs(
+    handle: *mut ChronosEngineHandle,
+    count: u32,
+    f0: f32,
+    f1: f32,
+    f2: f32,
+    f3: f32,
+) -> u32 {
+    match (handle as *mut ChronosEngine).as_mut() {
+        Some(eng) => eng.set_elasto_lock_freqs(count, f0, f1, f2, f3),
+        None => 0,
+    }
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn chronos_engine_set_depth_mode(
     handle: *mut ChronosEngineHandle,
     mode: u32,
@@ -339,7 +387,7 @@ pub unsafe extern "C" fn chronos_engine_ingest_rgba_mut_ptr(
     buf.as_mut_ptr()
 }
 
-/// Zero-copy read-only field view (`kind`: 0..=19; see `ChronosFieldKind` in `chronos.h`).
+/// Zero-copy read-only field view (`kind`: 0..=24; see `ChronosFieldKind` in `chronos.h`).
 #[no_mangle]
 pub unsafe extern "C" fn chronos_engine_field_view(
     handle: *const ChronosEngineHandle,

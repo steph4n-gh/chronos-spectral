@@ -1316,8 +1316,8 @@ async function main() {
         };
       })()`
     );
-    if (selectMeta.optgroups !== 5 || selectMeta.options !== 23) {
-      throw new Error(`Expected 5 <optgroup> and 23 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (selectMeta.optgroups !== 7 || selectMeta.options !== 36) {
+      throw new Error(`Expected 7 <optgroup> and 36 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);
@@ -6834,6 +6834,148 @@ async function main() {
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: v32TargetId }).catch(() => {});
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 12: v3.3.0 Interactive Mode Demos (Pocket Wind Tunnel Cp + Lift/Drag,
+    //          kHz Optical Elastography Crack Panel & 1.2 kHz Lock-In Acoustic BOS)
+    // ------------------------------------------------------------------------
+    {
+      const { targetId: v33TargetId } = await cdp.send('Target.createTarget', {
+        url: new URL('/index.html?view=deck', appUrl).href,
+      });
+      const { sessionId: v33Session } = await cdp.send('Target.attachToTarget', {
+        targetId: v33TargetId,
+        flatten: true,
+      });
+      try {
+        await cdp.send('Page.enable', {}, v33Session);
+        await cdp.send('Runtime.enable', {}, v33Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+          v33Session
+        );
+        await waitForCondition(
+          cdp,
+          v33Session,
+          'v3.3.0 demos deck boot ready',
+          `(() => {
+            const btnW = document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]');
+            const btnE = document.querySelector('.showcase-btn[data-showcase="elasto_crack"]');
+            const btnA = document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]');
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            return {
+              ok: Boolean(btnW && btnE && btnA && w2 && w2.available === true && w2.wind?.available && w2.elasto?.available),
+              avail: Boolean(w2?.available),
+              windAvail: Boolean(w2?.wind?.available),
+              elastoAvail: Boolean(w2?.elasto?.available),
+            };
+          })()`,
+          20000
+        );
+        await cdp.evalJs(
+          v33Session,
+          `(() => {
+            window.__e2eV33Cls = 0;
+            window.__e2eV33ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eV33Cls += e.value;
+              }
+            });
+            window.__e2eV33ClsPo.observe({ type: 'layout-shift', buffered: false });
+            return true;
+          })()`
+        );
+
+        // 12a. Pocket Wind Tunnel: Lifting Cylinder Cp & Kutta-Joukowski Lift/Drag
+        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]')?.click(); true;`);
+        const wtState = await waitForCondition(
+          cdp,
+          v33Session,
+          'wind_lifting_cyl READY_LOADS with Cp + Kutta-Joukowski lift',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const w = w2 && w2.wind;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(w && w.state === 3 && w.validCells >= 1200 && Math.abs(w.cl) > 1.5 && Math.abs(w.clKj) > 1.5 && om === 13),
+              state: w ? w.state : 0,
+              cells: w ? w.validCells : 0,
+              cl: w ? w.cl : 0,
+              cd: w ? w.cd : 0,
+              clKj: w ? w.clKj : 0,
+              om,
+            };
+          })()`,
+          30000
+        );
+
+        // 12b. kHz Optical Elastography: Hidden Crack Panel (380+860 Hz Kirchhoff Plate)
+        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="elasto_crack"]')?.click(); true;`);
+        const elState = await waitForCondition(
+          cdp,
+          v33Session,
+          'elasto_crack READY KIRCHHOFF_PLATE via muxed 48 kHz audio',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const e = w2 && w2.elasto;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(e && e.state === 3 && e.dispClass === 1 && e.alpha > 0.35 && e.alpha < 0.72 && e.meanCoh > 0.75 && e.validCells >= 1500 && om === 14),
+              state: e ? e.state : 0,
+              cls: e ? e.dispClass : 0,
+              alpha: e ? e.alpha : 0,
+              medC: e ? e.medC : 0,
+              coh: e ? e.meanCoh : 0,
+              cells: e ? e.validCells : 0,
+              reason: e ? e.reasonMask : 0,
+              om,
+            };
+          })()`,
+          30000
+        );
+
+        // 12c. Lock-In Acoustic BOS: 1,200 Hz Standing Wave (256x128 |Phi|)
+        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]')?.click(); true;`);
+        const abosState = await waitForCondition(
+          cdp,
+          v33Session,
+          'acoustic_bos READY 256x128 |Phi| via muxed 48 kHz audio',
+          `(() => {
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const e = w2 && w2.elasto;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(e && e.state === 3 && e.mode === 4 && e.abosPhiRms > 0.15 && e.abosCurlRms < 0.08 && e.validCells >= 16000 && om === 15),
+              state: e ? e.state : 0,
+              mode: e ? e.mode : 0,
+              phiRms: e ? e.abosPhiRms : 0,
+              curlRms: e ? e.abosCurlRms : 0,
+              cells: e ? e.validCells : 0,
+              reason: e ? e.reasonMask : 0,
+              om,
+            };
+          })()`,
+          30000
+        );
+
+        const v33Cls = await cdp.evalJs(
+          v33Session,
+          `(() => {
+            if (window.__e2eV33ClsPo) window.__e2eV33ClsPo.disconnect();
+            return window.__e2eV33Cls || 0;
+          })()`
+        );
+        if (v33Cls >= 0.000001) {
+          throw new Error(`Step 12: Expected 0.000000 CLS across v3.3.0 interactive demos, got ${v33Cls}`);
+        }
+        console.log(
+          `  [PASS] Step 12 (v3.3.0 Wind Tunnel, kHz Elastography & Acoustic BOS): wind=(CL=${wtState.cl.toFixed(2)}, KJ=${wtState.clKj.toFixed(2)}, cells=${wtState.cells}), elasto=(KIRCHHOFF, a=${elState.alpha.toFixed(2)}, c=${Math.round(elState.medC)}, coh=${elState.coh.toFixed(2)}), abos=(|Phi|=${abosState.phiRms.toFixed(3)}, curl=${abosState.curlRms.toFixed(3)}, cells=${abosState.cells}), CLS=${v33Cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: v33TargetId }).catch(() => {});
       }
     }
 

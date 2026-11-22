@@ -1016,6 +1016,7 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
             && sx + span + margin <= (frame_w as i32)
             && sy + span + margin <= (frame_h as i32)
     };
+    let wind_lab_lock = a.wind.get_mode() != crate::wind_tunnel::WIND_MODE_OFF;
     let mut changed_tiles = 0u32;
     let mut uniform_tiles = 0u32;
     let mut anchored_2d_tiles = 0u32;
@@ -1092,7 +1093,7 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
             }
             changed_tiles += 1;
 
-            let want_pan = tex_mad > 0.006 && iso2d && g_l1 > 0.18;
+            let want_pan = !wind_lab_lock && tex_mad > 0.006 && iso2d && g_l1 > 0.18;
             let want_cut = zero_sad > 0.055;
             if !want_pan && !want_cut {
                 continue;
@@ -1223,7 +1224,7 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
     let mut coast_only_pan = false;
     let swarm_pan_guard = a.swarm_mode_cached != 0 && a.micro_swarm.swarm_active != 0;
 
-    if best_cluster >= 5 {
+    if !wind_lab_lock && best_cluster >= 5 {
         est_dx = round_f(sum_cx * (2.0 * s));
         est_dy = round_f(sum_cy * (2.0 * s));
         let max_ref_patches = if swarm_pan_guard && best_cluster >= 6 && a.cam_pan_streak >= 2 {
@@ -1263,7 +1264,8 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
         }
         have_pan_candidate = n_patches >= 2;
         have_int_consensus = have_pan_candidate;
-    } else if hard_cut_tiles < 8
+    } else if !wind_lab_lock
+        && hard_cut_tiles < 8
         && subtle_tiles >= 5
         && (!swarm_pan_guard || uniform_tiles < 9)
         && !(swarm_pan_guard && a.cam_pan_streak == 0 && stat_tiles >= 6)
@@ -1500,7 +1502,7 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
     let mut sp_cand_cnt = 0usize;
     let mut sp_cand_bx = [0usize; 16];
     let mut sp_cand_by = [0usize; 16];
-    if !swarm_pan_guard && !have_pan_candidate && hard_cut_tiles < 8 && uniform_tiles >= 9 && anchored_2d_tiles == 0 {
+    if !wind_lab_lock && !swarm_pan_guard && !have_pan_candidate && hard_cut_tiles < 8 && uniform_tiles >= 9 && anchored_2d_tiles == 0 {
         const PREV_WIN_OFF: usize = 4608;
         let prev_rgba = &a.rgba_ring[slot_prev];
         let f_r = 6 * (scale_px as i32);
@@ -1675,7 +1677,8 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
     }
 
     let mut from_pan_fallback = false;
-    if !have_pan_candidate
+    if !wind_lab_lock
+        && !have_pan_candidate
         && a.cam_pan_streak >= 1
         && anchored_2d_tiles == 0
         && (!swarm_pan_guard || uniform_tiles < 9)
@@ -2741,6 +2744,7 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
     // and zero 2D-textured background tiles remained anchored (skipped during active micro-swarms
     // where 1,000+ moving foreground particles saturate tiles without camera motion).
     if f_idx >= 2
+        && !wind_lab_lock
         && a.micro_swarm.swarm_active == 0
         && anchored_2d_tiles == 0
         && stat_tiles <= 4
@@ -2960,8 +2964,13 @@ pub(crate) unsafe fn detect_camera_motion_coarse(
     a.last_pan_dy = 0;
     a.hist_cam_x[(f_idx as usize) & HIST_MASK] = a.cum_cam_x;
     a.hist_cam_y[(f_idx as usize) & HIST_MASK] = a.cum_cam_y;
-    a.cam_pan_streak = a.cam_pan_streak.saturating_sub(1);
-    a.cam_pan_speed_px_s *= 0.65;
+    if wind_lab_lock {
+        a.cam_pan_streak = 0;
+        a.cam_pan_speed_px_s = 0.0;
+    } else {
+        a.cam_pan_streak = a.cam_pan_streak.saturating_sub(1);
+        a.cam_pan_speed_px_s *= 0.65;
+    }
     let cut_hold_next = cut_hold_in.saturating_sub(1);
     if cut_hold_next > 0 {
         a.cam_motion_state = 2;

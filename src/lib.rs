@@ -17,6 +17,8 @@ use lanczos::solve_fiedler_jacobi_16x16;
 #[allow(dead_code)]
 pub(crate) mod hodge;
 pub(crate) mod depth;
+pub(crate) mod wind_tunnel;
+pub(crate) mod elastography;
 
 use crate::simd::{
     f32x4_abs, f32x4_add, f32x4_div, f32x4_extract_lane, f32x4_floor, f32x4_ge, f32x4_gt,
@@ -45,13 +47,13 @@ fn linked_static_end_bytes() -> u32 {
 }
 
 /// Region addresses are part of the audited ABI. `ARENA` is the wasm's only `.bss` symbol and
-/// the linker places it directly after `.rodata`, so its address (`84,400`, ABI-v2 layout)
+/// the linker places it directly after `.rodata`, so its address (`88,000`, ABI-v3 layout)
 /// is `16,384 + size of .rodata`. Kernel changes add or remove panic `Location`s and
-/// strings, which changes `.rodata`; this padding keeps it at exactly `68,016` bytes. `build.sh`
-/// fails if the `.rodata` end is not `84,400` and prints the size to set here. Not used by any
+/// strings, which changes `.rodata`; this padding keeps it at exactly `71,616` bytes. `build.sh`
+/// fails if the `.rodata` end is not `88,000` and prints the size to set here. Not used by any
 /// code; `#[used]` keeps it in the binary.
 #[cfg(target_arch = "wasm32")]
-const RODATA_PAD_BYTES: usize = 16;
+const RODATA_PAD_BYTES: usize = 576;
 #[cfg(target_arch = "wasm32")]
 #[used]
 static RODATA_PAD: [u8; RODATA_PAD_BYTES] = [0xA5; RODATA_PAD_BYTES];
@@ -880,6 +882,16 @@ pub const PROD_W2_VIBRO: usize = 0;
 pub const PROD_W2_HODGE: usize = 1;
 pub const PROD_W2_CONSERVATION: usize = 2;
 pub const PROD_W2_DEPTH: usize = 3;
+pub const PROD_W2_WIND: usize = 4;
+pub const PROD_W2_ELASTO: usize = 5;
+
+// Strict mutual-exclusion ownership tags for `BosState`'s `f64` solver scratch planes
+pub(crate) const BOS_OWNER_NONE: u8 = 0;
+pub(crate) const BOS_OWNER_THERMAL: u8 = 1;
+pub(crate) const BOS_OWNER_DEPTH_STEREO: u8 = 2;
+pub(crate) const BOS_OWNER_WIND_TUNNEL: u8 = 3;
+pub(crate) const BOS_OWNER_ELASTO_SURFACE: u8 = 4;
+pub(crate) const BOS_OWNER_ELASTO_ACOUSTIC_BOS: u8 = 5;
 
 const CTRL_PENDING_VALID: usize = 0;
 const CTRL_TICK_PHASE: usize = 1;
@@ -1146,6 +1158,13 @@ pub struct Arena {
     pub fovea: FoveaState,
     /// Zero-ML Depth Sensing, FoE/TTC, Stereo Bridge & External Depth-Plane ABI state (appended at Arena tail).
     pub depth: depth::DepthState,
+    /// Pocket Wind Tunnel: Optical Pressure, Lift/Drag & Navier-Stokes Viscosity state (appended at Arena tail).
+    pub wind: wind_tunnel::WindTunnelState,
+    /// kHz Optical Elastography, Structural Power Flow & Lock-In Acoustic BOS state (appended at Arena tail).
+    pub elasto: elastography::ElastoState,
+    /// Strict mutual-exclusion scratch owner for `BosState.solve_*` (`0=NONE..5=ELASTO_ACOUSTIC_BOS`).
+    pub bos_scratch_owner: u8,
+    pub _pad_v33: [u8; 15],
 }
 
 /// Per-target occlusion-freeze & support sidecar (appended at Arena tail so all v3.1.0 offsets stay fixed).
@@ -4240,7 +4259,7 @@ fn invalidate_all_wave1_stamps(wave1_telem: &mut [u32; WAVE1_TELEM_LEN]) {
 #[inline(always)]
 fn invalidate_stale_wave2_stamps(wave2_telem: &mut [u32; WAVE2_TELEM_LEN], cur_cont_ep: u32) {
     let mut i = 0usize;
-    while i < 4 {
+    while i < 6 {
         let base = WAVE2_PRODUCT_STAMPS_START + i * STAMP_STRIDE;
         if (wave2_telem[base] & STAMP_VALID) != 0 && wave2_telem[base + 1] != cur_cont_ep {
             set_stamp_invalid(wave2_telem, base);
@@ -4362,16 +4381,59 @@ fn wave2_enabled_bits(a: &Arena) -> u32 {
         8
     } else {
         0
+    }) | (if a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF {
+        16
+    } else {
+        0
+    }) | (if a.elasto.get_mode() != elastography::ELASTO_MODE_OFF {
+        32
+    } else {
+        0
     })
 }
 
 #[inline(always)]
 fn invalidate_all_wave2_stamps(wave2_telem: &mut [u32; WAVE2_TELEM_LEN]) {
     let mut i = 0usize;
-    while i < 4 {
+    while i < 6 {
         set_stamp_invalid(wave2_telem, WAVE2_PRODUCT_STAMPS_START + i * STAMP_STRIDE);
         i += 1;
     }
+}
+
+#[inline(never)]
+pub(crate) fn transition_bos_scratch_owner(a: &mut Arena, desired: u8) {
+    if a.bos_scratch_owner == desired {
+        return;
+    }
+    let prev = a.bos_scratch_owner;
+    a.bos.clear_solver_scratch();
+    if prev == BOS_OWNER_DEPTH_STEREO && desired != BOS_OWNER_DEPTH_STEREO {
+        a.bos.invalidate_stereo_ref();
+    }
+    if prev == BOS_OWNER_WIND_TUNNEL && desired != BOS_OWNER_WIND_TUNNEL {
+        a.wind.fast_count = 0;
+        a.wind.fast_head = 0;
+        a.wind.slow_count = 0;
+        a.wind.slow_head = 0;
+        a.wind.box_frames = 0;
+        a.wind.box_t_sum = 0.0;
+    }
+    if (prev == BOS_OWNER_ELASTO_SURFACE || prev == BOS_OWNER_ELASTO_ACOUSTIC_BOS)
+        && prev != desired
+    {
+        a.elasto.reset_runtime(0);
+        a.bos.planes.fill(0.0);
+        a.bos.valid_mask.fill(0);
+        a.bos.w_x.fill(0.0);
+        a.bos.w_y.fill(0.0);
+        a.bos.ref_noise_var.fill(0.0);
+        a.bos.clear_streak.fill(0);
+        if desired != BOS_OWNER_DEPTH_STEREO {
+            a.bos.reset_keep_config();
+        }
+    }
+    a.bos_scratch_owner = desired;
 }
 
 #[inline(never)]
@@ -4443,6 +4505,9 @@ pub(crate) unsafe fn init_on(a: &mut Arena) {
     a.vibro.reset_all();
     a.hodge.reset();
     a.depth.reset_all();
+    a.wind.reset_all();
+    a.elasto.init_in_place();
+    a.bos_scratch_owner = BOS_OWNER_NONE;
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
@@ -4573,6 +4638,9 @@ pub(crate) unsafe fn reset_tracks_on(a: &mut Arena) {
     a.vibro.reset_continuity(0);
     a.hodge.reset_keep_mode();
     a.depth.reset_temporal_keep_config();
+    a.wind.reset_temporal_keep_config();
+    a.elasto.reset_keep_config();
+    a.bos_scratch_owner = BOS_OWNER_NONE;
     a.lanczos_scratch.prev_track = [0.0; MAX_TARGETS];
     a.lanczos_scratch.last_lambda2 = 0.0;
     a.lanczos_scratch.last_n = 0;
@@ -4873,6 +4941,7 @@ pub(crate) unsafe fn set_swarm_mode_on(a: &mut Arena, mode: u32) {
         a.inspected_micro_tid_pin = 0;
         a.swarm_telem_zeroed = 1;
         a.hodge.reset_keep_mode();
+        a.wind.reset_temporal_keep_config();
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_MICRO * STAMP_STRIDE);
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_GRAD * STAMP_STRIDE);
         set_stamp_invalid(&mut a.wave1_telem, WAVE1_PRODUCT_STAMPS_START + PROD_FTLE * STAMP_STRIDE);
@@ -4880,6 +4949,10 @@ pub(crate) unsafe fn set_swarm_mode_on(a: &mut Arena, mode: u32) {
         set_stamp_invalid(
             &mut a.wave2_telem,
             WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE,
+        );
+        set_stamp_invalid(
+            &mut a.wave2_telem,
+            WAVE2_PRODUCT_STAMPS_START + PROD_W2_WIND * STAMP_STRIDE,
         );
         unsafe {
             release_wave1_owned_auto_heroes(a, a.frame_idx.saturating_sub(1), mode_dims(a.res_mode).6);
@@ -5550,6 +5623,153 @@ pub unsafe extern "C" fn chronos_hodge_solve_injected(grid_dx: f32, grid_dy: f32
         WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE,
     );
     a.hodge.solve_injected(grid_dx, grid_dy)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn set_wind_mode_on(a: &mut Arena, mode: u32) -> u32 {
+    let ok = a.wind.set_mode(mode);
+    if ok != 0 {
+        a.wave2_telem[2] = wave2_enabled_bits(a);
+        if a.wind.get_mode() == wind_tunnel::WIND_MODE_OFF {
+            if a.bos_scratch_owner == BOS_OWNER_WIND_TUNNEL {
+                transition_bos_scratch_owner(a, BOS_OWNER_NONE);
+            }
+            set_stamp_invalid(
+                &mut a.wave2_telem,
+                WAVE2_PRODUCT_STAMPS_START + PROD_W2_WIND * STAMP_STRIDE,
+            );
+        }
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_wind_mode(mode: u32) -> u32 {
+    set_wind_mode_on(arena_mut(), mode)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn set_wind_fluid_density_on(a: &mut Arena, rho_kg_m3: f32) -> u32 {
+    a.wind.set_fluid_density(rho_kg_m3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_wind_fluid_density(rho_kg_m3: f32) -> u32 {
+    set_wind_fluid_density_on(arena_mut(), rho_kg_m3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_wind_telemetry_ptr() -> *const u32 {
+    arena_mut().wind.telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_wind_planes_ptr() -> *const f32 {
+    arena_mut().wind.planes_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_wind_solve_injected(
+    grid_dx: f32,
+    grid_dy: f32,
+    t_sec: f64,
+) -> u32 {
+    let a = arena_mut();
+    a.wind.live_ready = 0;
+    set_stamp_invalid(
+        &mut a.wave2_telem,
+        WAVE2_PRODUCT_STAMPS_START + PROD_W2_WIND * STAMP_STRIDE,
+    );
+    let bos_busy = a.bos.get_mode() != bos::BOS_MODE_OFF
+        || a.depth.get_mode() == depth::DEPTH_MODE_STEREO_BOS
+        || a.elasto.get_mode() != elastography::ELASTO_MODE_OFF;
+    if !bos_busy {
+        transition_bos_scratch_owner(a, BOS_OWNER_WIND_TUNNEL);
+    }
+    let has_scratch = !bos_busy && a.bos_scratch_owner == BOS_OWNER_WIND_TUNNEL;
+    let cont_ep = a.wave1_telem[6];
+    let f_idx = a.frame_idx;
+    let ok = a.wind.step(
+        &mut a.hodge,
+        &mut a.bos,
+        &a.continuum.export_field,
+        &a.continuum.export_bodies,
+        grid_dx as f64,
+        grid_dy as f64,
+        t_sec,
+        cont_ep,
+        f_idx,
+        has_scratch,
+        false,
+    );
+    if ok {
+        1
+    } else {
+        0
+    }
+}
+
+#[inline(always)]
+pub(crate) unsafe fn set_elasto_mode_on(a: &mut Arena, mode: u32) -> u32 {
+    let ok = a.elasto.set_mode(mode);
+    if ok != 0 {
+        a.wave2_telem[2] = wave2_enabled_bits(a);
+        if a.elasto.get_mode() == elastography::ELASTO_MODE_OFF {
+            if a.bos_scratch_owner == BOS_OWNER_ELASTO_SURFACE
+                || a.bos_scratch_owner == BOS_OWNER_ELASTO_ACOUSTIC_BOS
+            {
+                transition_bos_scratch_owner(a, BOS_OWNER_NONE);
+            }
+            set_stamp_invalid(
+                &mut a.wave2_telem,
+                WAVE2_PRODUCT_STAMPS_START + PROD_W2_ELASTO * STAMP_STRIDE,
+            );
+        }
+    }
+    ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_elasto_mode(mode: u32) -> u32 {
+    set_elasto_mode_on(arena_mut(), mode)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn set_elasto_lock_freqs_on(
+    a: &mut Arena,
+    count: u32,
+    f0: f32,
+    f1: f32,
+    f2: f32,
+    f3: f32,
+) -> u32 {
+    a.elasto.set_lock_freqs(count, f0, f1, f2, f3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_set_elasto_lock_freqs(
+    count: u32,
+    f0: f32,
+    f1: f32,
+    f2: f32,
+    f3: f32,
+) -> u32 {
+    set_elasto_lock_freqs_on(arena_mut(), count, f0, f1, f2, f3)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_elasto_telemetry_ptr() -> *const u32 {
+    arena_mut().elasto.get_telemetry_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_elasto_planes_ptr() -> *const f32 {
+    arena_mut().bos.get_planes_ptr()
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_get_elasto_valid_ptr() -> *const u8 {
+    arena_mut().bos.get_valid_ptr()
 }
 
 #[no_mangle]
@@ -6922,6 +7142,7 @@ pub(crate) unsafe fn pre_tick_on(a: &mut Arena, dt_sec: f32) {
             0
         });
         a.hodge.reset_keep_mode();
+        a.elasto.reset_keep_config();
         a.collision_state.conservation.reset_continuity();
     }
     a.wave2_telem[3] = meta.continuity_epoch;
@@ -14328,6 +14549,21 @@ pub(crate) unsafe fn post_tick_on(a: &mut Arena, dt_sec: f32) -> u32 {
             && a.depth.calib_baseline_m >= 1e-4
             && a.bos.has_fresh_stereo_ref(frame_w, frame_h, f_idx, meta_in_ep));
 
+    let desired_bos_owner = if stereo_owns_bos {
+        BOS_OWNER_DEPTH_STEREO
+    } else if a.bos.get_mode() != bos::BOS_MODE_OFF {
+        BOS_OWNER_THERMAL
+    } else if a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF {
+        BOS_OWNER_WIND_TUNNEL
+    } else if a.elasto.get_mode() == elastography::ELASTO_MODE_ACOUSTIC_BOS {
+        BOS_OWNER_ELASTO_ACOUSTIC_BOS
+    } else if a.elasto.get_mode() != elastography::ELASTO_MODE_OFF {
+        BOS_OWNER_ELASTO_SURFACE
+    } else {
+        BOS_OWNER_NONE
+    };
+    transition_bos_scratch_owner(a, desired_bos_owner);
+
     let bos_ran = if !stereo_owns_bos && a.bos.get_mode() != bos::BOS_MODE_OFF {
         let meta = a.ring_meta[slot_in];
         let ext_scene_cut =
@@ -14386,7 +14622,7 @@ pub(crate) unsafe fn post_tick_on(a: &mut Arena, dt_sec: f32) -> u32 {
         false
     };
 
-    let (hodge_ran, hodge_grad_held) = run_wave2_post_tick(
+    let (hodge_ran, hodge_grad_held, wind_ran, elasto_ran) = run_wave2_post_tick(
         a,
         f_idx,
         slot_in,
@@ -14408,6 +14644,8 @@ pub(crate) unsafe fn post_tick_on(a: &mut Arena, dt_sec: f32) -> u32 {
         cons_fresh,
         new_cons_seq,
         depth_ran,
+        wind_ran,
+        elasto_ran,
     );
 
     a.ring_cursor = a.ring_cursor.wrapping_add(1);
@@ -14753,30 +14991,30 @@ fn run_wave2_post_tick(
     grid_w: usize,
     grid_h: usize,
     swarm_active: bool,
-) -> (bool, bool) {
+) -> (bool, bool, bool, bool) {
     let need_px = frame_w * frame_h;
+    let meta = a.ring_meta[slot_in];
+    let vmeta = vibrometry::VibroFrameMeta {
+        flags: meta.flags,
+        continuity_epoch: meta.continuity_epoch,
+        t_src_us: ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64),
+        src_w: meta.src_w,
+        src_h: meta.src_h,
+        crop_x0: meta.crop_x0,
+        crop_y0: meta.crop_y0,
+        crop_w: meta.crop_w,
+        crop_h: meta.crop_h,
+        orientation: meta.orientation,
+        scan_dir: meta.scan_dir,
+        native_1to1: meta.native_1to1_active,
+        gap_flag: meta.frame_gap_flag,
+        cam_motion_state: if a.roi_slew_active != 0 {
+            a.cam_motion_state.max(1)
+        } else {
+            a.cam_motion_state
+        },
+    };
     if a.vibro.get_mode() != vibrometry::RS_MODE_OFF {
-        let meta = a.ring_meta[slot_in];
-        let vmeta = vibrometry::VibroFrameMeta {
-            flags: meta.flags,
-            continuity_epoch: meta.continuity_epoch,
-            t_src_us: ((meta.t_src_us_hi as u64) << 32) | (meta.t_src_us_lo as u64),
-            src_w: meta.src_w,
-            src_h: meta.src_h,
-            crop_x0: meta.crop_x0,
-            crop_y0: meta.crop_y0,
-            crop_w: meta.crop_w,
-            crop_h: meta.crop_h,
-            orientation: meta.orientation,
-            scan_dir: meta.scan_dir,
-            native_1to1: meta.native_1to1_active,
-            gap_flag: meta.frame_gap_flag,
-            cam_motion_state: if a.roi_slew_active != 0 {
-                a.cam_motion_state.max(1)
-            } else {
-                a.cam_motion_state
-            },
-        };
         a.vibro.ingest_and_solve_frame(
             &a.luma[..need_px],
             &a.row_luma_means[slot_in],
@@ -14788,10 +15026,10 @@ fn run_wave2_post_tick(
 
     let (grad_valid, grad_held, _) = a.continuum.grad_product_status();
     let _ = (grid_w, grid_h);
+    let gdx = (frame_w as f32) / (hodge::HODGE_W as f32);
+    let gdy = (frame_h as f32) / (hodge::HODGE_H as f32);
     let hodge_ran = if swarm_active && a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
         if grad_valid && !grad_held {
-            let gdx = (frame_w as f32) / (hodge::HODGE_W as f32);
-            let gdy = (frame_h as f32) / (hodge::HODGE_H as f32);
             a.hodge.solve_from_continuum(
                 &a.continuum.export_field,
                 &a.continuum.cell_valid_mask,
@@ -14811,7 +15049,67 @@ fn run_wave2_post_tick(
         }
         false
     };
-    (hodge_ran, grad_held)
+
+    let wind_ran = if a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF {
+        let has_scratch = a.bos_scratch_owner == BOS_OWNER_WIND_TUNNEL;
+        let cont_ep = meta.continuity_epoch;
+        let frame_t_sec = a.hist_t_sec[(f_idx as usize) & HIST_MASK];
+        if !has_scratch {
+            a.wind.fail_refused(wind_tunnel::WIND_REASON_MUTEX_CONFLICT, true);
+            false
+        } else if !swarm_active || !grad_valid {
+            a.wind.fail_refused(wind_tunnel::WIND_REASON_NO_CONTINUUM, true);
+            false
+        } else if a.hodge.get_mode() == hodge::HODGE_MODE_OFF
+            || a.hodge.get_state() != hodge::HODGE_STATE_READY
+        {
+            a.wind.fail_refused(wind_tunnel::WIND_REASON_HODGE_UNCONV, true);
+            false
+        } else if hodge_ran {
+            a.wind.step(
+                &mut a.hodge,
+                &mut a.bos,
+                &a.continuum.export_field,
+                &a.continuum.export_bodies,
+                gdx as f64,
+                gdy as f64,
+                frame_t_sec,
+                cont_ep,
+                f_idx,
+                has_scratch,
+                true,
+            )
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    let elasto_ran = if a.elasto.get_mode() != elastography::ELASTO_MODE_OFF {
+        let need_owner = if a.elasto.get_mode() == elastography::ELASTO_MODE_ACOUSTIC_BOS {
+            BOS_OWNER_ELASTO_ACOUSTIC_BOS
+        } else {
+            BOS_OWNER_ELASTO_SURFACE
+        };
+        let has_scratch = a.bos_scratch_owner == need_owner;
+        let frame_t_sec = a.hist_t_sec[(f_idx as usize) & HIST_MASK];
+        a.elasto.step_frame(
+            &a.luma[..need_px],
+            frame_w,
+            frame_h,
+            frame_t_sec,
+            &vmeta,
+            &mut a.vibro,
+            &mut a.bos,
+            &mut a.bos_ref_cache,
+            &mut a.hodge,
+            has_scratch,
+        )
+    } else {
+        false
+    };
+    (hodge_ran, grad_held, wind_ran, elasto_ran)
 }
 
 #[inline(never)]
@@ -14824,6 +15122,8 @@ fn finalize_wave2_stamps(
     cons_fresh: bool,
     cons_seq: u32,
     depth_ran: bool,
+    wind_ran: bool,
+    elasto_ran: bool,
 ) {
     let meta = a.ring_meta[slot_in];
     let cont_ep = meta.continuity_epoch;
@@ -14902,6 +15202,39 @@ fn finalize_wave2_stamps(
         set_stamp_fresh(&mut a.wave2_telem, depth_base, &meta);
     } else {
         set_stamp_invalid(&mut a.wave2_telem, depth_base);
+    }
+
+    // 4 (word 48): Pocket Wind Tunnel freshness stamp (live_ready only; never spoofed by injected solves)
+    let wind_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_WIND * STAMP_STRIDE;
+    let wind_st = a.wind.get_state();
+    if swarm_active
+        && a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF
+        && a.wind.live_ready != 0
+        && (wind_st == wind_tunnel::WIND_STATE_READY_FIELD_ONLY
+            || wind_st == wind_tunnel::WIND_STATE_READY_FULL_LOADS)
+    {
+        if wind_ran && a.wind.fresh_solve != 0 {
+            set_stamp_fresh(&mut a.wave2_telem, wind_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave2_telem, wind_base, cont_ep);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave2_telem, wind_base);
+    }
+
+    // 5 (word 56): kHz Optical Elastography & Lock-In Acoustic BOS freshness stamp
+    let elasto_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_ELASTO * STAMP_STRIDE;
+    if a.elasto.get_mode() != elastography::ELASTO_MODE_OFF
+        && a.elasto.live_ready != 0
+        && a.elasto.get_state() == elastography::ELASTO_STATE_READY
+    {
+        if elasto_ran && a.elasto.fresh_solve != 0 {
+            set_stamp_fresh(&mut a.wave2_telem, elasto_base, &meta);
+        } else {
+            hold_or_invalidate_stamp(&mut a.wave2_telem, elasto_base, cont_ep);
+        }
+    } else {
+        set_stamp_invalid(&mut a.wave2_telem, elasto_base);
     }
 }
 

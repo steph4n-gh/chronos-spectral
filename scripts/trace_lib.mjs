@@ -251,6 +251,11 @@ const REGION_SPECS = [
   { name: 'depth_track_flags', getter: 'chronos_get_depth_track_flags_ptr', file: 'depth.rs', field: 'export_track_flags' },
   { name: 'depth_hero', getter: 'chronos_get_depth_hero_ptr', file: 'depth.rs', field: 'export_hero_depth' },
   { name: 'depth_ingest', getter: 'chronos_get_depth_ingest_ptr', file: 'depth.rs', field: 'ext_depth', dir: 'in' },
+  { name: 'wind_telemetry', getter: 'chronos_get_wind_telemetry_ptr', file: 'wind_tunnel.rs', field: 'telem' },
+  { name: 'wind_planes', getter: 'chronos_get_wind_planes_ptr', file: 'wind_tunnel.rs', field: 'planes' },
+  { name: 'elasto_telemetry', getter: 'chronos_get_elasto_telemetry_ptr', file: 'elastography.rs', field: 'telem' },
+  { name: 'elasto_planes', getter: 'chronos_get_elasto_planes_ptr', file: 'bos.rs', field: 'planes', alias: true },
+  { name: 'elasto_valid', getter: 'chronos_get_elasto_valid_ptr', file: 'bos.rs', field: 'valid_mask', alias: true },
 ];
 
 export const ELEM = { u8: 1, u32: 2, f32: 3 };

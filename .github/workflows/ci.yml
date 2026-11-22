@@ -145,7 +145,7 @@ jobs:
           DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
           cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
           cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
-          node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm
+          node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm,depth,wind
 
   native-scalar-linux-x86_64:
     name: Scalar reference backend at kernel level on Linux x86_64 (every Gate N scenario)
@@ -232,3 +232,5 @@ jobs:
           HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture
+          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_wind_tunnel -- --nocapture
+          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_elastography -- --nocapture

@@ -34,6 +34,11 @@ FIELD_DEPTH_FIELD = 16
 FIELD_DEPTH_TRACKS = 17
 FIELD_DEPTH_FLAGS = 18
 FIELD_DEPTH_HERO = 19
+FIELD_WIND_TELEMETRY = 20
+FIELD_WIND_PLANES = 21
+FIELD_ELASTO_TELEMETRY = 22
+FIELD_ELASTO_PLANES = 23
+FIELD_ELASTO_VALID = 24
 
 _FIELD_NAME_MAP = {
     "telemetry": FIELD_TELEMETRY,
@@ -57,6 +62,11 @@ _FIELD_NAME_MAP = {
     "depth_tracks": FIELD_DEPTH_TRACKS,
     "depth_flags": FIELD_DEPTH_FLAGS,
     "depth_hero": FIELD_DEPTH_HERO,
+    "wind_telemetry": FIELD_WIND_TELEMETRY,
+    "wind_planes": FIELD_WIND_PLANES,
+    "elasto_telemetry": FIELD_ELASTO_TELEMETRY,
+    "elasto_planes": FIELD_ELASTO_PLANES,
+    "elasto_valid": FIELD_ELASTO_VALID,
 }
 
 
@@ -152,6 +162,21 @@ class ChronosEngine:
         lib.chronos_engine_set_rs_calib.restype = ctypes.c_uint32
         lib.chronos_engine_set_hodge_mode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         lib.chronos_engine_set_hodge_mode.restype = ctypes.c_uint32
+        lib.chronos_engine_set_wind_mode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        lib.chronos_engine_set_wind_mode.restype = ctypes.c_uint32
+        lib.chronos_engine_set_wind_fluid_density.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        lib.chronos_engine_set_wind_fluid_density.restype = ctypes.c_uint32
+        lib.chronos_engine_set_elasto_mode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        lib.chronos_engine_set_elasto_mode.restype = ctypes.c_uint32
+        lib.chronos_engine_set_elasto_lock_freqs.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+            ctypes.c_float,
+        ]
+        lib.chronos_engine_set_elasto_lock_freqs.restype = ctypes.c_uint32
         lib.chronos_engine_set_depth_mode.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
         lib.chronos_engine_set_depth_mode.restype = ctypes.c_uint32
         lib.chronos_engine_set_depth_calib.argtypes = [
@@ -310,6 +335,31 @@ class ChronosEngine:
     def set_hodge_mode(self, mode: int) -> int:
         return int(self._lib.chronos_engine_set_hodge_mode(self._handle, int(mode)))
 
+    def set_wind_mode(self, mode: int) -> int:
+        """0 = Off, 1 = Staggered Pocket Wind Tunnel, 2 = Every-Frame Pocket Wind Tunnel."""
+        return int(self._lib.chronos_engine_set_wind_mode(self._handle, int(mode)))
+
+    def set_wind_fluid_density(self, rho_kg_m3: float) -> int:
+        """Fluid density in kg/m^3 (0.0 = dimensionless Cp/CL/CD/Re only)."""
+        return int(self._lib.chronos_engine_set_wind_fluid_density(self._handle, float(rho_kg_m3)))
+
+    def set_elasto_mode(self, mode: int) -> int:
+        """0 = Off, 1 = RS Audio-Locked, 2 = RS Self-Locked, 3 = Frame-Rate Surface, 4 = Acoustic BOS."""
+        return int(self._lib.chronos_engine_set_elasto_mode(self._handle, int(mode)))
+
+    def set_elasto_lock_freqs(self, *freqs: float) -> int:
+        """Set 0..4 explicit lock-in frequencies in Hz (0 clears explicit overrides)."""
+        if len(freqs) == 1 and isinstance(freqs[0], (list, tuple)):
+            freqs = tuple(freqs[0])
+        if len(freqs) > 4:
+            raise ValueError("set_elasto_lock_freqs accepts at most 4 frequencies")
+        vals = [float(f) for f in freqs] + [0.0] * (4 - len(freqs))
+        return int(
+            self._lib.chronos_engine_set_elasto_lock_freqs(
+                self._handle, len(freqs), vals[0], vals[1], vals[2], vals[3]
+            )
+        )
+
     def set_depth_mode(self, mode: int) -> int:
         """0 = Off, 1 = Mono Parallax+TTC, 2 = Calibrated Stereo BOS, 3 = External Depth Plane, 4 = Auto-Fused."""
         return int(self._lib.chronos_engine_set_depth_mode(self._handle, int(mode)))
@@ -461,7 +511,7 @@ class ChronosEngine:
             return memoryview(raw).cast("B").cast(fmt_map[int(view.elem_kind)]).toreadonly()
         arr = np.ctypeslib.as_array(raw)
         rows, cols, stride = int(view.rows), int(view.cols), int(view.stride)
-        if kind_id in (FIELD_BOS_PLANES, FIELD_HODGE_PLANES):
+        if kind_id in (FIELD_BOS_PLANES, FIELD_HODGE_PLANES, FIELD_WIND_PLANES, FIELD_ELASTO_PLANES):
             arr = arr.reshape((stride, rows, cols))
         elif kind_id in (FIELD_CONTINUUM, FIELD_DEPTH_FIELD):
             arr = arr.reshape((rows, cols, stride))

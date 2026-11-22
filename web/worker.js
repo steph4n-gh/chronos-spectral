@@ -186,6 +186,39 @@ let depthHeroView = null;
 let depthIngestView = null;
 let depthReqMode = 0;
 
+// Wave D2 (Pocket Wind Tunnel) & Wave D1 (kHz Optical Elastography & Lock-In Acoustic BOS) ABI-v3
+const WIND_TELEM_LEN = 32;
+const WIND_PLANES_LEN = 3 * FIELD_CELLS; // [Cp, p/rho, omega_filt]
+const WIND_STATE_LABELS = ['OFF', 'WARMING', 'READY_FIELD', 'READY_LOADS', 'REFUSED'];
+const WIND_REASON_NAMES = [
+  'NO_CONTINUUM',
+  'HODGE_UNCONV',
+  'MUTEX_CONFLICT',
+  'HIGH_DIV',
+  'NONCONSERV_FORCING',
+  'NO_STEADY_FREESTREAM',
+  'NO_VOID_FOR_LOADS',
+  'LOW_PRESSURE_QUALITY',
+];
+let windAbiValid = false;
+let windTelemView = null;
+let windTelemF32View = null;
+let windPlanesView = null;
+let windReqMode = 0;
+let windFluidDensity = 0.0;
+
+const ELASTO_TELEM_LEN = 32;
+const ELASTO_SURF_PLANES_LEN = 6 * FIELD_CELLS; // [c, coh, div, amp, phase, phi]
+const ELASTO_STATE_LABELS = ['OFF', 'UNCALIB', 'WARMING', 'READY', 'REFUSED'];
+const ELASTO_CLASS_LABELS = ['NONE', 'KIRCHHOFF_PLATE', 'MEMBRANE_SHEAR', 'DISPERSIVE'];
+let elastoAbiValid = false;
+let elastoTelemView = null;
+let elastoTelemF32View = null;
+let elastoPlanesView = null;
+let elastoValidView = null;
+let elastoReqMode = 0;
+let elastoLockFreqs = [];
+
 // Dual-Resolution 1:1 Fovea ABI views (160x160 lazy-chroma tile)
 const FOVEA_DIM = 160;
 let foveaRgbaView = null;
@@ -332,6 +365,15 @@ function clearWave2Views() {
   depthTrackFlagsView = null;
   depthHeroView = null;
   depthIngestView = null;
+  windAbiValid = false;
+  windTelemView = null;
+  windTelemF32View = null;
+  windPlanesView = null;
+  elastoAbiValid = false;
+  elastoTelemView = null;
+  elastoTelemF32View = null;
+  elastoPlanesView = null;
+  elastoValidView = null;
 }
 
 function refreshWave2Views() {
@@ -469,6 +511,62 @@ function refreshWave2Views() {
       depthIngestView = new Float32Array(buf, diP, DEPTH_INGEST_LEN);
       depthAbiValid = true;
       wasmExports.chronos_set_depth_mode(depthReqMode);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_wind_mode === 'function' &&
+    typeof wasmExports.chronos_set_wind_fluid_density === 'function' &&
+    typeof wasmExports.chronos_get_wind_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_wind_planes_ptr === 'function'
+  ) {
+    const wtP = wasmExports.chronos_get_wind_telemetry_ptr();
+    const wpP = wasmExports.chronos_get_wind_planes_ptr();
+    if (
+      (wtP & 3) === 0 && validatePtrSpan(bufLen, wtP, WIND_TELEM_LEN * 4) &&
+      (wpP & 3) === 0 && validatePtrSpan(bufLen, wpP, WIND_PLANES_LEN * 4)
+    ) {
+      windTelemView = new Uint32Array(buf, wtP, WIND_TELEM_LEN);
+      windTelemF32View = new Float32Array(buf, wtP, WIND_TELEM_LEN);
+      windPlanesView = new Float32Array(buf, wpP, WIND_PLANES_LEN);
+      windAbiValid = true;
+      wasmExports.chronos_set_wind_mode(windReqMode);
+      wasmExports.chronos_set_wind_fluid_density(windFluidDensity);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_elasto_mode === 'function' &&
+    typeof wasmExports.chronos_set_elasto_lock_freqs === 'function' &&
+    typeof wasmExports.chronos_get_elasto_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_elasto_planes_ptr === 'function' &&
+    typeof wasmExports.chronos_get_elasto_valid_ptr === 'function'
+  ) {
+    const etP = wasmExports.chronos_get_elasto_telemetry_ptr();
+    const epP = wasmExports.chronos_get_elasto_planes_ptr();
+    const evP = wasmExports.chronos_get_elasto_valid_ptr();
+    if (
+      (etP & 3) === 0 && validatePtrSpan(bufLen, etP, ELASTO_TELEM_LEN * 4) &&
+      (epP & 3) === 0 && validatePtrSpan(bufLen, epP, 6 * BOS_N * 4) &&
+      validatePtrSpan(bufLen, evP, BOS_N)
+    ) {
+      elastoTelemView = new Uint32Array(buf, etP, ELASTO_TELEM_LEN);
+      elastoTelemF32View = new Float32Array(buf, etP, ELASTO_TELEM_LEN);
+      elastoPlanesView = new Float32Array(buf, epP, 6 * BOS_N);
+      elastoValidView = new Uint8Array(buf, evP, BOS_N);
+      elastoAbiValid = true;
+      wasmExports.chronos_set_elasto_mode(elastoReqMode);
+      if (elastoLockFreqs.length > 0) {
+        wasmExports.chronos_set_elasto_lock_freqs(
+          elastoLockFreqs.length,
+          elastoLockFreqs[0] || 0,
+          elastoLockFreqs[1] || 0,
+          elastoLockFreqs[2] || 0,
+          elastoLockFreqs[3] || 0
+        );
+      } else {
+        wasmExports.chronos_set_elasto_lock_freqs(0, 0, 0, 0, 0);
+      }
     }
   }
   return wave2CoreAbiValid;
@@ -682,8 +780,8 @@ let bosOverlayCanvas = null;
 let bosOverlayCtx = null;
 let bosOverlayImgData = null;
 
-// Wave-2 40x22 overlay canvas & delayed-display ring buffers
-const w2CoreRing = Array.from({ length: RING_LEN }, () => new Uint32Array(36));
+// Wave-2 64x36 overlay canvas & delayed-display ring buffers
+const w2CoreRing = Array.from({ length: RING_LEN }, () => new Uint32Array(52));
 const w2CoreRingF32 = w2CoreRing.map((u) => new Float32Array(u.buffer));
 const w2CoreRingValid = new Uint8Array(RING_LEN);
 const vibroRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(VIBRO_TELEM_LEN));
@@ -699,6 +797,16 @@ const depthRingTelemF32 = depthRingTelem.map((u) => new Float32Array(u.buffer));
 const depthRingField = Array.from({ length: RING_LEN }, () => new Float32Array(DEPTH_FIELD_LEN));
 const depthRingStereoRgba = Array.from({ length: RING_LEN }, () => new Uint8ClampedArray(BOS_N * 4));
 const depthRingValid = new Uint8Array(RING_LEN);
+const windRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(WIND_TELEM_LEN));
+const windRingTelemF32 = windRingTelem.map((u) => new Float32Array(u.buffer));
+const windRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(WIND_PLANES_LEN));
+const windRingValid = new Uint8Array(RING_LEN);
+const elastoRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(ELASTO_TELEM_LEN));
+const elastoRingTelemF32 = elastoRingTelem.map((u) => new Float32Array(u.buffer));
+const elastoRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(ELASTO_SURF_PLANES_LEN));
+const elastoRingValidMask = Array.from({ length: RING_LEN }, () => new Uint8Array(FIELD_CELLS));
+const elastoRingAbosRgba = Array.from({ length: RING_LEN }, () => new Uint8ClampedArray(BOS_N * 4));
+const elastoRingValid = new Uint8Array(RING_LEN);
 let w2OverlayCanvas = null;
 let w2OverlayCtx = null;
 let w2OverlayImgData = null;
@@ -1822,6 +1930,14 @@ function applySceneCalibrationPreset(presetKey) {
     calPtsNormX[0] = 0.28; calPtsNormY[0] = 0.62;
     calPtsNormX[1] = 0.72; calPtsNormY[1] = 0.62;
     calPtCount = 2;
+  } else if (presetKey === 'real_daphnia_laser_piv') {
+    // Surveyed laboratory laser-sheet PIV FOV (32 mm horizontal span)
+    calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = 0.032;
+    calPtsNormX[0] = 0.0; calPtsNormY[0] = 0.50;
+    calPtsNormX[1] = 1.0; calPtsNormY[1] = 0.50;
+    calPtCount = 2;
   } else if (
     presetKey === 'model_rocket_full_flights' ||
     presetKey === 'rocket_vtvl_full_flight' ||
@@ -2304,6 +2420,8 @@ function clearVisualQueues() {
   hodgeRingValid.fill(0);
   consRingValid.fill(0);
   depthRingValid.fill(0);
+  windRingValid.fill(0);
+  elastoRingValid.fill(0);
   manualConsTestActive = false;
   tbRsFrameSeq = 0;
   tbRsAudioSampleCursor = 0;
@@ -4256,10 +4374,52 @@ function drawHudCaptionBox(x, y, text, borderColor, bgColor, textColor) {
   hudCtx.restore();
 }
 
+function colorizeAbosToRgba(planes, validMask, dstRgba) {
+  let maxPhi = 0.0;
+  for (let i = 0; i < BOS_N; i++) {
+    if (validMask[i]) {
+      const v = planes[i];
+      if (Number.isFinite(v) && v > maxPhi) maxPhi = v;
+    }
+  }
+  const invMax = 1.0 / Math.max(1e-4, maxPhi);
+  for (let i = 0; i < BOS_N; i++) {
+    const o = i * 4;
+    if (!validMask[i]) {
+      dstRgba[o] = 0; dstRgba[o + 1] = 0; dstRgba[o + 2] = 0; dstRgba[o + 3] = 0;
+      continue;
+    }
+    const t = Math.max(0.0, Math.min(1.0, planes[i] * invMax));
+    if (t < 0.06) {
+      dstRgba[o] = 0; dstRgba[o + 1] = 0; dstRgba[o + 2] = 0; dstRgba[o + 3] = 0;
+      continue;
+    }
+    let r, g, b;
+    if (t < 0.5) {
+      const s = t * 2.0;
+      r = 12 + 30 * s;
+      g = 56 + 170 * s;
+      b = 148 + 107 * s;
+    } else {
+      const s = (t - 0.5) * 2.0;
+      r = 42 + 213 * s;
+      g = 226 + 24 * s;
+      b = 255 - 165 * s;
+    }
+    dstRgba[o] = r | 0;
+    dstRgba[o + 1] = g | 0;
+    dstRgba[o + 2] = b | 0;
+    dstRgba[o + 3] = Math.round(35 + 175 * t);
+  }
+}
+
 function renderWave2Overlays(W, H, dispSlot, effK) {
   const isHodgeMode = fieldOverlayMode >= 8 && fieldOverlayMode <= 10;
   const isVibroMode = fieldOverlayMode === 11;
   const isDepthMode = fieldOverlayMode === 12;
+  const isWindMode = fieldOverlayMode === 13;
+  const isElastoSurfMode = fieldOverlayMode === 14;
+  const isAcousticBosMode = fieldOverlayMode === 15;
 
   if (isHodgeMode && w2OverlayCtx && w2OverlayImgData) {
     const src = resolveWave2RingOrLive(
@@ -4571,6 +4731,255 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
       refused ? '#ff4d6d' : (isNeural ? '#f59e0b' : 'rgba(56, 242, 122, 0.55)'),
       refused ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
       refused ? '#fecdd3' : (isNeural ? '#fde68a' : '#a7f3d0')
+    );
+  } else if (isWindMode && windAbiValid && windTelemView && windTelemF32View && windPlanesView) {
+    const delayedRing = hasAnyRenderedFrame() && effK > 0;
+    const hasSlot = dispSlot >= 0 && dispSlot < RING_LEN && windRingValid[dispSlot] === 1;
+    const wtU = hasSlot ? windRingTelem[dispSlot] : (!delayedRing ? windTelemView : null);
+    const wtF = hasSlot ? windRingTelemF32[dispSlot] : (!delayedRing ? windTelemF32View : null);
+    const wp = hasSlot ? windRingPlanes[dispSlot] : (!delayedRing ? windPlanesView : null);
+    const wState = wtU ? Math.max(0, Math.min(4, wtU[0] >>> 0)) : 0;
+    const wReason = wtU ? (wtU[2] >>> 0) : 0;
+    const beta1 = wtU ? (wtU[5] >>> 0) : 0;
+    const nu = wtF ? wtF[11] : 0.0;
+    const reNum = wtF ? wtF[13] : 0.0;
+    const cpMin = wtF ? wtF[14] : -1.0;
+    const cpMax = wtF ? wtF[15] : 1.0;
+    const cl = wtF ? wtF[18] : 0.0;
+    const cd = wtF ? wtF[19] : 0.0;
+    const etaNs = wtF ? wtF[21] : 0.0;
+    const holeCx = wtF ? wtF[23] : 0.0;
+    const holeCy = wtF ? wtF[24] : 0.0;
+
+    if (wp && (wState === 2 || wState === 3) && w2OverlayCtx && w2OverlayImgData) {
+      const span = Math.max(0.35, Math.max(Math.abs(cpMin), Math.abs(cpMax)));
+      const invSpan = 1.0 / span;
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const cp = wp[c];
+        if (!Number.isFinite(cp) || Math.abs(cp) < 1e-4) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const s = Math.max(-1.0, Math.min(1.0, cp * invSpan));
+        const a = Math.abs(s);
+        if (s < 0) {
+          // Suction low-pressure zone: cyan-blue
+          px[o] = Math.round(14 + (1.0 - a) * 32);
+          px[o + 1] = Math.round(135 + a * 95);
+          px[o + 2] = 255;
+        } else {
+          // Stagnation high-pressure zone: amber-crimson
+          px[o] = 255;
+          px[o + 1] = Math.round(190 - a * 120);
+          px[o + 2] = Math.round(60 - a * 40);
+        }
+        px[o + 3] = Math.round(28 + a * 162);
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+
+      // Draw aerodynamic lift/drag resultant arrow on the primary obstacle void
+      if (wState === 3) {
+        const rawCx = holeCx > 1.0 ? holeCx : (hodgeTelemView ? u32BitsToF32(hodgeTelemView[23]) : 0.0);
+        const rawCy = holeCy > 1.0 ? holeCy : (hodgeTelemView ? u32BitsToF32(hodgeTelemView[24]) : 0.0);
+        const vcx = rawCx * (W / Math.max(1, frameW));
+        const vcy = rawCy * (H / Math.max(1, frameH));
+        if (vcx > 4 && vcy > 4 && vcx < W - 4 && vcy < H - 4) {
+          const fMag = Math.hypot(cd, cl);
+          const scale = Math.min(58, Math.max(18, fMag * 12.0));
+          const fx = fMag > 1e-4 ? (cd / fMag) * scale : 0;
+          const fy = fMag > 1e-4 ? (-cl / fMag) * scale : 0;
+          hudCtx.save();
+          hudCtx.strokeStyle = '#ffd166';
+          hudCtx.fillStyle = '#ffd166';
+          hudCtx.lineWidth = 2.4;
+          hudCtx.beginPath();
+          hudCtx.arc(vcx, vcy, 7, 0, Math.PI * 2);
+          hudCtx.stroke();
+          hudCtx.beginPath();
+          hudCtx.moveTo(vcx, vcy);
+          hudCtx.lineTo(vcx + fx, vcy + fy);
+          hudCtx.stroke();
+          hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          hudCtx.fillText(`CL=${cl.toFixed(2)} CD=${cd.toFixed(2)}`, vcx + 10, vcy - 10);
+          hudCtx.restore();
+        }
+      }
+    }
+
+    const stLbl = WIND_STATE_LABELS[wState] || 'OFF';
+    let wCap = `WIND TUNNEL Cp (64x36) · ${stLbl}`;
+    if (wState === 3) {
+      wCap += ` · CL=${cl.toFixed(2)} CD=${cd.toFixed(2)} · b1=${beta1}`;
+      if (reNum > 0.5) wCap += ` · Re=${reNum.toFixed(0)}`;
+      wCap += ` · eta=${etaNs.toFixed(2)}`;
+    } else if (wState === 2) {
+      wCap += ` · nu=${nu.toFixed(1)} px2/s · eta=${etaNs.toFixed(2)}`;
+    } else if (wState === 4 && wReason !== 0) {
+      const fl = [];
+      for (let b = 0; b < WIND_REASON_NAMES.length; b++) {
+        if (wReason & (1 << b)) fl.push(WIND_REASON_NAMES[b]);
+      }
+      if (fl.length > 0) wCap += ` [${fl.slice(0, 2).join('+')}]`;
+    }
+    const isWarn = wState === 4;
+    drawHudCaptionBox(
+      10,
+      44,
+      wCap,
+      isWarn ? '#ff4d6d' : 'rgba(255, 209, 102, 0.65)',
+      isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.86)',
+      isWarn ? '#fecdd3' : '#fef08a'
+    );
+  } else if (
+    (isElastoSurfMode || isAcousticBosMode) &&
+    elastoAbiValid &&
+    elastoTelemView &&
+    elastoTelemF32View &&
+    elastoPlanesView &&
+    elastoValidView
+  ) {
+    const delayedRing = hasAnyRenderedFrame() && effK > 0;
+    const hasSlot = dispSlot >= 0 && dispSlot < RING_LEN && elastoRingValid[dispSlot] === 1;
+    const etU = hasSlot ? elastoRingTelem[dispSlot] : (!delayedRing ? elastoTelemView : null);
+    const etF = hasSlot ? elastoRingTelemF32[dispSlot] : (!delayedRing ? elastoTelemF32View : null);
+    const eState = etU ? Math.max(0, Math.min(4, etU[0] >>> 0)) : 0;
+    const eMode = etU ? (etU[1] >>> 0) : elastoReqMode;
+    const eReason = etU ? (etU[2] >>> 0) : 0;
+    const eClass = etU ? Math.max(0, Math.min(3, etU[3] >>> 0)) : 0;
+    const eValid = etU ? (etU[4] >>> 0) : 0;
+    const beta1 = etU ? (etU[7] >>> 0) : 0;
+    const f0 = etF ? etF[8] : 0.0;
+    const f1 = etF ? etF[9] : 0.0;
+    const medC = etF ? etF[12] : 0.0;
+    const alpha = etF ? etF[13] : 0.0;
+    const aniso = etF ? etF[14] : 1.0;
+    const meanCoh = etF ? etF[15] : 0.0;
+    const srcX = etF ? etF[16] : 0.0;
+    const srcY = etF ? etF[17] : 0.0;
+    const sinkX = etF ? etF[18] : 0.0;
+    const sinkY = etF ? etF[19] : 0.0;
+    const curlRms = etF ? etF[24] : 0.0;
+    const phiRms = etF ? etF[25] : 0.0;
+    const cP10 = etF ? etF[26] : 0.0;
+    const cP90 = etF ? etF[27] : 0.0;
+
+    if (isAcousticBosMode && eMode === 4 && eState === 3 && bosOverlayCtx && bosOverlayImgData) {
+      if (hasSlot) {
+        bosOverlayImgData.data.set(elastoRingAbosRgba[dispSlot]);
+      } else {
+        colorizeAbosToRgba(elastoPlanesView, elastoValidView, bosOverlayImgData.data);
+      }
+      bosOverlayCtx.putImageData(bosOverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(bosOverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    } else if (isElastoSurfMode && eMode !== 4 && eState === 3 && w2OverlayCtx && w2OverlayImgData) {
+      const ep = hasSlot ? elastoRingPlanes[dispSlot] : elastoPlanesView;
+      const ev = hasSlot ? elastoRingValidMask[dispSlot] : elastoValidView;
+      const loC = cP10 > 1e-3 ? cP10 * 0.85 : medC * 0.5;
+      const hiC = Math.max(loC + 1e-3, cP90 > loC ? cP90 * 1.15 : medC * 1.5);
+      const invSpan = 1.0 / (hiC - loC);
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const cv = ep[c];
+        if (!ev[c] || !Number.isFinite(cv) || cv <= 0.0) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const t = Math.max(0.0, Math.min(1.0, (cv - loC) * invSpan));
+        // Plasma-like stiffness speed map: deep violet (soft) -> magenta -> amber-gold (stiff)
+        let r, g, b;
+        if (t < 0.5) {
+          const s = t * 2.0;
+          r = 42 + 168 * s;
+          g = 24 + 44 * s;
+          b = 148 + 42 * s;
+        } else {
+          const s = (t - 0.5) * 2.0;
+          r = 210 + 45 * s;
+          g = 68 + 166 * s;
+          b = 190 - 140 * s;
+        }
+        px[o] = r | 0;
+        px[o + 1] = g | 0;
+        px[o + 2] = b | 0;
+        px[o + 3] = Math.round(70 + 130 * (0.35 + 0.65 * t));
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+
+      const sx = W / Math.max(1, frameW);
+      const sy = H / Math.max(1, frameH);
+      hudCtx.save();
+      hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      if (srcX > 4 && srcY > 4) {
+        const pxX = srcX * sx;
+        const pxY = srcY * sy;
+        hudCtx.strokeStyle = '#38f27a';
+        hudCtx.fillStyle = '#a7f3d0';
+        hudCtx.lineWidth = 2.0;
+        hudCtx.beginPath();
+        hudCtx.arc(pxX, pxY, 9, 0, Math.PI * 2);
+        hudCtx.moveTo(pxX - 13, pxY); hudCtx.lineTo(pxX + 13, pxY);
+        hudCtx.moveTo(pxX, pxY - 13); hudCtx.lineTo(pxX, pxY + 13);
+        hudCtx.stroke();
+        hudCtx.fillText('+ SRC', pxX + 12, pxY - 6);
+      }
+      if (sinkX > 4 && sinkY > 4) {
+        const kxX = sinkX * sx;
+        const kxY = sinkY * sy;
+        hudCtx.strokeStyle = '#ff4d6d';
+        hudCtx.fillStyle = '#fecdd3';
+        hudCtx.lineWidth = 2.0;
+        hudCtx.beginPath();
+        hudCtx.arc(kxX, kxY, 9, 0, Math.PI * 2);
+        hudCtx.moveTo(kxX - 8, kxY - 8); hudCtx.lineTo(kxX + 8, kxY + 8);
+        hudCtx.moveTo(kxX + 8, kxY - 8); hudCtx.lineTo(kxX - 8, kxY + 8);
+        hudCtx.stroke();
+        hudCtx.fillText('- SINK', kxX + 12, kxY + 12);
+      }
+      hudCtx.restore();
+    }
+
+    const stLbl = ELASTO_STATE_LABELS[eState] || 'OFF';
+    let eCap = isAcousticBosMode
+      ? `ACOUSTIC BOS (256x128) · ${stLbl}`
+      : `ELASTOGRAPHY c(x,y) (64x36) · ${stLbl}`;
+    if (eState === 3) {
+      if (eMode === 4) {
+        eCap += ` · ${f0.toFixed(0)}Hz · |Phi|=${phiRms.toFixed(2)} · curl=${curlRms.toFixed(3)} · ${eValid} nodes`;
+      } else {
+        const clsLbl = ELASTO_CLASS_LABELS[eClass] || 'NONE';
+        const fTxt = f1 > 1.0 ? `${f0.toFixed(0)}+${f1.toFixed(0)}Hz` : `${f0.toFixed(1)}Hz`;
+        eCap += ` · ${fTxt} · ${clsLbl}${alpha > 0.05 ? ` (a=${alpha.toFixed(2)})` : ''} · c=${medC.toFixed(0)} · coh=${meanCoh.toFixed(2)}`;
+        if (beta1 > 0) eCap += ` · b1=${beta1}`;
+        if (Math.abs(aniso - 1.0) > 0.15) eCap += ` · aniso=${aniso.toFixed(2)}`;
+      }
+    } else if (eState === 4 || eState === 1) {
+      eCap += ` [0x${eReason.toString(16)}]`;
+    }
+    const isWarn = eState === 4 || eState === 1;
+    drawHudCaptionBox(
+      10,
+      44,
+      eCap,
+      isWarn ? '#ff4d6d' : 'rgba(199, 125, 255, 0.65)',
+      isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.86)',
+      isWarn ? '#fecdd3' : '#e9d5ff'
     );
   }
 
@@ -7702,6 +8111,8 @@ function buildWave2Snapshot(dispSlot) {
           ? decodeWave2Stamp(32)
           : decodeStampFrom(cr, crF32, 20),
         depth: decodeStampFrom(cr, crF32, 28),
+        wind: decodeStampFrom(cr, crF32, 36),
+        elasto: decodeStampFrom(cr, crF32, 44),
       },
     };
   })() : (!delayedRing && wave2CoreAbiValid && wave2TelemView && wave2TelemF32View ? {
@@ -7715,6 +8126,8 @@ function buildWave2Snapshot(dispSlot) {
       hodge: decodeWave2Stamp(24),
       conservation: decodeWave2Stamp(32),
       depth: decodeWave2Stamp(40),
+      wind: decodeWave2Stamp(48),
+      elasto: decodeWave2Stamp(56),
     },
   } : {
     available: wave2CoreAbiValid,
@@ -7729,6 +8142,8 @@ function buildWave2Snapshot(dispSlot) {
         ? decodeWave2Stamp(32)
         : { validity: 0, valid: false, held: false },
       depth: { validity: 0, valid: false, held: false },
+      wind: { validity: 0, valid: false, held: false },
+      elasto: { validity: 0, valid: false, held: false },
     },
   });
 
@@ -7894,7 +8309,87 @@ function buildWave2Snapshot(dispSlot) {
       })()
     : { available: depthAbiValid, reqMode: depthReqMode, state: 0, stateLabel: 'OFF', provenance: 0, provenanceLabel: 'NONE', extSeq: 0 };
 
-  return { ...core, vibro, hodge, conservation, depth };
+  const hasSlotWind = dispSlot >= 0 && dispSlot < RING_LEN && windRingValid[dispSlot] === 1;
+  const wtU = hasSlotWind
+    ? windRingTelem[dispSlot]
+    : (!delayedRing && windAbiValid && windTelemView ? windTelemView : null);
+  const wtF = hasSlotWind
+    ? windRingTelemF32[dispSlot]
+    : (!delayedRing && windAbiValid && windTelemF32View ? windTelemF32View : null);
+  const wind = wtU && wtF
+    ? (() => {
+        const st = Math.max(0, Math.min(4, wtU[0] >>> 0));
+        return {
+          available: true,
+          reqMode: windReqMode,
+          mode: wtU[1] >>> 0,
+          state: st,
+          stateLabel: WIND_STATE_LABELS[st] || 'OFF',
+          reasonMask: wtU[2] >>> 0,
+          provenance: wtU[3] >>> 0,
+          validCells: wtU[4] >>> 0,
+          beta1: wtU[5] >>> 0,
+          uInf: finiteOrNull(wtF[8]) ?? 0.0,
+          dHolePx: finiteOrNull(wtF[10]) ?? 0.0,
+          nu: finiteOrNull(wtF[11]) ?? 0.0,
+          nuR2: finiteOrNull(wtF[12]) ?? 0.0,
+          reNum: finiteOrNull(wtF[13]) ?? 0.0,
+          cpMin: finiteOrNull(wtF[14]) ?? 0.0,
+          cpMax: finiteOrNull(wtF[15]) ?? 0.0,
+          clBnd: finiteOrNull(wtF[16]) ?? 0.0,
+          cdBnd: finiteOrNull(wtF[17]) ?? 0.0,
+          cl: finiteOrNull(wtF[18]) ?? 0.0,
+          cd: finiteOrNull(wtF[19]) ?? 0.0,
+          clCv: finiteOrNull(wtF[18]) ?? 0.0,
+          cdCv: finiteOrNull(wtF[19]) ?? 0.0,
+          clKj: finiteOrNull(wtF[20]) ?? 0.0,
+          etaNs: finiteOrNull(wtF[21]) ?? 0.0,
+          divFrac: finiteOrNull(wtF[22]) ?? 0.0,
+        };
+      })()
+    : { available: windAbiValid, reqMode: windReqMode, state: 0, stateLabel: 'OFF' };
+
+  const hasSlotElasto = dispSlot >= 0 && dispSlot < RING_LEN && elastoRingValid[dispSlot] === 1;
+  const etU = hasSlotElasto
+    ? elastoRingTelem[dispSlot]
+    : (!delayedRing && elastoAbiValid && elastoTelemView ? elastoTelemView : null);
+  const etF = hasSlotElasto
+    ? elastoRingTelemF32[dispSlot]
+    : (!delayedRing && elastoAbiValid && elastoTelemF32View ? elastoTelemF32View : null);
+  const elasto = etU && etF
+    ? (() => {
+        const st = Math.max(0, Math.min(4, etU[0] >>> 0));
+        const cls = Math.max(0, Math.min(3, etU[3] >>> 0));
+        return {
+          available: true,
+          reqMode: elastoReqMode,
+          mode: etU[1] >>> 0,
+          state: st,
+          stateLabel: ELASTO_STATE_LABELS[st] || 'OFF',
+          reasonMask: etU[2] >>> 0,
+          dispClass: cls,
+          classLabel: ELASTO_CLASS_LABELS[cls] || 'NONE',
+          validCells: etU[4] >>> 0,
+          lockedFreqs: etU[5] >>> 0,
+          welchSegs: etU[6] >>> 0,
+          beta1: etU[7] >>> 0,
+          f0: finiteOrNull(etF[8]) ?? 0.0,
+          f1: finiteOrNull(etF[9]) ?? 0.0,
+          medC: finiteOrNull(etF[12]) ?? 0.0,
+          alpha: finiteOrNull(etF[13]) ?? 0.0,
+          anisotropy: finiteOrNull(etF[14]) ?? 1.0,
+          meanCoh: finiteOrNull(etF[15]) ?? 0.0,
+          srcX: finiteOrNull(etF[16]) ?? 0.0,
+          srcY: finiteOrNull(etF[17]) ?? 0.0,
+          sinkX: finiteOrNull(etF[18]) ?? 0.0,
+          sinkY: finiteOrNull(etF[19]) ?? 0.0,
+          abosCurlRms: finiteOrNull(etF[24]) ?? 0.0,
+          abosPhiRms: finiteOrNull(etF[25]) ?? 0.0,
+        };
+      })()
+    : { available: elastoAbiValid, reqMode: elastoReqMode, state: 0, stateLabel: 'OFF' };
+
+  return { ...core, vibro, hodge, conservation, depth, wind, elasto };
 }
 
 function emitTelemetrySnapshot() {
@@ -8499,7 +8994,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
     cr[1] = wave2TelemView[1];
     cr[2] = wave2TelemView[2];
     cr[3] = wave2TelemView[3];
-    cr.set(wave2TelemView.subarray(16, 48), 4);
+    cr.set(wave2TelemView.subarray(16, 64), 4);
     w2CoreRingValid[slotIdx] = 1;
   } else {
     w2CoreRingValid[slotIdx] = 0;
@@ -8543,6 +9038,40 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   } else {
     depthRingField[slotIdx].fill(0.0);
     depthRingValid[slotIdx] = 0;
+  }
+  if (
+    windAbiValid &&
+    windTelemView &&
+    windPlanesView &&
+    (windReqMode !== 0 || (windTelemView[1] >>> 0) !== 0)
+  ) {
+    windRingTelem[slotIdx].set(windTelemView);
+    windRingPlanes[slotIdx].set(windPlanesView);
+    windRingValid[slotIdx] = 1;
+  } else {
+    windRingValid[slotIdx] = 0;
+  }
+  if (
+    elastoAbiValid &&
+    elastoTelemView &&
+    elastoPlanesView &&
+    elastoValidView &&
+    (elastoReqMode !== 0 || (elastoTelemView[1] >>> 0) !== 0)
+  ) {
+    elastoRingTelem[slotIdx].set(elastoTelemView);
+    if ((elastoTelemView[1] >>> 0) === 4) {
+      if ((elastoTelemView[0] >>> 0) === 3) {
+        colorizeAbosToRgba(elastoPlanesView, elastoValidView, elastoRingAbosRgba[slotIdx]);
+      } else {
+        elastoRingAbosRgba[slotIdx].fill(0);
+      }
+    } else {
+      elastoRingPlanes[slotIdx].set(elastoPlanesView.subarray(0, ELASTO_SURF_PLANES_LEN));
+      elastoRingValidMask[slotIdx].set(elastoValidView.subarray(0, FIELD_CELLS));
+    }
+    elastoRingValid[slotIdx] = 1;
+  } else {
+    elastoRingValid[slotIdx] = 0;
   }
   lastSwarmCopyMs = performance.now() - tCopy0;
   lastLambda2 = lambda2;
@@ -10148,7 +10677,7 @@ self.onmessage = async (ev) => {
       lastOverlaySyncSeq = msg.overlaySyncSeq;
     }
     const rawO = Number(msg.fieldOverlayMode);
-    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(12, Math.round(rawO))) : 0;
+    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(15, Math.round(rawO))) : 0;
     if (fieldOverlayMode >= 5 && fieldOverlayMode <= 7) {
       bosOverlayKind = fieldOverlayMode - 5;
       if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
@@ -10470,6 +10999,59 @@ self.onmessage = async (ev) => {
             hodgeRingTelem[s][1] = hodgeReqMode;
           }
         }
+      }
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_wind_config') {
+    if (typeof msg.windMode === 'number' && Number.isFinite(msg.windMode)) {
+      windReqMode = Math.max(0, Math.min(2, Math.round(msg.windMode)));
+      if (windAbiValid && typeof wasmExports.chronos_set_wind_mode === 'function') {
+        wasmExports.chronos_set_wind_mode(windReqMode);
+      }
+      syncWave2RingEnabledBits();
+      if (windReqMode === 0) {
+        windRingValid.fill(0);
+        invalidateWave2RingStamp(32);
+      }
+    }
+    if (typeof msg.fluidDensity === 'number' && Number.isFinite(msg.fluidDensity) && msg.fluidDensity >= 0.0) {
+      windFluidDensity = msg.fluidDensity;
+      if (windAbiValid && typeof wasmExports.chronos_set_wind_fluid_density === 'function') {
+        wasmExports.chronos_set_wind_fluid_density(windFluidDensity);
+      }
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_elasto_config') {
+    if (typeof msg.elastoMode === 'number' && Number.isFinite(msg.elastoMode)) {
+      elastoReqMode = Math.max(0, Math.min(4, Math.round(msg.elastoMode)));
+      if (elastoAbiValid && typeof wasmExports.chronos_set_elasto_mode === 'function') {
+        wasmExports.chronos_set_elasto_mode(elastoReqMode);
+      }
+      syncWave2RingEnabledBits();
+      if (elastoReqMode === 0) {
+        elastoRingValid.fill(0);
+        invalidateWave2RingStamp(40);
+      }
+    }
+    if (Array.isArray(msg.lockFreqs)) {
+      elastoLockFreqs = msg.lockFreqs
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v) && v > 0.1 && v <= 50000.0)
+        .slice(0, 4);
+      if (elastoAbiValid && typeof wasmExports.chronos_set_elasto_lock_freqs === 'function') {
+        wasmExports.chronos_set_elasto_lock_freqs(
+          elastoLockFreqs.length,
+          elastoLockFreqs[0] || 0,
+          elastoLockFreqs[1] || 0,
+          elastoLockFreqs[2] || 0,
+          elastoLockFreqs[3] || 0
+        );
       }
     }
     redrawPausedHudIfReady();

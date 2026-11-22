@@ -29,11 +29,11 @@ fn reset_restores_fresh_state_and_regions_match_getters() {
             "{}",
             r.name
         );
-        if r.kind == RegionKind::RingAlias {
+        if matches!(r.kind, RegionKind::RingAlias | RegionKind::FixedAlias) {
             continue;
         }
         for o in &regions[i + 1..] {
-            if o.kind != RegionKind::RingAlias {
+            if !matches!(o.kind, RegionKind::RingAlias | RegionKind::FixedAlias) {
                 let disjoint = r.field_addr + r.byte_len <= o.field_addr
                     || o.field_addr + o.byte_len <= r.field_addr;
                 assert!(disjoint, "{} overlaps {}", r.name, o.name);
@@ -60,6 +60,14 @@ fn reset_restores_fresh_state_and_regions_match_getters() {
         assert_eq!(
             chronos_spectral::chronos_get_ingest_rgba_ptr() as usize,
             by_name("ring_slot[0]").field_addr
+        );
+        assert_eq!(
+            chronos_spectral::chronos_get_elasto_planes_ptr() as usize,
+            by_name("bos_planes").field_addr
+        );
+        assert_eq!(
+            chronos_spectral::chronos_get_elasto_valid_ptr() as usize,
+            by_name("bos_valid").field_addr
         );
 
         // chronos_init leaves non-zero state (telemetry[20] = arena bytes) ...

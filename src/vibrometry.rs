@@ -119,7 +119,7 @@ const fn const_sin_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
-fn sin_cos_f64(rad: f64) -> (f64, f64) {
+pub(crate) fn sin_cos_f64(rad: f64) -> (f64, f64) {
     if !rad.is_finite() || abs_f64(rad) > 1.0e12 {
         return (0.0, 1.0);
     }
@@ -192,7 +192,7 @@ fn exp_neg_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
-fn ln_f64(x: f64) -> f64 {
+pub(crate) fn ln_f64(x: f64) -> f64 {
     if !x.is_finite() || x <= 0.0 {
         return 0.0;
     }
@@ -214,7 +214,7 @@ fn ln_f64(x: f64) -> f64 {
 }
 
 #[inline(always)]
-fn rel_us_f64(t_us: u64, anchor_us: u64) -> f64 {
+pub(crate) fn rel_us_f64(t_us: u64, anchor_us: u64) -> f64 {
     if t_us >= anchor_us {
         (t_us - anchor_us) as f64
     } else {
@@ -236,7 +236,7 @@ fn unambiguous_welch_k_end(dt_row_us: f32, df_hz: f64) -> usize {
 }
 
 #[inline(always)]
-fn sinc_exposure_h(freq_hz: f64, exposure_us: f64) -> f64 {
+pub(crate) fn sinc_exposure_h(freq_hz: f64, exposure_us: f64) -> f64 {
     let x = PI_64 * freq_hz * exposure_us * 1.0e-6;
     if abs_f64(x) < 1.0e-6 {
         1.0 - (x * x) * (1.0 / 6.0)
@@ -247,7 +247,7 @@ fn sinc_exposure_h(freq_hz: f64, exposure_us: f64) -> f64 {
 }
 
 #[inline(always)]
-fn oriented_extent(cw: u32, ch: u32, orientation: u32) -> (u32, u32) {
+pub(crate) fn oriented_extent(cw: u32, ch: u32, orientation: u32) -> (u32, u32) {
     if (orientation & 1) == 0 {
         (cw, ch)
     } else {
@@ -256,7 +256,7 @@ fn oriented_extent(cw: u32, ch: u32, orientation: u32) -> (u32, u32) {
 }
 
 #[inline(always)]
-fn engine_to_sensor_xy(
+pub(crate) fn engine_to_sensor_xy(
     ex: u32,
     ey: u32,
     ow: u32,
@@ -453,9 +453,9 @@ pub struct VibrometryState {
     last_src_h: u32,
     last_crop_x0: u32,
     single_seg_k1_coh: f32,
-    audio_has_prev_t: u8,
-    skew_disturbed: u8,
-    rate_disturbed: u8,
+    pub(crate) audio_has_prev_t: u8,
+    pub(crate) skew_disturbed: u8,
+    pub(crate) rate_disturbed: u8,
     scan_along_ey: u8,
     pub fresh_solve: u8,
 }
@@ -814,6 +814,232 @@ impl VibrometryState {
         self.audio_ring_rate_hz = sample_rate_hz;
         self.telem[18] = self.audio_total_samples as u32;
         1
+    }
+
+    /// Evaluates the exact Hann-windowed continuous-frequency audio phasor at `freq_hz`,
+    /// phase-referenced to `anchor_t_us` (`Re(X/|X|) = cos(2*pi*f*t_anchor + phi0)`,
+    /// `Im(X/|X|) = sin(2*pi*f*t_anchor + phi0)`), returning `(unit_re, unit_im, pxx)`.
+    #[inline(never)]
+    pub(crate) fn audio_phasor_at(&self, freq_hz: f64, anchor_t_us: u64) -> Option<(f64, f64, f64)> {
+        if self.audio_has_prev_t == 0
+            || self.audio_total_samples < (AUDIO_FFT_N as u64)
+            || !freq_hz.is_finite()
+            || freq_hz <= 0.0
+            || !self.audio_ring_rate_hz.is_finite()
+            || self.audio_ring_rate_hz < 4000.0
+        {
+            return None;
+        }
+        let fs = self.audio_ring_rate_hz as f64;
+        if freq_hz >= 0.49 * fs {
+            return None;
+        }
+        let dt_us = 1_000_000.0 / fs;
+        let t_end_us = self.audio_last_t_end_us;
+        let rel_anchor_us = rel_us_f64(anchor_t_us, t_end_us); // <= 0 when anchor is in the past
+        let n_tot = self.audio_total_samples as f64;
+        let center_sample = n_tot + rel_anchor_us / dt_us;
+        let ring_lo = self.audio_total_samples.saturating_sub(AUDIO_RING_LEN as u64);
+        let max_s0 = self.audio_total_samples - (AUDIO_FFT_N as u64);
+        let desired_s0 = center_sample - 0.5 * (AUDIO_FFT_N as f64);
+        let s0 = if desired_s0 < (ring_lo as f64) {
+            ring_lo
+        } else if desired_s0 > (max_s0 as f64) {
+            max_s0
+        } else {
+            desired_s0 as u64
+        };
+        // Reject if anchor is far outside the available audio window (> 0.25 s away)
+        let s0_t_rel_us = -((self.audio_total_samples - s0) as f64) * dt_us;
+        let win_dur_us = (AUDIO_FFT_N as f64) * dt_us;
+        if rel_anchor_us < s0_t_rel_us - 250_000.0 || rel_anchor_us > s0_t_rel_us + win_dur_us + 250_000.0 {
+            return None;
+        }
+
+        // Exact phase recurrence over `AUDIO_FFT_N` samples:
+        // t_k - t_anchor = (s0_t_rel_us - rel_anchor_us) + (k + 0.5) * dt_us
+        let t0_minus_anchor_sec = (s0_t_rel_us - rel_anchor_us) * 1.0e-6;
+        let step_rad = -TWO_PI_64 * freq_hz / fs;
+        let init_rad = -TWO_PI_64 * freq_hz * t0_minus_anchor_sec;
+        let (s_step, c_step) = sin_cos_f64(step_rad);
+        let (mut wi, mut wr) = sin_cos_f64(init_rad);
+
+        let mut mean_a = 0.0f64;
+        let mut w_sum = 0.0f64;
+        let mut k = 0usize;
+        while k < AUDIO_FFT_N {
+            let idx = ((s0 + (k as u64)) as usize) & (AUDIO_RING_LEN - 1);
+            let wk = FFT2048_TABLES.hann[k];
+            mean_a += wk * (self.audio_ring[idx] as f64);
+            w_sum += wk;
+            k += 1;
+        }
+        mean_a /= w_sum.max(1.0);
+
+        let mut x_re = 0.0f64;
+        let mut x_im = 0.0f64;
+        k = 0;
+        while k < AUDIO_FFT_N {
+            let idx = ((s0 + (k as u64)) as usize) & (AUDIO_RING_LEN - 1);
+            let val = ((self.audio_ring[idx] as f64) - mean_a) * FFT2048_TABLES.hann[k];
+            x_re += val * wr;
+            x_im += val * wi;
+            let nr = wr * c_step - wi * s_step;
+            let ni = wr * s_step + wi * c_step;
+            wr = nr;
+            wi = ni;
+            k += 1;
+        }
+        let scale = 2.0 / w_sum.max(1.0);
+        x_re *= scale;
+        x_im *= scale;
+        let pxx = x_re * x_re + x_im * x_im;
+        if !pxx.is_finite() || pxx <= 1.0e-12 {
+            return None;
+        }
+        let inv_mag = 1.0 / crate::wasm_sqrt_f64(pxx);
+        Some((x_re * inv_mag, x_im * inv_mag, pxx))
+    }
+
+    /// Detects up to 4 prominent narrowband audio tones in `(15 Hz, max_freq_hz]` from the
+    /// latest `AUDIO_FFT_N` samples in `audio_ring`, with parabolic log-magnitude refinement.
+    #[inline(never)]
+    pub(crate) fn detect_top_audio_peaks(
+        &mut self,
+        max_freq_hz: f64,
+        out_freqs: &mut [f64; 4],
+    ) -> usize {
+        out_freqs.fill(0.0);
+        if self.audio_has_prev_t == 0
+            || self.audio_total_samples < (AUDIO_FFT_N as u64)
+            || !self.audio_ring_rate_hz.is_finite()
+            || self.audio_ring_rate_hz < 4000.0
+            || !max_freq_hz.is_finite()
+            || max_freq_hz <= 20.0
+        {
+            return 0;
+        }
+        let fs = self.audio_ring_rate_hz as f64;
+        let df = fs / (AUDIO_FFT_N as f64);
+        let s0 = self.audio_total_samples - (AUDIO_FFT_N as u64);
+        let mut mean_a = 0.0f64;
+        let mut k = 0usize;
+        while k < AUDIO_FFT_N {
+            let idx = ((s0 + (k as u64)) as usize) & (AUDIO_RING_LEN - 1);
+            mean_a += self.audio_ring[idx] as f64;
+            k += 1;
+        }
+        mean_a /= AUDIO_FFT_N as f64;
+        k = 0;
+        while k < AUDIO_FFT_N {
+            let idx = ((s0 + (k as u64)) as usize) & (AUDIO_RING_LEN - 1);
+            self.fft_re[k] = ((self.audio_ring[idx] as f64) - mean_a) * FFT2048_TABLES.hann[k];
+            self.fft_im[k] = 0.0;
+            k += 1;
+        }
+        self.fft2048_inplace();
+
+        let k_min = ((15.0 / df) as usize).max(2);
+        let k_max = ((max_freq_hz / df) as usize).min(AUDIO_FFT_N / 2 - 2);
+        if k_max <= k_min + 2 {
+            return 0;
+        }
+
+        // Compute bin power into `fft_im[0..=k_max+1]` (free after FFT) and find global peak + floor
+        let mut max_p = 0.0f64;
+        let mut sum_p = 0.0f64;
+        let mut cnt_p = 0usize;
+        k = k_min - 1;
+        while k <= k_max + 1 {
+            let p = self.fft_re[k] * self.fft_re[k] + self.fft_im[k] * self.fft_im[k];
+            self.fft_re[k] = p;
+            if k >= k_min && k <= k_max {
+                if p > max_p {
+                    max_p = p;
+                }
+                sum_p += p;
+                cnt_p += 1;
+            }
+            k += 1;
+        }
+        if !max_p.is_finite() || max_p <= 1.0e-8 || cnt_p == 0 {
+            return 0;
+        }
+        let avg_p = sum_p / (cnt_p as f64);
+        let thresh = (0.04 * max_p).max(6.0 * avg_p);
+
+        let mut pk_f = [0.0f64; 4];
+        let mut pk_p = [0.0f64; 4];
+        let mut n_pk = 0usize;
+
+        k = k_min;
+        while k <= k_max {
+            let p0 = self.fft_re[k];
+            if p0 >= thresh && p0 >= self.fft_re[k - 1] && p0 >= self.fft_re[k + 1] {
+                let lp_m = ln_f64(self.fft_re[k - 1].max(1.0e-30));
+                let lp_0 = ln_f64(p0.max(1.0e-30));
+                let lp_p = ln_f64(self.fft_re[k + 1].max(1.0e-30));
+                let denom = lp_m - 2.0 * lp_0 + lp_p;
+                let delta = if abs_f64(denom) > 1.0e-12 {
+                    (0.5 * (lp_m - lp_p) / denom).clamp(-0.5, 0.5)
+                } else {
+                    0.0
+                };
+                let f_est = ((k as f64) + delta) * df;
+                // Keep distinct peaks separated by >= 2.5 bins (~58 Hz)
+                let mut merged = false;
+                let mut j = 0usize;
+                while j < n_pk {
+                    if abs_f64(pk_f[j] - f_est) < 2.5 * df {
+                        if p0 > pk_p[j] {
+                            pk_f[j] = f_est;
+                            pk_p[j] = p0;
+                        }
+                        merged = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                if !merged {
+                    if n_pk < 4 {
+                        pk_f[n_pk] = f_est;
+                        pk_p[n_pk] = p0;
+                        n_pk += 1;
+                    } else {
+                        let mut min_j = 0usize;
+                        let mut j2 = 1usize;
+                        while j2 < 4 {
+                            if pk_p[j2] < pk_p[min_j] {
+                                min_j = j2;
+                            }
+                            j2 += 1;
+                        }
+                        if p0 > pk_p[min_j] {
+                            pk_f[min_j] = f_est;
+                            pk_p[min_j] = p0;
+                        }
+                    }
+                }
+            }
+            k += 1;
+        }
+
+        // Sort peaks ascending by frequency
+        let mut a = 0usize;
+        while a < n_pk {
+            let mut b = a + 1;
+            while b < n_pk {
+                if pk_f[b] < pk_f[a] {
+                    let tf = pk_f[a];
+                    pk_f[a] = pk_f[b];
+                    pk_f[b] = tf;
+                }
+                b += 1;
+            }
+            out_freqs[a] = pk_f[a];
+            a += 1;
+        }
+        n_pk
     }
 
     #[inline(never)]

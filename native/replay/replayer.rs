@@ -197,7 +197,7 @@ impl<'h> Replayer<'h> {
                     r.byte_len, n.byte_len
                 ));
             }
-            let alias = n.kind == RegionKind::RingAlias;
+            let alias = matches!(n.kind, RegionKind::RingAlias | RegionKind::FixedAlias);
             if (r.flags & RFLAG_ALIAS != 0) != alias || (r.flags & RFLAG_DIGESTED != 0) == alias {
                 bad.push(format!(
                     "alias/digested flags 0x{:x} disagree with the native region kind",
@@ -304,7 +304,10 @@ impl<'h> Replayer<'h> {
         };
         let addr = p.addr();
         let ok = match b.native.kind {
-            RegionKind::Fixed | RegionKind::Indexed(_) | RegionKind::RingSlot(_) => addr == b.native.field_addr,
+            RegionKind::Fixed
+            | RegionKind::FixedAlias
+            | RegionKind::Indexed(_)
+            | RegionKind::RingSlot(_) => addr == b.native.field_addr,
             RegionKind::RingAlias => self.ring_slots.contains(&addr),
         };
         if !ok {

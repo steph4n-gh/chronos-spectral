@@ -49,6 +49,8 @@ pub enum RegionKind {
     RingSlot(u32),
     /// A moving view onto one of the ring slots (`ingest_rgba`, `display_rgba`).
     RingAlias,
+    /// A fixed view aliasing another digested field (e.g. `elasto_planes -> bos_planes`).
+    FixedAlias,
 }
 
 /// One exported region, as laid out in this build.
@@ -77,7 +79,7 @@ const F32: u8 = 3;
 /// Every region exported by a pointer getter, in the order of `REGION_SPECS` in
 /// `scripts/trace_lib.mjs` (ring slots expanded). Addresses and lengths come from the native
 /// types; nothing here is hard-coded.
-pub fn regions() -> [NativeRegion; RING_LEN + 43] {
+pub fn regions() -> [NativeRegion; RING_LEN + 48] {
     // SAFETY: only addresses and sizes of fields are taken; no reads or writes.
     let a: &Arena = unsafe { &*addr_of_mut!(ARENA) };
     macro_rules! fixed {
@@ -409,6 +411,45 @@ pub fn regions() -> [NativeRegion; RING_LEN + 43] {
             true,
             a.depth.ext_depth
         ),
+        fixed!(
+            "wind_telemetry",
+            "chronos_get_wind_telemetry_ptr",
+            U32,
+            false,
+            a.wind.telem
+        ),
+        fixed!(
+            "wind_planes",
+            "chronos_get_wind_planes_ptr",
+            F32,
+            false,
+            a.wind.planes
+        ),
+        fixed!(
+            "elasto_telemetry",
+            "chronos_get_elasto_telemetry_ptr",
+            U32,
+            false,
+            a.elasto.telem
+        ),
+        NativeRegion {
+            name: "elasto_planes",
+            getter: "chronos_get_elasto_planes_ptr",
+            kind: RegionKind::FixedAlias,
+            elem: F32,
+            host_writable: false,
+            field_addr: a.bos.planes.as_ptr() as usize,
+            byte_len: size_of_val(&a.bos.planes),
+        },
+        NativeRegion {
+            name: "elasto_valid",
+            getter: "chronos_get_elasto_valid_ptr",
+            kind: RegionKind::FixedAlias,
+            elem: U8,
+            host_writable: false,
+            field_addr: a.bos.valid_mask.as_ptr() as usize,
+            byte_len: size_of_val(&a.bos.valid_mask),
+        },
     ]
 }
 
@@ -584,6 +625,29 @@ mod engine {
 
         pub fn set_hodge_mode(&mut self, mode: u32) -> u32 {
             unsafe { crate::set_hodge_mode_on(&mut self.arena, mode) }
+        }
+
+        pub fn set_wind_mode(&mut self, mode: u32) -> u32 {
+            unsafe { crate::set_wind_mode_on(&mut self.arena, mode) }
+        }
+
+        pub fn set_wind_fluid_density(&mut self, rho_kg_m3: f32) -> u32 {
+            unsafe { crate::set_wind_fluid_density_on(&mut self.arena, rho_kg_m3) }
+        }
+
+        pub fn set_elasto_mode(&mut self, mode: u32) -> u32 {
+            unsafe { crate::set_elasto_mode_on(&mut self.arena, mode) }
+        }
+
+        pub fn set_elasto_lock_freqs(
+            &mut self,
+            count: u32,
+            f0: f32,
+            f1: f32,
+            f2: f32,
+            f3: f32,
+        ) -> u32 {
+            unsafe { crate::set_elasto_lock_freqs_on(&mut self.arena, count, f0, f1, f2, f3) }
         }
 
         pub fn set_depth_mode(&mut self, mode: u32) -> u32 {
@@ -793,7 +857,35 @@ mod engine {
             &self.arena.depth.export_hero_depth
         }
 
-        /// Zero-copy field descriptor for C/Python bindings (`kind`: 0..=19).
+        pub fn wind_telemetry(&self) -> &[u32] {
+            &self.arena.wind.telem
+        }
+
+        pub fn wind_planes(&self) -> &[f32] {
+            &self.arena.wind.planes
+        }
+
+        pub fn elasto_telemetry(&self) -> &[u32] {
+            &self.arena.elasto.telem
+        }
+
+        pub fn elasto_planes(&self) -> &[f32] {
+            if self.arena.elasto.get_mode() == crate::elastography::ELASTO_MODE_ACOUSTIC_BOS {
+                &self.arena.bos.planes
+            } else {
+                &self.arena.bos.planes[..6 * crate::elastography::ELASTO_V]
+            }
+        }
+
+        pub fn elasto_valid(&self) -> &[u8] {
+            if self.arena.elasto.get_mode() == crate::elastography::ELASTO_MODE_ACOUSTIC_BOS {
+                &self.arena.bos.valid_mask
+            } else {
+                &self.arena.bos.valid_mask[..crate::elastography::ELASTO_V]
+            }
+        }
+
+        /// Zero-copy field descriptor for C/Python bindings (`kind`: 0..=24).
         pub fn field_view_desc(&self, kind: u32) -> Option<FieldViewDesc> {
             let (fw, fh) = self.frame_dims();
             let desc = match kind {
@@ -977,6 +1069,83 @@ mod engine {
                     cols: crate::depth::DEPTH_HERO_STRIDE as u32,
                     stride: crate::depth::DEPTH_HERO_STRIDE as u32,
                 },
+                20 => FieldViewDesc {
+                    ptr: self.arena.wind.telem.as_ptr() as *const u8,
+                    len: self.arena.wind.telem.len(),
+                    elem_size: 4,
+                    elem_kind: 2,
+                    rows: self.arena.wind.telem.len() as u32,
+                    cols: 1,
+                    stride: 1,
+                },
+                21 => FieldViewDesc {
+                    ptr: self.arena.wind.planes.as_ptr() as *const u8,
+                    len: self.arena.wind.planes.len(),
+                    elem_size: 4,
+                    elem_kind: 3,
+                    rows: crate::wind_tunnel::WIND_H as u32,
+                    cols: crate::wind_tunnel::WIND_W as u32,
+                    stride: 3,
+                },
+                22 => FieldViewDesc {
+                    ptr: self.arena.elasto.telem.as_ptr() as *const u8,
+                    len: self.arena.elasto.telem.len(),
+                    elem_size: 4,
+                    elem_kind: 2,
+                    rows: self.arena.elasto.telem.len() as u32,
+                    cols: 1,
+                    stride: 1,
+                },
+                23 => {
+                    let is_abos = self.arena.elasto.get_mode()
+                        == crate::elastography::ELASTO_MODE_ACOUSTIC_BOS;
+                    FieldViewDesc {
+                        ptr: self.arena.bos.planes.as_ptr() as *const u8,
+                        len: if is_abos {
+                            self.arena.bos.planes.len()
+                        } else {
+                            6 * crate::elastography::ELASTO_V
+                        },
+                        elem_size: 4,
+                        elem_kind: 3,
+                        rows: if is_abos {
+                            crate::bos::BOS_GRID_H as u32
+                        } else {
+                            crate::elastography::ELASTO_H as u32
+                        },
+                        cols: if is_abos {
+                            crate::bos::BOS_GRID_W as u32
+                        } else {
+                            crate::elastography::ELASTO_W as u32
+                        },
+                        stride: 6,
+                    }
+                }
+                24 => {
+                    let is_abos = self.arena.elasto.get_mode()
+                        == crate::elastography::ELASTO_MODE_ACOUSTIC_BOS;
+                    FieldViewDesc {
+                        ptr: self.arena.bos.valid_mask.as_ptr(),
+                        len: if is_abos {
+                            self.arena.bos.valid_mask.len()
+                        } else {
+                            crate::elastography::ELASTO_V
+                        },
+                        elem_size: 1,
+                        elem_kind: 1,
+                        rows: if is_abos {
+                            crate::bos::BOS_GRID_H as u32
+                        } else {
+                            crate::elastography::ELASTO_H as u32
+                        },
+                        cols: if is_abos {
+                            crate::bos::BOS_GRID_W as u32
+                        } else {
+                            crate::elastography::ELASTO_W as u32
+                        },
+                        stride: 1,
+                    }
+                }
                 _ => return None,
             };
             Some(desc)

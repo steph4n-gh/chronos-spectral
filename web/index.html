@@ -2707,6 +2707,7 @@
           <div class="showcase-toolbar-group" role="group" aria-label="Zero-upload local optical inputs">
             <button type="button" id="btnHeroDropMp4" class="hero-action-btn" title="Test your own MP4/WebM video locally in WebAssembly (zero bytes uploaded)">📂 Drop / Choose Any MP4</button>
             <button type="button" id="btnHeroWebcam" class="hero-action-btn" title="Stream live webcam pixels directly into the local Wasm arena">◉ Use Webcam</button>
+            <button type="button" id="btnHeroSoundProbe" class="hero-action-btn" title="One-click live webcam + 110/220 Hz WebAudio lock-in probe to visualize acoustic vibrations in real time">🎙 Live Sound Probe</button>
           </div>
         </div>
         <p id="showcaseToolbarStatus" role="status" class="visually-hidden"></p>
@@ -3190,6 +3191,9 @@
               <option value="10">Hodge Harmonic |h| (64x36)</option>
               <option value="11">RS Welch Coherence gamma^2 (64x36)</option>
               <option value="12">Depth / Parallax / Stereo (64x36 / 256x128)</option>
+              <option value="13">Pocket Wind Tunnel Cp + Lift/Drag (64x36)</option>
+              <option value="14">kHz Optical Elastography c(x,y) + Power Flow (64x36)</option>
+              <option value="15">Lock-In Acoustic BOS |Phi| (256x128)</option>
             </select>
           </div>
         </div>
@@ -3242,6 +3246,40 @@
               <option value="3" disabled>Mode 3 · External Plane LiDAR/Prior (SDK / Worker API)</option>
               <option value="4" disabled>Mode 4 · Auto-Fused (SDK / Worker API)</option>
             </select>
+          </div>
+          <div class="select-field">
+            <label for="windModeSelect">Pocket Wind Tunnel (Cp · Lift/Drag · NS)</label>
+            <select id="windModeSelect" name="windMode">
+              <option value="0" selected>Off (Zero Overhead)</option>
+              <option value="1">Mode 1 · Staggered 2f (64x36)</option>
+              <option value="2">Mode 2 · Every Frame (64x36)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="elastoModeSelect">kHz Optical Elastography &amp; Acoustic BOS</label>
+            <select id="elastoModeSelect" name="elastoMode">
+              <option value="0" selected>Off (Zero Overhead)</option>
+              <option value="1">Mode 1 · RS Audio-Locked (64x36)</option>
+              <option value="2">Mode 2 · RS Self-Locked (64x36)</option>
+              <option value="3">Mode 3 · Frame-Rate Surface (64x36)</option>
+              <option value="4">Mode 4 · Lock-In Acoustic BOS (256x128)</option>
+            </select>
+          </div>
+          <div class="select-field">
+            <label for="probeExciterPreset">WebAudio Probe Exciter (Speaker Lock-In)</label>
+            <div style="display: flex; gap: 0.35rem; align-items: stretch;">
+              <select id="probeExciterPreset" name="probeExciterPreset" style="flex: 1 1 auto; min-width: 0;">
+                <option value="380,860" selected>380 + 860 Hz (Kirchhoff Plate)</option>
+                <option value="247.5,495">247.5 + 495 Hz (Octave Aniso)</option>
+                <option value="110,220">110 + 220 Hz (Shear / Gelatin)</option>
+                <option value="440">440 Hz (Single Tone)</option>
+                <option value="1200">1,200 Hz (Acoustic BOS)</option>
+              </select>
+              <button type="button" id="btnProbeExciter" class="action-btn" aria-pressed="false" style="white-space: nowrap; flex: 0 0 auto;">▶ Probe</button>
+            </div>
           </div>
         </div>
 
@@ -3366,7 +3404,7 @@
               <span class="kpi-value" id="diagMetrologyCov">0 usable · 0 cand</span>
             </div>
             <div class="kpi-card">
-              <span class="kpi-label">WAVE-2 STAMPS (V·H·C)</span>
+              <span class="kpi-label">WAVE-2 STAMPS (V·H·C·D·W·E)</span>
               <span class="kpi-value" id="diagWave2Stamps" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">--</span>
             </div>
             <div class="kpi-card">
@@ -3380,6 +3418,14 @@
             <div class="kpi-card">
               <span class="kpi-label">OCCLUDED CONSERVATION</span>
               <span class="kpi-value" id="diagOcclConservation" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">NONE</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">POCKET WIND TUNNEL (CL·CD·nu)</span>
+              <span class="kpi-value" id="diagWindTunnel" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
+            </div>
+            <div class="kpi-card">
+              <span class="kpi-label">ELASTOGRAPHY · ACOUSTIC BOS</span>
+              <span class="kpi-value" id="diagElastography" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">OFF</span>
             </div>
           </div>
         </details>
@@ -3414,6 +3460,15 @@
           <button type="button" class="showcase-btn" data-showcase="hodge_cylinder" aria-pressed="false">🌊 Hodge 64×36 Cylinder Flow (8s)</button>
           <button type="button" class="showcase-btn" data-showcase="rs_vibro_247hz" aria-pressed="false">〰️ 247.5 Hz RS Vibrometry (8s)</button>
           <button type="button" class="showcase-btn" data-showcase="fovea_720p" aria-pressed="false">🔍 720p 1:1 Fovea &amp; PTZ (8s)</button>
+          <button type="button" class="showcase-btn" data-showcase="wind_lifting_cyl" aria-pressed="false">🌬 Wind Tunnel Lift &amp; Cp (8.5s)</button>
+          <button type="button" class="showcase-btn" data-showcase="wind_lamb_oseen" aria-pressed="false">🌀 NS Viscosity Discovery (8.5s)</button>
+          <button type="button" class="showcase-btn" data-showcase="wind_daphnia_piv" aria-pressed="false">🔬 Real Laser PIV 32mm (14s)</button>
+          <button type="button" class="showcase-btn" data-showcase="wind_smoke_wing" aria-pressed="false">✈ Real Smoke Airfoil Stall (40s)</button>
+          <button type="button" class="showcase-btn" data-showcase="elasto_crack" aria-pressed="false">🔊 kHz Elastography Crack (9s)</button>
+          <button type="button" class="showcase-btn" data-showcase="elasto_guitar" aria-pressed="false">🎸 Guitar Soundboard β₁ (9s)</button>
+          <button type="button" class="showcase-btn" data-showcase="elasto_gelatin" aria-pressed="false">🧪 Gelatin Shear Inclusion (8.5s)</button>
+          <button type="button" class="showcase-btn" data-showcase="acoustic_bos" aria-pressed="false">📡 1.2 kHz Acoustic BOS (9s)</button>
+          <button type="button" class="showcase-btn" data-showcase="live_sound_probe" aria-pressed="false">🎙 Live Sound Probe (Webcam)</button>
         </div>
       </div>
 
@@ -3471,6 +3526,23 @@
               <option value="./samples/hodge_cylinder_circulation.mp4" data-fps="30" data-lab="0" data-swarm="2">Mesh Hodge 64×36 Cylinder Circulation (8.0s · 30 fps · Ex/Co/Ha + β₁)</option>
               <option value="./samples/rs_vibrometry_247hz.mp4" data-fps="30" data-lab="0" data-swarm="0">Rolling-Shutter 247.5 Hz Sub-Frame Vibrometry (8.0s · 30 fps · 1:1 Scan)</option>
               <option value="./samples/fovea_720p_micro_detail.mp4" data-fps="30" data-lab="0" data-swarm="1">720p Dual-Resolution 1:1 Fovea &amp; PTZ Slew (8.0s · 1280×720 · 30 fps)</option>
+            </optgroup>
+            <optgroup label="v3.3.0 Pocket Wind Tunnel (Cp · Lift/Drag · NS Viscosity)">
+              <option value="./samples/wind_lifting_cylinder_cp.mp4" data-fps="30" data-lab="0" data-swarm="2">Lifting Cylinder Cp &amp; Kutta-Joukowski (8.5s · 30 fps · β₁=1)</option>
+              <option value="./samples/wind_lamb_oseen_viscosity.mp4" data-fps="30" data-lab="0" data-swarm="2">Lamb-Oseen Vortex NS Viscosity Discovery (8.5s · 30 fps · ν=24)</option>
+              <option value="./samples/real_daphnia_laser_piv.mp4" data-fps="15" data-lab="0" data-swarm="2">Real Lab Laser-Sheet PIV 32×32 mm Wake (14.0s · 15 fps · CC BY)</option>
+              <option value="./samples/real_smoke_airfoil_cambridge.mp4" data-fps="25" data-lab="0" data-swarm="2">Real Cambridge Smoke Wind-Tunnel Airfoil Stall (40.1s · 25 fps)</option>
+              <option value="./samples/real_karman_mri_cylinder.mp4" data-fps="25" data-lab="0" data-swarm="2">Real-Time MRI Water Channel Kármán Vortex Street (19.5s · 25 fps)</option>
+            </optgroup>
+            <optgroup label="v3.3.0 kHz Optical Elastography &amp; Lock-In Acoustic BOS">
+              <option value="./samples/elasto_hidden_crack_panel.mp4" data-fps="30" data-lab="0" data-swarm="0">kHz Kirchhoff Plate Rib &amp; Crack Sink (9.0s · 380+860 Hz · 48 kHz)</option>
+              <option value="./samples/elasto_guitar_soundboard.mp4" data-fps="30" data-lab="0" data-swarm="0">Anisotropic Guitar Soundboard &amp; β₁ Soundhole (9.0s · 247.5+495 Hz)</option>
+              <option value="./samples/elasto_gelatin_phantom.mp4" data-fps="30" data-lab="0" data-swarm="0">Gelatin Shear-Wave Stiff Inclusion Phantom (8.5s · 110+220 Hz)</option>
+              <option value="./samples/acoustic_bos_standing_wave.mp4" data-fps="30" data-lab="0" data-swarm="0">Lock-In 1.2 kHz Acoustic BOS Standing Wave (9.0s · 256×128 |Φ|)</option>
+              <option value="./samples/real_tuning_fork_ripples.mp4" data-fps="30" data-lab="0" data-swarm="0">Real Tuning-Fork Twin Capillary Ripples (12.5s · 480 fps Slow-Mo)</option>
+              <option value="./samples/real_glass_faraday_waves.mp4" data-fps="25" data-lab="0" data-swarm="0">Real Singing Wine-Glass Faraday Waves (16.0s · 25 fps)</option>
+              <option value="./samples/real_chladni_plate_audio.mp4" data-fps="30" data-lab="0" data-swarm="0">Real Brass Chladni Plate Nodal Waves (10.6s · 30 fps · Audio)</option>
+              <option value="./samples/real_shear_wave_oce.mp4" data-fps="10" data-lab="0" data-swarm="0">Real Lab OCE Tissue Shear-Wave Propagation (15.0s · 10 fps)</option>
             </optgroup>
           </select>
         </div>
@@ -4262,6 +4334,10 @@
       hodgeModeSelect: document.getElementById('hodgeModeSelect'),
       rsVibroModeSelect: document.getElementById('rsVibroModeSelect'),
       depthModeSelect: document.getElementById('depthModeSelect'),
+      windModeSelect: document.getElementById('windModeSelect'),
+      elastoModeSelect: document.getElementById('elastoModeSelect'),
+      probeExciterPreset: document.getElementById('probeExciterPreset'),
+      btnProbeExciter: document.getElementById('btnProbeExciter'),
       inpRsDtRowUs: document.getElementById('inpRsDtRowUs'),
       inpRsExposureUs: document.getElementById('inpRsExposureUs'),
       selRsScanDir: document.getElementById('selRsScanDir'),
@@ -4301,6 +4377,8 @@
       diagRsWelch: document.getElementById('diagRsWelch'),
       diagHodge2Complex: document.getElementById('diagHodge2Complex'),
       diagOcclConservation: document.getElementById('diagOcclConservation'),
+      diagWindTunnel: document.getElementById('diagWindTunnel'),
+      diagElastography: document.getElementById('diagElastography'),
       kpiTremorHz: document.getElementById('kpiTremorHz'),
       kpiTremorPhi: document.getElementById('kpiTremorPhi'),
       lblApexKpi: document.getElementById('lblApexKpi'),
@@ -4499,7 +4577,7 @@
           showEcaOverlay: Boolean(st.overlays.showEcaOverlay),
           showKalman: Boolean(st.overlays.showKalman),
           showCovEllipses: Boolean(st.overlays.showCovEllipses),
-          fieldOverlayMode: Math.max(0, Math.min(11, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
+          fieldOverlayMode: Math.max(0, Math.min(15, Math.trunc(Number(st.overlays.fieldOverlayMode) || 0))),
         }),
         pointerTool: st.pointerTool,
         viewport: st.viewport,
@@ -4538,7 +4616,7 @@
           showCovEllipses: typeof event.showCovEllipses === 'boolean' ? event.showCovEllipses : state.overlays.showCovEllipses,
           fieldOverlayMode:
             typeof event.fieldOverlayMode === 'number' && Number.isFinite(event.fieldOverlayMode)
-              ? Math.max(0, Math.min(11, Math.round(event.fieldOverlayMode)))
+              ? Math.max(0, Math.min(15, Math.round(event.fieldOverlayMode)))
               : state.overlays.fieldOverlayMode,
         };
         if (
@@ -5181,7 +5259,7 @@
 
     function syncRsLiveAudioCapture() {
       const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
-      if (!activeMediaStream || rm !== 2) {
+      if (!activeMediaStream || rm !== 2 || probeExciterActive) {
         stopRsLiveAudioCapture(true);
         return;
       }
@@ -5865,8 +5943,278 @@
       }
     }
 
+    // ========================================================================
+    // v3.3.0 Muxed MP4 Audio Feeder & WebAudio Probe Exciter (Elastography / ABOS)
+    // ========================================================================
+    let mp4AudioPcm = null;
+    let mp4AudioRateHz = 48000.0;
+    let mp4AudioCursor = 0;
+    let mp4AudioPrimed = false;
+    let mp4AudioDecodeToken = 0;
+
+    function clearMp4AudioState() {
+      mp4AudioDecodeToken++;
+      mp4AudioPcm = null;
+      mp4AudioRateHz = 48000.0;
+      mp4AudioCursor = 0;
+      mp4AudioPrimed = false;
+    }
+
+    async function decodeMp4AudioTrack(urlOrFile, expectedEpoch) {
+      const myToken = ++mp4AudioDecodeToken;
+      try {
+        let rawBuf = null;
+        if (typeof urlOrFile === 'string' && urlOrFile.length > 0) {
+          const resp = await fetch(urlOrFile);
+          if (!resp.ok) return false;
+          rawBuf = await resp.arrayBuffer();
+        } else if (urlOrFile && typeof urlOrFile.arrayBuffer === 'function') {
+          rawBuf = await urlOrFile.arrayBuffer();
+        } else {
+          return false;
+        }
+        if (myToken !== mp4AudioDecodeToken || expectedEpoch !== sourceEpoch) return false;
+        const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!OAC && !AC) return false;
+        const decCtx = OAC ? new OAC(1, 1, 48000) : new AC();
+        let decoded = null;
+        try {
+          decoded = await decCtx.decodeAudioData(rawBuf);
+        } finally {
+          if (!OAC && typeof decCtx.close === 'function') {
+            try { await decCtx.close(); } catch (_e) {}
+          }
+        }
+        if (!decoded || decoded.length === 0 || decoded.numberOfChannels < 1) return false;
+        if (myToken !== mp4AudioDecodeToken || expectedEpoch !== sourceEpoch) return false;
+        const n = decoded.length;
+        const mono = new Float32Array(n);
+        if (decoded.numberOfChannels === 1) {
+          mono.set(decoded.getChannelData(0));
+        } else {
+          const ch0 = decoded.getChannelData(0);
+          const ch1 = decoded.getChannelData(1);
+          for (let i = 0; i < n; i++) {
+            mono[i] = 0.5 * (ch0[i] + ch1[i]);
+          }
+        }
+        mp4AudioPcm = mono;
+        mp4AudioRateHz = decoded.sampleRate || 48000.0;
+        mp4AudioCursor = 0;
+        mp4AudioPrimed = false;
+        const rm = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+        if (rm === 2 && Math.abs(mp4AudioRateHz - 48000.0) > 1.0) {
+          const dtRowUs = dom.inpRsDtRowUs ? Number(dom.inpRsDtRowUs.value) : 35.0;
+          const exposureUs = dom.inpRsExposureUs ? Number(dom.inpRsExposureUs.value) : 200.0;
+          worker.postMessage({
+            type: 'set_rs_calib',
+            rsMode: 2,
+            dtRowUs,
+            exposureUs,
+            audioRateHz: mp4AudioRateHz,
+            maxSkewUs: 500.0,
+          });
+        }
+        return true;
+      } catch (_decodeErr) {
+        return false;
+      }
+    }
+
+    function pumpMp4AudioToWorker(mediaTimeSec) {
+      if (!mp4AudioPcm || mp4AudioPcm.length === 0) return;
+      if (!Number.isFinite(mediaTimeSec) || mediaTimeSec < 0) return;
+      const targetSample = Math.min(
+        mp4AudioPcm.length,
+        Math.round((mediaTimeSec + 0.065) * mp4AudioRateHz)
+      );
+      if (!mp4AudioPrimed) {
+        mp4AudioCursor = Math.max(0, Math.round((mediaTimeSec - 0.12) * mp4AudioRateHz));
+        mp4AudioPrimed = true;
+      }
+      if (targetSample <= mp4AudioCursor) return;
+      const slice = mp4AudioPcm.slice(mp4AudioCursor, targetSample);
+      const tEndUs = Math.round((targetSample * 1_000_000.0) / mp4AudioRateHz);
+      mp4AudioCursor = targetSample;
+      worker.postMessage(
+        {
+          type: 'push_audio_pcm',
+          samples: slice,
+          tEndUs,
+          sampleRateHz: mp4AudioRateHz,
+          estSkewUs: 0.0,
+        },
+        [slice.buffer]
+      );
+    }
+
+    let probeExciterCtx = null;
+    let probeExciterOscs = [];
+    let probeExciterActive = false;
+    let probeExciterFreqs = [380, 860];
+    let probeExciterRateHz = 48000.0;
+    let probeExciterCursor = 0;
+    let probeExciterPrimed = false;
+
+    function parseProbeExciterFreqs() {
+      const raw = dom.probeExciterPreset ? String(dom.probeExciterPreset.value || '380,860') : '380,860';
+      const parsed = raw
+        .split(',')
+        .map((s) => Number(s.trim()))
+        .filter((v) => Number.isFinite(v) && v > 1.0 && v <= 20000.0)
+        .slice(0, 4);
+      return parsed.length > 0 ? parsed : [380, 860];
+    }
+
+    function syncProbeExciterUi() {
+      if (!dom.btnProbeExciter) return;
+      dom.btnProbeExciter.classList.toggle('active', probeExciterActive);
+      dom.btnProbeExciter.setAttribute('aria-pressed', String(probeExciterActive));
+      setTextIfChanged(dom.btnProbeExciter, probeExciterActive ? '■ Stop' : '▶ Probe');
+    }
+
+    function pumpProbeExciterAudioToWorker(mediaTimeSec) {
+      if (!probeExciterActive || mp4AudioPcm) return;
+      if (!Number.isFinite(mediaTimeSec) || mediaTimeSec < 0) return;
+      const rate = probeExciterRateHz;
+      const targetSample = Math.round((mediaTimeSec + 0.065) * rate);
+      if (!probeExciterPrimed || targetSample < probeExciterCursor) {
+        probeExciterCursor = Math.max(0, Math.round((mediaTimeSec - 0.12) * rate));
+        probeExciterPrimed = true;
+      }
+      if (targetSample - probeExciterCursor > Math.round(rate)) {
+        probeExciterCursor = Math.max(0, targetSample - Math.round(0.2 * rate));
+      }
+      const n = targetSample - probeExciterCursor;
+      if (n <= 0) return;
+      const buf = new Float32Array(n);
+      const invN = 1.0 / Math.max(1, probeExciterFreqs.length);
+      const startSample = probeExciterCursor;
+      for (let f = 0; f < probeExciterFreqs.length; f++) {
+        const w = (2.0 * Math.PI * probeExciterFreqs[f]) / rate;
+        for (let i = 0; i < n; i++) {
+          buf[i] += invN * Math.sin(w * (startSample + i));
+        }
+      }
+      probeExciterCursor = targetSample;
+      const tEndUs = Math.round((targetSample * 1_000_000.0) / rate);
+      worker.postMessage(
+        { type: 'push_audio_pcm', samples: buf, tEndUs, sampleRateHz: rate, estSkewUs: 0.0 },
+        [buf.buffer]
+      );
+    }
+
+    function stopProbeExciter(resumeMic = true) {
+      const wasActive = probeExciterActive;
+      probeExciterActive = false;
+      probeExciterCursor = 0;
+      probeExciterPrimed = false;
+      for (let i = 0; i < probeExciterOscs.length; i++) {
+        try { probeExciterOscs[i].stop(); } catch (_e) {}
+        try { probeExciterOscs[i].disconnect(); } catch (_e) {}
+      }
+      probeExciterOscs = [];
+      if (probeExciterCtx) {
+        try { probeExciterCtx.close(); } catch (_e) {}
+        probeExciterCtx = null;
+      }
+      syncProbeExciterUi();
+      if (wasActive && resumeMic) {
+        syncRsLiveAudioCapture();
+      }
+    }
+
+    function startProbeExciter(opts = null) {
+      stopProbeExciter(false);
+      const freqs = opts && Array.isArray(opts.freqs) && opts.freqs.length > 0
+        ? opts.freqs
+        : parseProbeExciterFreqs();
+      probeExciterFreqs = freqs;
+      probeExciterRateHz = 48000.0;
+      probeExciterCursor = 0;
+      probeExciterPrimed = false;
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) {
+        try {
+          const ctx = new AC({ sampleRate: 48000 });
+          const master = ctx.createGain();
+          master.gain.value = 0.18 / Math.max(1, freqs.length);
+          master.connect(ctx.destination);
+          const oscs = freqs.map((hz) => {
+            const osc = ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.value = hz;
+            osc.connect(master);
+            osc.start();
+            return osc;
+          });
+          if (ctx.state === 'suspended') ctx.resume();
+          probeExciterCtx = ctx;
+          probeExciterOscs = oscs;
+        } catch (_audioErr) {}
+      }
+      probeExciterActive = true;
+      stopRsLiveAudioCapture(true);
+      const curEm = dom.elastoModeSelect ? (parseInt(dom.elastoModeSelect.value || '0', 10) || 0) : 0;
+      const targetEm = opts && typeof opts.elastoMode === 'number'
+        ? opts.elastoMode
+        : (curEm > 0 ? curEm : (freqs.length === 1 && freqs[0] >= 1000 ? 4 : 1));
+      if (dom.bosModeSelect && dom.bosModeSelect.value !== '0') {
+        dom.bosModeSelect.value = '0';
+        worker.postMessage({ type: 'set_bos_config', bosMode: 0, overlayKind: 0 });
+      }
+      if (dom.elastoModeSelect) dom.elastoModeSelect.value = String(targetEm);
+      if (dom.rsVibroModeSelect && (targetEm === 1 || targetEm === 4)) {
+        dom.rsVibroModeSelect.value = '2';
+        sendRsControlToWorker(true);
+      }
+      worker.postMessage({ type: 'set_elasto_config', elastoMode: targetEm, lockFreqs: freqs });
+      const targetOverlay = opts && typeof opts.overlayMode === 'number'
+        ? opts.overlayMode
+        : (targetEm === 4 ? 15 : 14);
+      if (dom.fieldOverlayModeSelect) {
+        dom.fieldOverlayModeSelect.value = String(targetOverlay);
+        dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: targetOverlay });
+        worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: targetOverlay, overlaySyncSeq: nextOverlaySyncSeq() });
+      }
+      syncProbeExciterUi();
+    }
+
+    async function activateLiveSoundProbeWebcam() {
+      if (activeResMode === 0) {
+        document.getElementById('btnResHd')?.click();
+      }
+      syncSwarmControlsForConfig(1, 0, 11, true);
+      if (dom.probeExciterPreset) dom.probeExciterPreset.value = '110,220';
+      applyWave1PresetToUiAndWorker({
+        resMode: 1,
+        swarmMode: 0,
+        overlayMode: 11,
+        bosMode: 0,
+        hodgeMode: 0,
+        windMode: 0,
+        depthMode: 0,
+        rsMode: 2,
+        elastoMode: 1,
+        elastoLockFreqs: [110, 220],
+        rsCalib: { dtRowUs: 35.0, exposureUs: 500.0, scanDir: 0 },
+        native1to1: true,
+      });
+      startProbeExciter({ freqs: [110, 220], elastoMode: 1, overlayMode: 11 });
+      if (activeSourceMode !== 'webcam' || !activeMediaStream) {
+        await startWebcamCapture({ highlightShowcase: 'live_sound_probe', preferMic: false });
+      } else {
+        setActiveShowcaseChip('live_sound_probe');
+        dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM · 110+220 Hz SOUND PROBE (RS COHERENCE + ELASTO)';
+      }
+    }
+
     function stopMediaCapture(preserveLiveRetry = false) {
       stopRsLiveAudioCapture();
+      clearMp4AudioState();
+      probeExciterCursor = 0;
+      probeExciterPrimed = false;
       rsVidClockOffsetUs = 0.0;
       rsVidClockValid = false;
       rsVidClockCaptureTimed = false;
@@ -6169,6 +6517,16 @@
         rsAudioAnchorRefineLeft = 0;
         resetRsAudioSkewState();
         rsAudioLastSentTEndUs = 0;
+        mp4AudioCursor = 0;
+        mp4AudioPrimed = false;
+        probeExciterCursor = 0;
+        probeExciterPrimed = false;
+      }
+
+      if (hasValidPts && mp4AudioPcm && !activeMediaStream) {
+        pumpMp4AudioToWorker(mediaTimeSec);
+      } else if (hasValidPts && probeExciterActive && !mp4AudioPcm) {
+        pumpProbeExciterAudioToWorker(mediaTimeSec);
       }
 
       const nomDt = 1.0 / Math.max(8.0, activeVideoFps);
@@ -6785,12 +7143,22 @@
         const w2h = w2 && w2.hodge && w2.hodge.available ? w2.hodge : null;
         const w2hActive = Boolean(w2h && w2h.reqMode > 0);
         const w2c = w2 && w2.conservation && w2.conservation.available ? w2.conservation : null;
+        const w2w = w2 && w2.wind && w2.wind.available ? w2.wind : null;
+        const w2wActive = Boolean(w2w && w2w.reqMode > 0);
+        const w2e = w2 && w2.elasto && w2.elasto.available ? w2.elasto : null;
+        const w2eActive = Boolean(w2e && w2e.reqMode > 0);
         const w2vNull = Boolean(w2v && (w2v.exposureNullFlag || ((w2v.reasonMask || 0) & 64) !== 0));
         const w2vHardFail = Boolean(w2v && (((w2v.reasonMask || 0) & ((1 << 4) | (1 << 5))) !== 0));
         if (bosActive && bos.state === 3) {
           severity = 'danger';
           const reasons = (bos.reasonFlags || []).join(', ') || 'CAMERA MOTION';
           bannerTxt = `⚠ TRIPOD FAILURE / DISTURBED (${reasons}) · SHIFT (${bos.shiftX.toFixed(2)}, ${bos.shiftY.toFixed(2)}) px · REF INVALIDATED`;
+        } else if (w2eActive && w2e.state === 4) {
+          severity = 'warn';
+          bannerTxt = `⚠ ELASTOGRAPHY REFUSED (0x${(w2e.reasonMask || 0).toString(16)}) · CHECK CALIB / MUTEX`;
+        } else if (w2wActive && w2w.state === 4) {
+          severity = 'warn';
+          bannerTxt = `⚠ WIND TUNNEL REFUSED (0x${(w2w.reasonMask || 0).toString(16)}) · CHECK EGO / FLOW`;
         } else if (w2vActive && (w2v.state === 4 || w2vNull)) {
           severity = w2vHardFail ? 'danger' : 'warn';
           const sincAbs = Number.isFinite(w2v.sincH) ? Math.abs(w2v.sincH).toFixed(3) : '--';
@@ -6810,9 +7178,21 @@
         } else if (roi && roi.fallbackScale) {
           severity = 'warn';
           bannerTxt = `⚠ NATIVE 1:1 UNAVAILABLE (${roi.srcW}x${roi.srcH} < ${roi.engineW}x${roi.engineH}) · RESCALED`;
+        } else if (w2eActive && w2e.state === 1) {
+          severity = 'warn';
+          bannerTxt = `⚠ ELASTOGRAPHY CALIBRATION REQUIRED (0x${(w2e.reasonMask || 0).toString(16)})`;
         } else if (w2vActive && w2v.state === 1) {
           severity = 'warn';
           bannerTxt = `⚠ RS CALIBRATION REQUIRED (${(w2v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'})`;
+        } else if (w2eActive && w2e.state === 3) {
+          severity = 'ok';
+          bannerTxt = w2e.mode === 4
+            ? `◆ LOCK-IN ACOUSTIC BOS READY · ${(w2e.f0 || 0).toFixed(0)} Hz · |Phi| RMS ${(w2e.abosPhiRms || 0).toFixed(3)} · CURL ${(w2e.abosCurlRms || 0).toFixed(3)}`
+            : `◆ ELASTOGRAPHY READY · ${w2e.classLabel || 'WAVE'} · a=${(w2e.alpha || 0).toFixed(2)} · c=${Math.round(w2e.medC || 0)} px/s · coh=${(w2e.meanCoh || 0).toFixed(2)}`;
+        } else if (w2wActive && (w2w.state === 2 || w2w.state === 3)) {
+          severity = 'ok';
+          const loadPart = w2w.state === 3 ? `CL=${(w2w.cl || 0).toFixed(2)} CD=${(w2w.cd || 0).toFixed(2)} · ` : '';
+          bannerTxt = `◆ POCKET WIND TUNNEL READY · ${loadPart}nu=${(w2w.nu || 0).toFixed(1)} px²/s · ${w2w.validCells || 0} CELLS`;
         } else if (bosActive && bos.state === 2) {
           severity = 'ok';
           bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/32768 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
@@ -6821,6 +7201,12 @@
           const fTxt = Number.isFinite(w2v.domFreqHz) ? w2v.domFreqHz.toFixed(1) : '--';
           const gTxt = Number.isFinite(w2v.maxCohGamma2) ? w2v.maxCohGamma2.toFixed(3) : '--';
           bannerTxt = `◆ RS VIBROMETRY READY · K=${w2v.welchK || 0} · ${fTxt} Hz · g2=${gTxt}`;
+        } else if (w2eActive && w2e.state === 2) {
+          severity = 'info';
+          bannerTxt = `ELASTOGRAPHY WARMING · SEGMENTS ${w2e.welchSegs || 0}/8 · LOCKING TONES`;
+        } else if (w2wActive && w2w.state === 1) {
+          severity = 'info';
+          bannerTxt = `POCKET WIND TUNNEL WARMING · BUILDING HODGE PRESSURE FIELD`;
         } else if (bosActive && bos.state === 1) {
           severity = 'info';
           bannerTxt = `BOS REFERENCE WARMING (${bos.warmupCnt}/16) · KEEP CAMERA STATIC ON TRIPOD`;
@@ -6852,7 +7238,7 @@
           const sc = (s) => (!s || !s.valid ? '-' : (s.held ? 'H' : 'V'));
           setTextIfChanged(
             dom.diagWave2Stamps,
-            `${sc(st.vibro)}${sc(st.hodge)}${sc(st.conservation)} · EP ${w2.continuityEpoch || 0}`
+            `${sc(st.vibro)}${sc(st.hodge)}${sc(st.conservation)}${sc(st.depth)}${sc(st.wind)}${sc(st.elasto)} · EP ${w2.continuityEpoch || 0}`
           );
         } else {
           setTextIfChanged(dom.diagWave2Stamps, '--');
@@ -6909,6 +7295,44 @@
           cTxt = `${c.statusLabel || 'NONE'} · ${hyps}`;
         }
         setTextIfChanged(dom.diagOcclConservation, cTxt);
+      }
+
+      if (dom.diagWindTunnel) {
+        const w = w2.wind;
+        let wTxt = 'OFF';
+        if (w && w.available) {
+          if (w.state === 3) {
+            wTxt = `LOADS · CL=${(w.cl || 0).toFixed(2)} CD=${(w.cd || 0).toFixed(2)} · nu=${(w.nu || 0).toFixed(1)}`;
+          } else if (w.state === 2) {
+            wTxt = `FIELD · nu=${(w.nu || 0).toFixed(1)} · R2=${(w.nuR2 || 0).toFixed(2)} · ${w.validCells || 0}c`;
+          } else if (w.state === 1) {
+            wTxt = `WARMING · ${w.validCells || 0}c`;
+          } else if (w.state === 4) {
+            wTxt = `REFUSED · 0x${(w.reasonMask || 0).toString(16)}`;
+          }
+        }
+        setTextIfChanged(dom.diagWindTunnel, wTxt);
+      }
+
+      if (dom.diagElastography) {
+        const e = w2.elasto;
+        let eTxt = 'OFF';
+        if (e && e.available) {
+          if (e.state === 3) {
+            if (e.mode === 4) {
+              eTxt = `ABOS · ${(e.f0 || 0).toFixed(0)}Hz · |Phi|=${(e.abosPhiRms || 0).toFixed(3)} · curl=${(e.abosCurlRms || 0).toFixed(3)}`;
+            } else {
+              eTxt = `${e.classLabel || 'READY'} · a=${(e.alpha || 0).toFixed(2)} · c=${Math.round(e.medC || 0)} · coh=${(e.meanCoh || 0).toFixed(2)}`;
+            }
+          } else if (e.state === 2) {
+            eTxt = `WARMING · seg=${e.welchSegs || 0}`;
+          } else if (e.state === 1) {
+            eTxt = `UNCALIB · 0x${(e.reasonMask || 0).toString(16)}`;
+          } else if (e.state === 4) {
+            eTxt = `REFUSED · 0x${(e.reasonMask || 0).toString(16)}`;
+          }
+        }
+        setTextIfChanged(dom.diagElastography, eTxt);
       }
     }
 
@@ -7377,9 +7801,13 @@
 
     if (dom.fieldOverlayModeSelect) {
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
-        const om = Math.max(0, Math.min(12, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        const om = Math.max(0, Math.min(15, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
         if (om >= 5 && om <= 7 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
+          if (dom.elastoModeSelect && dom.elastoModeSelect.value !== '0') {
+            dom.elastoModeSelect.value = '0';
+            worker.postMessage({ type: 'set_elasto_config', elastoMode: 0 });
+          }
           dom.bosModeSelect.value = '1';
           worker.postMessage({ type: 'set_bos_config', bosMode: 1, overlayKind: om - 5, gaugeRoi: [4, 4, 18, 60] });
         } else if (om >= 8 && om <= 10 && dom.hodgeModeSelect && dom.hodgeModeSelect.value === '0') {
@@ -7395,6 +7823,29 @@
             worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
           }
           worker.postMessage({ type: 'set_depth_config', depthMode: 1 });
+        } else if (om === 13 && dom.windModeSelect && dom.windModeSelect.value === '0') {
+          dom.windModeSelect.value = '1';
+          if (dom.swarmModeSelect && dom.swarmModeSelect.value === '0') {
+            dom.swarmModeSelect.value = '2';
+            worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
+          }
+          if (dom.hodgeModeSelect && dom.hodgeModeSelect.value === '0') {
+            dom.hodgeModeSelect.value = '1';
+            worker.postMessage({ type: 'set_hodge_config', hodgeMode: 1 });
+          }
+          worker.postMessage({ type: 'set_wind_config', windMode: 1 });
+        } else if ((om === 14 || om === 15) && dom.elastoModeSelect && dom.elastoModeSelect.value === '0') {
+          const targetEm = om === 15 ? 4 : 1;
+          if (dom.bosModeSelect && dom.bosModeSelect.value !== '0') {
+            dom.bosModeSelect.value = '0';
+            worker.postMessage({ type: 'set_bos_config', bosMode: 0, overlayKind: 0 });
+          }
+          dom.elastoModeSelect.value = String(targetEm);
+          if (dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
+            dom.rsVibroModeSelect.value = '2';
+            sendRsControlToWorker(true);
+          }
+          worker.postMessage({ type: 'set_elasto_config', elastoMode: targetEm });
         }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
@@ -7403,6 +7854,10 @@
     if (dom.bosModeSelect) {
       dom.bosModeSelect.addEventListener('change', () => {
         const bm = Math.max(0, Math.min(2, parseInt(dom.bosModeSelect.value || '0', 10) || 0));
+        if (bm > 0 && dom.elastoModeSelect && dom.elastoModeSelect.value !== '0') {
+          dom.elastoModeSelect.value = '0';
+          worker.postMessage({ type: 'set_elasto_config', elastoMode: 0 });
+        }
         const om = dom.fieldOverlayModeSelect ? (parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0) : 0;
         const okind = om >= 5 && om <= 7 ? om - 5 : 0;
         const payload = { type: 'set_bos_config', bosMode: bm, overlayKind: okind };
@@ -7434,6 +7889,54 @@
           worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
         }
         worker.postMessage({ type: 'set_depth_config', depthMode: dm });
+      });
+    }
+
+    if (dom.windModeSelect) {
+      dom.windModeSelect.addEventListener('change', () => {
+        const wm = Math.max(0, Math.min(2, parseInt(dom.windModeSelect.value || '0', 10) || 0));
+        if (wm > 0) {
+          if (dom.swarmModeSelect && dom.swarmModeSelect.value === '0') {
+            dom.swarmModeSelect.value = '2';
+            worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
+          }
+          if (dom.hodgeModeSelect && dom.hodgeModeSelect.value === '0') {
+            dom.hodgeModeSelect.value = '1';
+            worker.postMessage({ type: 'set_hodge_config', hodgeMode: 1 });
+          }
+        }
+        worker.postMessage({ type: 'set_wind_config', windMode: wm });
+      });
+    }
+
+    if (dom.elastoModeSelect) {
+      dom.elastoModeSelect.addEventListener('change', () => {
+        const em = Math.max(0, Math.min(4, parseInt(dom.elastoModeSelect.value || '0', 10) || 0));
+        if (em > 0 && dom.bosModeSelect && dom.bosModeSelect.value !== '0') {
+          dom.bosModeSelect.value = '0';
+          worker.postMessage({ type: 'set_bos_config', bosMode: 0, overlayKind: 0 });
+        }
+        if ((em === 1 || em === 4) && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value !== '2') {
+          dom.rsVibroModeSelect.value = '2';
+          sendRsControlToWorker(true);
+        } else if (em === 2 && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
+          dom.rsVibroModeSelect.value = '1';
+          sendRsControlToWorker(true);
+        }
+        worker.postMessage({ type: 'set_elasto_config', elastoMode: em });
+      });
+    }
+
+    if (dom.btnProbeExciter) {
+      dom.btnProbeExciter.addEventListener('click', () => {
+        if (probeExciterActive) stopProbeExciter();
+        else startProbeExciter();
+      });
+    }
+
+    if (dom.probeExciterPreset) {
+      dom.probeExciterPreset.addEventListener('change', () => {
+        if (probeExciterActive) startProbeExciter();
       });
     }
 
@@ -8379,6 +8882,7 @@
     });
 
     btnTestbench.addEventListener('click', () => {
+      stopProbeExciter(false);
       stopMediaCapture();
       sampleVideoSelect.value = '';
       setSourceButtons(btnTestbench);
@@ -8388,11 +8892,15 @@
       worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
     });
 
-    btnWebcam.addEventListener('click', async () => {
+    async function startWebcamCapture(opts = null) {
       const reqEpoch = sourceEpoch;
+      const highlightShowcase = opts && typeof opts.highlightShowcase === 'string' ? opts.highlightShowcase : '';
       let stream = null;
       try {
-        const wantAudio = Boolean(dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '2');
+        const wantAudio =
+          !(opts && opts.preferMic === false) &&
+          !probeExciterActive &&
+          Boolean(dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '2');
         try {
           stream = await navigator.mediaDevices.getUserMedia({
             video: { width: { ideal: 640 }, height: { ideal: 360 }, frameRate: { ideal: 60 } },
@@ -8407,7 +8915,7 @@
         }
         if (reqEpoch !== sourceEpoch) {
           stream.getTracks().forEach((t) => t.stop());
-          return;
+          return false;
         }
         stopMediaCapture();
         const myEpoch = sourceEpoch;
@@ -8423,17 +8931,22 @@
           }
         }
         rsAudioMicReqStream = wantAudio ? stream : null;
-        activeVideoFps = 60.0;
+        const vidTrack = typeof stream.getVideoTracks === 'function' ? stream.getVideoTracks()[0] : null;
+        const trackFps = vidTrack && typeof vidTrack.getSettings === 'function' ? Number(vidTrack.getSettings().frameRate) : NaN;
+        activeVideoFps = Number.isFinite(trackFps) && trackFps >= 8.0 && trackFps <= 240.0 ? trackFps : 30.0;
         videoEl.srcObject = stream;
         await videoEl.play();
-        if (myEpoch !== sourceEpoch) return;
+        if (myEpoch !== sourceEpoch) return false;
         setSourceButtons(btnWebcam);
-        setActiveShowcaseChip('');
+        setActiveShowcaseChip(highlightShowcase);
         syncContextualSourceUi('webcam');
-        dom.hudSourceLabel.textContent = 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
-        worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: 60 });
+        dom.hudSourceLabel.textContent = highlightShowcase === 'live_sound_probe'
+          ? 'SOURCE: LIVE WEBCAM · 110+220 Hz SOUND PROBE (RS COHERENCE + ELASTO)'
+          : 'SOURCE: LIVE WEBCAM OPTICAL FEED (DEDUPLICATED)';
+        worker.postMessage({ type: 'set_source', sourceMode: 'webcam', fpsHint: Math.round(activeVideoFps) });
         syncRsLiveAudioCapture();
         startVideoPump();
+        return true;
       } catch (err) {
         if (stream && activeMediaStream !== stream) {
           stream.getTracks().forEach((t) => t.stop());
@@ -8441,7 +8954,12 @@
         if (reqEpoch === sourceEpoch) {
           dom.hudSourceLabel.textContent = `WEBCAM UNAVAILABLE: ${err.message}`;
         }
+        return false;
       }
+    }
+
+    btnWebcam.addEventListener('click', () => {
+      startWebcamCapture();
     });
 
     let showcaseInspectSubNote = 'Zero upload · Drag any MP4 onto canvas';
@@ -8454,8 +8972,31 @@
 
       const c1k = m.chronos1000;
       const bos = m.bos;
+      const w2 = m.wave2;
+      const w2w = w2 && w2.wind && w2.wind.available && w2.wind.reqMode > 0 ? w2.wind : null;
+      const w2e = w2 && w2.elasto && w2.elasto.available && w2.elasto.reqMode > 0 ? w2.elasto : null;
       const shownSwaps = m.sourceMode === 'testbench' ? (m.oracleSwaps ?? 0) : (m.padicSwaps ?? 0);
-      if (bos && bos.available && bos.reqMode > 0) {
+      if (w2e) {
+        setTextIfChanged(dom.scValTracks, `${w2e.mode === 4 ? 'ABOS' : 'ELASTO'} ${w2e.stateLabel} · ${w2e.validCells || 0} cells`);
+        setTextIfChanged(dom.scSubTracks, `${w2e.classLabel || 'NONE'} · segs=${w2e.welchSegs || 0} · b1=${w2e.beta1 || 0}`);
+        const elStat = w2e.state === 3
+          ? (w2e.mode === 4
+              ? `|Phi| ${(w2e.abosPhiRms || 0).toFixed(3)} · curl ${(w2e.abosCurlRms || 0).toFixed(3)}`
+              : `c=${Math.round(w2e.medC || 0)} px/s · a=${(w2e.alpha || 0).toFixed(2)}`)
+          : `STATE ${w2e.stateLabel}`;
+        setTextIfChanged(dom.scValPhysics, elStat);
+        setTextIfChanged(dom.scSubPhysics, `${(w2e.f0 || 0).toFixed(1)} Hz · coh ${(w2e.meanCoh || 0).toFixed(2)} · aniso ${(w2e.anisotropy || 1).toFixed(2)}`);
+        setTextIfChanged(dom.scValInspect, w2e.mode === 4 ? '256x128 Lock-In Acoustic BOS' : '64x36 Wave Speed & Power Flow');
+      } else if (w2w) {
+        setTextIfChanged(dom.scValTracks, `WIND ${w2w.stateLabel} · ${w2w.validCells || 0} cells · b1=${w2w.beta1 || 0}`);
+        setTextIfChanged(dom.scSubTracks, `Uinf ${(w2w.uInf || 0).toFixed(1)} px/s · div ${(w2w.divFrac || 0).toFixed(2)}`);
+        const wStat = w2w.state === 3
+          ? `CL ${(w2w.cl || 0).toFixed(2)} · CD ${(w2w.cd || 0).toFixed(2)}`
+          : `nu ${(w2w.nu || 0).toFixed(1)} px²/s`;
+        setTextIfChanged(dom.scValPhysics, wStat);
+        setTextIfChanged(dom.scSubPhysics, `KJ CL ${(w2w.clKj || 0).toFixed(2)} · nu R² ${(w2w.nuR2 || 0).toFixed(2)} · Cp [${(w2w.cpMin || 0).toFixed(1)}, ${(w2w.cpMax || 0).toFixed(1)}]`);
+        setTextIfChanged(dom.scValInspect, '64x36 Optical Cp + Navier-Stokes');
+      } else if (bos && bos.available && bos.reqMode > 0) {
         const usable = m.metrology ? m.metrology.usableCovCount : 0;
         const heroCands = m.metrology ? m.metrology.promotedCandidates : 0;
         setTextIfChanged(dom.scValTracks, `BOS ${bos.stateLabel} · ${bos.validDisp}/32768 cells`);
@@ -8575,6 +9116,12 @@
       if (fromShowcaseDrop || activeSurface === 'showcase') {
         srcPayload.swarmMode = 1;
       }
+      const curEmLocal = dom.elastoModeSelect ? (parseInt(dom.elastoModeSelect.value || '0', 10) || 0) : 0;
+      const curRmLocal = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+      if (curEmLocal === 1 || curEmLocal === 4 || curRmLocal === 2) {
+        await decodeMp4AudioTrack(file, myEpoch);
+        if (myEpoch !== sourceEpoch) return;
+      }
       worker.postMessage(srcPayload);
       startVideoPump();
     }
@@ -8602,6 +9149,19 @@
       hodge_cylinder: { url: './samples/hodge_cylinder_circulation.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 10, hodgeMode: 1 },
       rs_vibro_247hz: { url: './samples/rs_vibrometry_247hz.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 11, rsMode: 1, rsCalib: { dtRowUs: 40.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
       fovea_720p: { url: './samples/fovea_720p_micro_detail.mp4', cal: 'none', resMode: 1, swarmMode: 1, overlayMode: 0, native1to1: true },
+      wind_lifting_cyl: { url: './samples/wind_lifting_cylinder_cp.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
+      wind_lamb_oseen: { url: './samples/wind_lamb_oseen_viscosity.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
+      wind_daphnia_piv: { url: './samples/real_daphnia_laser_piv.mp4', cal: 'preset', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
+      wind_smoke_wing: { url: './samples/real_smoke_airfoil_cambridge.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
+      wind_karman_mri: { url: './samples/real_karman_mri_cylinder.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
+      elasto_crack: { url: './samples/elasto_hidden_crack_panel.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [380, 860], rsCalib: { dtRowUs: 35.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
+      elasto_guitar: { url: './samples/elasto_guitar_soundboard.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [247.5, 495], rsCalib: { dtRowUs: 35.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
+      elasto_gelatin: { url: './samples/elasto_gelatin_phantom.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [110, 220], rsCalib: { dtRowUs: 35.0, exposureUs: 250.0, scanDir: 0 }, native1to1: true },
+      acoustic_bos: { url: './samples/acoustic_bos_standing_wave.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 15, rsMode: 2, elastoMode: 4, elastoLockFreqs: [1200], rsCalib: { dtRowUs: 35.0, exposureUs: 180.0, scanDir: 0 }, native1to1: true },
+      elasto_fork_real: { url: './samples/real_tuning_fork_ripples.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, elastoMode: 3 },
+      elasto_glass_real: { url: './samples/real_glass_faraday_waves.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, elastoMode: 3 },
+      elasto_chladni: { url: './samples/real_chladni_plate_audio.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, elastoMode: 3 },
+      elasto_oce_real: { url: './samples/real_shear_wave_oce.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, elastoMode: 3 },
       vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
       juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
       gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
@@ -8613,20 +9173,27 @@
     let pendingShowcaseCal = '';
 
     function applyWave1PresetToUiAndWorker(cfg) {
-      const nextBosMode = cfg && typeof cfg.bosMode === 'number' ? cfg.bosMode : 0;
+      const nextElastoMode = cfg && typeof cfg.elastoMode === 'number' ? cfg.elastoMode : 0;
+      const nextBosMode = nextElastoMode > 0 ? 0 : (cfg && typeof cfg.bosMode === 'number' ? cfg.bosMode : 0);
       const nextMetMode = cfg && typeof cfg.metrologyMode === 'number' ? cfg.metrologyMode : 0;
       const nextShowCov = Boolean(cfg && cfg.showCovEllipses);
       const nextNativeRoi = Boolean(cfg && cfg.native1to1);
-      const nextHodgeMode = cfg && typeof cfg.hodgeMode === 'number' ? cfg.hodgeMode : 0;
-      const nextRsMode = cfg && typeof cfg.rsMode === 'number' ? cfg.rsMode : 0;
+      const nextWindMode = cfg && typeof cfg.windMode === 'number' ? cfg.windMode : 0;
+      const nextHodgeMode = cfg && typeof cfg.hodgeMode === 'number' ? cfg.hodgeMode : (nextWindMode > 0 ? 1 : 0);
+      const nextRsMode = cfg && typeof cfg.rsMode === 'number'
+        ? cfg.rsMode
+        : (nextElastoMode === 1 || nextElastoMode === 4 ? 2 : (nextElastoMode === 2 ? 1 : 0));
       const nextDepthMode = cfg && typeof cfg.depthMode === 'number' ? cfg.depthMode : 0;
       const nextRsCalib = cfg && cfg.rsCalib ? cfg.rsCalib : null;
       const nextDepthCalib = cfg && cfg.depthCalib ? cfg.depthCalib : null;
+      const nextElastoLockFreqs = cfg && Array.isArray(cfg.elastoLockFreqs) ? cfg.elastoLockFreqs : [];
       if (dom.bosModeSelect) dom.bosModeSelect.value = String(nextBosMode);
       if (dom.metrologyModeSelect) dom.metrologyModeSelect.value = String(nextMetMode);
       if (dom.hodgeModeSelect) dom.hodgeModeSelect.value = String(nextHodgeMode);
       if (dom.rsVibroModeSelect) dom.rsVibroModeSelect.value = String(nextRsMode);
       if (dom.depthModeSelect) dom.depthModeSelect.value = String(nextDepthMode);
+      if (dom.windModeSelect) dom.windModeSelect.value = String(nextWindMode);
+      if (dom.elastoModeSelect) dom.elastoModeSelect.value = String(nextElastoMode);
       if (nextRsCalib) {
         if (dom.inpRsDtRowUs && typeof nextRsCalib.dtRowUs === 'number') dom.inpRsDtRowUs.value = String(nextRsCalib.dtRowUs);
         if (dom.inpRsExposureUs && typeof nextRsCalib.exposureUs === 'number') dom.inpRsExposureUs.value = String(nextRsCalib.exposureUs);
@@ -8643,6 +9210,11 @@
       });
       worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
       worker.postMessage({ type: 'set_hodge_config', hodgeMode: nextHodgeMode });
+      worker.postMessage({
+        type: 'set_wind_config',
+        windMode: nextWindMode,
+        fluidDensity: cfg && typeof cfg.fluidDensity === 'number' ? cfg.fluidDensity : 0.0,
+      });
       const depthMsg = { type: 'set_depth_config', depthMode: nextDepthMode };
       if (nextDepthCalib) {
         depthMsg.fPx = nextDepthCalib.fPx;
@@ -8666,6 +9238,11 @@
         rsMsg.maxSkewUs = 500.0;
       }
       worker.postMessage(rsMsg);
+      worker.postMessage({
+        type: 'set_elasto_config',
+        elastoMode: nextElastoMode,
+        lockFreqs: nextElastoLockFreqs,
+      });
       syncRsLiveAudioCapture();
       const roiMsg = { type: 'set_roi', native1to1: nextNativeRoi };
       if (nextRsCalib && typeof nextRsCalib.scanDir === 'number') {
@@ -8678,7 +9255,9 @@
         const orphanedHodge = curOm >= 8 && curOm <= 10 && nextHodgeMode === 0;
         const orphanedRs = curOm === 11 && nextRsMode === 0;
         const orphanedDepth = curOm === 12 && nextDepthMode === 0;
-        if (orphanedBos || orphanedHodge || orphanedRs || orphanedDepth) {
+        const orphanedWind = curOm === 13 && nextWindMode === 0;
+        const orphanedElasto = (curOm === 14 || curOm === 15) && nextElastoMode === 0;
+        if (orphanedBos || orphanedHodge || orphanedRs || orphanedDepth || orphanedWind || orphanedElasto) {
           dom.fieldOverlayModeSelect.value = '0';
           dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: 0 });
           worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: 0, overlaySyncSeq: nextOverlaySyncSeq() });
@@ -8726,6 +9305,12 @@
       activeVideoUrl = url;
       videoEl.src = url;
       videoEl.loop = true;
+      const curEmSample = dom.elastoModeSelect ? (parseInt(dom.elastoModeSelect.value || '0', 10) || 0) : 0;
+      const curRmSample = dom.rsVibroModeSelect ? (parseInt(dom.rsVibroModeSelect.value || '0', 10) || 0) : 0;
+      const audioDecodePromise =
+        curEmSample === 1 || curEmSample === 4 || curRmSample === 2
+          ? decodeMp4AudioTrack(url, myEpoch)
+          : null;
       const playOk = await safePlayVideo();
       if (!playOk) {
         if (myEpoch === sourceEpoch && activeSurface === 'showcase' && url.includes('starling_murmuration_1000')) {
@@ -8738,6 +9323,9 @@
           setHeroTargetsVisible(false);
         }
         return;
+      }
+      if (audioDecodePromise) {
+        await audioDecodePromise;
       }
       if (myEpoch !== sourceEpoch) return;
 
@@ -8771,6 +9359,11 @@
 
     function activateShowcaseEntry(key) {
       pendingShowcaseCal = '';
+      if (key === 'live_sound_probe') {
+        activateLiveSoundProbeWebcam();
+        return;
+      }
+      stopProbeExciter(false);
       setActiveShowcaseChip(key);
       if (activeResMode === 0) {
         document.getElementById('btnResHd')?.click();
@@ -8846,7 +9439,10 @@
         sceneKey === 'depth_parallax' ||
         sceneKey === 'depth_foe_ttc' ||
         sceneKey === 'hodge_cylinder' ||
-        sceneKey === 'rs_vibro_247hz'
+        sceneKey === 'rs_vibro_247hz' ||
+        sceneKey.startsWith('wind_') ||
+        sceneKey.startsWith('elasto_') ||
+        sceneKey === 'acoustic_bos'
       ) {
         setShowcaseWipePercent(keepWipe ? curWipe : 28);
         setHeroTargetsVisible(false);
@@ -8993,6 +9589,7 @@
     const btnHeroWebcam = document.getElementById('btnHeroWebcam');
     if (btnHeroWebcam) {
       btnHeroWebcam.addEventListener('click', () => {
+        stopProbeExciter(false);
         setHeroScenePressed('');
         syncSwarmControlsForConfig(1, 1, 0, true);
         setHeroTargetsVisible(true);
@@ -9002,6 +9599,19 @@
           dom.showcaseToolbarStatus.textContent = 'Requesting live webcam feed';
         }
         btnWebcam.click();
+      });
+    }
+    const btnHeroSoundProbe = document.getElementById('btnHeroSoundProbe');
+    if (btnHeroSoundProbe) {
+      btnHeroSoundProbe.addEventListener('click', () => {
+        setHeroScenePressed('');
+        setHeroTargetsVisible(false);
+        setShowcaseWipePercent(28);
+        showcaseInspectSubNote = 'Live webcam + 110/220 Hz lock-in sound probe (RS coherence + elastography)';
+        if (dom.showcaseToolbarStatus) {
+          dom.showcaseToolbarStatus.textContent = 'Starting live webcam sound probe (110+220 Hz)';
+        }
+        activateLiveSoundProbeWebcam();
       });
     }
     if (dom.btnOpenFullDeck) {

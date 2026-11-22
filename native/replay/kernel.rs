@@ -252,6 +252,16 @@ exports! {
     chronos_get_hodge_planes_ptr();
     chronos_get_hodge_inject_ptr();
     chronos_hodge_solve_injected(f32, f32);
+    chronos_set_wind_mode(u32);
+    chronos_set_wind_fluid_density(f32);
+    chronos_get_wind_telemetry_ptr();
+    chronos_get_wind_planes_ptr();
+    chronos_wind_solve_injected(f32, f32, f64);
+    chronos_set_elasto_mode(u32);
+    chronos_set_elasto_lock_freqs(u32, f32, f32, f32, f32);
+    chronos_get_elasto_telemetry_ptr();
+    chronos_get_elasto_planes_ptr();
+    chronos_get_elasto_valid_ptr();
     chronos_get_conservation_telemetry_ptr();
     chronos_get_conservation_input_ptr();
     chronos_eval_occluded_pair();

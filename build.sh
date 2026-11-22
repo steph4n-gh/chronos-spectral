@@ -208,7 +208,7 @@ echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED
 # ARENA, the only .bss symbol, starts at the .rodata end; every region getter's address depends on
 # it, and recorded traces compare those addresses. Keep it locked at the ABI-v2 address (src/lib.rs
 # RODATA_PAD_BYTES absorbs code changes that add or remove panic locations and strings).
-RODATA_END_EXPECTED=84400
+RODATA_END_EXPECTED=88000
 if [ "$RODATA_END" -ne "$RODATA_END_EXPECTED" ]; then
   echo "FAIL: .rodata ends at ${RODATA_END}, not ${RODATA_END_EXPECTED}: every region address would move." >&2
   echo "      Set RODATA_PAD_BYTES in src/lib.rs to its current value + $((RODATA_END_EXPECTED - RODATA_END)) and rebuild." >&2
@@ -2996,11 +2996,13 @@ else
 fi
 
 echo ""
-echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation, I7 Depth/FoE/Stereo)..."
+echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation, I7 Depth/FoE/Stereo, I8 Elastography/ABOS, I9 Pocket Wind Tunnel)..."
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
 node scripts/gate_i7_depth.mjs
+node scripts/gate_i8_elastography.mjs
+node scripts/gate_i9_wind_tunnel.mjs
 
 echo ""
 echo "[Gate X] Running Adversarial C-ABI Fuzz (random exports with hostile arguments, pixels and staging buffers; 0 traps)..."
@@ -3023,10 +3025,10 @@ echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance su
 echo ""
 echo "[Gate N] Running Native/Wasm Whole-Kernel Parity (fresh CSTRACE recording replayed bit for bit on the native build, negative control)..."
 if [ "${1:-}" = "--native-check" ] && ! command -v ffmpeg >/dev/null 2>&1; then
-  # The real-MP4 scenario decodes its clip with ffmpeg; --native-check also runs on hosts
-  # without it (the macOS CI job). --check and --e2e always run every scenario.
-  echo "  [SKIP] Gate N scenario hero_sd (real MP4): ffmpeg not on PATH (--native-check only)"
-  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm,depth
+  # The real-MP4 scenarios (hero_sd, elasto) decode clips with ffmpeg; --native-check also runs
+  # on hosts without it (the macOS CI job). --check and --e2e always run every scenario.
+  echo "  [SKIP] Gate N scenarios hero_sd,elasto (real MP4): ffmpeg not on PATH (--native-check only)"
+  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm,depth,wind
 else
   node scripts/gate_native_parity.mjs
 fi

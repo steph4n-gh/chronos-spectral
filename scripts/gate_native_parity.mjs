@@ -61,6 +61,8 @@ const SCENARIOS = [
   { id: 'conservation', argv: ['scripts/gate_i5b_conservation.mjs'], capMiB: 32, minCalls: 1000 },
   { id: 'swarm', argv: ['scripts/benchmark_1000.mjs', '--only=Q1'], maxInstances: 1, capMiB: 24, minCalls: 300 },
   { id: 'depth', argv: ['scripts/gate_i7_depth.mjs', '--parity-lite'], capMiB: 24, minCalls: 80 },
+  { id: 'wind', argv: ['scripts/gate_i9_wind_tunnel.mjs', '--parity-lite'], capMiB: 24, minCalls: 60 },
+  { id: 'elasto', argv: ['scripts/gate_i8_elastography.mjs', '--parity-lite'], capMiB: 24, minCalls: 60 },
 ];
 
 if (SCENARIO_IDS) {

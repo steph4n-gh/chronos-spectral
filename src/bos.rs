@@ -365,7 +365,7 @@ pub struct BosState {
 const _: () = assert!(core::mem::size_of::<BosState>() <= 4_120_000);
 
 #[inline(always)]
-fn node_coord(i: usize, j: usize, frame_w: usize, frame_h: usize) -> (f32, f32) {
+pub(crate) fn node_coord(i: usize, j: usize, frame_w: usize, frame_h: usize) -> (f32, f32) {
     let hx = (frame_w as f32) * (1.0 / (BOS_GRID_W as f32));
     let hy = (frame_h as f32) * (1.0 / (BOS_GRID_H as f32));
     (
@@ -2145,7 +2145,7 @@ fn screen_patch_autocorr_1d(
 impl BosState {
     /// Advances `ctrl.ref_gen` after `ref_luma` changed (skipping `0`, which means "no cache").
     #[inline(always)]
-    fn bump_ref_gen(&mut self) {
+    pub(crate) fn bump_ref_gen(&mut self) {
         self.ctrl.ref_gen = next_gen(self.ctrl.ref_gen);
     }
 
@@ -3060,6 +3060,80 @@ impl BosState {
         (valid_nodes, rms_disp)
     }
 
+    /// Lightweight `256x128` 1-iter affine `8x8` IC-LK against `self.ref_luma` for Lock-In Acoustic BOS.
+    /// Writes per-frame `(eps_x, eps_y)` into `self.w_x`/`self.w_y` and validity (`1`/`0`) into
+    /// `self.clear_streak`, leaving `self.planes`, `self.valid_mask`, and `self.solve_*` untouched!
+    #[inline(never)]
+    pub(crate) fn extract_dense_lk_raw(
+        &mut self,
+        cache: &mut BosRefCache,
+        cur_luma: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+    ) -> u32 {
+        let mut p_ref = PatchRefData::empty();
+        let mut cur_buf = [0.0f32; 64];
+        let mut cur_mask = [0u8; 64];
+        let mut valid_nodes = 0u32;
+
+        let mut j = 0usize;
+        while j < BOS_GRID_H {
+            let mut i = 0usize;
+            while i < BOS_GRID_W {
+                let idx = j * BOS_GRID_W + i;
+                let (cx, cy) = node_coord(i, j, frame_w, frame_h);
+                let mut accepted = false;
+                if build_ref_patch_node(
+                    cache,
+                    self.ctrl.ref_gen,
+                    &self.ref_luma,
+                    frame_w,
+                    frame_h,
+                    idx,
+                    &mut p_ref,
+                ) {
+                    if let Some(fit) = eval_cur_patch_8x8(
+                        cur_luma,
+                        frame_w,
+                        frame_h,
+                        cx,
+                        cy,
+                        0.0,
+                        0.0,
+                        &p_ref,
+                        &mut cur_buf,
+                        &mut cur_mask,
+                    ) {
+                        if fit.det > 1e-12
+                            && fit.gain.is_finite()
+                            && fit.gain >= 0.5
+                            && fit.gain <= 2.0
+                        {
+                            let inv_dg = 1.0 / (fit.det * fit.gain);
+                            let ex = (-(fit.h_yy * fit.bx - fit.h_xy * fit.by) * inv_dg) as f32;
+                            let ey = (-(-fit.h_xy * fit.bx + fit.h_xx * fit.by) * inv_dg) as f32;
+                            if ex.is_finite() && ey.is_finite() && (ex * ex + ey * ey) <= 4.0 {
+                                self.w_x[idx] = ex;
+                                self.w_y[idx] = ey;
+                                self.clear_streak[idx] = 1;
+                                valid_nodes += 1;
+                                accepted = true;
+                            }
+                        }
+                    }
+                }
+                if !accepted {
+                    self.w_x[idx] = 0.0;
+                    self.w_y[idx] = 0.0;
+                    self.clear_streak[idx] = 0;
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        valid_nodes
+    }
+
     /// Mode 2 selective maintenance: updates each eligible pixel INSIDE `gauge_roi` and OUTSIDE
     /// frozen anchor halos ONCE per frame after `120` consecutive clear samples (`alpha = 1/4096`).
     #[inline(never)]
@@ -3865,7 +3939,7 @@ impl BosState {
     /// Runs `L_0^\dagger` in-place on `solve_z` using uniform positive weights `(wx_c, wy_c)`
     /// and grid spacings `(hx, hy)`.
     #[inline(never)]
-    fn apply_dct_poisson_solve_z(&mut self, wx_c: f64, wy_c: f64, hx: f64, hy: f64) {
+    pub(crate) fn apply_dct_poisson_solve_z(&mut self, wx_c: f64, wy_c: f64, hx: f64, hy: f64) {
         self.dct2_2d_solve_z();
         let inv_hx2 = wx_c / (hx * hx);
         let inv_hy2 = wy_c / (hy * hy);
@@ -5037,6 +5111,19 @@ impl BosState {
         self.ctrl.stereo_ref_fresh = 0;
         self.ctrl.stereo_ref_epoch = 0;
         self.ctrl.stereo_ref_frame_idx = u32::MAX;
+    }
+
+    /// Zero all `f64` solver scratch planes (`solve_x..solve_lp`) on scratch-owner handoff
+    /// so mutually exclusive organs (`WindTunnelState`, `ElastoState`, `BosState`) never
+    /// observe stale data from a prior owner.
+    #[inline(never)]
+    pub(crate) fn clear_solver_scratch(&mut self) {
+        self.solve_x.fill(0.0);
+        self.solve_b.fill(0.0);
+        self.solve_r.fill(0.0);
+        self.solve_p.fill(0.0);
+        self.solve_z.fill(0.0);
+        self.solve_lp.fill(0.0);
     }
 
     /// Capture an RGBA8 frame directly as the Left rectified stereo reference bound to

@@ -40,7 +40,12 @@ typedef enum ChronosFieldKind {
     CHRONOS_FIELD_DEPTH_FIELD     = 16,
     CHRONOS_FIELD_DEPTH_TRACKS    = 17,
     CHRONOS_FIELD_DEPTH_FLAGS     = 18,
-    CHRONOS_FIELD_DEPTH_HERO      = 19
+    CHRONOS_FIELD_DEPTH_HERO      = 19,
+    CHRONOS_FIELD_WIND_TELEMETRY   = 20,
+    CHRONOS_FIELD_WIND_PLANES      = 21,
+    CHRONOS_FIELD_ELASTO_TELEMETRY = 22,
+    CHRONOS_FIELD_ELASTO_PLANES    = 23,
+    CHRONOS_FIELD_ELASTO_VALID     = 24
 } ChronosFieldKind;
 
 typedef struct ChronosFieldView {
@@ -82,6 +87,17 @@ uint32_t chronos_engine_set_rs_calib(
     float max_skew_us
 );
 uint32_t chronos_engine_set_hodge_mode(ChronosEngine* engine, uint32_t mode);
+uint32_t chronos_engine_set_wind_mode(ChronosEngine* engine, uint32_t mode);
+uint32_t chronos_engine_set_wind_fluid_density(ChronosEngine* engine, float rho_kg_m3);
+uint32_t chronos_engine_set_elasto_mode(ChronosEngine* engine, uint32_t mode);
+uint32_t chronos_engine_set_elasto_lock_freqs(
+    ChronosEngine* engine,
+    uint32_t count,
+    float f0,
+    float f1,
+    float f2,
+    float f3
+);
 /*
  * Depth Sensing Modes (`chronos_engine_set_depth_mode`):
  *   0 = Off (zero overhead), 1 = Monocular Parallax + FoE/TTC (fail-closed),

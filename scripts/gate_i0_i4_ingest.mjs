@@ -1238,9 +1238,19 @@ async function main() {
     'chronos_get_depth_track_flags_ptr',
     'chronos_get_depth_hero_ptr',
     'chronos_get_depth_ingest_ptr',
+    'chronos_set_wind_mode',
+    'chronos_set_wind_fluid_density',
+    'chronos_wind_solve_injected',
+    'chronos_get_wind_telemetry_ptr',
+    'chronos_get_wind_planes_ptr',
+    'chronos_set_elasto_mode',
+    'chronos_set_elasto_lock_freqs',
+    'chronos_get_elasto_telemetry_ptr',
+    'chronos_get_elasto_planes_ptr',
+    'chronos_get_elasto_valid_ptr',
   ];
   const exportNames = Object.keys(exp);
-  assert(exportNames.length === 91, `Expected exact pinned Wasm export count 91, got ${exportNames.length}`);
+  assert(exportNames.length === 101, `Expected exact pinned Wasm export count 101, got ${exportNames.length}`);
   assert(typeof exp.chronos_get_micro_metrology_mode === 'undefined', 'Unpinned export chronos_get_micro_metrology_mode must not exist');
   for (const name of [...requiredWave1, ...requiredWave2]) {
     assert(typeof exp[name] === 'function', `Missing required export: ${name}`);
@@ -1298,6 +1308,11 @@ async function main() {
   ranges.push({ name: 'depth_track_flags', start: exp.chronos_get_depth_track_flags_ptr(), end: exp.chronos_get_depth_track_flags_ptr() + 3072 });
   ranges.push({ name: 'depth_hero', start: exp.chronos_get_depth_hero_ptr(), end: exp.chronos_get_depth_hero_ptr() + 16 * 4 * 4 });
   ranges.push({ name: 'depth_ingest', start: exp.chronos_get_depth_ingest_ptr(), end: exp.chronos_get_depth_ingest_ptr() + 128 * 64 * 4 });
+  ranges.push({ name: 'wind_telem', start: exp.chronos_get_wind_telemetry_ptr(), end: exp.chronos_get_wind_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'wind_planes', start: exp.chronos_get_wind_planes_ptr(), end: exp.chronos_get_wind_planes_ptr() + 3 * 2304 * 4 });
+  ranges.push({ name: 'elasto_telem', start: exp.chronos_get_elasto_telemetry_ptr(), end: exp.chronos_get_elasto_telemetry_ptr() + 32 * 4 });
+  assert(exp.chronos_get_elasto_planes_ptr() === exp.chronos_get_bos_planes_ptr(), 'elasto_planes must alias bos_planes');
+  assert(exp.chronos_get_elasto_valid_ptr() === exp.chronos_get_bos_valid_ptr(), 'elasto_valid must alias bos_valid');
   ranges.sort((a, b) => a.start - b.start);
   for (let i = 1; i < ranges.length; i++) {
     assert(ranges[i - 1].end <= ranges[i].start, `Overlap ${ranges[i - 1].name} vs ${ranges[i].name}`);

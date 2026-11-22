@@ -79,14 +79,14 @@ pub const HODGE_TELEM_EXACT_ITERS: usize = 29;
 pub const HODGE_TELEM_COEXACT_ITERS: usize = 30;
 pub const HODGE_TELEM_RESERVED31: usize = 31;
 
-const VCLASS_INACTIVE: u8 = 0;
-const VCLASS_ACTIVE: u8 = 1;
-const VCLASS_HOLE_BND: u8 = 2;
-const VCLASS_PORT_BND: u8 = 4;
+pub(crate) const VCLASS_INACTIVE: u8 = 0;
+pub(crate) const VCLASS_ACTIVE: u8 = 1;
+pub(crate) const VCLASS_HOLE_BND: u8 = 2;
+pub(crate) const VCLASS_PORT_BND: u8 = 4;
 
-const EPORT_NONE: u8 = 0;
-const EPORT_HOLE_BND: u8 = 1;
-const EPORT_PORT_BND: u8 = 2;
+pub(crate) const EPORT_NONE: u8 = 0;
+pub(crate) const EPORT_HOLE_BND: u8 = 1;
+pub(crate) const EPORT_PORT_BND: u8 = 2;
 
 const HODGE_PCG_MAX_ITERS: usize = 160;
 const HODGE_PCG_TOL: f64 = 1e-8;
@@ -139,22 +139,22 @@ pub struct HodgeState {
 const _: () = assert!(core::mem::size_of::<HodgeState>() <= 524_288);
 
 #[inline(always)]
-const fn v_idx(c: usize, r: usize) -> usize {
+pub(crate) const fn v_idx(c: usize, r: usize) -> usize {
     r * HODGE_W + c
 }
 
 #[inline(always)]
-const fn ex_idx(c: usize, r: usize) -> usize {
+pub(crate) const fn ex_idx(c: usize, r: usize) -> usize {
     r * (HODGE_W - 1) + c
 }
 
 #[inline(always)]
-const fn ey_idx(c: usize, r: usize) -> usize {
+pub(crate) const fn ey_idx(c: usize, r: usize) -> usize {
     HODGE_EX + r * HODGE_W + c
 }
 
 #[inline(always)]
-const fn f_idx(c: usize, r: usize) -> usize {
+pub(crate) const fn f_idx(c: usize, r: usize) -> usize {
     r * (HODGE_W - 1) + c
 }
 
@@ -1425,6 +1425,418 @@ impl HodgeState {
         }
 
         (rel_true.is_finite(), iters, rel_true)
+    }
+
+    /// Solve `(d_0^T W_1 d_0) out_phi0 = d_0^T W_1 rhs_1cochain` on the active 2-complex
+    /// without mutating `omega`, `omega_exact`, `phi_0`, `planes`, or `telem`.
+    #[inline(never)]
+    pub(crate) fn solve_exact_on_active_complex(
+        &mut self,
+        rhs_1cochain: &[f64; HODGE_E],
+        out_phi0: &mut [f64; HODGE_V],
+        warm_start: bool,
+    ) -> (bool, u32, f64) {
+        let comp_cnt = (self.telem[HODGE_TELEM_COMP_CNT] as usize).min(HODGE_V);
+        if comp_cnt == 0 {
+            out_phi0.fill(0.0);
+            return (false, 0, f64::NAN);
+        }
+        self.cg_rhs.fill(0.0);
+        self.cg_inv_diag.fill(0.0);
+
+        let mut r = 0usize;
+        while r < HODGE_H {
+            let mut c = 0usize;
+            while c < HODGE_W - 1 {
+                let e = ex_idx(c, r);
+                if self.e_act[e] != 0 {
+                    let v0 = v_idx(c, r);
+                    let v1 = v0 + 1;
+                    let w = self.w1_edge[e];
+                    let wo = w * rhs_1cochain[e];
+                    self.cg_rhs[v0] -= wo;
+                    self.cg_rhs[v1] += wo;
+                    self.cg_inv_diag[v0] += w;
+                    self.cg_inv_diag[v1] += w;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+        r = 0;
+        while r < HODGE_H - 1 {
+            let mut c = 0usize;
+            while c < HODGE_W {
+                let e = ey_idx(c, r);
+                if self.e_act[e] != 0 {
+                    let v0 = v_idx(c, r);
+                    let v1 = v0 + HODGE_W;
+                    let w = self.w1_edge[e];
+                    let wo = w * rhs_1cochain[e];
+                    self.cg_rhs[v0] -= wo;
+                    self.cg_rhs[v1] += wo;
+                    self.cg_inv_diag[v0] += w;
+                    self.cg_inv_diag[v1] += w;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+
+        let mut v = 0usize;
+        while v < HODGE_V {
+            let d = self.cg_inv_diag[v];
+            if self.v_act[v] != 0 && d > 1e-18 {
+                self.cg_inv_diag[v] = 1.0 / d;
+            } else {
+                self.cg_inv_diag[v] = 0.0;
+            }
+            v += 1;
+        }
+
+        project_zero_mean(
+            &mut self.cg_rhs,
+            &self.v_act,
+            &self.comp_id,
+            &self.comp_count,
+            &mut self.comp_sum,
+            comp_cnt,
+        );
+
+        let mut b2 = 0.0f64;
+        v = 0;
+        while v < HODGE_V {
+            let b = self.cg_rhs[v];
+            b2 += b * b;
+            v += 1;
+        }
+        let b_norm = crate::wasm_sqrt_f64(b2);
+        if !b_norm.is_finite() {
+            out_phi0.fill(0.0);
+            return (false, 0, f64::NAN);
+        }
+        if b_norm <= 1e-18 {
+            out_phi0.fill(0.0);
+            return (true, 0, 0.0);
+        }
+
+        const WIND_PCG_MAX_ITERS: usize = 96;
+        const WIND_PCG_TOL: f64 = 1e-6;
+
+        let mut use_warm = false;
+        if warm_start {
+            v = 0;
+            while v < HODGE_V {
+                if self.v_act[v] == 0 || !out_phi0[v].is_finite() {
+                    out_phi0[v] = 0.0;
+                }
+                v += 1;
+            }
+            project_zero_mean(
+                out_phi0,
+                &self.v_act,
+                &self.comp_id,
+                &self.comp_count,
+                &mut self.comp_sum,
+                comp_cnt,
+            );
+            apply_l0(out_phi0, &mut self.cg_ap, &self.e_act, &self.w1_edge);
+            let mut r0_sq = 0.0f64;
+            v = 0;
+            while v < HODGE_V {
+                let rv = if self.v_act[v] != 0 {
+                    self.cg_rhs[v] - self.cg_ap[v]
+                } else {
+                    0.0
+                };
+                self.cg_r[v] = rv;
+                r0_sq += rv * rv;
+                v += 1;
+            }
+            if r0_sq.is_finite() && r0_sq < b2 {
+                use_warm = true;
+                let rel0 = crate::wasm_sqrt_f64(r0_sq) / b_norm;
+                if rel0 <= WIND_PCG_TOL {
+                    return (true, 0, rel0);
+                }
+            }
+        }
+        if !use_warm {
+            out_phi0.fill(0.0);
+            v = 0;
+            while v < HODGE_V {
+                self.cg_r[v] = self.cg_rhs[v];
+                v += 1;
+            }
+        }
+
+        self.apply_ssor_l0();
+        project_zero_mean(
+            &mut self.cg_z,
+            &self.v_act,
+            &self.comp_id,
+            &self.comp_count,
+            &mut self.comp_sum,
+            comp_cnt,
+        );
+
+        let mut rz = 0.0f64;
+        v = 0;
+        while v < HODGE_V {
+            self.cg_p[v] = self.cg_z[v];
+            rz += self.cg_r[v] * self.cg_z[v];
+            v += 1;
+        }
+
+        let mut iters = 0u32;
+        let mut iter = 0usize;
+        while iter < WIND_PCG_MAX_ITERS {
+            apply_l0(&self.cg_p, &mut self.cg_ap, &self.e_act, &self.w1_edge);
+            let mut pap = 0.0f64;
+            v = 0;
+            while v < HODGE_V {
+                if self.v_act[v] != 0 {
+                    pap += self.cg_p[v] * self.cg_ap[v];
+                }
+                v += 1;
+            }
+            if !pap.is_finite() || pap <= 1e-30 * b2 {
+                break;
+            }
+            let alpha = rz / pap;
+            if !alpha.is_finite() {
+                return (false, iters, f64::NAN);
+            }
+            let mut r2 = 0.0f64;
+            v = 0;
+            while v < HODGE_V {
+                if self.v_act[v] != 0 {
+                    out_phi0[v] += alpha * self.cg_p[v];
+                    let rv = self.cg_r[v] - alpha * self.cg_ap[v];
+                    self.cg_r[v] = rv;
+                    r2 += rv * rv;
+                }
+                v += 1;
+            }
+
+            iters = (iter + 1) as u32;
+            let rel = crate::wasm_sqrt_f64(r2) / b_norm;
+            if rel <= WIND_PCG_TOL {
+                break;
+            }
+
+            self.apply_ssor_l0();
+            project_zero_mean(
+                &mut self.cg_z,
+                &self.v_act,
+                &self.comp_id,
+                &self.comp_count,
+                &mut self.comp_sum,
+                comp_cnt,
+            );
+
+            let mut rz_new = 0.0f64;
+            v = 0;
+            while v < HODGE_V {
+                rz_new += self.cg_r[v] * self.cg_z[v];
+                v += 1;
+            }
+            if !rz_new.is_finite() || abs_f64(rz) <= 1e-30 * b2 {
+                break;
+            }
+            let beta = rz_new / rz;
+            v = 0;
+            while v < HODGE_V {
+                self.cg_p[v] = self.cg_z[v] + beta * self.cg_p[v];
+                v += 1;
+            }
+            rz = rz_new;
+            iter += 1;
+        }
+
+        project_zero_mean(
+            out_phi0,
+            &self.v_act,
+            &self.comp_id,
+            &self.comp_count,
+            &mut self.comp_sum,
+            comp_cnt,
+        );
+
+        apply_l0(out_phi0, &mut self.cg_ap, &self.e_act, &self.w1_edge);
+        v = 0;
+        while v < HODGE_V {
+            self.cg_r[v] = if self.v_act[v] != 0 {
+                self.cg_rhs[v] - self.cg_ap[v]
+            } else {
+                0.0
+            };
+            v += 1;
+        }
+        project_zero_mean(
+            &mut self.cg_r,
+            &self.v_act,
+            &self.comp_id,
+            &self.comp_count,
+            &mut self.comp_sum,
+            comp_cnt,
+        );
+        let mut r_true2 = 0.0f64;
+        v = 0;
+        while v < HODGE_V {
+            let rv = self.cg_r[v];
+            r_true2 += rv * rv;
+            v += 1;
+        }
+        let rel_true = crate::wasm_sqrt_f64(r_true2) / b_norm;
+        (rel_true.is_finite() && rel_true <= HODGE_PCG_HARD_FAIL, iters, rel_true)
+    }
+
+    /// Runs full discrete Hodge decomposition on an injected mechanical power-flow vector field
+    /// `(ix, iy)` over active vertex mask `act` without mutating `self.planes` or `self.telem`.
+    /// Outputs exact power potential `out_phi` (high at sources, low at sinks) and discrete
+    /// divergence `out_div` (`> 0` at power sources, `< 0` at sinks), returning
+    /// `(converged, beta1, exact_frac, coexact_frac)`.
+    #[inline(never)]
+    pub(crate) fn solve_power_flow_hodge(
+        &mut self,
+        ix: &[f64],
+        iy: &[f64],
+        act: &[u8],
+        dx: f64,
+        dy: f64,
+        out_phi: &mut [f64],
+        out_div: &mut [f64],
+    ) -> (bool, u32, f64, f64) {
+        if ix.len() < HODGE_V
+            || iy.len() < HODGE_V
+            || act.len() < HODGE_V
+            || out_phi.len() < HODGE_V
+            || out_div.len() < HODGE_V
+        {
+            return (false, 0, 0.0, 0.0);
+        }
+        out_phi[..HODGE_V].fill(0.0);
+        out_div[..HODGE_V].fill(0.0);
+        let saved_telem = self.telem;
+        let saved_live = self.live_ready;
+        let mut v = 0usize;
+        while v < HODGE_V {
+            if act[v] != 0 && ix[v].is_finite() && iy[v].is_finite() {
+                self.v_act[v] = 1;
+                self.cg_r[v] = ix[v];
+                self.cg_z[v] = iy[v];
+            } else {
+                self.v_act[v] = 0;
+                self.cg_r[v] = 0.0;
+                self.cg_z[v] = 0.0;
+            }
+            v += 1;
+        }
+        let (topo_ok, v_act_cnt, e_act_cnt, _f_act_cnt, comp_cnt, beta1, _voids, _ports) =
+            self.build_topology_and_cochain(dx, dy);
+        if !topo_ok || v_act_cnt < 8 || e_act_cnt == 0 {
+            self.telem = saved_telem;
+            self.live_ready = saved_live;
+            return (false, 0, 0.0, 0.0);
+        }
+
+        // Positive-source / negative-sink discrete divergence `+div(I) = -d_0^T W_1 omega`
+        let inv_area = 1.0 / (dx * dy);
+        let mut r = 0usize;
+        while r < HODGE_H {
+            let mut c = 0usize;
+            while c < HODGE_W - 1 {
+                let e = ex_idx(c, r);
+                if self.e_act[e] != 0 {
+                    let v0 = v_idx(c, r);
+                    let v1 = v0 + 1;
+                    let flux = self.w1_edge[e] * self.omega[e] * inv_area;
+                    out_div[v0] += flux;
+                    out_div[v1] -= flux;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+        r = 0;
+        while r < HODGE_H - 1 {
+            let mut c = 0usize;
+            while c < HODGE_W {
+                let e = ey_idx(c, r);
+                if self.e_act[e] != 0 {
+                    let v0 = v_idx(c, r);
+                    let v1 = v0 + HODGE_W;
+                    let flux = self.w1_edge[e] * self.omega[e] * inv_area;
+                    out_div[v0] += flux;
+                    out_div[v1] -= flux;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+
+        let mut omega_scale = 0.0f64;
+        let mut e = 0usize;
+        while e < HODGE_E {
+            if self.e_act[e] != 0 {
+                let wmag = abs_f64(self.omega[e]);
+                if wmag > omega_scale {
+                    omega_scale = wmag;
+                }
+            } else {
+                self.omega[e] = 0.0;
+            }
+            e += 1;
+        }
+        if !omega_scale.is_finite() || omega_scale <= 1.0e-30 {
+            self.telem = saved_telem;
+            self.live_ready = saved_live;
+            return (true, beta1, 0.0, 0.0);
+        }
+        let inv_scale = 1.0 / omega_scale;
+        e = 0;
+        while e < HODGE_E {
+            if self.e_act[e] != 0 {
+                self.omega[e] *= inv_scale;
+            }
+            e += 1;
+        }
+        let (ex_ok, _, ex_res) = self.solve_exact_pcg(comp_cnt);
+        let (co_ok, _, co_res) = self.solve_coexact_pcg();
+        if !ex_ok || !co_ok || !ex_res.is_finite() || !co_res.is_finite() {
+            self.telem = saved_telem;
+            self.live_ready = saved_live;
+            return (false, beta1, 0.0, 0.0);
+        }
+        let mut e_tot = 0.0f64;
+        let mut e_ex = 0.0f64;
+        let mut e_co = 0.0f64;
+        e = 0;
+        while e < HODGE_E {
+            if self.e_act[e] != 0 {
+                let w = self.w1_edge[e];
+                let om = self.omega[e];
+                let oe = self.omega_exact[e];
+                let oc = self.omega_coexact[e];
+                e_tot += w * om * om;
+                e_ex += w * oe * oe;
+                e_co += w * oc * oc;
+            }
+            e += 1;
+        }
+        let ex_frac = if e_tot > 1.0e-30 { e_ex / e_tot } else { 0.0 };
+        let co_frac = if e_tot > 1.0e-30 { e_co / e_tot } else { 0.0 };
+        v = 0;
+        while v < HODGE_V {
+            if self.v_act[v] != 0 {
+                out_phi[v] = -self.phi_0[v] * omega_scale;
+            }
+            v += 1;
+        }
+        self.telem = saved_telem;
+        self.live_ready = saved_live;
+        (true, beta1, ex_frac, co_frac)
     }
 
     #[inline(never)]
