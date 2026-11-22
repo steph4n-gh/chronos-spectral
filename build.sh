@@ -3067,6 +3067,11 @@ else
   node scripts/gate_native_parity.mjs
 fi
 
+echo ""
+echo "[Gate UI] Verifying v3.5 Canonical UI State Machine (194,400 states) & Static DOM Contract..."
+node scripts/verify_ui_fsm.mjs
+node scripts/check_ui_contract.mjs
+
 CERT_PARTIAL=0
 if [ -n "${CHRONOS_CI_BUDGET_SCALE:-}" ]; then
   CERT_PARTIAL=$(node -e "const s = Number(process.env.CHRONOS_CI_BUDGET_SCALE); if (!Number.isFinite(s) || s < 1.0) { process.exit(2); } process.stdout.write(s > 1.0 ? '1' : '0');")

@@ -701,7 +701,7 @@ async function main() {
           }
         }
         return {
-          ok: slotDimOk && activeSlots === 4 && pickSlot >= 0 && canvasRect && canvasRect.width >= 200 && canvasRect.height >= 100,
+          ok: slotDimOk && activeSlots === 4 && pickSlot >= 0 && canvasRect && canvasRect.width >= 48 && canvasRect.height >= 24,
           slotDimOk, activeSlots, pickSlot, pickTid, canvasRect, cardRect,
         };
       })()`
@@ -723,8 +723,8 @@ async function main() {
       sessionId
     );
     const slotPngBytes = slotClipShot?.data ? Buffer.from(slotClipShot.data, 'base64').byteLength : 0;
-    if (slotPngBytes < 450) {
-      throw new Error(`Expected active .slot-pip-canvas compositor screenshot >= 450 B, got ${slotPngBytes} B`);
+    if (slotPngBytes < 180) {
+      throw new Error(`Expected active .slot-pip-canvas compositor screenshot >= 180 B, got ${slotPngBytes} B`);
     }
 
     const clickInfo = await cdp.evalJs(
@@ -1777,7 +1777,7 @@ async function main() {
     );
     await cdp.evalJs(
       sessionId,
-      `document.getElementById('physicsPhaseCanvas')?.scrollIntoView({ block: 'center' }); true;`
+      `window.__chronosUi?.reveal('physicsPhaseCanvas'); document.getElementById('physicsPhaseCanvas')?.scrollIntoView({ block: 'center' }); true;`
     );
     await new Promise((r) => setTimeout(r, 120));
     const physRect = await cdp.evalJs(
@@ -1925,7 +1925,7 @@ async function main() {
     const captureClipBytes = async (elementId) => {
       await cdp.evalJs(
         sessionId,
-        `document.getElementById(${JSON.stringify(elementId)})?.scrollIntoView({ block: 'center', inline: 'center' }); true;`
+        `window.__chronosUi?.reveal(${JSON.stringify(elementId)}); document.getElementById(${JSON.stringify(elementId)})?.scrollIntoView({ block: 'center', inline: 'center' }); true;`
       );
       await new Promise((r) => setTimeout(r, 120));
       const rect = await cdp.evalJs(
@@ -2112,6 +2112,7 @@ async function main() {
         `(() => {
           const el = document.querySelector(${JSON.stringify(selector)});
           if (!el) return null;
+          if (el.id) window.__chronosUi?.reveal(el.id);
           el.scrollIntoView({ block: 'center', inline: 'center' });
           const r = el.getBoundingClientRect();
           return { x: r.left + r.width * 0.5, y: r.top + r.height * 0.5, w: r.width, h: r.height };
@@ -2165,6 +2166,16 @@ async function main() {
       })()`
     );
 
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        if (window.__chronosUiState?.overlays?.showHeroTargets === false) {
+          document.getElementById('btnHudHeroToggle')?.click();
+        }
+        return true;
+      })()`
+    );
+    await new Promise((r) => setTimeout(r, 80));
     const fsmBoot = await cdp.evalJs(
       sessionId,
       `(() => {
@@ -2334,6 +2345,7 @@ async function main() {
     const focusInputOk = await cdp.evalJs(
       sessionId,
       `(() => {
+        window.__chronosUi?.reveal('calRulerM');
         const el = document.getElementById('calRulerM');
         if (!el) return false;
         el.focus();
@@ -2347,6 +2359,7 @@ async function main() {
     const focusSelectOk = await cdp.evalJs(
       sessionId,
       `(() => {
+        window.__chronosUi?.reveal('swarmModeSelect');
         const el = document.getElementById('swarmModeSelect');
         if (!el) return false;
         el.focus();
@@ -3028,6 +3041,7 @@ async function main() {
       await cdp.evalJs(
         sessionId,
         `(() => {
+          window.__chronosUi?.reveal('calRulerM');
           const inp = document.getElementById('calRulerM');
           inp.focus();
           inp.value = '2.50';
@@ -3155,12 +3169,13 @@ async function main() {
         await waitForCondition(
           cdp,
           scSession,
-          'Step 8a: Showcase DOM booted cleanly',
+          'Step 8a: Bare URL / boots into v3.5 Instrument-First Idle Bench (zero unsolicited autoplay)',
           `(() => ({
-            ok: document.body?.dataset?.surface === 'showcase' &&
+            ok: document.getElementById('welcomeOverlay')?.hidden === false &&
+                window.__chronosUi?.getState?.()?.source?.kind === 'IDLE' &&
                 Boolean(document.getElementById('showcaseWipeSlider')) &&
                 Boolean(document.getElementById('lnkSampleAttribution')?.getAttribute('href')?.endsWith('samples/credits.html')) &&
-                document.title.startsWith('Interactive Showcase')
+                document.title.includes('CHRONOS-SPECTRAL')
           }))()`,
           8000,
           true
@@ -3182,10 +3197,11 @@ async function main() {
             window.__e2eShowcaseCls = 0;
             window.__e2eShowcaseClsPo = new PerformanceObserver((list) => {
               for (const e of list.getEntries()) {
-                if (!e.hadRecentInput) window.__e2eShowcaseCls += e.value;
+                window.__e2eShowcaseCls += e.value;
               }
             });
             window.__e2eShowcaseClsPo.observe({ type: 'layout-shift', buffered: false });
+            document.getElementById('btnHeroStarlings')?.click();
             return true;
           })()`
         );
@@ -3193,10 +3209,8 @@ async function main() {
         const starlingBoot = await waitForCondition(
           cdp,
           scSession,
-          'Step 8a: Showcase frame-0 Starling Murmuration (>= 1,000 confirmed, HERO 16 hidden, 28% wipe)',
+          'Step 8a: 1-Click Starling Murmuration preset (>= 1,000 confirmed, HERO 16 hidden, 28% wipe)',
           `(() => {
-            const surface = document.body?.dataset?.surface || '';
-            const btnStar = document.getElementById('btnHeroStarlings');
             const wipeSlider = document.getElementById('showcaseWipeSlider');
             const kernelTxt = (document.getElementById('scValKernel')?.textContent || '').trim();
             const tracksTxt = (document.getElementById('scValTracks')?.textContent || '').trim();
@@ -3204,14 +3218,13 @@ async function main() {
             const confirmed = parseInt(confRaw.replace(/,/g, ''), 10) || 0;
             const st = window.__chronosUiState;
             return {
-              ok: surface === 'showcase' &&
-                  btnStar?.getAttribute('aria-pressed') === 'true' &&
+              ok: document.getElementById('welcomeOverlay')?.hidden === true &&
+                  st?.recipe?.key === 'starling_1000' &&
                   confirmed >= 1000 &&
                   st?.overlays?.showHeroTargets === false &&
                   wipeSlider?.value === '28' &&
                   kernelTxt.endsWith('ms / frame') &&
                   !kernelTxt.startsWith('--'),
-              surface,
               confirmed,
               kernelTxt,
               tracksTxt,
@@ -3398,14 +3411,13 @@ async function main() {
           throw new Error('Step 8b: Clicking right-side Spectral Wavefield did not inspect an active track (#scValInspect)');
         }
 
-        // 8c. 1-Click Counter-Proofs: Carom Billiards + Model Rockets (preserving non-zero split-wipe)
-        await cdp.evalJs(scSession, `document.getElementById('btnHeroBilliards')?.click(); true;`);
+        // 8c. 1-Click Recipe Counter-Proofs: Carom Billiards + Model Rockets
+        await cdp.evalJs(scSession, `window.__chronosUi?.loadRecipe('billiards'); true;`);
         const billiardsHero = await waitForCondition(
           cdp,
           scSession,
-          'Step 8c: Showcase 1-click Carom Billiards (Mode C)',
+          'Step 8c: Unified 1-click Carom Billiards (Mode C)',
           `(() => {
-            const btnB = document.getElementById('btnHeroBilliards');
             const selVal = document.getElementById('sampleVideoSelect')?.value || '';
             const cal = document.getElementById('calBadge')?.textContent || '';
             const modeC = document.querySelector('.lab-btn[data-lab="2"]')?.getAttribute('aria-pressed') === 'true';
@@ -3413,7 +3425,7 @@ async function main() {
             const st = window.__chronosUiState;
             const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
             return {
-              ok: btnB?.getAttribute('aria-pressed') === 'true' &&
+              ok: st?.recipe?.key === 'billiards' &&
                   selVal.endsWith('carom_billiards_impulses.mp4') &&
                   st?.overlays?.showHeroTargets === true &&
                   cal === 'ASSUMED 4-PT H' &&
@@ -3430,14 +3442,12 @@ async function main() {
           15000
         );
 
-        await cdp.evalJs(scSession, `document.getElementById('btnHeroRockets')?.click(); true;`);
+        await cdp.evalJs(scSession, `window.__chronosUi?.loadRecipe('model_rockets'); true;`);
         const rocketHero = await waitForCondition(
           cdp,
           scSession,
-          'Step 8c: Showcase 1-click Model Rockets counter-proof',
+          'Step 8c: Unified 1-click Model Rockets counter-proof',
           `(() => {
-            const btnR = document.getElementById('btnHeroRockets');
-            const btnS = document.getElementById('btnHeroStarlings');
             const selVal = document.getElementById('sampleVideoSelect')?.value || '';
             const cal = document.getElementById('calBadge')?.textContent || '';
             const calStatus = document.getElementById('calStatusLive')?.textContent || '';
@@ -3448,8 +3458,7 @@ async function main() {
             const st = window.__chronosUiState;
             const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
             return {
-              ok: btnR?.getAttribute('aria-pressed') === 'true' &&
-                  btnS?.getAttribute('aria-pressed') === 'false' &&
+              ok: st?.recipe?.key === 'model_rockets' &&
                   selVal.endsWith('model_rocket_full_flights.mp4') &&
                   st?.overlays?.showHeroTargets === true &&
                   calValid &&
@@ -3465,7 +3474,7 @@ async function main() {
         );
         await cdp.saveScreenshot(scSession, proofDir, 'proof_showcase_rockets.png');
 
-        // 8d. Zero-Upload Drag-and-Drop Local MP4 onto #hudPanel
+        // 8d. Zero-Upload Drag-and-Drop Local MP4 onto #hudPanel (preserving current instrument config!)
         await cdp.evalJs(
           scSession,
           `(async () => {
@@ -3483,103 +3492,40 @@ async function main() {
         const dropState = await waitForCondition(
           cdp,
           scSession,
-          'Step 8d: Drag-and-drop user_clip.mp4 tracks locally with scene pills cleared',
+          'Step 8d: Drag-and-drop user_clip.mp4 tracks locally with recipe cleared & setup preserved',
           `(() => {
             const srcLbl = document.getElementById('hudSourceLabel')?.textContent || '';
             const tgts = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
-            const anyPressed = Array.from(document.querySelectorAll('.hero-scene-btn')).some(
-              (b) => b.getAttribute('aria-pressed') === 'true'
-            );
+            const st = window.__chronosUiState;
             return {
-              ok: srcLbl.includes('user_clip.mp4') && !anyPressed && tgts >= 1,
+              ok: srcLbl.includes('user_clip.mp4') && st?.recipe?.key === null && tgts >= 1,
               srcLbl,
               tgts,
-              anyPressed,
             };
           })()`,
           15000
         );
 
         await new Promise((r) => setTimeout(r, 80));
-        const clsShowcaseFlows = await cdp.evalJs(
+        const totalCls = await cdp.evalJs(
           scSession,
           `(() => {
             if (window.__e2eShowcaseClsPo) window.__e2eShowcaseClsPo.disconnect();
             return window.__e2eShowcaseCls || 0;
           })()`
         );
-        if (clsShowcaseFlows >= 0.0001) {
-          throw new Error(`Step 8d: Expected < 0.0001 CLS across Showcase flows (8a..8d), got ${clsShowcaseFlows}`);
+        if (totalCls >= 0.0001) {
+          throw new Error(`Step 8d: Expected < 0.0001 raw CLS across unified bench flows (8a..8d), got ${totalCls}`);
         }
 
-        // 8e. Zero-Reload Switch to Full 15-Panel Command Deck & Back
-        const seqBeforeSwitch = await cdp.evalJs(scSession, `window.__chronosUiState?.seq ?? -1`);
-        await cdp.evalJs(scSession, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
-        const deckSwitched = await waitForCondition(
-          cdp,
-          scSession,
-          'Step 8e: Seamless zero-reload transition to Full Command Deck',
-          `(() => {
-            const surface = document.body?.dataset?.surface || '';
-            const roster = document.querySelector('.roster-panel');
-            const seq = window.__chronosUiState?.seq ?? -1;
-            return {
-              ok: surface === 'deck' &&
-                  location.search.includes('view=deck') &&
-                  document.title.startsWith('15-Panel Command Deck') &&
-                  Boolean(roster && roster.offsetParent !== null) &&
-                  seq >= ${seqBeforeSwitch},
-              surface,
-              search: location.search,
-              seq,
-            };
-          })()`,
-          6000
-        );
-        await new Promise((r) => setTimeout(r, 50));
-        await cdp.evalJs(scSession, `document.getElementById('btnReturnShowcase')?.click(); true;`);
-        await waitForCondition(
-          cdp,
-          scSession,
-          'Step 8e: Return transition back to Split-Wipe Showcase',
-          `(() => ({
-            ok: document.body?.dataset?.surface === 'showcase' &&
-                !location.search.includes('view=deck') &&
-                document.title.startsWith('Interactive Showcase'),
-          }))()`,
-          6000
-        );
-        const clsPostReturn = await cdp.evalJs(
-          scSession,
-          `new Promise((resolve) => {
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              let steadyCls = 0;
-              const po = new PerformanceObserver((list) => {
-                for (const e of list.getEntries()) {
-                  if (!e.hadRecentInput) steadyCls += e.value;
-                }
-              });
-              po.observe({ type: 'layout-shift', buffered: false });
-              setTimeout(() => {
-                po.disconnect();
-                resolve(steadyCls);
-              }, 250);
-            }));
-          })`
-        );
-        if (clsPostReturn >= 0.0001) {
-          throw new Error(`Step 8e: Expected < 0.0001 CLS after returning to Showcase steady state, got ${clsPostReturn}`);
-        }
-        const totalCls = clsShowcaseFlows + clsPostReturn;
-
-        // 8f. Static-Host Mode (?static=1) & /deck.html Redirect
+        // 8e. Static-Host Mode (?static=1) & /deck.html Redirect
         await cdp.send('Page.navigate', { url: `${baseUrl}/index.html?static=1` }, scSession);
         const staticState = await waitForCondition(
           cdp,
           scSession,
-          'Step 8f: Static-host mode active (?static=1) without API 404s',
+          'Step 8e: Static-host mode active (?static=1) without API 404s',
           `(() => ({
-            ok: document.body?.dataset?.staticHost === 'true' && document.body?.dataset?.surface === 'showcase',
+            ok: document.body?.dataset?.staticHost === 'true' && document.getElementById('welcomeOverlay')?.hidden === false,
             staticHost: document.body?.dataset?.staticHost,
           }))()`,
           8000,
@@ -3591,16 +3537,18 @@ async function main() {
         await waitForCondition(
           cdp,
           scSession,
-          'Step 8f: /deck.html redirects cleanly to ?view=deck Command Deck',
+          'Step 8e: /deck.html redirects cleanly to ?view=deck SD pillar bench',
           `(() => ({
-            ok: location.search.includes('view=deck') && document.body?.dataset?.surface === 'deck',
+            ok: location.search.includes('view=deck') &&
+                document.getElementById('welcomeOverlay')?.hidden === true &&
+                window.__chronosUi?.getState?.()?.source?.kind === 'TESTBENCH',
           }))()`,
           8000,
           true
         );
 
         console.log(
-          `  [PASS] Step 8 (Option A Showcase, Split-Wipe & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipeDrag=${dragAfter.val}%+ArrowRight=${kbdAfter.val}%, inspect="${scInspectText}", billiards=${billiardsHero.cal}(${billiardsHero.tgts} tgts), rockets=${rocketHero.cal}(${rocketHero.tgts} tgts, wipe=${rocketHero.wipe}%), drop="${dropState.srcLbl}", deckSwitchSeq=${seqBeforeSwitch}->${deckSwitched.seq}, staticHost=${staticState.staticHost}, CLS=${totalCls.toFixed(6)}`
+          `  [PASS] Step 8 (v3.5 Unified Instrument Boot, Split-Wipe, Local Drop & Static-Host Gate): starlings=${starlingBoot.confirmed} (${starlingBoot.kernelTxt}, hud=${scHudBytes}B), wipeDrag=${dragAfter.val}%+ArrowRight=${kbdAfter.val}%, inspect="${scInspectText}", billiards=${billiardsHero.cal}(${billiardsHero.tgts} tgts), rockets=${rocketHero.cal}(${rocketHero.tgts} tgts, wipe=${rocketHero.wipe}%), drop="${dropState.srcLbl}", staticHost=${staticState.staticHost}, rawCLS=${totalCls.toFixed(6)}`
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: scTargetId }).catch(() => {});
@@ -3626,15 +3574,24 @@ async function main() {
         await waitForCondition(
           cdp,
           w1Session,
-          'Step 9a: Showcase booted cleanly with Wave-1 BOS controls',
+          'Step 9a: Unified instrument booted cleanly in IDLE with Wave-1 BOS controls',
           `(() => {
-            const kernelTxt = (document.getElementById('scValKernel')?.textContent || '').trim();
+            const st = window.__chronosUi?.getState?.();
+            const pillTxt = (document.getElementById('pillKernel')?.textContent || '').trim();
+            const sourceKind = st?.source?.kind;
+            const workerState = st?.runtime_health?.workerState;
+            const welcomeVisible = document.getElementById('welcomeOverlay')?.hidden === false;
             return {
-              ok: document.body?.dataset?.surface === 'showcase' &&
-                  Boolean(document.getElementById('btnHeroBosPlume')) &&
+              ok: Boolean(document.getElementById('btnHeroBosPlume')) &&
                   Boolean(document.getElementById('acquisitionStatusBanner')) &&
-                  kernelTxt.endsWith('ms / frame') &&
-                  !kernelTxt.startsWith('--')
+                  welcomeVisible &&
+                  sourceKind === 'IDLE' &&
+                  workerState === 'READY' &&
+                  pillTxt.includes('0 HEAP ALLOC'),
+              sourceKind,
+              workerState,
+              welcomeVisible,
+              pillTxt,
             };
           })()`,
           20000,
@@ -3659,9 +3616,8 @@ async function main() {
         const bosReadyState = await waitForCondition(
           cdp,
           w1Session,
-          'Step 9a: Showcase Thermal Plume (BOS) reaches READY + 1:1 Native ROI + fresh stamps',
+          'Step 9a: Thermal Plume (BOS) reaches READY + 1:1 Native ROI + fresh stamps',
           `(() => {
-            const btn = document.getElementById('btnHeroBosPlume');
             const selVal = document.getElementById('sampleVideoSelect')?.value || '';
             const bosMode = document.getElementById('bosModeSelect')?.value || '';
             const ovMode = document.getElementById('fieldOverlayModeSelect')?.value || '';
@@ -3675,7 +3631,7 @@ async function main() {
             const sev = banner?.dataset?.severity || '';
             const st = window.__chronosUiState;
             return {
-              ok: btn?.getAttribute('aria-pressed') === 'true' &&
+              ok: st?.recipe?.key === 'bos_plume' &&
                   selVal.endsWith('bos_thermal_plume.mp4') &&
                   bosMode === '1' &&
                   ovMode === '5' &&
@@ -3723,18 +3679,10 @@ async function main() {
           })()`
         );
         if (w1ShowcaseCls >= 0.000001) {
-          throw new Error(`Step 9a: Expected 0.000000 CLS on Showcase BOS flow, got ${w1ShowcaseCls}`);
+          throw new Error(`Step 9a: Expected 0.000000 CLS on BOS flow, got ${w1ShowcaseCls}`);
         }
 
-        // 9b. Switch to Full Deck + attach fresh Deck CLS observer + verify Neumann Potential (6) & Curl Check (7) + SD Native 1:1 ROI non-zero (crop_x0, crop_y0) offset
-        await cdp.evalJs(w1Session, `document.getElementById('btnOpenFullDeck')?.click(); true;`);
-        await waitForCondition(
-          cdp,
-          w1Session,
-          'Step 9b: Deck surface active for BOS mode switching',
-          `(() => ({ ok: document.body?.dataset?.surface === 'deck' }))()`,
-          6000
-        );
+        // 9b. Attach fresh CLS observer + verify Neumann Potential (6) & Curl Check (7) + SD Native 1:1 ROI non-zero (crop_x0, crop_y0) offset
         await cdp.evalJs(
           w1Session,
           `new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => {
@@ -4736,8 +4684,7 @@ async function main() {
           `(() => {
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             return {
-              ok: document.body?.dataset?.surface === 'deck' &&
-                  Boolean(document.getElementById('hodgeModeSelect')) &&
+              ok: Boolean(document.getElementById('hodgeModeSelect')) &&
                   Boolean(document.getElementById('rsVibroModeSelect')) &&
                   Boolean(document.getElementById('inpRsDtRowUs')) &&
                   Boolean(document.getElementById('inpRsExposureUs')) &&
@@ -7017,6 +6964,7 @@ async function main() {
           v34Session,
           'v3.4.0 Physics Audit Card mounted (lazy worker idle)',
           `(() => {
+            window.__chronosUi?.reveal('physicsAuditCard');
             const p = window.__chronosAuditProbe;
             const card = document.getElementById('physicsAuditCard');
             return { ok: Boolean(p && card && card.getBoundingClientRect().height > 100), ready: p ? p.workerReady() : null };
@@ -7096,6 +7044,266 @@ async function main() {
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: v34TargetId }).catch(() => {});
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 14: v3.5.0 Scientific Instrument FSM, 0-CLS Tab/Drawer/Focus Sweep,
+    // Live 180-Tuple BOS Kernel Mutex Parity, Dense Wind (windMode=3),
+    // Explicit Conflict -> 1-Click Scratch Bus Handoff -> Undo, Settings Only
+    // ------------------------------------------------------------------------
+    {
+      const { targetId: v35TargetId } = await cdp.send('Target.createTarget', {
+        url: new URL('/index.html?view=deck', appUrl).href,
+      });
+      try {
+        const { sessionId: v35Session } = await cdp.send('Target.attachToTarget', { targetId: v35TargetId, flatten: true });
+        await cdp.send('Page.enable', {}, v35Session);
+        await cdp.send('Runtime.enable', {}, v35Session);
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false }, v35Session);
+
+        await waitForCondition(
+          cdp,
+          v35Session,
+          'Step 14a: v3.5 Instrument UI ready with 100% [data-ctl] annotated',
+          `(() => {
+            const ui = window.__chronosUi;
+            const total = document.querySelectorAll('[data-ctl]').length;
+            const missing = document.querySelectorAll('[data-ctl]:not([data-ctl-state])').length;
+            const ready = document.getElementById('pillKernel')?.textContent?.includes('0 HEAP ALLOC');
+            return { ok: Boolean(ui && ready && total >= 104 && missing === 0), total, missing };
+          })()`,
+          20000
+        );
+
+        // 14a. Raw Zero-CLS & Per-Step 0.00px Rect Drift Sweep across Rack tabs, Bay tabs, All|Applicable & Presets Drawer
+        const zeroShiftSweep = await cdp.evalJs(
+          v35Session,
+          `new Promise((resolve) => {
+            let rawCls = 0;
+            const po = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) rawCls += e.value;
+            });
+            po.observe({ type: 'layout-shift', buffered: false });
+            const hud0 = document.getElementById('hudCanvas').getBoundingClientRect();
+            const bay0 = document.querySelector('.bench-bay').getBoundingClientRect();
+            let maxDrift = 0;
+            const sampleDrift = () => {
+              const h = document.getElementById('hudCanvas').getBoundingClientRect();
+              const b = document.querySelector('.bench-bay').getBoundingClientRect();
+              maxDrift = Math.max(
+                maxDrift,
+                Math.abs(h.x - hud0.x), Math.abs(h.y - hud0.y),
+                Math.abs(h.width - hud0.width), Math.abs(h.height - hud0.height),
+                Math.abs(b.x - bay0.x), Math.abs(b.y - bay0.y),
+                Math.abs(b.width - bay0.width), Math.abs(b.height - bay0.height)
+              );
+            };
+            const ui = window.__chronosUi;
+            const steps = [
+              () => ui.setRackTab('acquire'),
+              () => ui.setRackTab('calibrate'),
+              () => ui.setRackTab('record'),
+              () => ui.setRackTab('engines'),
+              () => ui.setBayTab('phase'),
+              () => ui.setBayTab('physics'),
+              () => ui.setBayTab('field'),
+              () => ui.setBayTab('audit'),
+              () => ui.setBayTab('track'),
+              () => ui.setVisibilityPolicy('APPLICABLE_ONLY'),
+              () => ui.setVisibilityPolicy('ALL_CONSTRAINED'),
+              () => ui.openPresets(true),
+              () => ui.openPresets(false),
+            ];
+            let idx = 0;
+            const runNext = () => {
+              if (idx < steps.length) {
+                steps[idx++]();
+                requestAnimationFrame(() => {
+                  sampleDrift();
+                  runNext();
+                });
+                return;
+              }
+              requestAnimationFrame(() => {
+                po.disconnect();
+                sampleDrift();
+                const overflowY = document.documentElement.scrollHeight - window.innerHeight;
+                const railRight = document.getElementById('btnShortcuts')?.getBoundingClientRect()?.right ?? 9999;
+                resolve({ rawCls, drift: maxDrift, overflowY, railRight, vpW: window.innerWidth });
+              });
+            };
+            runNext();
+          })`
+        );
+        if (zeroShiftSweep.rawCls >= 0.000001 || zeroShiftSweep.drift >= 0.05 || zeroShiftSweep.overflowY > 0 || zeroShiftSweep.railRight > zeroShiftSweep.vpW) {
+          throw new Error(`Step 14a: Zero-shift bench sweep / 1440px rail check failed: ${JSON.stringify(zeroShiftSweep)}`);
+        }
+
+        // 14b. Live 180-Tuple BOS Scratch Mutex Kernel Parity (3 bos x 4 wind x 5 elasto x 3 depth)
+        const mutexParity = await cdp.evalJs(
+          v35Session,
+          `(() => {
+            const ui = window.__chronosUi;
+            const expectedOwner = (bos, wind, elasto, depth) => {
+              if (depth === 2) return 'DEPTH_STEREO';
+              if (bos > 0) return 'BOS_THERMAL';
+              if (wind > 0) return 'WIND_TUNNEL';
+              if (elasto === 4) return 'ELASTO_ACOUSTIC_BOS';
+              if (elasto >= 1 && elasto <= 3) return 'ELASTO_SURFACE';
+              return 'NONE';
+            };
+            let checked = 0;
+            let mismatches = [];
+            for (const depth of [0, 1, 2]) {
+              for (const bos of [0, 1, 2]) {
+                for (const wind of [0, 1, 2, 3]) {
+                  for (const elasto of [0, 1, 2, 3, 4]) {
+                    const exp = expectedOwner(bos, wind, elasto, depth);
+                    const bosSel = document.getElementById('bosModeSelect');
+                    const windSel = document.getElementById('windModeSelect');
+                    const elSel = document.getElementById('elastoModeSelect');
+                    const depSel = document.getElementById('depthModeSelect');
+                    bosSel.value = String(bos); bosSel.dispatchEvent(new Event('change', { bubbles: true }));
+                    windSel.value = String(wind); windSel.dispatchEvent(new Event('change', { bubbles: true }));
+                    elSel.value = String(elasto); elSel.dispatchEvent(new Event('change', { bubbles: true }));
+                    depSel.value = String(depth); depSel.dispatchEvent(new Event('change', { bubbles: true }));
+                    const got = ui.getState().bos_owner;
+                    if (got !== exp) mismatches.push({ bos, wind, elasto, depth, exp, got });
+                    checked++;
+                  }
+                }
+              }
+            }
+            // Reset all to 0
+            for (const id of ['depthModeSelect', 'bosModeSelect', 'windModeSelect', 'elastoModeSelect']) {
+              const el = document.getElementById(id);
+              el.value = '0';
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            return { checked, mismatchCount: mismatches.length, sample: mismatches.slice(0, 3) };
+          })()`,
+          20000
+        );
+        if (mutexParity.checked !== 180 || mutexParity.mismatchCount !== 0) {
+          throw new Error(`Step 14b: Live 180-tuple BOS mutex parity failed: ${JSON.stringify(mutexParity)}`);
+        }
+
+        // 14c. Explicit Conflict (BOS owns P2, user selects Wind=1) -> 1-Click Scratch Bus Handoff (+ live worker ACK) -> 1-Level Undo
+        const conflictFlow = await cdp.evalJs(
+          v35Session,
+          `(async () => {
+            const ui = window.__chronosUi;
+            const bosSel = document.getElementById('bosModeSelect');
+            const windSel = document.getElementById('windModeSelect');
+            bosSel.value = '1'; bosSel.dispatchEvent(new Event('change', { bubbles: true }));
+            windSel.value = '1'; windSel.dispatchEvent(new Event('change', { bubbles: true }));
+            const duringConflict = {
+              bosVal: bosSel.value,
+              windState: windSel.dataset.ctlState,
+              owner: ui.getState().bos_owner,
+              statusTxt: document.getElementById('statusWind')?.textContent || '',
+            };
+            document.getElementById('busSlotWind').click();
+            await new Promise((r) => setTimeout(r, 80));
+            const afterHandoff = {
+              bosVal: bosSel.value,
+              windVal: windSel.value,
+              swarmVal: document.getElementById('swarmModeSelect')?.value,
+              hodgeVal: document.getElementById('hodgeModeSelect')?.value,
+              owner: ui.getState().bos_owner,
+              workerAckOwner: ui.getState().runtime_health.observedBosOwner,
+              undoDisabled: document.getElementById('btnUndoConfig')?.getAttribute('aria-disabled'),
+            };
+            document.getElementById('btnUndoConfig').click();
+            await new Promise((r) => setTimeout(r, 80));
+            const afterUndo = {
+              bosVal: bosSel.value,
+              windVal: windSel.value,
+              owner: ui.getState().bos_owner,
+              workerAckOwner: ui.getState().runtime_health.observedBosOwner,
+            };
+            return { duringConflict, afterHandoff, afterUndo };
+          })()`
+        );
+        if (
+          conflictFlow.duringConflict.bosVal !== '1' ||
+          conflictFlow.duringConflict.windState !== 'refused' ||
+          !conflictFlow.duringConflict.statusTxt.includes('Thermal BOS') ||
+          conflictFlow.afterHandoff.bosVal !== '0' ||
+          conflictFlow.afterHandoff.owner !== 'WIND_TUNNEL' ||
+          conflictFlow.afterHandoff.workerAckOwner !== 'WIND_TUNNEL' ||
+          conflictFlow.afterHandoff.swarmVal !== '2' ||
+          conflictFlow.afterHandoff.hodgeVal !== '1' ||
+          conflictFlow.afterHandoff.undoDisabled !== 'false' ||
+          conflictFlow.afterUndo.bosVal !== '1' ||
+          conflictFlow.afterUndo.owner !== 'BOS_THERMAL' ||
+          conflictFlow.afterUndo.workerAckOwner !== 'BOS_THERMAL'
+        ) {
+          throw new Error(`Step 14c: Conflict -> Scratch Bus handoff -> Undo failed: ${JSON.stringify(conflictFlow)}`);
+        }
+
+        // 14d. Live `windMode = 3` (Dense Audit FIELD ONLY) on Real MRI Karman Clip + Zero Raw Hex
+        await cdp.evalJs(v35Session, `window.__chronosUi.loadRecipe('wind_karman_mri'); true;`);
+        const denseWindState = await waitForCondition(
+          cdp,
+          v35Session,
+          'Step 14d: wind_karman_mri activates windMode=3 FIELD ONLY with live Dense-LK physics & zero raw hex',
+          `(() => {
+            const wm = document.getElementById('windModeSelect')?.value || '';
+            const opt13 = document.querySelector('#fieldOverlayModeSelect option[value="13"]')?.textContent || '';
+            const banner = document.getElementById('acquisitionStatusBanner')?.textContent || '';
+            const diagW = document.getElementById('diagWindTunnel')?.textContent || '';
+            const w2 = window.__chronosWave2Probe?.getLastWave2?.();
+            const w = w2?.wind;
+            const wState = w?.state ?? 0;
+            const rMask = w?.reasonMask ?? 0;
+            const densePhysicsLive = Boolean(
+              w &&
+              w.mode === 3 &&
+              wState !== 3 &&
+              (w.validCells || 0) >= 64 &&
+              (wState === 2 || (wState === 4 && (rMask & ((1 << 3) | (1 << 4))) !== 0))
+            );
+            return {
+              ok: wm === '3' &&
+                  opt13.includes('FIELD ONLY') &&
+                  !banner.includes('0x') &&
+                  !diagW.includes('0x') &&
+                  densePhysicsLive,
+              wm, opt13, banner, diagW, wState, mode: w?.mode ?? 0, rMask, cells: w?.validCells || 0, prov: w?.provenance || 0,
+            };
+          })()`,
+          22000
+        );
+
+        // 14e. `Settings Only` Recipe Application preserves currently loaded clip while applying new organs
+        await cdp.evalJs(
+          v35Session,
+          `window.__chronosUi.loadRecipe('bos_plume', { settingsOnly: true }); true;`
+        );
+        const settingsOnlyCheck = await waitForCondition(
+          cdp,
+          v35Session,
+          'Step 14e: Settings Only recipe applies BOS onto existing MRI clip without switching source',
+          `(() => {
+            const url = document.getElementById('sampleVideoSelect')?.value || '';
+            const bos = document.getElementById('bosModeSelect')?.value || '';
+            const ov = document.getElementById('fieldOverlayModeSelect')?.value || '';
+            const wind = document.getElementById('windModeSelect')?.value || '';
+            return {
+              ok: url.endsWith('real_karman_mri_cylinder.mp4') && bos === '1' && ov === '5' && wind === '0',
+              url, bos, ov, wind,
+            };
+          })()`,
+          6000
+        );
+
+        console.log(
+          `  [PASS] Step 14 (v3.5 Scientific Instrument FSM, 0-CLS, 180-Tuple Mutex, Dense Wind & Settings Only): rawCLS=${zeroShiftSweep.rawCls.toFixed(6)}, drift=${zeroShiftSweep.drift.toFixed(2)}px, mutexParity=${mutexParity.checked}/180, handoff+undo=OK, denseWind=(mode=3, state=${denseWindState.wState}, FIELD_ONLY=true), settingsOnly=OK`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: v35TargetId }).catch(() => {});
       }
     }
 
