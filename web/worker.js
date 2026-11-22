@@ -11653,8 +11653,664 @@ self.onmessage = async (ev) => {
       },
       [ordered.buffer]
     );
+  } else if (msg.type === 'audit_init') {
+    try {
+      const resp = await fetch(msg.wasmUrl || './chronos_spectral.wasm?v=20261115c1k');
+      if (!resp.ok) throw new Error(`Wasm fetch failed (HTTP ${resp.status})`);
+      const wasmBytes = await resp.arrayBuffer();
+      const { instance } = await WebAssembly.instantiate(wasmBytes, {});
+      wasmExports = instance.exports;
+      wasmMemory = wasmExports.memory;
+      wasmExports.chronos_init();
+      telemView = new Float32Array(wasmMemory.buffer, wasmExports.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
+      fiedlerView = new Float32Array(wasmMemory.buffer, wasmExports.chronos_get_fiedler_ptr(), GRAPH_NODES);
+      refreshWave1Views();
+      refreshWave2Views();
+      simCanvas = new OffscreenCanvas(320, 180);
+      simCtx = simCanvas.getContext('2d', { willReadFrequently: true });
+      running = false;
+      self.postMessage({ type: 'audit_ready', version: '3.4.0', abi: 4 });
+    } catch (err) {
+      self.postMessage({ type: 'audit_error', slot: msg.slot || 'A', message: String(err && err.message ? err.message : err) });
+    }
+  } else if (msg.type === 'audit_cancel') {
+    auditCancelSeq++;
+  } else if (msg.type === 'audit_run') {
+    await runWorkerPhysicsAudit(msg);
   }
 };
+
+// ============================================================================
+// v3.4.0 Lazy Physics Integrity Audit Worker (`chronos-audit/1`, Zero Upload)
+// ============================================================================
+
+let auditCancelSeq = 0;
+
+const AUDIT_AXIS_NAMES = [
+  'trajectory',
+  'collision',
+  'depth_parallax',
+  'fluid_div',
+  'fluid_momentum',
+  'bg_shimmer',
+  'temporal_cadence',
+  'av_sync',
+];
+
+function auditComputeLetterbox(srcW, srcH, dstW, dstH) {
+  if (srcW <= 0 || srcH <= 0) return { sw: dstW, sh: dstH, dx: 0, dy: 0 };
+  let sw = dstW;
+  let sh = dstH;
+  if (srcW * dstH >= dstW * srcH) {
+    sw = dstW;
+    sh = Math.max(1, Math.min(dstH, Math.round((srcH * dstW) / srcW)));
+  } else {
+    sh = dstH;
+    sw = Math.max(1, Math.min(dstW, Math.round((srcW * dstH) / srcH)));
+  }
+  return { sw, sh, dx: Math.floor((dstW - sw) / 2), dy: Math.floor((dstH - sh) / 2) };
+}
+
+function auditSampleLumaSig(rgba, w, h) {
+  const sig = new Float32Array(64);
+  let idx = 0;
+  for (let gy = 0; gy < 8; gy++) {
+    const y0 = Math.floor((gy * h) / 8);
+    const y1 = Math.max(y0 + 1, Math.floor(((gy + 1) * h) / 8));
+    for (let gx = 0; gx < 8; gx++) {
+      const x0 = Math.floor((gx * w) / 8);
+      const x1 = Math.max(x0 + 1, Math.floor(((gx + 1) * w) / 8));
+      let sum = 0;
+      let cnt = 0;
+      for (let py = y0; py < y1; py += 2) {
+        const row = py * w;
+        for (let px = x0; px < x1; px += 2) {
+          const off = (row + px) * 4;
+          sum += (rgba[off] * 77 + rgba[off + 1] * 150 + rgba[off + 2] * 29) >> 8;
+          cnt++;
+        }
+      }
+      sig[idx++] = cnt > 0 ? sum / cnt : 0;
+    }
+  }
+  return sig;
+}
+
+function makeAuditSyntheticFrames(kind, nFrames = 48, w = 320, h = 180) {
+  const frames = [];
+  if (kind === 'static_decoy') {
+    const black = new Uint8Array(w * h * 4);
+    for (let i = 3; i < black.length; i += 4) black[i] = 255;
+    for (let f = 0; f < 16; f++) frames.push(black);
+    return { frames, fps: 30.0, profileFlags: 1 << 5, requiredMask: 1 << 0 };
+  }
+  const freezeAt = kind === 'stutter_freeze' ? 22 : -1;
+  let x = 42.0;
+  let y = 92.0;
+  let vx = 4.2;
+  let vy = -3.4;
+  let prevBuf = null;
+  for (let f = 0; f < nFrames; f++) {
+    if (freezeAt >= 0 && f >= freezeAt && f < freezeAt + 5 && prevBuf) {
+      frames.push(new Uint8Array(prevBuf));
+      continue;
+    }
+    x += vx;
+    y += vy;
+    if (x < 22 || x > w - 22) { vx = -vx; x = Math.max(22, Math.min(w - 22, x)); }
+    if (y < 22 || y > h - 22) { vy = -vy; y = Math.max(22, Math.min(h - 22, y)); }
+    const buf = new Uint8Array(w * h * 4);
+    for (let i = 0; i < buf.length; i += 4) {
+      buf[i] = 22; buf[i + 1] = 26; buf[i + 2] = 34; buf[i + 3] = 255;
+    }
+    const cx = Math.round(x);
+    const cy = Math.round(y);
+    for (let dy = -11; dy <= 11; dy++) {
+      const py = cy + dy;
+      if (py < 0 || py >= h) continue;
+      for (let dx = -11; dx <= 11; dx++) {
+        const px = cx + dx;
+        if (px < 0 || px >= w || dx * dx + dy * dy > 100) continue;
+        const off = (py * w + px) * 4;
+        buf[off] = 244; buf[off + 1] = 230; buf[off + 2] = 185; buf[off + 3] = 255;
+      }
+    }
+    prevBuf = buf;
+    frames.push(buf);
+  }
+  return { frames, fps: 30.0, profileFlags: freezeAt >= 0 ? (1 << 5) : 0, requiredMask: 0 };
+}
+
+async function runWorkerPhysicsAudit(msg) {
+  const slot = msg.slot === 'B' ? 'B' : 'A';
+  const mySeq = ++auditCancelSeq;
+  if (!wasmExports || !wasmMemory) {
+    self.postMessage({ type: 'audit_error', slot, message: 'Audit Wasm engine not initialized' });
+    return;
+  }
+
+  const profileName = String(msg.profile || 'quick');
+  const useDenseFluid = profileName === 'fluid_dense' || profileName === 'standard';
+  const resModeReq = profileName === 'standard' ? 0 : 0;
+  const ew = resModeReq === 1 ? 640 : 320;
+  const eh = resModeReq === 1 ? 360 : 180;
+  const maxFrames = Math.max(12, Math.min(360, Number(msg.maxFrames) || 120));
+  const tStartMs = performance.now();
+
+  try {
+    wasmExports.chronos_init();
+    wasmExports.chronos_set_resolution(resModeReq);
+    wasmExports.chronos_set_swarm_mode(0);
+    wasmExports.chronos_set_bos_mode(0);
+    wasmExports.chronos_set_depth_mode(profileName === 'standard' ? 1 : 0);
+    wasmExports.chronos_set_hodge_mode(useDenseFluid ? 1 : 0);
+    wasmExports.chronos_set_wind_mode(useDenseFluid ? 3 : 0);
+    telemView = new Float32Array(wasmMemory.buffer, wasmExports.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
+    refreshWave1Views();
+    refreshWave2Views();
+    if (!simCanvas || simCanvas.width !== ew || simCanvas.height !== eh) {
+      simCanvas = new OffscreenCanvas(ew, eh);
+      simCtx = simCanvas.getContext('2d', { willReadFrequently: true });
+    }
+
+    const applFrames = new Uint32Array(8);
+    const warnFrames = new Uint32Array(8);
+    const violFrames = new Uint32Array(8);
+    const worstResid = new Float64Array(8);
+    const hasResid = new Uint8Array(8);
+    const violations = [];
+    const timeline = [];
+
+    let profileFlags = Number(msg.profileFlags || 0) >>> 0;
+    let requiredMask = Number(msg.requiredMask || 0) >>> 0;
+    let framesDecoded = 0;
+    let framesCommitted = 0;
+    let shots = 0;
+    let lastEpoch = 0;
+    let lastPtsUs = -1;
+    let prevSig = null;
+    let frozenRun = 0;
+    let odeLowStreak = 0;
+    let fluidDivStreak = 0;
+    let fluidNsStreak = 0;
+    let odeR2Sum = 0;
+    let odeR2Cnt = 0;
+    let gSignPos = 0;
+    let gSignNeg = 0;
+    let srcW = ew;
+    let srcH = eh;
+    let lbRect = [0, 0, ew, eh];
+    let audioPresent = false;
+    const prevTracks = Array.from({ length: 16 }, () => ({ tid: 0, x: 0, y: 0, spd: 0, f: 0 }));
+
+    const updateResid = (ax, v) => {
+      if (Number.isFinite(v) && (!hasResid[ax] || v > worstResid[ax])) {
+        worstResid[ax] = v;
+        hasResid[ax] = 1;
+      }
+    };
+    const pushSpan = (axisId, code, frame, tUs, dtUs, severity, measured, expected) => {
+      const sev = Math.max(0, Math.min(1, Number.isFinite(severity) ? severity : 0.5));
+      const t1 = tUs + Math.max(1, dtUs);
+      for (let i = violations.length - 1; i >= 0; i--) {
+        const s = violations[i];
+        if (s.axis_id === axisId && s.code === code && frame <= s.frames[1] + 4) {
+          s.frames[1] = frame;
+          s.t_us[1] = Math.max(s.t_us[1], t1);
+          if (sev > s.severity) {
+            s.severity = Number(sev.toFixed(4));
+            s.measured = Number(measured.toFixed(4));
+            s.expected = Number(expected.toFixed(4));
+          }
+          return;
+        }
+      }
+      if (violations.length < 128) {
+        violations.push({
+          axis: AUDIT_AXIS_NAMES[axisId],
+          axis_id: axisId,
+          code,
+          frames: [frame, frame],
+          t_us: [tUs, t1],
+          severity: Number(sev.toFixed(4)),
+          measured: Number(measured.toFixed(4)),
+          expected: Number(expected.toFixed(4)),
+        });
+      }
+    };
+
+    const stepOne = (rgba, dtSec, ptsUs, seq, sw, sh, lb) => {
+      const sig = auditSampleLumaSig(rgba, ew, eh);
+      const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
+      new Uint8Array(wasmMemory.buffer, ptr, ew * eh * 4).set(rgba);
+      const ptsLo = ptsUs >>> 0;
+      const ptsHi = Math.floor(ptsUs / 4294967296) >>> 0;
+      wasmExports.chronos_set_ingest_meta(
+        1, seq, ptsLo, ptsHi, -1.0,
+        (1 << 1) | (1 << 4), sw, sh, 0, 0, sw, sh, 0, 0xFFFFFFFF,
+        lb[0], lb[1], lb[2], lb[3], 0, (sw === ew && sh === eh) ? 1 : 0
+      );
+      wasmExports.chronos_pre_tick(dtSec);
+      wasmExports.chronos_post_tick(dtSec);
+
+      const frameIdx = framesDecoded++;
+      const status = wave1TelemView ? (wave1TelemView[8] >>> 0) : 0;
+      if (status === 2 || status === 3 || status === 4) {
+        timeline.push(0);
+        return;
+      }
+      framesCommitted++;
+      const ep = wave1TelemView ? Math.max(1, wave1TelemView[6] >>> 0) : 1;
+      const epChanged = lastEpoch !== 0 && ep !== lastEpoch;
+      if (shots === 0 || epChanged) {
+        shots++;
+        frozenRun = 0;
+        odeLowStreak = 0;
+        fluidDivStreak = 0;
+        fluidNsStreak = 0;
+        prevSig = null;
+        for (let m = 0; m < 16; m++) prevTracks[m].tid = 0;
+      }
+      lastEpoch = ep;
+
+      const dtUs = Math.round(Math.max(0.001, Math.min(1.0, dtSec)) * 1_000_000);
+      let frameSev = 0;
+      const camMoving = Math.round(telemView[1257]) !== 0;
+      const activeN = Math.round(telemView[3]);
+      let maxSpdF = 0;
+      for (let m = 0; m < 16; m++) {
+        if (telemView[32 + m * 56] > 0.5) {
+          const sp = telemView[1120 + m * 8 + 1] * dtSec;
+          if (Number.isFinite(sp) && sp > maxSpdF) maxSpdF = sp;
+        }
+      }
+      let lumaMad = 1.0;
+      let maxTileDiff = 255.0;
+      if (prevSig) {
+        let acc = 0;
+        maxTileDiff = 0;
+        for (let k = 0; k < 64; k++) {
+          const d = Math.abs(prevSig[k] - sig[k]);
+          acc += d;
+          if (d > maxTileDiff) maxTileDiff = d;
+        }
+        lumaMad = acc / (64.0 * 255.0);
+      }
+      const hasMotion = activeN > 0 && maxSpdF >= 1.5;
+      if (prevSig && !epChanged) {
+        if (lumaMad <= 0.0006 && maxTileDiff <= 0.35 && hasMotion) {
+          frozenRun++;
+          if (frozenRun >= 2) {
+            applFrames[6]++;
+            updateResid(6, frozenRun);
+            if ((profileFlags & (1 << 5)) !== 0) {
+              violFrames[6]++;
+              frameSev = Math.max(frameSev, 0.8);
+              pushSpan(6, 'FROZEN_MID_MOTION', frameIdx, ptsUs, dtUs, 0.8, frozenRun, 0);
+            } else {
+              warnFrames[6]++;
+              frameSev = Math.max(frameSev, 0.35);
+            }
+          }
+        } else {
+          frozenRun = 0;
+          if (hasMotion) {
+            applFrames[6]++;
+            updateResid(6, lumaMad);
+          }
+        }
+      }
+      prevSig = sig;
+      lastPtsUs = ptsUs;
+
+      // Trajectory & Collision
+      let hadTraj = false;
+      let bestR2 = -1;
+      for (let m = 0; m < 16; m++) {
+        const base = 32 + m * 56;
+        if (telemView[base] < 0.5) { prevTracks[m].tid = 0; continue; }
+        const tid = Math.round(telemView[base + 1]);
+        const px = telemView[base + 8];
+        const py = telemView[base + 9];
+        const kbase = 1120 + m * 8;
+        const spd = telemView[kbase + 1];
+        const strike = telemView[kbase + 4] > 0.5;
+        const restE = telemView[kbase + 5];
+        const pbase = 1280 + m * 16;
+        const fitR2 = telemView[pbase + 9];
+        const lawClass = Math.round(telemView[pbase + 10]);
+        const c0y = telemView[pbase + 3];
+        if (lawClass >= 1 && Number.isFinite(fitR2) && fitR2 >= 0) {
+          hadTraj = true;
+          if (fitR2 > bestR2) bestR2 = fitR2;
+          if (lawClass === 1 && !camMoving && Math.abs(c0y) > 40) {
+            if (c0y > 0) gSignPos++; else gSignNeg++;
+          }
+        }
+        const pt = prevTracks[m];
+        if (pt.tid === tid && frameIdx === pt.f + 1) {
+          const jump = Math.hypot(px - pt.x, py - pt.y);
+          const reach = Math.max(pt.spd, spd) * dtSec * 3.5 + 36.0;
+          if (jump > reach && jump > 48.0) {
+            applFrames[6]++;
+            violFrames[6]++;
+            frameSev = Math.max(frameSev, 0.8);
+            updateResid(6, jump / reach);
+            pushSpan(6, 'TELEPORT_JUMP', frameIdx, ptsUs, dtUs, 0.8, jump, reach);
+          }
+        }
+        prevTracks[m] = { tid, x: px, y: py, spd, f: frameIdx };
+        if (strike && Number.isFinite(restE) && restE > 0.05 && restE < 5.0) {
+          applFrames[1]++;
+          updateResid(1, Math.max(0, restE - 1.0));
+          if (restE > 1.18) {
+            violFrames[1]++;
+            frameSev = Math.max(frameSev, 0.85);
+            pushSpan(1, 'SUPERELASTIC_RESTITUTION', frameIdx, ptsUs, dtUs, 0.85, restE, 1.0);
+          }
+        }
+      }
+      if (hadTraj && !camMoving) {
+        applFrames[0]++;
+        if (bestR2 >= 0) {
+          odeR2Sum += bestR2;
+          odeR2Cnt++;
+          updateResid(0, Math.max(0, 1.0 - bestR2));
+          if (bestR2 < 0.72) {
+            odeLowStreak++;
+            if (odeLowStreak >= 4) {
+              violFrames[0]++;
+              frameSev = Math.max(frameSev, 0.75);
+              pushSpan(0, 'ODE_LAW_BREAK', frameIdx, ptsUs, dtUs, 0.75, bestR2, 0.85);
+            }
+          } else {
+            odeLowStreak = 0;
+          }
+        }
+      }
+
+      // Fluid axes (dense LK or sparse wind tunnel)
+      if (useDenseFluid && windTelemView && windTelemF32View) {
+        const wst = windTelemView[0] >>> 0;
+        const wreason = windTelemView[2] >>> 0;
+        const lowSup = (wreason & (1 << 9)) !== 0;
+        const highDiv = (wreason & (1 << 3)) !== 0;
+        const highNs = (wreason & (1 << 4)) !== 0;
+        const divFrac = windTelemF32View[22];
+        const nsResid = windTelemF32View[21];
+        if ((wst === 2 || wst === 3 || (wst === 4 && highDiv)) && !lowSup && Number.isFinite(divFrac)) {
+          applFrames[3]++;
+          updateResid(3, divFrac);
+          if (highDiv || divFrac > 0.30) {
+            fluidDivStreak++;
+            if (fluidDivStreak >= 3) {
+              if ((profileFlags & (1 << 2)) !== 0) {
+                violFrames[3]++;
+                frameSev = Math.max(frameSev, 0.8);
+                pushSpan(3, 'FLUID_MASS_LEAK', frameIdx, ptsUs, dtUs, 0.8, divFrac, 0.30);
+              } else {
+                warnFrames[3]++;
+                frameSev = Math.max(frameSev, 0.35);
+              }
+            }
+          } else {
+            fluidDivStreak = 0;
+          }
+        }
+        if ((wst === 2 || wst === 3 || (wst === 4 && highNs)) && !lowSup && Number.isFinite(nsResid)) {
+          applFrames[4]++;
+          updateResid(4, nsResid);
+          if (highNs || nsResid > 0.35) {
+            fluidNsStreak++;
+            if (fluidNsStreak >= 3) {
+              violFrames[4]++;
+              frameSev = Math.max(frameSev, 0.8);
+              pushSpan(4, 'FLUID_NONCONSERVATIVE', frameIdx, ptsUs, dtUs, 0.8, nsResid, 0.35);
+            }
+          } else {
+            fluidNsStreak = 0;
+          }
+        }
+      }
+      timeline.push(frameSev);
+    };
+
+    if (msg.syntheticKind) {
+      const syn = makeAuditSyntheticFrames(msg.syntheticKind, maxFrames, ew, eh);
+      profileFlags = (profileFlags | syn.profileFlags) >>> 0;
+      requiredMask = (requiredMask | syn.requiredMask) >>> 0;
+      const dtSec = 1.0 / syn.fps;
+      for (let i = 0; i < syn.frames.length; i++) {
+        if (auditCancelSeq !== mySeq) return;
+        stepOne(syn.frames[i], dtSec, Math.round(i * dtSec * 1_000_000), i + 1, ew, eh, [0, 0, ew, eh]);
+        if ((i % 10) === 0 || i + 1 === syn.frames.length) {
+          self.postMessage({ type: 'audit_progress', slot, frame: i + 1, total: syn.frames.length });
+        }
+      }
+    } else {
+      let rawBuf = null;
+      if (msg.arrayBuffer instanceof ArrayBuffer) {
+        rawBuf = msg.arrayBuffer;
+      } else if (msg.file && typeof msg.file.arrayBuffer === 'function') {
+        rawBuf = await msg.file.arrayBuffer();
+      } else if (typeof msg.url === 'string' && msg.url.length > 0) {
+        const resp = await fetch(msg.url);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        rawBuf = await resp.arrayBuffer();
+      } else {
+        throw new Error('No clip source provided');
+      }
+
+      const track = parseMp4TrackMultiCodec(rawBuf);
+      if (!track || track.samples.length === 0) throw new Error('Unsupported MP4 container or video codec');
+      const sampleCount = Math.min(track.samples.length, maxFrames);
+      const decConfig = { codec: track.codec };
+      if (track.description) decConfig.description = track.description;
+      if (track.codedWidth > 0) decConfig.codedWidth = track.codedWidth;
+      if (track.codedHeight > 0) decConfig.codedHeight = track.codedHeight;
+
+      const audioPcm = msg.audioPcm instanceof Float32Array ? msg.audioPcm : null;
+      const audioRate = Number(msg.audioRateHz) || 48000;
+      audioPresent = Boolean(audioPcm && audioPcm.length > 0);
+      let audioCursor = 0;
+
+      let decErr = null;
+      let chain = Promise.resolve();
+      let prevTsUs = -1;
+      let seq = 0;
+      const decoder = new VideoDecoder({
+        output: (vf) => {
+          if (auditCancelSeq !== mySeq || decErr) { vf.close(); return; }
+          chain = chain.then(() => {
+            try {
+              if (auditCancelSeq !== mySeq || decErr || seq >= maxFrames) return;
+              srcW = Math.max(1, Math.trunc(vf.displayWidth || vf.codedWidth || ew));
+              srcH = Math.max(1, Math.trunc(vf.displayHeight || vf.codedHeight || eh));
+              const lb = auditComputeLetterbox(srcW, srcH, ew, eh);
+              lbRect = [lb.dx, lb.dy, lb.sw, lb.sh];
+              const ptsUs = typeof vf.timestamp === 'number' && Number.isFinite(vf.timestamp)
+                ? Math.max(0, Math.round(vf.timestamp))
+                : Math.round((seq / 30.0) * 1_000_000);
+              const dtSec = prevTsUs >= 0 && ptsUs > prevTsUs
+                ? Math.max(0.005, Math.min(0.25, (ptsUs - prevTsUs) * 1e-6))
+                : (1.0 / 30.0);
+              prevTsUs = ptsUs;
+              seq++;
+
+              if (audioPcm && audioStagingView) {
+                const sNext = Math.min(audioPcm.length, Math.round((ptsUs * 1e-6 + dtSec) * audioRate));
+                while (audioCursor < sNext) {
+                  const chunk = Math.min(4096, sNext - audioCursor);
+                  audioStagingView.set(audioPcm.subarray(audioCursor, audioCursor + chunk), 0);
+                  audioCursor += chunk;
+                  const tEndUs = Math.round((audioCursor / audioRate) * 1_000_000);
+                  wasmExports.chronos_push_audio_block(chunk, tEndUs >>> 0, Math.floor(tEndUs / 4294967296) >>> 0, audioRate, 0.0);
+                }
+              }
+
+              simCtx.fillStyle = '#000';
+              simCtx.fillRect(0, 0, ew, eh);
+              simCtx.drawImage(vf, 0, 0, srcW, srcH, lb.dx, lb.dy, lb.sw, lb.sh);
+              const px = simCtx.getImageData(0, 0, ew, eh).data;
+              stepOne(px, dtSec, ptsUs, seq, srcW, srcH, lbRect);
+              if ((seq % 10) === 0 || seq === sampleCount) {
+                self.postMessage({ type: 'audit_progress', slot, frame: seq, total: sampleCount });
+              }
+            } finally {
+              vf.close();
+            }
+          }).catch((e) => { decErr = e; });
+        },
+        error: (e) => { decErr = e || new Error('VideoDecoder error'); },
+      });
+      decoder.configure(decConfig);
+      for (let i = 0; i < sampleCount; i++) {
+        if (auditCancelSeq !== mySeq || decErr) break;
+        while (decoder.decodeQueueSize > 8 && auditCancelSeq === mySeq && !decErr) {
+          await new Promise((r) => setTimeout(r, 1));
+        }
+        const s = track.samples[i];
+        decoder.decode(new EncodedVideoChunk({
+          type: s.isKey ? 'key' : 'delta',
+          timestamp: s.timestampUs,
+          duration: s.durationUs,
+          data: track.bytes.subarray(s.offset, s.offset + s.size),
+        }));
+      }
+      if (auditCancelSeq === mySeq && !decErr && decoder.state === 'configured') {
+        await decoder.flush();
+      }
+      await chain;
+      if (decoder.state !== 'closed') { try { decoder.close(); } catch (_e) {} }
+      if (decErr) throw decErr;
+      if (auditCancelSeq !== mySeq) return;
+    }
+
+    if (gSignPos >= 6 && gSignNeg >= 6) {
+      violFrames[0] += 4;
+      pushSpan(0, 'G_SIGN_FLIP', 0, 0, 33333, 0.9, -1.0, 1.0);
+    }
+
+    const minAppl = 6;
+    const enabledMask = (1 << 0) | (1 << 1) | (1 << 6) | (useDenseFluid ? ((1 << 3) | (1 << 4)) : 0) | (profileName === 'standard' ? (1 << 2) : 0);
+    const axes = [];
+    let applicableAxes = 0;
+    let violatedAxes = 0;
+    let warnedAxes = 0;
+    let scoreSum = 0;
+
+    for (let ax = 0; ax < 8; ax++) {
+      const enabled = (enabledMask & (1 << ax)) !== 0;
+      const af = applFrames[ax];
+      const wf = warnFrames[ax];
+      const vf = violFrames[ax];
+      let applicability = 'unknown';
+      let verdict = 'none';
+      let score = null;
+      const naReasons = [];
+      if (!enabled) {
+        applicability = 'absent';
+        naReasons.push('DISABLED');
+      } else if (ax === 7 && !audioPresent) {
+        applicability = 'absent';
+        naReasons.push('NO_AUDIO');
+      } else if (af === 0) {
+        applicability = 'unknown';
+        naReasons.push('NO_EVIDENCE');
+      } else if (af < (ax === 1 ? 1 : minAppl) && vf === 0) {
+        applicability = 'insufficient';
+        naReasons.push('TOO_SHORT');
+      } else {
+        applicability = 'eligible';
+        applicableAxes++;
+        const vfFrac = vf / Math.max(1, af);
+        const wfFrac = wf / Math.max(1, af);
+        let sc = Math.max(0, Math.min(1, 1.0 - vfFrac - 0.35 * wfFrac));
+        if (ax === 0 && odeR2Cnt > 0) sc = Math.min(sc, Math.max(0, Math.min(1, odeR2Sum / odeR2Cnt)));
+        score = Number(sc.toFixed(4));
+        if (vf > 0) { verdict = 'violated'; violatedAxes++; }
+        else if (wf > 0) { verdict = 'warn'; warnedAxes++; }
+        else { verdict = 'pass'; }
+        scoreSum += sc;
+      }
+      axes.push({
+        id: AUDIT_AXIS_NAMES[ax],
+        axis_id: ax,
+        applicability,
+        applicable: applicability === 'eligible',
+        verdict,
+        pass: verdict === 'none' ? null : verdict !== 'violated',
+        na_reasons: naReasons,
+        applicable_frames: af,
+        warned_frames: wf,
+        violated_frames: vf,
+        score,
+        worst_residual: hasResid[ax] ? Number(worstResid[ax].toFixed(4)) : null,
+      });
+    }
+
+    const integrity = applicableAxes > 0 ? Number((scoreSum / applicableAxes).toFixed(4)) : null;
+    const coverage = Number((framesCommitted > 0 ? Math.min(1, Math.max(...Array.from(applFrames)) / Math.max(1, framesCommitted)) : 0).toFixed(4));
+    let grade = 'NA';
+    if (applicableAxes > 0) {
+      grade = violatedAxes > 0 ? 'FAIL' : (warnedAxes > 0 ? 'WARN' : 'PASS');
+    }
+    let rewardMilli = null;
+    if (requiredMask !== 0) {
+      let missingReq = false;
+      let acc = 0;
+      let cnt = 0;
+      for (let ax = 0; ax < 8; ax++) {
+        if ((requiredMask & (1 << ax)) === 0) continue;
+        cnt++;
+        if (axes[ax].applicability !== 'eligible') { missingReq = true; acc -= 1; }
+        else if (axes[ax].verdict === 'violated') acc -= 1;
+        else if (axes[ax].verdict === 'pass') acc += 1;
+      }
+      rewardMilli = missingReq || coverage < 0.15 ? -1000 : Math.round((acc / Math.max(1, cnt)) * 1000);
+    } else if (applicableAxes > 0) {
+      rewardMilli = Math.round(((integrity ?? 0) * 2 - 1) * 1000);
+    }
+
+    const record = {
+      schema: 'chronos-audit/1',
+      clip: { path: String(msg.clipName || msg.url || msg.syntheticKind || '<clip>') },
+      status: 'ok',
+      error: null,
+      verdict: {
+        grade,
+        integrity,
+        coverage,
+        applicable_axes: applicableAxes,
+        violated_axes: violatedAxes,
+        warned_axes: warnedAxes,
+        violations: violations.length,
+      },
+      rlvr: {
+        reward: rewardMilli === null ? null : Number((rewardMilli / 1000).toFixed(4)),
+        reward_milli: rewardMilli,
+      },
+      axes,
+      violations,
+      shots,
+      ingest: {
+        decoder: msg.syntheticKind ? 'synthetic' : 'webcodecs',
+        src_w: srcW,
+        src_h: srcH,
+        frames_decoded: framesDecoded,
+        frames_committed: framesCommitted,
+        letterbox: lbRect,
+        audio: { present: audioPresent },
+      },
+      engine: { version: '3.4.0', abi: 4, law_set: 'core-8' },
+      perf: { wall_s: Number(((performance.now() - tStartMs) / 1000).toFixed(3)) },
+      timeline,
+    };
+    self.postMessage({ type: 'audit_done', slot, record });
+  } catch (err) {
+    self.postMessage({ type: 'audit_error', slot, message: String(err && err.message ? err.message : err) });
+  }
+}
 
 // ============================================================================
 // Dual-Resolution 1:1 Fovea Staging & Worker-Resident WebCodecs Fast-Pass

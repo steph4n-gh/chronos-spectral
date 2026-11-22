@@ -28,7 +28,9 @@ pub const WIND_PLANE_VORT_BUDGET: usize = 2;
 // Operating modes (`chronos_set_wind_mode`)
 pub const WIND_MODE_OFF: u32 = 0;
 pub const WIND_MODE_STAGGERED: u32 = 1;
+#[allow(dead_code)]
 pub const WIND_MODE_EVERY_FRAME: u32 = 2;
+pub const WIND_MODE_DENSE_AUDIT: u32 = 3;
 
 // State enum (`telem[0]`)
 pub const WIND_STATE_OFF: u32 = 0;
@@ -42,6 +44,14 @@ pub const WIND_PROV_NONE: u32 = 0;
 pub const WIND_PROV_DIMENSIONLESS: u32 = 1;
 #[allow(dead_code)]
 pub const WIND_PROV_SURVEYED_METRIC: u32 = 2;
+pub const WIND_PROV_DENSE_LK: u32 = 3;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum WindInputSource {
+    SparseLive,
+    DenseLive,
+    Injected,
+}
 
 // Fail-closed reason mask (`telem[2]`)
 pub const WIND_REASON_NO_CONTINUUM: u32 = 1 << 0;
@@ -53,6 +63,7 @@ pub const WIND_REASON_NO_OBSTACLE_VOID: u32 = 1 << 5;
 pub const WIND_REASON_NO_FREESTREAM: u32 = 1 << 6;
 pub const WIND_REASON_LOW_VORT_COND: u32 = 1 << 7;
 pub const WIND_REASON_PCG_UNCONV: u32 = 1 << 8;
+pub const WIND_REASON_LOW_SUPPORT: u32 = 1 << 9;
 
 // Telemetry word indices (`[u32; 32]`; 8..=27 and 29..=31 store `f32::to_bits()`)
 pub const WIND_TELEM_STATE: usize = 0;
@@ -261,7 +272,7 @@ pub struct WindTunnelState {
     pub cached_nu_valid: u8,
     pub live_ready: u8,
     pub fresh_solve: u8,
-    pub _pad: u8,
+    pub dense_ref_valid: u8,
 }
 
 const _: () = assert!(core::mem::size_of::<WindTunnelState>() <= 28_672);
@@ -290,7 +301,7 @@ impl WindTunnelState {
         self.cached_nu_valid = 0;
         self.live_ready = 0;
         self.fresh_solve = 0;
-        self._pad = 0;
+        self.dense_ref_valid = 0;
     }
 
     pub fn reset_temporal_keep_config(&mut self) {
@@ -316,6 +327,7 @@ impl WindTunnelState {
         self.cached_nu_valid = 0;
         self.live_ready = 0;
         self.fresh_solve = 0;
+        self.dense_ref_valid = 0;
         self.mode = keep_mode;
         self.rho_kg_m3 = keep_rho;
         self.telem[WIND_TELEM_MODE] = keep_mode;
@@ -328,7 +340,7 @@ impl WindTunnelState {
     }
 
     pub fn set_mode(&mut self, mode: u32) -> u32 {
-        if mode > WIND_MODE_EVERY_FRAME {
+        if mode > WIND_MODE_DENSE_AUDIT {
             return 0;
         }
         let changed = self.mode != mode;
@@ -397,8 +409,8 @@ impl WindTunnelState {
     }
 
     /// Run one Pocket Wind Tunnel step on the currently solved `HodgeState` active 2-complex.
-    /// `raw_continuum_field` provides unblurred vertex `(u, v)` (stride 6) when `is_live == true`;
-    /// otherwise `hodge.inject_buf` provides exact unblurred vertex `(u, v)`.
+    /// `source` explicitly selects `SparseLive` (`raw_continuum_field`), `DenseLive` (`bos.w_x`/`w_y`),
+    /// or `Injected` (`hodge.inject_buf`).
     /// Caller MUST guarantee `bos_scratch_owner == BOS_OWNER_WIND_TUNNEL` when `has_scratch == true`.
     #[inline(never)]
     pub fn step(
@@ -413,8 +425,10 @@ impl WindTunnelState {
         continuity_epoch: u32,
         frame_idx: u32,
         has_scratch: bool,
-        is_live: bool,
+        source: WindInputSource,
     ) -> bool {
+        let is_live = source != WindInputSource::Injected;
+        let is_dense = source == WindInputSource::DenseLive;
         self.fresh_solve = 0;
         if self.mode == WIND_MODE_OFF {
             self.telem[WIND_TELEM_STATE] = WIND_STATE_OFF;
@@ -475,7 +489,9 @@ impl WindTunnelState {
         let act_cells = capture_vertex_velocity_and_vorticity(
             hodge,
             raw_continuum_field,
-            is_live,
+            &bos.w_x[..WIND_V],
+            &bos.w_y[..WIND_V],
+            source,
             &mut bos.solve_x[base..base + WIND_V],
             &mut bos.solve_b[base..base + WIND_V],
             &mut bos.solve_p[base..base + WIND_V],
@@ -549,13 +565,26 @@ impl WindTunnelState {
             grid_dy,
         );
 
-        // 3. Interior incompressibility check (preserves open-port potential flow, rejects 3D/compressible sources!)
-        let div_frac = compute_interior_divergence_fraction(
+        // 3. Interior incompressibility check (preserves open-port potential flow, rejects 3D/compressible sources
+        //    and rejects vacuous zero-flow / static decoys! Thin sparse smoke ribbons with < 8 5-pt stencils
+        //    retain WIND_REASON_LOW_SUPPORT so downstream physics auditors abstain from divergence verdicts;
+        //    dense-LK fallback requires >= 32 full interior stencils.)
+        let (div_frac, div_stencils, div_rms_spd) = compute_interior_divergence_fraction(
             hodge,
             bos,
             grid_dx,
             grid_dy,
         );
+        if !div_rms_spd.is_finite() || div_rms_spd < 1.0e-3 {
+            self.fail_refused(WIND_REASON_NO_CONTINUUM | WIND_REASON_LOW_SUPPORT, false);
+            self.telem[WIND_TELEM_ACTIVE_CELLS] = act_cells as u32;
+            return false;
+        }
+        if is_dense && (div_stencils < 12 || div_rms_spd < 0.5) {
+            self.fail_refused(WIND_REASON_NO_CONTINUUM | WIND_REASON_LOW_SUPPORT, false);
+            self.telem[WIND_TELEM_ACTIVE_CELLS] = act_cells as u32;
+            return false;
+        }
         if !div_frac.is_finite() || div_frac > DIV_HARD_LIMIT {
             self.fail_refused(WIND_REASON_HIGH_DIV, false);
             self.telem[WIND_TELEM_ACTIVE_CELLS] = act_cells as u32;
@@ -585,6 +614,9 @@ impl WindTunnelState {
         let nu_stencils = self.cached_nu_stencils;
 
         let mut reason_mask = 0u32;
+        if div_stencils < 8 {
+            reason_mask |= WIND_REASON_LOW_SUPPORT;
+        }
         if !nu_identifiable {
             reason_mask |= WIND_REASON_LOW_VORT_COND;
         }
@@ -638,11 +670,22 @@ impl WindTunnelState {
         }
 
         // 6. Built-in Navier-Stokes curl integrability audit: eta_NS = ||g_1 - d_0 p_0||_W1 / ||g_1||_W1
+        //    On `DenseLive` (`WIND_MODE_DENSE_AUDIT`), steady uniform laminar flow has identically zero
+        //    material acceleration (`g_1 = 0`), so pixel-quantization noise would otherwise divide
+        //    noise by noise. Apply an inertial-scale denominator floor `0.08 * U_rms^2` exclusively on
+        //    `DenseLive` (0.0 on `SparseLive`/`Injected` -> bit-identical v3.3.0 modes 0..=2) while
+        //    preserving full rejection of non-conservative forcing (`||g_1|| >> 0.08 * U_rms^2`).
+        let dense_g_floor = if is_dense {
+            0.08 * div_rms_spd * div_rms_spd
+        } else {
+            0.0
+        };
         let ns_resid_ratio = compute_ns_curl_residual(
             hodge,
             &bos.solve_r[SCR_G1_OFF..SCR_G1_OFF + WIND_E],
             &bos.solve_r[SCR_P0_OFF..SCR_P0_OFF + WIND_V],
             &mut self.planes[WIND_PLANE_NS_RESID * WIND_V..(WIND_PLANE_NS_RESID + 1) * WIND_V],
+            dense_g_floor,
         );
         if !ns_resid_ratio.is_finite() || ns_resid_ratio > NS_RESID_HARD_LIMIT {
             self.fail_refused(reason_mask | WIND_REASON_HIGH_NS_RESIDUAL, false);
@@ -676,26 +719,30 @@ impl WindTunnelState {
             reason_mask |= WIND_REASON_NO_FREESTREAM;
         }
 
-        // Populate Plane 0 (`C_p` if freestream present, else `p/rho - p_ref`) & Plane 2 (vorticity)
+        // Populate Plane 0 (`C_p` if freestream present on sparse/injected, 0.0 on dense-LK fallback) & Plane 2 (vorticity)
         let q_dyn = 0.5 * u_inf * u_inf;
         let mut cp_min = 1.0e30f64;
         let mut cp_max = -1.0e30f64;
         let mut v = 0usize;
         while v < WIND_V {
             if hodge.v_act[v] != 0 {
-                let p_rel = bos.solve_r[SCR_P0_OFF + v] - p_gauge_ref;
-                let out_val = if has_freestream && q_dyn > 1.0e-6 {
-                    p_rel / q_dyn
-                } else {
-                    p_rel
-                };
-                if out_val.is_finite() {
-                    self.planes[WIND_PLANE_CP * WIND_V + v] = out_val as f32;
-                    if out_val < cp_min {
-                        cp_min = out_val;
-                    }
-                    if out_val > cp_max {
-                        cp_max = out_val;
+                if !is_dense {
+                    let p_rel = bos.solve_r[SCR_P0_OFF + v] - p_gauge_ref;
+                    let out_val = if has_freestream && q_dyn > 1.0e-6 {
+                        p_rel / q_dyn
+                    } else {
+                        p_rel
+                    };
+                    if out_val.is_finite() {
+                        self.planes[WIND_PLANE_CP * WIND_V + v] = out_val as f32;
+                        if out_val < cp_min {
+                            cp_min = out_val;
+                        }
+                        if out_val > cp_max {
+                            cp_max = out_val;
+                        }
+                    } else {
+                        self.planes[WIND_PLANE_CP * WIND_V + v] = 0.0;
                     }
                 } else {
                     self.planes[WIND_PLANE_CP * WIND_V + v] = 0.0;
@@ -714,6 +761,8 @@ impl WindTunnelState {
         }
 
         // 9. Dual-Method Aerodynamic Force Balance (`C_L, C_D`) + Kutta-Joukowski audit
+        //    Dense optical-flow fallback is structurally capped at READY_FIELD_ONLY (never fabricates
+        //    obstacle pressure/loads from texture holes).
         let mut cl_bnd = 0.0f64;
         let mut cd_bnd = 0.0f64;
         let mut cl_cv = 0.0f64;
@@ -722,7 +771,7 @@ impl WindTunnelState {
         let mut reynolds = 0.0f64;
         let mut full_loads = false;
 
-        if !has_void || beta1 == 0 {
+        if is_dense || !has_void || beta1 == 0 {
             reason_mask |= WIND_REASON_NO_OBSTACLE_VOID;
         } else if has_freestream && d_hole_px > 1.0 && q_dyn > 1.0e-6 {
             let norm = q_dyn * d_hole_px;
@@ -760,9 +809,6 @@ impl WindTunnelState {
             if ok_cv {
                 cd_cv = (fx_cv * e_inf_x + fy_cv * e_inf_y) / norm;
                 cl_cv = (-fx_cv * e_inf_y + fy_cv * e_inf_x) / norm;
-            } else if ok_b {
-                cd_cv = cd_bnd;
-                cl_cv = cl_bnd;
             }
 
             let gamma1 = f32::from_bits(hodge.telem[HODGE_TELEM_PRIMARY_VOID_CIRC]) as f64;
@@ -777,7 +823,7 @@ impl WindTunnelState {
         }
 
         // Optional FSI bridge: check SE(2) rigid body overlapping the primary obstacle void
-        let (fsi_id, fsi_vx, fsi_vy, fsi_om) = if has_void {
+        let (fsi_id, fsi_vx, fsi_vy, fsi_om) = if !is_dense && has_void {
             find_overlapping_rigid_body(export_bodies, hole_cx, hole_cy, d_hole_px)
         } else {
             (0, 0.0, 0.0, 0.0)
@@ -792,7 +838,11 @@ impl WindTunnelState {
         self.telem[WIND_TELEM_STATE] = final_state;
         self.telem[WIND_TELEM_MODE] = self.mode;
         self.telem[WIND_TELEM_REASON_MASK] = reason_mask;
-        self.telem[WIND_TELEM_PROVENANCE] = WIND_PROV_DIMENSIONLESS;
+        self.telem[WIND_TELEM_PROVENANCE] = if is_dense {
+            WIND_PROV_DENSE_LK
+        } else {
+            WIND_PROV_DIMENSIONLESS
+        };
         self.telem[WIND_TELEM_ACTIVE_CELLS] = act_cells as u32;
         self.telem[WIND_TELEM_BETA1_HOLES] = beta1;
         self.telem[WIND_TELEM_PCG_ITERS] = pcg_iters;
@@ -1199,7 +1249,9 @@ fn compute_vorticity_from_uv(
 fn capture_vertex_velocity_and_vorticity(
     hodge: &HodgeState,
     raw_continuum_field: &[f32; WIND_V * 6],
-    is_live: bool,
+    dense_u: &[f32],
+    dense_v: &[f32],
+    source: WindInputSource,
     out_u: &mut [f64],
     out_v: &mut [f64],
     out_w: &mut [f64],
@@ -1211,11 +1263,13 @@ fn capture_vertex_velocity_and_vorticity(
     let mut v = 0usize;
     while v < WIND_V {
         if hodge.v_act[v] != 0 {
-            let (u, vv) = if is_live {
-                let b = v * 6;
-                (raw_continuum_field[b] as f64, raw_continuum_field[b + 1] as f64)
-            } else {
-                (hodge.inject_buf[v] as f64, hodge.inject_buf[WIND_V + v] as f64)
+            let (u, vv) = match source {
+                WindInputSource::SparseLive => {
+                    let b = v * 6;
+                    (raw_continuum_field[b] as f64, raw_continuum_field[b + 1] as f64)
+                }
+                WindInputSource::DenseLive => (dense_u[v] as f64, dense_v[v] as f64),
+                WindInputSource::Injected => (hodge.inject_buf[v] as f64, hodge.inject_buf[WIND_V + v] as f64),
             };
             if u.is_finite() && vv.is_finite() {
                 out_u[v] = u;
@@ -1743,7 +1797,7 @@ fn compute_interior_divergence_fraction(
     bos: &mut BosState,
     dx: f64,
     dy: f64,
-) -> f64 {
+) -> (f64, u32, f64) {
     let mut r = 0usize;
     while r < WIND_H {
         let mut c = 0usize;
@@ -1827,11 +1881,29 @@ fn compute_interior_divergence_fraction(
     }
 
     if cnt < 8 {
-        return 0.0;
+        let mut all_spd2 = 0.0f64;
+        let mut all_cnt = 0usize;
+        let mut vi = 0usize;
+        while vi < WIND_V {
+            if hodge.v_act[vi] != 0 {
+                let uc = bos.solve_r[SCR_LAPU_OFF + vi];
+                let vc = bos.solve_r[SCR_LAPV_OFF + vi];
+                all_spd2 += uc * uc + vc * vc;
+                all_cnt += 1;
+            }
+            vi += 1;
+        }
+        let rms = if all_cnt > 0 {
+            wasm_sqrt_f64(all_spd2 / (all_cnt as f64))
+        } else {
+            0.0
+        };
+        return (0.0, cnt as u32, rms);
     }
     let h2 = dx * dy;
     let floor = 1.0e-4 * (spd2_sum / h2) + 1.0e-12;
-    div2_sum / (grad2_sum + floor)
+    let rms_spd = wasm_sqrt_f64(spd2_sum / (cnt as f64));
+    (div2_sum / (grad2_sum + floor), cnt as u32, rms_spd)
 }
 
 /// Build the Lamb-form negative material acceleration 1-cochain from OLS `(u_bar, v_bar, w_bar, du_dt, dv_dt)`:
@@ -1953,10 +2025,12 @@ fn compute_ns_curl_residual(
     g1: &[f64],
     p0: &[f64],
     out_cell_resid: &mut [f32],
+    g_floor_edge: f64,
 ) -> f64 {
     out_cell_resid.fill(0.0);
     let mut e_res = 0.0f64;
     let mut e_tot = 0.0f64;
+    let mut w_sum = 0.0f64;
 
     let mut r = 0usize;
     while r < WIND_H {
@@ -1971,6 +2045,7 @@ fn compute_ns_curl_residual(
                 let d = g - (p0[v1] - p0[v0]);
                 e_res += w * d * d;
                 e_tot += w * g * g;
+                w_sum += w;
                 let ad = abs_f64(d) as f32;
                 out_cell_resid[v0] += ad;
                 out_cell_resid[v1] += ad;
@@ -1992,6 +2067,7 @@ fn compute_ns_curl_residual(
                 let d = g - (p0[v1] - p0[v0]);
                 e_res += w * d * d;
                 e_tot += w * g * g;
+                w_sum += w;
                 let ad = abs_f64(d) as f32;
                 out_cell_resid[v0] += ad;
                 out_cell_resid[v1] += ad;
@@ -2013,10 +2089,15 @@ fn compute_ns_curl_residual(
         v += 1;
     }
 
-    if e_tot <= 1.0e-18 {
+    let e_den = if g_floor_edge > 0.0 {
+        e_tot.max(w_sum * g_floor_edge * g_floor_edge)
+    } else {
+        e_tot
+    };
+    if e_den <= 1.0e-18 {
         0.0
     } else {
-        wasm_sqrt_f64(e_res / e_tot)
+        wasm_sqrt_f64(e_res / e_den)
     }
 }
 
