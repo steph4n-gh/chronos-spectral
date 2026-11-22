@@ -31,6 +31,10 @@ doctest = false
 name = "chronos_replay"
 path = "replay/main.rs"
 
+[[bin]]
+name = "chronos"
+path = "cli/main.rs"
+
 [dependencies]
 
 # Same feature names as the root package (the shared source refers to them). `native-lib` is on
@@ -40,6 +44,7 @@ default = ["native-lib"]
 native-lib = []
 simd-force-scalar = []
 simd-conformance = []
+hires-720p = []
 
 # Native release profile, chosen by measurement (docs/VERIFICATION_AND_BENCHMARKS.md, "Native
 # build configuration"): these are Cargo's defaults, spelled out so the choice is explicit. On

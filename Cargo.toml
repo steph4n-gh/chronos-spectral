@@ -28,6 +28,8 @@ simd-conformance = []
 # consumers (integration tests, host binaries). Such a build links into a `std` binary, so the
 # crate's own `#[panic_handler]` is omitted.
 native-lib = []
+# Native-only 1280x720 (720p) engine mode (res_mode=2, scale_px=4). Ignored on wasm32.
+hires-720p = []
 
 # A native `no_std` cdylib cannot unwind (wasm32 aborts by default). Cargo ignores `panic` for
 # test targets, so `cargo test --target host-tuple` still uses the unwinding test harness.

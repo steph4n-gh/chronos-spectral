@@ -123,10 +123,11 @@ if (isMainThread) {
   ];
   const STAGING = [
     ['chronos_get_audio_staging_ptr', 4096],
-    ['chronos_get_hodge_inject_ptr', 2640],
+    ['chronos_get_hodge_inject_ptr', 6912],
     ['chronos_get_conservation_input_ptr', 32],
     ['chronos_get_laplacian_ptr', 1024],
     ['chronos_get_fiedler_ptr', 32],
+    ['chronos_get_depth_ingest_ptr', 8192],
   ];
 
   const traps = new Map();

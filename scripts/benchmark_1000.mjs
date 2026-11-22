@@ -33,18 +33,18 @@ const MAX_KRYLOV = 31;
 const TELEMETRY_LEN = 1568;
 const TELEM_RESERVED_TAIL_START = 1550;
 
-// Locked Wave-2 C-ABI constants (aligned with #64, #67, #72, #75, #76, #83)
+// Locked Wave-2 / Wave-C ABI-v2 constants
 const WASM_PAGE_BYTES = 65536;
 const EXPECTED_WASM_PAGES = 448;
 const EXPECTED_WASM_MEM_BYTES = EXPECTED_WASM_PAGES * WASM_PAGE_BYTES; // 29,360,128 B
-const MAX_ARENA_BYTES = 24_117_248;
-const WAVE1_MAX_STATIC_END = 24_248_320;
+const MAX_ARENA_BYTES = 29_100_000;
+const WAVE1_MAX_STATIC_END = 29_294_592;
 const FULL_RING_SLOT_BYTES = HD_W * HD_H * 4; // 921,600 B backing size even in SD
-const MAX_MICRO = 1536;
+const MAX_MICRO = 3072;
 const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
-const FIELD_COLS = 40;
-const FIELD_ROWS = 22;
-const FIELD_CELLS = FIELD_COLS * FIELD_ROWS; // 880
+const FIELD_COLS = 64;
+const FIELD_ROWS = 36;
+const FIELD_CELLS = FIELD_COLS * FIELD_ROWS; // 2304
 const FIELD_STRIDE = 6; // [u_px_s, v_px_s, vorticity_s1, divergence_s1, ftle_s1, valid_weight]
 const MAX_RIGID_BODIES = 32;
 const BODY_STRIDE = 8; // [body_id, member_count, cx, cy, vx, vy, omega_rad_s, se2_rmse_px]
@@ -201,291 +201,9 @@ function pearsonR(xs, ys) {
   return denom > 1e-12 ? sxy / denom : 0.0;
 }
 
-/** Production EISPACK-tql2 + DGKS Lanczos solver matching web/worker.js and scripts/calibrate_mp4.mjs. */
-function createLanczosSolver(exp, laplacian, fiedler) {
-  const activeNodeIdx = new Int32Array(GRAPH_NODES);
-  const subL = new Float64Array(GRAPH_NODES * GRAPH_NODES);
-  const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
-  const lanczosAlpha = new Float64Array(MAX_KRYLOV);
-  const lanczosBeta = new Float64Array(MAX_KRYLOV);
-  const dDiag = new Float64Array(MAX_KRYLOV);
-  const eSub = new Float64Array(GRAPH_NODES);
-  const lanczosW = new Float64Array(GRAPH_NODES);
-  const zVec = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
-  const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
-  const eigVecBuf = new Float64Array(GRAPH_NODES);
-  let tqlBestCol = 0;
-  let tqlSecCol = -1;
-  let tqlThetaMax = -1e30;
-  let tqlThetaSecond = -1e30;
-
-  function findOrthogonalBasisSeed(n, numExisting, outOffset) {
-    for (let cand = 0; cand < n; cand++) {
-      const invN = 1.0 / n;
-      for (let a = 0; a < n; a++) lanczosW[a] = (a === cand ? 1.0 : 0.0) - invN;
-      for (let pass = 0; pass < 2; pass++) {
-        for (let k = 0; k < numExisting; k++) {
-          const kOff = k * GRAPH_NODES;
-          let dot = 0.0;
-          for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-          for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-        }
-        let mean = 0.0;
-        for (let a = 0; a < n; a++) mean += lanczosW[a];
-        mean /= n;
-        for (let a = 0; a < n; a++) lanczosW[a] -= mean;
-      }
-      let norm2 = 0.0;
-      for (let a = 0; a < n; a++) norm2 += lanczosW[a] * lanczosW[a];
-      if (norm2 > 1e-12) {
-        const invNorm = 1.0 / Math.sqrt(norm2);
-        for (let a = 0; a < n; a++) lanczosQ[outOffset + a] = lanczosW[a] * invNorm;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function solveTridiagTql2(mDim) {
-    for (let i = 0; i < mDim; i++) {
-      dDiag[i] = lanczosAlpha[i];
-      eSub[i] = i + 1 < mDim ? lanczosBeta[i] : 0.0;
-    }
-    zVec.fill(0.0, 0, mDim * mDim);
-    for (let i = 0; i < mDim; i++) zVec[i * mDim + i] = 1.0;
-
-    for (let l = 0; l < mDim; l++) {
-      let iter = 0;
-      while (iter++ < 40) {
-        let m = l;
-        for (; m < mDim - 1; m++) {
-          if (Math.abs(eSub[m]) <= 1e-14 * (Math.abs(dDiag[m]) + Math.abs(dDiag[m + 1])) + 1e-30) break;
-        }
-        if (m === l) break;
-        let g = (dDiag[l + 1] - dDiag[l]) / (2.0 * eSub[l]);
-        const ag = Math.abs(g);
-        let r = ag < 1e100 ? Math.sqrt(g * g + 1.0) : ag;
-        g = dDiag[m] - dDiag[l] + eSub[l] / (g + (g >= 0.0 ? r : -r));
-        let s = 1.0;
-        let c = 1.0;
-        let p = 0.0;
-        for (let i = m - 1; i >= l; i--) {
-          const f = s * eSub[i];
-          const b = c * eSub[i];
-          const r2 = f * f + g * g;
-          r = (r2 > 1e-200 && r2 < 1e200) ? Math.sqrt(r2) : Math.hypot(f, g);
-          eSub[i + 1] = r;
-          if (r < 1e-30) {
-            dDiag[i + 1] -= p;
-            eSub[m] = 0.0;
-            break;
-          }
-          s = f / r;
-          c = g / r;
-          g = dDiag[i + 1] - p;
-          r = (dDiag[i] - g) * s + 2.0 * c * b;
-          p = s * r;
-          dDiag[i + 1] = g + p;
-          g = c * r - b;
-          const rowI = i * mDim;
-          const rowI1 = rowI + mDim;
-          for (let k = 0; k < mDim; k++) {
-            const fz = zVec[rowI1 + k];
-            const zki = zVec[rowI + k];
-            zVec[rowI1 + k] = s * zki + c * fz;
-            zVec[rowI + k] = c * zki - s * fz;
-          }
-        }
-        if (r < 1e-30 && eSub[m] === 0.0) continue;
-        dDiag[l] -= p;
-        eSub[l] = g;
-        eSub[m] = 0.0;
-      }
-    }
-
-    let bestCol = 0;
-    let secCol = -1;
-    let thetaMax = -1e30;
-    let thetaSecond = -1e30;
-    for (let c = 0; c < mDim; c++) {
-      const val = dDiag[c];
-      if (val > thetaMax) {
-        thetaSecond = thetaMax;
-        secCol = bestCol;
-        thetaMax = val;
-        bestCol = c;
-      } else if (val > thetaSecond) {
-        thetaSecond = val;
-        secCol = c;
-      }
-    }
-    tqlBestCol = bestCol;
-    tqlSecCol = secCol;
-    tqlThetaMax = thetaMax;
-    tqlThetaSecond = thetaSecond;
-  }
-
-  return function solveShiftedLanczosFiedler() {
-    if (typeof exp.chronos_solve_fiedler_lanczos === 'function') {
-      return exp.chronos_solve_fiedler_lanczos();
-    }
-    let n = 0;
-    for (let i = 0; i < GRAPH_NODES; i++) {
-      if (laplacian[i * GRAPH_NODES + i] > 1e-6) activeNodeIdx[n++] = i;
-    }
-    fiedler.fill(0.0);
-    if (n < 2) {
-      exp.chronos_set_fiedler_spectrum(0.0, 0.0);
-      return 0.0;
-    }
-    for (let a = 0; a < n; a++) {
-      const ia = activeNodeIdx[a] * GRAPH_NODES;
-      const rOff = a * n;
-      subL[rOff + a] = laplacian[ia + activeNodeIdx[a]];
-      for (let b = 0; b < a; b++) {
-        const v = laplacian[ia + activeNodeIdx[b]];
-        subL[rOff + b] = v;
-        subL[b * n + a] = v;
-      }
-    }
-    let mu = 0.0;
-    for (let a = 0; a < n; a++) {
-      const rOff = a * n;
-      let rowSum = subL[rOff + a];
-      for (let b = 0; b < n; b++) {
-        if (a !== b) rowSum += Math.abs(subL[rOff + b]);
-      }
-      if (rowSum > mu) mu = rowSum;
-    }
-    mu += 0.1;
-
-    const mSteps = Math.min(n - 1, MAX_KRYLOV);
-    const invN = 1.0 / n;
-    let mean0 = 0.0;
-    for (let a = 0; a < n; a++) {
-      const val = (a + 1) - 0.5 * (n + 1);
-      lanczosQ[a] = val;
-      mean0 += val;
-    }
-    mean0 *= invN;
-    let norm0 = 0.0;
-    for (let a = 0; a < n; a++) {
-      lanczosQ[a] -= mean0;
-      norm0 += lanczosQ[a] * lanczosQ[a];
-    }
-    const invNorm0 = 1.0 / Math.sqrt(Math.max(norm0, 1e-18));
-    for (let a = 0; a < n; a++) lanczosQ[a] *= invNorm0;
-
-    let actualM = 0;
-    let convergedEarly = false;
-    for (let j = 0; j < mSteps; j++) {
-      const qOff = j * GRAPH_NODES;
-      for (let a = 0; a < n; a++) {
-        const rOff = a * n;
-        let sumL = 0.0;
-        for (let b = 0; b < n; b++) sumL += subL[rOff + b] * lanczosQ[qOff + b];
-        lanczosW[a] = mu * lanczosQ[qOff + a] - sumL;
-      }
-      let wMean = 0.0;
-      for (let a = 0; a < n; a++) wMean += lanczosW[a];
-      wMean *= invN;
-      if (j > 0 && lanczosBeta[j - 1] > 0.0) {
-        const prevOff = (j - 1) * GRAPH_NODES;
-        const betaPrev = lanczosBeta[j - 1];
-        for (let a = 0; a < n; a++) lanczosW[a] = (lanczosW[a] - wMean) - betaPrev * lanczosQ[prevOff + a];
-      } else {
-        for (let a = 0; a < n; a++) lanczosW[a] -= wMean;
-      }
-      let alpha = 0.0;
-      for (let a = 0; a < n; a++) alpha += lanczosQ[qOff + a] * lanczosW[a];
-      lanczosAlpha[j] = alpha;
-      let preNorm2 = 0.0;
-      for (let a = 0; a < n; a++) {
-        const nv = lanczosW[a] - alpha * lanczosQ[qOff + a];
-        lanczosW[a] = nv;
-        preNorm2 += nv * nv;
-      }
-
-      for (let pass = 0; pass < 2; pass++) {
-        for (let k = 0; k <= j; k++) {
-          const kOff = k * GRAPH_NODES;
-          let dot = 0.0;
-          for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-          for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-        }
-        let wm = 0.0;
-        for (let a = 0; a < n; a++) wm += lanczosW[a];
-        wm *= invN;
-        let post2 = 0.0;
-        for (let a = 0; a < n; a++) {
-          const nv = lanczosW[a] - wm;
-          lanczosW[a] = nv;
-          post2 += nv * nv;
-        }
-        if (pass === 0 && post2 > 0.5 * preNorm2) break;
-      }
-
-      let beta2 = 0.0;
-      for (let a = 0; a < n; a++) beta2 += lanczosW[a] * lanczosW[a];
-      const beta = Math.sqrt(Math.max(0.0, beta2));
-      actualM = j + 1;
-
-      if (j + 1 >= mSteps) {
-        lanczosBeta[j] = 0.0;
-        break;
-      }
-      const nextOff = (j + 1) * GRAPH_NODES;
-      if (beta < 1e-8) {
-        lanczosBeta[j] = 0.0;
-        if (!findOrthogonalBasisSeed(n, j + 1, nextOff)) break;
-      } else {
-        lanczosBeta[j] = beta;
-        if (n > 12 && (j === 9 || j === 15)) {
-          solveTridiagTql2(actualM);
-          const ritzRes1 = beta * Math.abs(zVec[tqlBestCol * actualM + (actualM - 1)]);
-          const ritzRes2 = tqlSecCol >= 0 ? beta * Math.abs(zVec[tqlSecCol * actualM + (actualM - 1)]) : 0.0;
-          if ((mu - tqlThetaMax) > 1e-4 && ritzRes1 < 1e-8 && ritzRes2 < 1e-7) {
-            convergedEarly = true;
-            break;
-          }
-        }
-        const invBeta = 1.0 / beta;
-        for (let a = 0; a < n; a++) lanczosQ[nextOff + a] = lanczosW[a] * invBeta;
-      }
-    }
-
-    if (!convergedEarly) solveTridiagTql2(actualM);
-    const bestCol = tqlBestCol;
-    const thetaMax = tqlThetaMax;
-    const thetaSecond = tqlThetaSecond;
-
-    const lambda2 = Math.max(0.0, mu - thetaMax);
-    const lambda3 = actualM >= 2 ? Math.max(lambda2, mu - thetaSecond) : lambda2;
-    const spectralGap = Math.max(0.0, lambda3 - lambda2);
-
-    let dotPrev = 0.0;
-    const bestZOff = bestCol * actualM;
-    for (let a = 0; a < n; a++) {
-      let comp = 0.0;
-      for (let j = 0; j < actualM; j++) {
-        comp += lanczosQ[j * GRAPH_NODES + a] * zVec[bestZOff + j];
-      }
-      eigVecBuf[a] = comp;
-      const nodeIdx = activeNodeIdx[a];
-      if (nodeIdx < MAX_TARGETS) dotPrev += comp * prevFiedlerTrack[nodeIdx];
-    }
-
-    const signFix = (dotPrev < -1e-4 || (Math.abs(dotPrev) <= 1e-4 && eigVecBuf[0] < 0.0)) ? -1.0 : 1.0;
-    for (let a = 0; a < n; a++) {
-      const nodeIdx = activeNodeIdx[a];
-      const val = eigVecBuf[a] * signFix;
-      fiedler[nodeIdx] = val;
-      if (nodeIdx < MAX_TARGETS) prevFiedlerTrack[nodeIdx] = val;
-    }
-
-    exp.chronos_set_fiedler_spectrum(lambda2, spectralGap);
-    return lambda2;
-  };
+/** Delegates directly to the in-kernel Wasm Shifted Lanczos solver (`src/lanczos.rs`). */
+function createLanczosSolver(exp) {
+  return () => exp.chronos_solve_fiedler_lanczos();
 }
 
 /** Exact O(n^3) Jonker-Volgenant / Hungarian min-cost bipartite assignment on square n x n matrix. */
@@ -2801,13 +2519,13 @@ function setupHdSession(exp, mem, swarmMode = 2, resMode = 1, staticDataEnd = 0)
     ptrRanges.push({ name: 'bos_telemetry', ptr: exp.chronos_get_bos_telemetry_ptr(), bytes: 32 * 4, align: 4 });
   }
   if (typeof exp.chronos_get_bos_planes_ptr === 'function') {
-    ptrRanges.push({ name: 'bos_planes', ptr: exp.chronos_get_bos_planes_ptr(), bytes: 6 * 8192 * 4, align: 4 });
+    ptrRanges.push({ name: 'bos_planes', ptr: exp.chronos_get_bos_planes_ptr(), bytes: 6 * 32768 * 4, align: 4 });
   }
   if (typeof exp.chronos_get_bos_valid_ptr === 'function') {
-    ptrRanges.push({ name: 'bos_valid', ptr: exp.chronos_get_bos_valid_ptr(), bytes: 8192, align: 4 });
+    ptrRanges.push({ name: 'bos_valid', ptr: exp.chronos_get_bos_valid_ptr(), bytes: 32768, align: 4 });
   }
   if (typeof exp.chronos_get_bos_rgba_ptr === 'function') {
-    ptrRanges.push({ name: 'bos_rgba', ptr: exp.chronos_get_bos_rgba_ptr(), bytes: 4 * 8192, align: 4 });
+    ptrRanges.push({ name: 'bos_rgba', ptr: exp.chronos_get_bos_rgba_ptr(), bytes: 4 * 32768, align: 4 });
   }
   if (typeof exp.chronos_get_wave2_telemetry_ptr === 'function') {
     ptrRanges.push({ name: 'wave2_telem', ptr: exp.chronos_get_wave2_telemetry_ptr(), bytes: 64 * 4, align: 4 });
@@ -2819,16 +2537,16 @@ function setupHdSession(exp, mem, swarmMode = 2, resMode = 1, staticDataEnd = 0)
     ptrRanges.push({ name: 'vibro_telem', ptr: exp.chronos_get_vibro_telemetry_ptr(), bytes: 32 * 4, align: 4 });
   }
   if (typeof exp.chronos_get_vibro_planes_ptr === 'function') {
-    ptrRanges.push({ name: 'vibro_planes', ptr: exp.chronos_get_vibro_planes_ptr(), bytes: (3 * 880 + 64) * 4, align: 4 });
+    ptrRanges.push({ name: 'vibro_planes', ptr: exp.chronos_get_vibro_planes_ptr(), bytes: (3 * FIELD_CELLS + 128) * 4, align: 4 });
   }
   if (typeof exp.chronos_get_hodge_telemetry_ptr === 'function') {
     ptrRanges.push({ name: 'hodge_telem', ptr: exp.chronos_get_hodge_telemetry_ptr(), bytes: 32 * 4, align: 4 });
   }
   if (typeof exp.chronos_get_hodge_planes_ptr === 'function') {
-    ptrRanges.push({ name: 'hodge_planes', ptr: exp.chronos_get_hodge_planes_ptr(), bytes: 7 * 880 * 4, align: 4 });
+    ptrRanges.push({ name: 'hodge_planes', ptr: exp.chronos_get_hodge_planes_ptr(), bytes: 7 * FIELD_CELLS * 4, align: 4 });
   }
   if (typeof exp.chronos_get_hodge_inject_ptr === 'function') {
-    ptrRanges.push({ name: 'hodge_inject', ptr: exp.chronos_get_hodge_inject_ptr(), bytes: 3 * 880 * 4, align: 4 });
+    ptrRanges.push({ name: 'hodge_inject', ptr: exp.chronos_get_hodge_inject_ptr(), bytes: 3 * FIELD_CELLS * 4, align: 4 });
   }
   if (typeof exp.chronos_get_conservation_telemetry_ptr === 'function') {
     ptrRanges.push({ name: 'conservation_telem', ptr: exp.chronos_get_conservation_telemetry_ptr(), bytes: 32 * 4, align: 4 });
@@ -3261,7 +2979,7 @@ function logDiagnostics(tag, stats) {
     );
   }
   console.log(
-    `  Validity Mask : ${decodeValidityMask(stats.validityMask)} (raw=${stats.validityMask}, validCells=${stats.validCells}/880)`
+    `  Validity Mask : ${decodeValidityMask(stats.validityMask)} (raw=${stats.validityMask}, validCells=${stats.validCells}/${FIELD_CELLS})`
   );
   console.log(
     `  Continuum Raw : vortMax=${stats.maxVort.toFixed(3)}/s vortRms=${stats.rmsVort.toFixed(3)}/s divRms=${stats.rmsDiv.toFixed(3)}/s | ftleMax=${stats.maxFtle.toFixed(3)}/s (${stats.ftleCells} cells) | strain=${stats.meanStrain.toFixed(3)}/s`
@@ -4157,13 +3875,13 @@ async function runQ3ModalBeam(wasm) {
             const phi = session.modalField[idx];
             if (!Number.isFinite(phi) || phi < -3.15 || phi > 3.15) continue;
             validModalCells++;
-            if (row <= 1 || row >= 20) emptyRowModalCells++;
-            if (row >= 4 && row <= 17) {
-              if (col <= 17) {
+            if (row <= 2 || row >= FIELD_ROWS - 3) emptyRowModalCells++;
+            if (row >= 7 && row <= 28) {
+              if (col <= 28) {
                 lCos += Math.cos(phi);
                 lSin += Math.sin(phi);
                 lCnt++;
-              } else if (col >= 22) {
+              } else if (col >= 35) {
                 rCos += Math.cos(phi);
                 rSin += Math.sin(phi);
                 rCnt++;
@@ -4194,7 +3912,7 @@ async function runQ3ModalBeam(wasm) {
           rCnt >= 20 &&
           errFromPi <= 0.30 &&
           validModalCells >= 120 &&
-          validModalCells <= sensors &&
+          validModalCells <= FIELD_CELLS - 6 * FIELD_COLS &&
           emptyRowModalCells === 0;
         if (simJointOk) jointValidFrames++;
       }
@@ -8625,6 +8343,7 @@ async function runAntiSpoofSelfTests() {
       chronos_get_ring_slot_ptr: (s) => RING_BASE + s * RING_STEP,
       chronos_set_ingest_pts: () => {},
       chronos_pre_tick: () => {},
+      chronos_solve_fiedler_lanczos: () => 0.0,
       chronos_solve_lanczos: () => {},
       chronos_laplacian_matvec: () => {},
       chronos_fiedler_step: () => {},
@@ -8966,11 +8685,11 @@ async function runAntiSpoofSelfTests() {
     st[1] = 1; st[2] = pts.length; st[3] = pts.length; st[4] = pts.length; st[5] = pts.length;
     st[16] = 8; st[27] = 3.0; st[28] = 0.9; st[29] = 600; st[41] = 0.98;
     modal.fill(-9.0);
-    const startRow = leakRow0 ? 0 : 4;
-    for (let r = startRow; r <= 17; r++) {
+    const startRow = leakRow0 ? 0 : 7;
+    for (let r = startRow; r <= 28; r++) {
       for (let c = 0; c < FIELD_COLS; c++) {
-        if (c <= 17) modal[r * FIELD_COLS + c] = 0.0;
-        else if (c >= 22) modal[r * FIELD_COLS + c] = Math.PI;
+        if (c <= 28) modal[r * FIELD_COLS + c] = 0.0;
+        else if (c >= 35) modal[r * FIELD_COLS + c] = Math.PI;
       }
     }
   };

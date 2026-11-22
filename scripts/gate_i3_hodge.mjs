@@ -26,13 +26,13 @@ const DEFAULT_WASM = path.join(ROOT, 'web', 'chronos_spectral.wasm');
 const wasmArg = process.argv.slice(2).find((a) => a.startsWith('--wasm='));
 const WASM_PATH = wasmArg ? path.resolve(wasmArg.slice('--wasm='.length)) : DEFAULT_WASM;
 
-const HODGE_W = 40;
-const HODGE_H = 22;
-const HODGE_V = HODGE_W * HODGE_H; // 880
-const HODGE_EX = (HODGE_W - 1) * HODGE_H; // 858
-const HODGE_EY = HODGE_W * (HODGE_H - 1); // 840
-const HODGE_E = HODGE_EX + HODGE_EY; // 1,698
-const HODGE_F = (HODGE_W - 1) * (HODGE_H - 1); // 819
+const HODGE_W = 64;
+const HODGE_H = 36;
+const HODGE_V = HODGE_W * HODGE_H; // 2,304
+const HODGE_EX = (HODGE_W - 1) * HODGE_H; // 2,268
+const HODGE_EY = HODGE_W * (HODGE_H - 1); // 2,240
+const HODGE_E = HODGE_EX + HODGE_EY; // 4,508
+const HODGE_F = (HODGE_W - 1) * (HODGE_H - 1); // 2,205
 
 const HODGE_MODE_OFF = 0;
 const HODGE_MODE_STAGGERED = 1;
@@ -46,8 +46,8 @@ const HODGE_STATE_INVALID_UNCONVERGED = 3;
 const STAMP_VALID = 1 << 0;
 const STAMP_HELD = 1 << 1;
 
-const DX = 16.0;
-const DY = 360.0 / 22.0;
+const DX = 640.0 / HODGE_W;
+const DY = 360.0 / HODGE_H;
 
 function assert(cond, msg) {
   if (!cond) {
@@ -244,9 +244,9 @@ assert(tFull.exactFrac > 0.99999 && tFull.coexactFrac < 1e-7 && tFull.harmFrac <
 // ----------------------------------------------------------------------------
 // 3. Punctured Cylinder vs Slit-to-Border vs Corner / Two-Hole Topology
 // ----------------------------------------------------------------------------
-const CYL_CX_CELL = 19.5;
-const CYL_CY_CELL = 10.5;
-const CYL_R_CELL = 4.0;
+const CYL_CX_CELL = 31.5;
+const CYL_CY_CELL = 17.5;
+const CYL_R_CELL = 6.4;
 const CYL_MASK = (c, r) => (Math.hypot(c - CYL_CX_CELL, r - CYL_CY_CELL) > CYL_R_CELL ? 1.0 : 0.0);
 
 // 3a. Enclosed disk hole -> beta1 = 1, holes = 1, ports = 0
@@ -260,7 +260,7 @@ assert(
 );
 
 // 3b. Open 1-cell slit from disk to left border -> flood enters -> beta1 = 0, holes = 0, ports = 1
-stageField(DX, DY, (c, r) => [1.0, 0.0, CYL_MASK(c, r) > 0.5 && !(r === 10 && c <= 19) ? 1.0 : 0.0]);
+stageField(DX, DY, (c, r) => [1.0, 0.0, CYL_MASK(c, r) > 0.5 && !(r === 17 && c <= 31) ? 1.0 : 0.0]);
 assert(exp.chronos_hodge_solve_injected(DX, DY) === 1, 'Slit mask solve failed');
 const tSlitTopo = readTelem();
 checkFiniteTelemAndPlanes('SlitTopo');
@@ -285,7 +285,7 @@ assert(tCorner.beta1 === 0 && tCorner.internalVoids === 0 && tCorner.openPorts =
 stageField(DX, DY, (c, r) => [
   1.0,
   0.0,
-  Math.hypot(c - 12.5, r - 10.5) > 3.0 && Math.hypot(c - 26.5, r - 10.5) > 3.0 ? 1.0 : 0.0,
+  Math.hypot(c - 20.5, r - 17.5) > 4.8 && Math.hypot(c - 43.5, r - 17.5) > 4.8 ? 1.0 : 0.0,
 ]);
 assert(exp.chronos_hodge_solve_injected(DX, DY) === 1, 'Two-hole mask solve failed');
 const tTwo = readTelem();
@@ -775,7 +775,7 @@ assert(exp.chronos_hodge_solve_injected(1.0, 1.0) === 1, 'Exact zero field solve
 }
 
 console.log(
-  `[PASS] Gate I3 (Hodge 40x22): Full=(V=${tFull.vAct},E=${tFull.eAct},F=${tFull.fAct},b1=${tFull.beta1}) | ` +
+  `[PASS] Gate I3 (Hodge 64x36): Full=(V=${tFull.vAct},E=${tFull.eAct},F=${tFull.fAct},b1=${tFull.beta1}) | ` +
     `Cyl=(b1=${tCylTopo.beta1},holes=${tCylTopo.internalVoids}) vs Slit=(b1=${tSlitTopo.beta1},ports=${tSlitTopo.openPorts}) | ` +
     `PotCyl(ex=${tPotCyl.exactFrac.toFixed(4)},h=${tPotCyl.harmFrac.toExponential(2)}) | ` +
     `Circ+1200(h=${tCircPos.harmFrac.toFixed(3)},G1=${tCircPos.primaryVoidCirc.toFixed(1)}) | Wake(hyps=${tWake.wakeHyps},def=${tWake.primaryWakeDeficit.toFixed(3)}) | ` +

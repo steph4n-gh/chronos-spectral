@@ -41,20 +41,20 @@ const ringSlotImgData = new Array(RING_LEN);
 const ecaOverlayBackingBuf = new Uint8ClampedArray(MAX_FRAME_BYTES);
 let ecaResView = null;
 let pipImgData = null;
-let laplacianView = null;
+// (Shifted Lanczos Fiedler runs in-kernel via chronos_solve_fiedler_lanczos)
 let fiedlerView = null;
 let telemView = null;
 let slotMetaView = null;
 const slotPipImgData = new Array(MAX_TARGETS).fill(null);
 
-// Swarm & Wave-1 ABI Constants
-const MAX_MICRO = 1536;
+// Swarm & Wave-1 ABI-v2 Constants
+const MAX_MICRO = 3072;
 const MICRO_STRIDE = 8; // [track_id, pos_x, pos_y, vel_x, vel_y, state, body_id, ftle_val]
 const MAX_RIGID_BODIES = 32;
 const BODY_STRIDE = 8; // [body_id, member_count, cx, cy, vx, vy, omega_rad_s, se2_rmse_px]
-const FIELD_GRID_W = 40;
-const FIELD_GRID_H = 22;
-const FIELD_CELLS = FIELD_GRID_W * FIELD_GRID_H; // 880
+const FIELD_GRID_W = 64;
+const FIELD_GRID_H = 36;
+const FIELD_CELLS = FIELD_GRID_W * FIELD_GRID_H; // 2304
 const FIELD_STRIDE = 6; // [u_px_s, v_px_s, vorticity_s1, divergence_s1, ftle_s1, valid_weight]
 const SWARM_TELEM_LEN = 64;
 
@@ -62,9 +62,9 @@ const RING_META_STRIDE = 24;
 const ROW_LUMA_H = 360;
 const WAVE1_TELEM_LEN = 192;
 const HERO_CAND_LEN = 4 + 16 * 8;
-const BOS_W = 128;
-const BOS_H = 64;
-const BOS_N = BOS_W * BOS_H; // 8192
+const BOS_W = 256;
+const BOS_H = 128;
+const BOS_N = BOS_W * BOS_H; // 32768
 const BOS_TELEM_LEN = 32;
 const BOS_REASON_NAMES = [
   'ANCHOR_SUP',
@@ -109,14 +109,14 @@ let wave1CoreAbiValid = false;
 let wave1MetrologyAbiValid = false;
 let wave1BosAbiValid = false;
 
-// Wave-2 ABI constants & views (Vibrometry, Hodge 2-complex, Occluded Conservation)
+// Wave-2 ABI-v2 constants & views (Vibrometry, Hodge 2-complex, Occluded Conservation)
 const WAVE2_TELEM_LEN = 64;
 const VIBRO_TELEM_LEN = 32;
-const VIBRO_PLANES_LEN = 2704;
+const VIBRO_PLANES_LEN = 7040;
 const AUDIO_STAGING_LEN = 4096;
 const HODGE_TELEM_LEN = 32;
-const HODGE_PLANES_LEN = 6160;
-const HODGE_INJECT_LEN = 2640;
+const HODGE_PLANES_LEN = 16128;
+const HODGE_INJECT_LEN = 6912;
 const CONSERVATION_LEN = 32;
 
 const VIBRO_STATE_LABELS = ['OFF', 'UNCALIB', 'WARMING', 'READY', 'DISTURBED'];
@@ -136,6 +136,30 @@ const RS_REASON_NAMES = [
 const HODGE_STATE_LABELS = ['OFF', 'STANDBY', 'READY', 'UNCONV'];
 const OCCL_STATUS_LABELS = ['NONE', 'UNIQUE', 'AMBIGUOUS', 'VIOLATED'];
 const OCCL_HYP_NAMES = ['H0_KEEP', 'H0_SWAP', 'H1_KEEP', 'H1_SWAP'];
+const DEPTH_TELEM_LEN = 32;
+const DEPTH_FIELD_LEN = 64 * 36 * 2;
+const DEPTH_TRACKS_LEN = 3072 * 2;
+const DEPTH_HERO_LEN = 16 * 4;
+const DEPTH_INGEST_LEN = 128 * 64;
+const DEPTH_STATE_LABELS = [
+  'OFF',
+  'WARMING',
+  'READY_PARALLAX',
+  'READY_TTC',
+  'REFUSED_ROTATION',
+  'REFUSED_NO_BASELINE',
+  'READY_STEREO',
+  'READY_EXTERNAL',
+];
+const DEPTH_PROV_LABELS = [
+  'NONE',
+  'MONO_REL',
+  'MONO_METRIC',
+  'TTC_FREE',
+  'SURVEYED_STEREO',
+  'SURVEYED_LIDAR',
+  'ASSUMED_NEURAL_PRIOR',
+];
 
 let wave2TelemView = null;
 let wave2TelemF32View = null;
@@ -152,6 +176,61 @@ let wave2CoreAbiValid = false;
 let wave2VibroAbiValid = false;
 let wave2HodgeAbiValid = false;
 let wave2ConsAbiValid = false;
+let depthAbiValid = false;
+let depthTelemView = null;
+let depthTelemF32View = null;
+let depthFieldView = null;
+let depthTracksView = null;
+let depthTrackFlagsView = null;
+let depthHeroView = null;
+let depthIngestView = null;
+let depthReqMode = 0;
+
+// Wave D2 (Pocket Wind Tunnel) & Wave D1 (kHz Optical Elastography & Lock-In Acoustic BOS) ABI-v3
+const WIND_TELEM_LEN = 32;
+const WIND_PLANES_LEN = 3 * FIELD_CELLS; // [Cp, p/rho, omega_filt]
+const WIND_STATE_LABELS = ['OFF', 'WARMING', 'READY_FIELD', 'READY_LOADS', 'REFUSED'];
+const WIND_REASON_NAMES = [
+  'NO_CONTINUUM',
+  'HODGE_UNCONV',
+  'MUTEX_CONFLICT',
+  'HIGH_DIV',
+  'NONCONSERV_FORCING',
+  'NO_STEADY_FREESTREAM',
+  'NO_VOID_FOR_LOADS',
+  'LOW_PRESSURE_QUALITY',
+];
+let windAbiValid = false;
+let windTelemView = null;
+let windTelemF32View = null;
+let windPlanesView = null;
+let windReqMode = 0;
+let windFluidDensity = 0.0;
+
+const ELASTO_TELEM_LEN = 32;
+const ELASTO_SURF_PLANES_LEN = 6 * FIELD_CELLS; // [c, coh, div, amp, phase, phi]
+const ELASTO_STATE_LABELS = ['OFF', 'UNCALIB', 'WARMING', 'READY', 'REFUSED'];
+const ELASTO_CLASS_LABELS = ['NONE', 'KIRCHHOFF_PLATE', 'MEMBRANE_SHEAR', 'DISPERSIVE'];
+let elastoAbiValid = false;
+let elastoTelemView = null;
+let elastoTelemF32View = null;
+let elastoPlanesView = null;
+let elastoValidView = null;
+let elastoReqMode = 0;
+let elastoLockFreqs = [];
+
+// Dual-Resolution 1:1 Fovea ABI views (160x160 lazy-chroma tile)
+const FOVEA_DIM = 160;
+let foveaRgbaView = null;
+let foveaReqView = null;
+let foveaAbiValid = false;
+let foveaStageCanvas = null;
+let foveaStageCtx = null;
+let roiBoxPreview = null; // { x0, y0, x1, y1 } normalized [0..1]
+let autoTrackRoiEnabled = false;
+let roiSlewPending = false;
+let workerFastPassCancel = false;
+let workerFastPassRunning = false;
 
 const rsCalibConfig = {
   mode: 0,
@@ -275,6 +354,26 @@ function clearWave2Views() {
   hodgeInjectView = null;
   conservationTelemView = null;
   conservationInputView = null;
+  foveaRgbaView = null;
+  foveaReqView = null;
+  foveaAbiValid = false;
+  depthAbiValid = false;
+  depthTelemView = null;
+  depthTelemF32View = null;
+  depthFieldView = null;
+  depthTracksView = null;
+  depthTrackFlagsView = null;
+  depthHeroView = null;
+  depthIngestView = null;
+  windAbiValid = false;
+  windTelemView = null;
+  windTelemF32View = null;
+  windPlanesView = null;
+  elastoAbiValid = false;
+  elastoTelemView = null;
+  elastoTelemF32View = null;
+  elastoPlanesView = null;
+  elastoValidView = null;
 }
 
 function refreshWave2Views() {
@@ -360,6 +459,114 @@ function refreshWave2Views() {
       conservationTelemView = new Float32Array(buf, ctPtr, CONSERVATION_LEN);
       conservationInputView = new Float32Array(buf, ciPtr, CONSERVATION_LEN);
       wave2ConsAbiValid = true;
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_get_fovea_rgba_ptr === 'function' &&
+    typeof wasmExports.chronos_set_fovea_meta === 'function' &&
+    typeof wasmExports.chronos_get_fovea_request_ptr === 'function'
+  ) {
+    const fPtr = wasmExports.chronos_get_fovea_rgba_ptr(0);
+    const rPtr = wasmExports.chronos_get_fovea_request_ptr();
+    if (
+      validatePtrSpan(bufLen, fPtr, FOVEA_DIM * FOVEA_DIM * 4) &&
+      (rPtr & 3) === 0 && validatePtrSpan(bufLen, rPtr, 8 * 4)
+    ) {
+      foveaRgbaView = new Uint8Array(buf, fPtr, FOVEA_DIM * FOVEA_DIM * 4);
+      foveaReqView = new Uint32Array(buf, rPtr, 8);
+      foveaAbiValid = true;
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_depth_mode === 'function' &&
+    typeof wasmExports.chronos_get_depth_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_depth_field_ptr === 'function' &&
+    typeof wasmExports.chronos_get_depth_tracks_ptr === 'function' &&
+    typeof wasmExports.chronos_get_depth_track_flags_ptr === 'function' &&
+    typeof wasmExports.chronos_get_depth_hero_ptr === 'function' &&
+    typeof wasmExports.chronos_get_depth_ingest_ptr === 'function'
+  ) {
+    const dtP = wasmExports.chronos_get_depth_telemetry_ptr();
+    const dfP = wasmExports.chronos_get_depth_field_ptr();
+    const dkP = wasmExports.chronos_get_depth_tracks_ptr();
+    const flP = wasmExports.chronos_get_depth_track_flags_ptr();
+    const dhP = wasmExports.chronos_get_depth_hero_ptr();
+    const diP = wasmExports.chronos_get_depth_ingest_ptr();
+    if (
+      (dtP & 3) === 0 && validatePtrSpan(bufLen, dtP, DEPTH_TELEM_LEN * 4) &&
+      (dfP & 3) === 0 && validatePtrSpan(bufLen, dfP, DEPTH_FIELD_LEN * 4) &&
+      (dkP & 3) === 0 && validatePtrSpan(bufLen, dkP, DEPTH_TRACKS_LEN * 4) &&
+      validatePtrSpan(bufLen, flP, 3072) &&
+      (dhP & 3) === 0 && validatePtrSpan(bufLen, dhP, DEPTH_HERO_LEN * 4) &&
+      (diP & 3) === 0 && validatePtrSpan(bufLen, diP, DEPTH_INGEST_LEN * 4)
+    ) {
+      depthTelemView = new Uint32Array(buf, dtP, DEPTH_TELEM_LEN);
+      depthTelemF32View = new Float32Array(buf, dtP, DEPTH_TELEM_LEN);
+      depthFieldView = new Float32Array(buf, dfP, DEPTH_FIELD_LEN);
+      depthTracksView = new Float32Array(buf, dkP, DEPTH_TRACKS_LEN);
+      depthTrackFlagsView = new Uint8Array(buf, flP, 3072);
+      depthHeroView = new Float32Array(buf, dhP, DEPTH_HERO_LEN);
+      depthIngestView = new Float32Array(buf, diP, DEPTH_INGEST_LEN);
+      depthAbiValid = true;
+      wasmExports.chronos_set_depth_mode(depthReqMode);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_wind_mode === 'function' &&
+    typeof wasmExports.chronos_set_wind_fluid_density === 'function' &&
+    typeof wasmExports.chronos_get_wind_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_wind_planes_ptr === 'function'
+  ) {
+    const wtP = wasmExports.chronos_get_wind_telemetry_ptr();
+    const wpP = wasmExports.chronos_get_wind_planes_ptr();
+    if (
+      (wtP & 3) === 0 && validatePtrSpan(bufLen, wtP, WIND_TELEM_LEN * 4) &&
+      (wpP & 3) === 0 && validatePtrSpan(bufLen, wpP, WIND_PLANES_LEN * 4)
+    ) {
+      windTelemView = new Uint32Array(buf, wtP, WIND_TELEM_LEN);
+      windTelemF32View = new Float32Array(buf, wtP, WIND_TELEM_LEN);
+      windPlanesView = new Float32Array(buf, wpP, WIND_PLANES_LEN);
+      windAbiValid = true;
+      wasmExports.chronos_set_wind_mode(windReqMode);
+      wasmExports.chronos_set_wind_fluid_density(windFluidDensity);
+    }
+  }
+
+  if (
+    typeof wasmExports.chronos_set_elasto_mode === 'function' &&
+    typeof wasmExports.chronos_set_elasto_lock_freqs === 'function' &&
+    typeof wasmExports.chronos_get_elasto_telemetry_ptr === 'function' &&
+    typeof wasmExports.chronos_get_elasto_planes_ptr === 'function' &&
+    typeof wasmExports.chronos_get_elasto_valid_ptr === 'function'
+  ) {
+    const etP = wasmExports.chronos_get_elasto_telemetry_ptr();
+    const epP = wasmExports.chronos_get_elasto_planes_ptr();
+    const evP = wasmExports.chronos_get_elasto_valid_ptr();
+    if (
+      (etP & 3) === 0 && validatePtrSpan(bufLen, etP, ELASTO_TELEM_LEN * 4) &&
+      (epP & 3) === 0 && validatePtrSpan(bufLen, epP, 6 * BOS_N * 4) &&
+      validatePtrSpan(bufLen, evP, BOS_N)
+    ) {
+      elastoTelemView = new Uint32Array(buf, etP, ELASTO_TELEM_LEN);
+      elastoTelemF32View = new Float32Array(buf, etP, ELASTO_TELEM_LEN);
+      elastoPlanesView = new Float32Array(buf, epP, 6 * BOS_N);
+      elastoValidView = new Uint8Array(buf, evP, BOS_N);
+      elastoAbiValid = true;
+      wasmExports.chronos_set_elasto_mode(elastoReqMode);
+      if (elastoLockFreqs.length > 0) {
+        wasmExports.chronos_set_elasto_lock_freqs(
+          elastoLockFreqs.length,
+          elastoLockFreqs[0] || 0,
+          elastoLockFreqs[1] || 0,
+          elastoLockFreqs[2] || 0,
+          elastoLockFreqs[3] || 0
+        );
+      } else {
+        wasmExports.chronos_set_elasto_lock_freqs(0, 0, 0, 0, 0);
+      }
     }
   }
   return wave2CoreAbiValid;
@@ -573,8 +780,8 @@ let bosOverlayCanvas = null;
 let bosOverlayCtx = null;
 let bosOverlayImgData = null;
 
-// Wave-2 40x22 overlay canvas & delayed-display ring buffers
-const w2CoreRing = Array.from({ length: RING_LEN }, () => new Uint32Array(28));
+// Wave-2 64x36 overlay canvas & delayed-display ring buffers
+const w2CoreRing = Array.from({ length: RING_LEN }, () => new Uint32Array(52));
 const w2CoreRingF32 = w2CoreRing.map((u) => new Float32Array(u.buffer));
 const w2CoreRingValid = new Uint8Array(RING_LEN);
 const vibroRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(VIBRO_TELEM_LEN));
@@ -585,6 +792,21 @@ const hodgeRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(
 const hodgeRingValid = new Uint8Array(RING_LEN);
 const consRingTelem = Array.from({ length: RING_LEN }, () => new Float32Array(CONSERVATION_LEN));
 const consRingValid = new Uint8Array(RING_LEN);
+const depthRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(DEPTH_TELEM_LEN));
+const depthRingTelemF32 = depthRingTelem.map((u) => new Float32Array(u.buffer));
+const depthRingField = Array.from({ length: RING_LEN }, () => new Float32Array(DEPTH_FIELD_LEN));
+const depthRingStereoRgba = Array.from({ length: RING_LEN }, () => new Uint8ClampedArray(BOS_N * 4));
+const depthRingValid = new Uint8Array(RING_LEN);
+const windRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(WIND_TELEM_LEN));
+const windRingTelemF32 = windRingTelem.map((u) => new Float32Array(u.buffer));
+const windRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(WIND_PLANES_LEN));
+const windRingValid = new Uint8Array(RING_LEN);
+const elastoRingTelem = Array.from({ length: RING_LEN }, () => new Uint32Array(ELASTO_TELEM_LEN));
+const elastoRingTelemF32 = elastoRingTelem.map((u) => new Float32Array(u.buffer));
+const elastoRingPlanes = Array.from({ length: RING_LEN }, () => new Float32Array(ELASTO_SURF_PLANES_LEN));
+const elastoRingValidMask = Array.from({ length: RING_LEN }, () => new Uint8Array(FIELD_CELLS));
+const elastoRingAbosRgba = Array.from({ length: RING_LEN }, () => new Uint8ClampedArray(BOS_N * 4));
+const elastoRingValid = new Uint8Array(RING_LEN);
 let w2OverlayCanvas = null;
 let w2OverlayCtx = null;
 let w2OverlayImgData = null;
@@ -799,20 +1021,6 @@ const trailLastFrame = new Uint32Array(TRAIL_SLOTS);
 const trailX = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
 const trailY = new Float32Array(TRAIL_SLOTS * TRAIL_LEN);
 
-// Pre-allocated Complete Shifted Lanczos + Invariant-Subspace Restart Workspaces (up to 31 = N - 1)
-const MAX_KRYLOV = 31;
-const activeNodeIdx = new Int32Array(GRAPH_NODES);
-const subL = new Float64Array(GRAPH_NODES * GRAPH_NODES);
-const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
-const lanczosAlpha = new Float64Array(MAX_KRYLOV);
-const lanczosBeta = new Float64Array(MAX_KRYLOV);
-const dDiag = new Float64Array(MAX_KRYLOV);
-const eSub = new Float64Array(GRAPH_NODES);
-const lanczosW = new Float64Array(GRAPH_NODES);
-const zVec = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
-const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
-const eigVecBuf = new Float64Array(GRAPH_NODES);
-
 // Pre-allocated Zero-GC Frame-Accurate Telemetry Session Recorder (18,000 frames = 5 min @ 60 Hz, 56 cols)
 const REC_COLS = 56;
 const REC_MAX_FRAMES = 18000;
@@ -865,6 +1073,180 @@ let sessionElapsedSec = 0.0;
 let lastPersistRenderMs = 0.0;
 let contBinStrideFrames = 15;
 let contBinHead = 0;
+
+// Bounded Physics Event Timeline & Live Drag-Box Seeding State (v3.2.0)
+const REC_EVENTS_MAX = 2048;
+let recEvents = [];
+let recEventsSpanSec = 0.0;
+let lastTimelineEventsEmitMs = 0.0;
+let lastTimelineEventsCount = 0;
+let prevBosEventState = 0;
+const prevSlotJumpEventCode = new Int8Array(MAX_TARGETS);
+const prevSlotApexVal = new Float32Array(MAX_TARGETS);
+const prevSlotApexEventFrame = new Uint32Array(MAX_TARGETS);
+let lastCutEventFrame = 0xffffffff;
+let seedBoxPreview = null; // { x0, y0, x1, y1 } normalized [0..1]
+let fastPassActive = false;
+const EVENT_TICK_COLORS = {
+  strike: '#ff5d6c',
+  scene_cut: '#00f0ff',
+  apex: '#ffd166',
+  bos_disturbed: '#ff922b',
+  jump: '#c77dff',
+};
+const JUMP_EVENT_LABELS = ['', 'GALILEO PEG', 'BOOST BURNOUT', 'CHUTE DEPLOY', 'COLLISION'];
+
+function resetRecEvents() {
+  recEvents = [];
+  recEventsSpanSec = 0.0;
+  lastTimelineEventsEmitMs = 0.0;
+  lastTimelineEventsCount = 0;
+  prevBosEventState = 0;
+  prevSlotJumpEventCode.fill(0);
+  prevSlotApexVal.fill(0);
+  prevSlotApexEventFrame.fill(0);
+  lastCutEventFrame = 0xffffffff;
+  self.postMessage({
+    type: 'timeline_events',
+    events: [],
+    spanSec: 0.0,
+    seq: 0,
+  });
+}
+
+function pushRecEvent(kind, tSec, frame, tid, label, x, y) {
+  const safeT = Number.isFinite(tSec) && tSec >= 0.0 ? Number(tSec.toFixed(4)) : 0.0;
+  if (recEvents.length >= REC_EVENTS_MAX) {
+    recEvents.shift();
+  }
+  recEvents.push({
+    kind,
+    tSec: safeT,
+    frame: frame >>> 0,
+    seq: persistSampleSeq,
+    tid: tid | 0,
+    label: label || kind.toUpperCase(),
+    x: Number.isFinite(x) ? Number(x.toFixed(2)) : 0.0,
+    y: Number.isFinite(y) ? Number(y.toFixed(2)) : 0.0,
+  });
+  if (safeT > recEventsSpanSec) {
+    recEventsSpanSec = safeT;
+  }
+}
+
+function emitTimelineEventsIfNeeded(force = false) {
+  const nowMs = performance.now();
+  if (!force && recEvents.length === lastTimelineEventsCount) return;
+  if (!force && nowMs - lastTimelineEventsEmitMs < 350.0) return;
+  lastTimelineEventsEmitMs = nowMs;
+  lastTimelineEventsCount = recEvents.length;
+  self.postMessage({
+    type: 'timeline_events',
+    events: recEvents,
+    spanSec: Math.max(sessionElapsedSec, recEventsSpanSec),
+    seq: persistSampleSeq,
+  });
+}
+
+function renderRoiBoxOverlay(W, H) {
+  if (!hudCtx) return;
+  if (roiBoxPreview) {
+    const x0 = Math.max(0, Math.min(1, roiBoxPreview.x0)) * W;
+    const y0 = Math.max(0, Math.min(1, roiBoxPreview.y0)) * H;
+    const x1 = Math.max(0, Math.min(1, roiBoxPreview.x1)) * W;
+    const y1 = Math.max(0, Math.min(1, roiBoxPreview.y1)) * H;
+    const rx = Math.min(x0, x1);
+    const ry = Math.min(y0, y1);
+    const rw = Math.abs(x1 - x0);
+    const rh = Math.abs(y1 - y0);
+    if (rw >= 2 && rh >= 2) {
+      hudCtx.save();
+      hudCtx.fillStyle = 'rgba(0, 229, 255, 0.14)';
+      hudCtx.fillRect(rx, ry, rw, rh);
+      hudCtx.strokeStyle = '#00e5ff';
+      hudCtx.lineWidth = 1.8;
+      hudCtx.setLineDash([6, 3]);
+      hudCtx.strokeRect(rx + 0.5, ry + 0.5, rw, rh);
+      hudCtx.setLineDash([]);
+      hudCtx.fillStyle = 'rgba(6, 10, 18, 0.88)';
+      const tagY = ry >= 18 ? ry - 16 : ry + 4;
+      hudCtx.fillRect(rx, tagY, 110, 14);
+      hudCtx.fillStyle = '#00e5ff';
+      hudCtx.font = '700 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillText('DRAG ZOOM ROI', rx + 5, tagY + 10.5);
+      hudCtx.restore();
+    }
+  }
+  const hasZoomCrop =
+    nativeRoiEnabled ||
+    cropNorm[0] > 0.001 ||
+    cropNorm[1] > 0.001 ||
+    cropNorm[2] < 0.999 ||
+    cropNorm[3] < 0.999;
+  if (hasZoomCrop && sourceMode !== 'testbench' && lastIngestGeom && lastIngestGeom.srcW > 0 && lastIngestGeom.srcH > 0) {
+    const mw = 84;
+    const mh = Math.max(36, Math.round((mw * lastIngestGeom.srcH) / lastIngestGeom.srcW));
+    const mx = W - mw - 12;
+    const my = 40;
+    const rx = mx + (lastIngestGeom.cropX0 / lastIngestGeom.srcW) * mw;
+    const ry = my + (lastIngestGeom.cropY0 / lastIngestGeom.srcH) * mh;
+    const rw = Math.max(4, (lastIngestGeom.cropW / lastIngestGeom.srcW) * mw);
+    const rh = Math.max(4, (lastIngestGeom.cropH / lastIngestGeom.srcH) * mh);
+    hudCtx.save();
+    hudCtx.fillStyle = 'rgba(5, 10, 18, 0.82)';
+    hudCtx.fillRect(mx, my, mw, mh);
+    hudCtx.strokeStyle = 'rgba(138, 173, 214, 0.55)';
+    hudCtx.lineWidth = 1;
+    hudCtx.strokeRect(mx + 0.5, my + 0.5, mw - 1, mh - 1);
+    hudCtx.fillStyle = 'rgba(0, 229, 255, 0.22)';
+    hudCtx.fillRect(rx, ry, rw, rh);
+    hudCtx.strokeStyle = autoTrackRoiEnabled ? '#ffd166' : '#00e5ff';
+    hudCtx.lineWidth = 1.4;
+    hudCtx.strokeRect(rx + 0.5, ry + 0.5, Math.max(2, rw - 1), Math.max(2, rh - 1));
+    hudCtx.fillStyle = '#a8c0df';
+    hudCtx.font = '700 8px ui-monospace, SFMono-Regular, Menlo, monospace';
+    hudCtx.fillText(lastIngestGeom.native1to1 ? '1:1 ROI' : 'ZOOM ROI', mx + 3, my + mh - 3);
+    hudCtx.restore();
+  }
+}
+
+function renderSeedBoxOverlay(W, H) {
+  renderRoiBoxOverlay(W, H);
+  if (!seedBoxPreview || !hudCtx) return;
+  const x0 = Math.max(0, Math.min(1, seedBoxPreview.x0)) * W;
+  const y0 = Math.max(0, Math.min(1, seedBoxPreview.y0)) * H;
+  const x1 = Math.max(0, Math.min(1, seedBoxPreview.x1)) * W;
+  const y1 = Math.max(0, Math.min(1, seedBoxPreview.y1)) * H;
+  const rx = Math.min(x0, x1);
+  const ry = Math.min(y0, y1);
+  const rw = Math.abs(x1 - x0);
+  const rh = Math.abs(y1 - y0);
+  if (rw < 2 || rh < 2) return;
+  hudCtx.save();
+  hudCtx.fillStyle = 'rgba(0, 240, 255, 0.12)';
+  hudCtx.fillRect(rx, ry, rw, rh);
+  hudCtx.strokeStyle = '#00f0ff';
+  hudCtx.lineWidth = 1.6;
+  hudCtx.setLineDash([5, 3]);
+  hudCtx.strokeRect(rx + 0.5, ry + 0.5, rw, rh);
+  hudCtx.setLineDash([]);
+  hudCtx.strokeStyle = '#ffd166';
+  hudCtx.lineWidth = 2.0;
+  const cLen = Math.min(10, rw * 0.35, rh * 0.35);
+  hudCtx.beginPath();
+  hudCtx.moveTo(rx, ry + cLen); hudCtx.lineTo(rx, ry); hudCtx.lineTo(rx + cLen, ry);
+  hudCtx.moveTo(rx + rw - cLen, ry); hudCtx.lineTo(rx + rw, ry); hudCtx.lineTo(rx + rw, ry + cLen);
+  hudCtx.moveTo(rx, ry + rh - cLen); hudCtx.lineTo(rx, ry + rh); hudCtx.lineTo(rx + cLen, ry + rh);
+  hudCtx.moveTo(rx + rw - cLen, ry + rh); hudCtx.lineTo(rx + rw, ry + rh); hudCtx.lineTo(rx + rw, ry + rh - cLen);
+  hudCtx.stroke();
+  hudCtx.fillStyle = 'rgba(6, 10, 18, 0.85)';
+  const tagY = ry >= 18 ? ry - 16 : ry + 4;
+  hudCtx.fillRect(rx, tagY, 92, 14);
+  hudCtx.fillStyle = '#00f0ff';
+  hudCtx.font = '600 9.5px ui-monospace, SFMono-Regular, Menlo, monospace';
+  hudCtx.fillText('SEED TARGET BOX', rx + 4, tagY + 10.5);
+  hudCtx.restore();
+}
 
 // ============================================================================
 // Pre-Allocated Metric Ruler, Auto-g Scale, & 4-Point Plane Homography Engine
@@ -1548,6 +1930,14 @@ function applySceneCalibrationPreset(presetKey) {
     calPtsNormX[0] = 0.28; calPtsNormY[0] = 0.62;
     calPtsNormX[1] = 0.72; calPtsNormY[1] = 0.62;
     calPtCount = 2;
+  } else if (presetKey === 'real_daphnia_laser_piv') {
+    // Surveyed laboratory laser-sheet PIV FOV (32 mm horizontal span)
+    calMode = 'ruler';
+    calProvenance = 'assumed';
+    calRulerMeters = 0.032;
+    calPtsNormX[0] = 0.0; calPtsNormY[0] = 0.50;
+    calPtsNormX[1] = 1.0; calPtsNormY[1] = 0.50;
+    calPtCount = 2;
   } else if (
     presetKey === 'model_rocket_full_flights' ||
     presetKey === 'rocket_vtvl_full_flight' ||
@@ -2029,6 +2419,9 @@ function clearVisualQueues() {
   vibroRingValid.fill(0);
   hodgeRingValid.fill(0);
   consRingValid.fill(0);
+  depthRingValid.fill(0);
+  windRingValid.fill(0);
+  elastoRingValid.fill(0);
   manualConsTestActive = false;
   tbRsFrameSeq = 0;
   tbRsAudioSampleCursor = 0;
@@ -2137,6 +2530,7 @@ function resetPersistenceState() {
   lastPersistRenderMs = 0.0;
   contBinStrideFrames = 15;
   contBinHead = 0;
+  resetRecEvents();
 }
 
 function updatePersistenceState(fpsDt) {
@@ -2297,6 +2691,22 @@ function renderPersistenceTimeline(force = false) {
     }
   }
 
+  // Color-coded event markers along sparkline top & canvas top edge (clickable to seek)
+  if (recEvents.length > 0) {
+    const denomSeq = Math.max(1, persistSampleSeq);
+    const denomSpan = Math.max(0.05, sessionElapsedSec, recEventsSpanSec);
+    for (let ei = 0; ei < recEvents.length; ei++) {
+      const ev = recEvents[ei];
+      const frac = ev.seq > 0
+        ? Math.max(0, Math.min(1, ev.seq / denomSeq))
+        : Math.max(0, Math.min(1, ev.tSec / denomSpan));
+      const ex = sparkX0 + frac * sparkW;
+      ctx.fillStyle = EVENT_TICK_COLORS[ev.kind] || '#ffd166';
+      ctx.fillRect(ex - 0.75, sparkY0 + 1, 1.8, 6);
+      ctx.fillRect(ex - 0.75, 0, 1.8, 3);
+    }
+  }
+
   const laneHeaderY = sparkY0 + sparkH + 15;
   ctx.fillStyle = '#9db4d4';
   ctx.fillText('TOP-10 TARGET CUSTODY SWIMLANES (LOCKED vs RE-ENGAGED)', sparkX0, laneHeaderY);
@@ -2438,7 +2848,6 @@ function resetTestbenchState() {
   }
 
   oracleTrackOwner.fill(-1);
-  prevFiedlerTrack.fill(0.0);
   clearVisualQueues();
   resetPersistenceState();
   oraclePadicSwaps = 0;
@@ -2863,323 +3272,6 @@ function auditOracleSwaps() {
       }
     }
   }
-}
-
-// ============================================================================
-// Pre-allocated Shifted Lanczos Fiedler Eigensolver with Invariant-Subspace
-// Orthogonal Completion & Certified Symmetric Jacobi Tridiagonal Solver
-// ============================================================================
-
-function findOrthogonalBasisSeed(n, numExisting, outOffset) {
-  for (let cand = 0; cand < n; cand++) {
-    const invN = 1.0 / n;
-    for (let a = 0; a < n; a++) {
-      lanczosW[a] = (a === cand ? 1.0 : 0.0) - invN;
-    }
-    for (let pass = 0; pass < 2; pass++) {
-      for (let k = 0; k < numExisting; k++) {
-        const kOff = k * GRAPH_NODES;
-        let dot = 0.0;
-        for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-        for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-      }
-      let mean = 0.0;
-      for (let a = 0; a < n; a++) mean += lanczosW[a];
-      mean /= n;
-      for (let a = 0; a < n; a++) lanczosW[a] -= mean;
-    }
-
-    let norm2 = 0.0;
-    for (let a = 0; a < n; a++) norm2 += lanczosW[a] * lanczosW[a];
-    if (norm2 > 1e-12) {
-      const invNorm = 1.0 / Math.sqrt(norm2);
-      for (let a = 0; a < n; a++) {
-        lanczosQ[outOffset + a] = lanczosW[a] * invNorm;
-      }
-      return true;
-    }
-  }
-  return false;
-}
-
-let tqlBestCol = 0;
-let tqlSecCol = -1;
-let tqlThetaMax = -1e30;
-let tqlThetaSecond = -1e30;
-
-function solveTridiagTql2(mDim) {
-  for (let i = 0; i < mDim; i++) {
-    dDiag[i] = lanczosAlpha[i];
-    eSub[i] = i + 1 < mDim ? lanczosBeta[i] : 0.0;
-  }
-  zVec.fill(0.0, 0, mDim * mDim);
-  for (let i = 0; i < mDim; i++) zVec[i * mDim + i] = 1.0;
-
-  for (let l = 0; l < mDim; l++) {
-    let iter = 0;
-    while (iter++ < 40) {
-      let m = l;
-      for (; m < mDim - 1; m++) {
-        if (Math.abs(eSub[m]) <= 1e-14 * (Math.abs(dDiag[m]) + Math.abs(dDiag[m + 1])) + 1e-30) {
-          break;
-        }
-      }
-      if (m === l) break;
-      let g = (dDiag[l + 1] - dDiag[l]) / (2.0 * eSub[l]);
-      const ag = Math.abs(g);
-      let r = ag < 1e100 ? Math.sqrt(g * g + 1.0) : ag;
-      g = dDiag[m] - dDiag[l] + eSub[l] / (g + (g >= 0.0 ? r : -r));
-      let s = 1.0;
-      let c = 1.0;
-      let p = 0.0;
-      for (let i = m - 1; i >= l; i--) {
-        const f = s * eSub[i];
-        const b = c * eSub[i];
-        const r2 = f * f + g * g;
-        r = (r2 > 1e-200 && r2 < 1e200) ? Math.sqrt(r2) : Math.hypot(f, g);
-        eSub[i + 1] = r;
-        if (r < 1e-30) {
-          dDiag[i + 1] -= p;
-          eSub[m] = 0.0;
-          break;
-        }
-        s = f / r;
-        c = g / r;
-        g = dDiag[i + 1] - p;
-        r = (dDiag[i] - g) * s + 2.0 * c * b;
-        p = s * r;
-        dDiag[i + 1] = g + p;
-        g = c * r - b;
-        const rowI = i * mDim;
-        const rowI1 = rowI + mDim;
-        for (let k = 0; k < mDim; k++) {
-          const fz = zVec[rowI1 + k];
-          const zki = zVec[rowI + k];
-          zVec[rowI1 + k] = s * zki + c * fz;
-          zVec[rowI + k] = c * zki - s * fz;
-        }
-      }
-      if (r < 1e-30 && eSub[m] === 0.0) continue;
-      dDiag[l] -= p;
-      eSub[l] = g;
-      eSub[m] = 0.0;
-    }
-  }
-
-  let bestCol = 0;
-  let secCol = -1;
-  let thetaMax = -1e30;
-  let thetaSecond = -1e30;
-  for (let c = 0; c < mDim; c++) {
-    const val = dDiag[c];
-    if (val > thetaMax) {
-      thetaSecond = thetaMax;
-      secCol = bestCol;
-      thetaMax = val;
-      bestCol = c;
-    } else if (val > thetaSecond) {
-      thetaSecond = val;
-      secCol = c;
-    }
-  }
-  tqlBestCol = bestCol;
-  tqlSecCol = secCol;
-  tqlThetaMax = thetaMax;
-  tqlThetaSecond = thetaSecond;
-}
-
-function solveShiftedLanczosFiedler() {
-  if (wasmExports && typeof wasmExports.chronos_solve_fiedler_lanczos === 'function') {
-    return wasmExports.chronos_solve_fiedler_lanczos();
-  }
-  let n = 0;
-  for (let i = 0; i < GRAPH_NODES; i++) {
-    if (laplacianView[i * GRAPH_NODES + i] > 1e-6) {
-      activeNodeIdx[n++] = i;
-    }
-  }
-
-  fiedlerView.fill(0.0);
-  if (n < 2) {
-    wasmExports.chronos_set_fiedler_spectrum(0.0, 0.0);
-    return 0.0;
-  }
-
-  for (let a = 0; a < n; a++) {
-    const ia = activeNodeIdx[a] * GRAPH_NODES;
-    const rOff = a * n;
-    subL[rOff + a] = laplacianView[ia + activeNodeIdx[a]];
-    for (let b = 0; b < a; b++) {
-      const v = laplacianView[ia + activeNodeIdx[b]];
-      subL[rOff + b] = v;
-      subL[b * n + a] = v;
-    }
-  }
-
-  let mu = 0.0;
-  for (let a = 0; a < n; a++) {
-    const rOff = a * n;
-    let rowSum = subL[rOff + a];
-    for (let b = 0; b < n; b++) {
-      if (a !== b) {
-        rowSum += Math.abs(subL[rOff + b]);
-      }
-    }
-    if (rowSum > mu) mu = rowSum;
-  }
-  mu += 0.1;
-
-  const mSteps = Math.min(n - 1, MAX_KRYLOV);
-  const invN = 1.0 / n;
-
-  let mean0 = 0.0;
-  for (let a = 0; a < n; a++) {
-    const val = (a + 1) - 0.5 * (n + 1);
-    lanczosQ[a] = val;
-    mean0 += val;
-  }
-  mean0 *= invN;
-  let norm0 = 0.0;
-  for (let a = 0; a < n; a++) {
-    lanczosQ[a] -= mean0;
-    norm0 += lanczosQ[a] * lanczosQ[a];
-  }
-  const invNorm0 = 1.0 / Math.sqrt(Math.max(norm0, 1e-18));
-  for (let a = 0; a < n; a++) {
-    lanczosQ[a] *= invNorm0;
-  }
-
-  let actualM = 0;
-  let convergedEarly = false;
-  for (let j = 0; j < mSteps; j++) {
-    const qOff = j * GRAPH_NODES;
-
-    for (let a = 0; a < n; a++) {
-      const rOff = a * n;
-      let sumL = 0.0;
-      for (let b = 0; b < n; b++) {
-        sumL += subL[rOff + b] * lanczosQ[qOff + b];
-      }
-      lanczosW[a] = mu * lanczosQ[qOff + a] - sumL;
-    }
-
-    let wMean = 0.0;
-    for (let a = 0; a < n; a++) wMean += lanczosW[a];
-    wMean *= invN;
-    if (j > 0 && lanczosBeta[j - 1] > 0.0) {
-      const prevOff = (j - 1) * GRAPH_NODES;
-      const betaPrev = lanczosBeta[j - 1];
-      for (let a = 0; a < n; a++) {
-        lanczosW[a] = (lanczosW[a] - wMean) - betaPrev * lanczosQ[prevOff + a];
-      }
-    } else {
-      for (let a = 0; a < n; a++) lanczosW[a] -= wMean;
-    }
-
-    let alpha = 0.0;
-    for (let a = 0; a < n; a++) {
-      alpha += lanczosQ[qOff + a] * lanczosW[a];
-    }
-    lanczosAlpha[j] = alpha;
-
-    let preNorm2 = 0.0;
-    for (let a = 0; a < n; a++) {
-      const nv = lanczosW[a] - alpha * lanczosQ[qOff + a];
-      lanczosW[a] = nv;
-      preNorm2 += nv * nv;
-    }
-
-    for (let pass = 0; pass < 2; pass++) {
-      for (let k = 0; k <= j; k++) {
-        const kOff = k * GRAPH_NODES;
-        let dot = 0.0;
-        for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-        for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-      }
-      let wm = 0.0;
-      for (let a = 0; a < n; a++) wm += lanczosW[a];
-      wm *= invN;
-      let post2 = 0.0;
-      for (let a = 0; a < n; a++) {
-        const nv = lanczosW[a] - wm;
-        lanczosW[a] = nv;
-        post2 += nv * nv;
-      }
-      if (pass === 0 && post2 > 0.5 * preNorm2) break;
-    }
-
-    let beta2 = 0.0;
-    for (let a = 0; a < n; a++) {
-      beta2 += lanczosW[a] * lanczosW[a];
-    }
-
-    const beta = Math.sqrt(Math.max(0.0, beta2));
-    actualM = j + 1;
-
-    if (j + 1 >= mSteps) {
-      lanczosBeta[j] = 0.0;
-      break;
-    }
-
-    const nextOff = (j + 1) * GRAPH_NODES;
-    if (beta < 1e-8) {
-      lanczosBeta[j] = 0.0;
-      if (!findOrthogonalBasisSeed(n, j + 1, nextOff)) {
-        break;
-      }
-    } else {
-      lanczosBeta[j] = beta;
-      if (n > 12 && (j === 9 || j === 15)) {
-        solveTridiagTql2(actualM);
-        const ritzRes1 = beta * Math.abs(zVec[tqlBestCol * actualM + (actualM - 1)]);
-        const ritzRes2 = tqlSecCol >= 0 ? beta * Math.abs(zVec[tqlSecCol * actualM + (actualM - 1)]) : 0.0;
-        if ((mu - tqlThetaMax) > 1e-4 && ritzRes1 < 1e-8 && ritzRes2 < 1e-7) {
-          convergedEarly = true;
-          break;
-        }
-      }
-      const invBeta = 1.0 / beta;
-      for (let a = 0; a < n; a++) {
-        lanczosQ[nextOff + a] = lanczosW[a] * invBeta;
-      }
-    }
-  }
-
-  if (!convergedEarly) solveTridiagTql2(actualM);
-  const bestCol = tqlBestCol;
-  const thetaMax = tqlThetaMax;
-  const thetaSecond = tqlThetaSecond;
-
-  const lambda2 = Math.max(0.0, mu - thetaMax);
-  const lambda3 = actualM >= 2 ? Math.max(lambda2, mu - thetaSecond) : lambda2;
-  const spectralGap = Math.max(0.0, lambda3 - lambda2);
-
-  let dotPrev = 0.0;
-  const bestZOff = bestCol * actualM;
-  for (let a = 0; a < n; a++) {
-    let comp = 0.0;
-    for (let j = 0; j < actualM; j++) {
-      comp += lanczosQ[j * GRAPH_NODES + a] * zVec[bestZOff + j];
-    }
-    eigVecBuf[a] = comp;
-    const nodeIdx = activeNodeIdx[a];
-    if (nodeIdx < MAX_TARGETS) {
-      dotPrev += comp * prevFiedlerTrack[nodeIdx];
-    }
-  }
-
-  const signFix = (dotPrev < -1e-4 || (Math.abs(dotPrev) <= 1e-4 && eigVecBuf[0] < 0.0)) ? -1.0 : 1.0;
-  for (let a = 0; a < n; a++) {
-    const nodeIdx = activeNodeIdx[a];
-    const val = eigVecBuf[a] * signFix;
-    fiedlerView[nodeIdx] = val;
-    if (nodeIdx < MAX_TARGETS) {
-      prevFiedlerTrack[nodeIdx] = val;
-    }
-  }
-
-  wasmExports.chronos_set_fiedler_spectrum(lambda2, spectralGap);
-  return lambda2;
 }
 
 // ============================================================================
@@ -4282,9 +4374,52 @@ function drawHudCaptionBox(x, y, text, borderColor, bgColor, textColor) {
   hudCtx.restore();
 }
 
+function colorizeAbosToRgba(planes, validMask, dstRgba) {
+  let maxPhi = 0.0;
+  for (let i = 0; i < BOS_N; i++) {
+    if (validMask[i]) {
+      const v = planes[i];
+      if (Number.isFinite(v) && v > maxPhi) maxPhi = v;
+    }
+  }
+  const invMax = 1.0 / Math.max(1e-4, maxPhi);
+  for (let i = 0; i < BOS_N; i++) {
+    const o = i * 4;
+    if (!validMask[i]) {
+      dstRgba[o] = 0; dstRgba[o + 1] = 0; dstRgba[o + 2] = 0; dstRgba[o + 3] = 0;
+      continue;
+    }
+    const t = Math.max(0.0, Math.min(1.0, planes[i] * invMax));
+    if (t < 0.06) {
+      dstRgba[o] = 0; dstRgba[o + 1] = 0; dstRgba[o + 2] = 0; dstRgba[o + 3] = 0;
+      continue;
+    }
+    let r, g, b;
+    if (t < 0.5) {
+      const s = t * 2.0;
+      r = 12 + 30 * s;
+      g = 56 + 170 * s;
+      b = 148 + 107 * s;
+    } else {
+      const s = (t - 0.5) * 2.0;
+      r = 42 + 213 * s;
+      g = 226 + 24 * s;
+      b = 255 - 165 * s;
+    }
+    dstRgba[o] = r | 0;
+    dstRgba[o + 1] = g | 0;
+    dstRgba[o + 2] = b | 0;
+    dstRgba[o + 3] = Math.round(35 + 175 * t);
+  }
+}
+
 function renderWave2Overlays(W, H, dispSlot, effK) {
   const isHodgeMode = fieldOverlayMode >= 8 && fieldOverlayMode <= 10;
   const isVibroMode = fieldOverlayMode === 11;
+  const isDepthMode = fieldOverlayMode === 12;
+  const isWindMode = fieldOverlayMode === 13;
+  const isElastoSurfMode = fieldOverlayMode === 14;
+  const isAcousticBosMode = fieldOverlayMode === 15;
 
   if (isHodgeMode && w2OverlayCtx && w2OverlayImgData) {
     const src = resolveWave2RingOrLive(
@@ -4355,10 +4490,10 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
     const stLabel = HODGE_STATE_LABELS[Math.max(0, Math.min(3, hState))] || 'OFF';
     let hCap =
       fieldOverlayMode === 8
-        ? 'HODGE EXACT |grad phi| (40x22)'
+        ? 'HODGE EXACT |grad phi| (64x36)'
         : fieldOverlayMode === 9
-        ? 'HODGE COEXACT |curl* psi| (40x22)'
-        : 'HODGE HARMONIC |h| (40x22)';
+        ? 'HODGE COEXACT |curl* psi| (64x36)'
+        : 'HODGE HARMONIC |h| (64x36)';
     hCap += ` · ${stLabel}`;
     if (ht && hState === 2) {
       const ex = u32BitsToF32(ht[12]);
@@ -4395,22 +4530,47 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
     const vState = vt ? (vt[0] >>> 0) : 0;
     const vReason = vt ? (vt[2] >>> 0) : 0;
 
+    const vMode = vt ? (vt[1] >>> 0) : (rsCalibConfig.mode >>> 0);
+    const isRsOnly = vMode === 1;
     if (vp && vState === 3) {
       const px = w2OverlayImgData.data;
-      const gCrit = vt ? Math.max(0.05, Math.min(0.99, u32BitsToF32(vt[7]))) : 0.45;
-      for (let c = 0; c < FIELD_CELLS; c++) {
-        const o = c * 4;
-        const coh = vp[FIELD_CELLS + c];
-        if (!Number.isFinite(coh) || coh <= 0.02) {
-          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
-          continue;
+      if (isRsOnly) {
+        const domAmp = vt ? u32BitsToF32(vt[12]) : 0.0;
+        let maxAmp = Math.max(0.05, Number.isFinite(domAmp) ? domAmp : 0.0);
+        for (let c = 0; c < FIELD_CELLS; c++) {
+          const a = vp[c];
+          if (Number.isFinite(a) && a > maxAmp) maxAmp = a;
         }
-        const t = Math.min(1.0, Math.max(0.0, coh));
-        const coupled = t >= gCrit;
-        px[o] = coupled ? Math.round(24 + t * 110) : 54;
-        px[o + 1] = coupled ? Math.round(190 + t * 65) : Math.round(90 + t * 60);
-        px[o + 2] = coupled ? Math.round(160 + t * 95) : 140;
-        px[o + 3] = coupled ? Math.round(65 + t * 135) : Math.round(16 + t * 48);
+        const invMax = 1.0 / maxAmp;
+        for (let c = 0; c < FIELD_CELLS; c++) {
+          const o = c * 4;
+          const amp = vp[c];
+          if (!Number.isFinite(amp) || amp <= 0.015) {
+            px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+            continue;
+          }
+          const t = Math.min(1.0, Math.max(0.0, amp * invMax));
+          px[o] = Math.round(28 + t * 227);
+          px[o + 1] = Math.round(185 + t * 45 - t * t * 65);
+          px[o + 2] = Math.round(235 - t * 170);
+          px[o + 3] = Math.round(45 + t * 150);
+        }
+      } else {
+        const gCrit = vt ? Math.max(0.05, Math.min(0.99, u32BitsToF32(vt[7]))) : 0.45;
+        for (let c = 0; c < FIELD_CELLS; c++) {
+          const o = c * 4;
+          const coh = vp[FIELD_CELLS + c];
+          if (!Number.isFinite(coh) || coh <= 0.02) {
+            px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+            continue;
+          }
+          const t = Math.min(1.0, Math.max(0.0, coh));
+          const coupled = t >= gCrit;
+          px[o] = coupled ? Math.round(24 + t * 110) : 54;
+          px[o + 1] = coupled ? Math.round(190 + t * 65) : Math.round(90 + t * 60);
+          px[o + 2] = coupled ? Math.round(160 + t * 95) : 140;
+          px[o + 3] = coupled ? Math.round(65 + t * 135) : Math.round(16 + t * 48);
+        }
       }
       w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
       hudCtx.save();
@@ -4421,13 +4581,20 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
     }
 
     const stLabel = VIBRO_STATE_LABELS[Math.max(0, Math.min(4, vState))] || 'OFF';
-    let vCap = `RS WELCH COH g2 (40x22) · ${stLabel}`;
+    let vCap = isRsOnly
+      ? `RS VIBROMETRY AMP (64x36) · ${stLabel}`
+      : `RS WELCH COH g2 (64x36) · ${stLabel}`;
     if (vt && vState >= 2) {
       const kSeg = vt[3] >>> 0;
       const domF = u32BitsToF32(vt[5]);
       const maxC = u32BitsToF32(vt[6]);
       const sincH = u32BitsToF32(vt[8]);
-      vCap += ` · K=${kSeg} · ${domF.toFixed(1)}Hz · g2=${maxC.toFixed(3)} · H=${sincH.toFixed(2)}`;
+      const domAmp = u32BitsToF32(vt[12]);
+      if (isRsOnly) {
+        vCap += ` · ${domF.toFixed(1)}Hz · amp=${domAmp.toFixed(2)}px · H=${sincH.toFixed(2)}`;
+      } else {
+        vCap += ` · K=${kSeg} · ${domF.toFixed(1)}Hz · g2=${maxC.toFixed(3)} · H=${sincH.toFixed(2)}`;
+      }
     }
     if (vReason !== 0) {
       const flags = [];
@@ -4444,6 +4611,375 @@ function renderWave2Overlays(W, H, dispSlot, effK) {
       isWarn ? '#ff4d6d' : 'rgba(0, 229, 255, 0.55)',
       isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
       isWarn ? '#fecdd3' : '#bae6fd'
+    );
+  } else if (isDepthMode && depthAbiValid && depthTelemView && depthTelemF32View && depthFieldView) {
+    const delayedDepthRing = hasAnyRenderedFrame() && effK > 0;
+    const hasSlotDepth = dispSlot >= 0 && dispSlot < RING_LEN && depthRingValid[dispSlot] === 1;
+    const dTelemU = hasSlotDepth ? depthRingTelem[dispSlot] : (!delayedDepthRing ? depthTelemView : null);
+    const dTelemF = hasSlotDepth ? depthRingTelemF32[dispSlot] : (!delayedDepthRing ? depthTelemF32View : null);
+    const dField = hasSlotDepth ? depthRingField[dispSlot] : (!delayedDepthRing ? depthFieldView : null);
+    const dStereoRgba = hasSlotDepth ? depthRingStereoRgba[dispSlot] : (!delayedDepthRing ? bosRgbaView : null);
+    const dState = dTelemU ? Math.max(0, Math.min(7, dTelemU[2] >>> 0)) : 0;
+    const dProv = dTelemU ? Math.max(0, Math.min(6, dTelemU[4] >>> 0)) : 0;
+    const foeInliers = dTelemU ? (dTelemU[8] >>> 0) : 0;
+    const ttcCnt = dTelemU ? (dTelemU[7] >>> 0) : 0;
+    const validCells = dTelemU ? (dTelemU[9] >>> 0) : 0;
+    const stereoNodes = dTelemU ? (dTelemU[13] >>> 0) : 0;
+    const foeX = dTelemF ? dTelemF[22] : 0.0;
+    const foeY = dTelemF ? dTelemF[23] : 0.0;
+    const minTtc = dTelemF ? dTelemF[24] : 0.0;
+    const bestR2 = dTelemF ? dTelemF[25] : 0.0;
+    const medZ = dTelemF ? dTelemF[29] : 0.0;
+    const minZ = dTelemF ? dTelemF[30] : 0.0;
+    const maxZ = dTelemF ? dTelemF[31] : 0.0;
+
+    if (dState === 6 && bosOverlayCtx && bosOverlayImgData && dStereoRgba) {
+      bosOverlayImgData.data.set(dStereoRgba);
+      bosOverlayCtx.putImageData(bosOverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(bosOverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    } else if (dField && validCells > 0 && w2OverlayCtx && w2OverlayImgData) {
+      let minIz = Infinity;
+      let maxIz = 0.0;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const iz = dField[c * 2];
+        const cf = dField[c * 2 + 1];
+        if (cf > 0.0 && Number.isFinite(iz) && iz > 1e-6) {
+          if (iz < minIz) minIz = iz;
+          if (iz > maxIz) maxIz = iz;
+        }
+      }
+      const invSpan = 1.0 / Math.max(1e-4, maxIz - minIz);
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const iz = dField[c * 2];
+        const cf = dField[c * 2 + 1];
+        if (cf <= 0.0 || !Number.isFinite(iz) || iz <= 1e-6) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const t = Math.max(0.0, Math.min(1.0, (iz - minIz) * invSpan));
+        let r, g, b;
+        if (t < 0.35) {
+          const s = t / 0.35;
+          r = 18 + 18 * s; g = 44 + 132 * s; b = 118 + 106 * s;
+        } else if (t < 0.70) {
+          const s = (t - 0.35) / 0.35;
+          r = 36 + 206 * s; g = 176 + 42 * s; b = 224 - 154 * s;
+        } else {
+          const s = (t - 0.70) / 0.30;
+          r = 242 + 13 * s; g = 218 - 138 * s; b = 70 - 38 * s;
+        }
+        px[o] = r | 0;
+        px[o + 1] = g | 0;
+        px[o + 2] = b | 0;
+        px[o + 3] = Math.round(70 + 135 * Math.min(1.0, cf));
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    }
+
+    if (foeInliers >= 3 && Number.isFinite(foeX) && Number.isFinite(foeY)) {
+      const fx = foeX * (W / Math.max(1, frameW));
+      const fy = foeY * (H / Math.max(1, frameH));
+      hudCtx.save();
+      hudCtx.strokeStyle = '#fbbf24';
+      hudCtx.lineWidth = 1.5;
+      hudCtx.beginPath();
+      hudCtx.arc(fx, fy, 11, 0, Math.PI * 2);
+      hudCtx.moveTo(fx - 16, fy); hudCtx.lineTo(fx + 16, fy);
+      hudCtx.moveTo(fx, fy - 16); hudCtx.lineTo(fx, fy + 16);
+      hudCtx.stroke();
+      hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      hudCtx.fillStyle = '#fde68a';
+      hudCtx.fillText(
+        ttcCnt > 0 && Number.isFinite(minTtc) ? `FoE · TTC ${minTtc.toFixed(2)}s (R2 ${bestR2.toFixed(3)})` : 'FoE',
+        fx + 14,
+        fy - 6
+      );
+      hudCtx.restore();
+    }
+
+    const stLbl = DEPTH_STATE_LABELS[dState] || 'OFF';
+    const provLbl = DEPTH_PROV_LABELS[dProv] || 'NONE';
+    let dCap = `DEPTH (${provLbl}) · ${stLbl}`;
+    if (dState === 6) {
+      dCap += ` · ${stereoNodes}/${BOS_N} · Zmed ${medZ.toFixed(2)}m [${minZ.toFixed(2)}..${maxZ.toFixed(2)}m]`;
+    } else if (dState === 2 || dState === 7) {
+      dCap += ` · ${validCells}/${FIELD_CELLS} cells`;
+      if (Number.isFinite(minZ) && minZ > 0 && Number.isFinite(maxZ) && maxZ > 0) {
+        dCap += ` · [${minZ.toFixed(2)}..${maxZ.toFixed(2)}]`;
+      }
+    }
+    if (ttcCnt > 0 && Number.isFinite(minTtc) && minTtc > 0) {
+      dCap += ` · minTTC ${minTtc.toFixed(2)}s (R2=${bestR2.toFixed(3)})`;
+    }
+    const refused = dState === 4 || dState === 5;
+    const isNeural = dProv === 6;
+    drawHudCaptionBox(
+      10,
+      44,
+      dCap,
+      refused ? '#ff4d6d' : (isNeural ? '#f59e0b' : 'rgba(56, 242, 122, 0.55)'),
+      refused ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.84)',
+      refused ? '#fecdd3' : (isNeural ? '#fde68a' : '#a7f3d0')
+    );
+  } else if (isWindMode && windAbiValid && windTelemView && windTelemF32View && windPlanesView) {
+    const delayedRing = hasAnyRenderedFrame() && effK > 0;
+    const hasSlot = dispSlot >= 0 && dispSlot < RING_LEN && windRingValid[dispSlot] === 1;
+    const wtU = hasSlot ? windRingTelem[dispSlot] : (!delayedRing ? windTelemView : null);
+    const wtF = hasSlot ? windRingTelemF32[dispSlot] : (!delayedRing ? windTelemF32View : null);
+    const wp = hasSlot ? windRingPlanes[dispSlot] : (!delayedRing ? windPlanesView : null);
+    const wState = wtU ? Math.max(0, Math.min(4, wtU[0] >>> 0)) : 0;
+    const wReason = wtU ? (wtU[2] >>> 0) : 0;
+    const beta1 = wtU ? (wtU[5] >>> 0) : 0;
+    const nu = wtF ? wtF[11] : 0.0;
+    const reNum = wtF ? wtF[13] : 0.0;
+    const cpMin = wtF ? wtF[14] : -1.0;
+    const cpMax = wtF ? wtF[15] : 1.0;
+    const cl = wtF ? wtF[18] : 0.0;
+    const cd = wtF ? wtF[19] : 0.0;
+    const etaNs = wtF ? wtF[21] : 0.0;
+    const holeCx = wtF ? wtF[23] : 0.0;
+    const holeCy = wtF ? wtF[24] : 0.0;
+
+    if (wp && (wState === 2 || wState === 3) && w2OverlayCtx && w2OverlayImgData) {
+      const span = Math.max(0.35, Math.max(Math.abs(cpMin), Math.abs(cpMax)));
+      const invSpan = 1.0 / span;
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const cp = wp[c];
+        if (!Number.isFinite(cp) || Math.abs(cp) < 1e-4) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const s = Math.max(-1.0, Math.min(1.0, cp * invSpan));
+        const a = Math.abs(s);
+        if (s < 0) {
+          // Suction low-pressure zone: cyan-blue
+          px[o] = Math.round(14 + (1.0 - a) * 32);
+          px[o + 1] = Math.round(135 + a * 95);
+          px[o + 2] = 255;
+        } else {
+          // Stagnation high-pressure zone: amber-crimson
+          px[o] = 255;
+          px[o + 1] = Math.round(190 - a * 120);
+          px[o + 2] = Math.round(60 - a * 40);
+        }
+        px[o + 3] = Math.round(28 + a * 162);
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+
+      // Draw aerodynamic lift/drag resultant arrow on the primary obstacle void
+      if (wState === 3) {
+        const rawCx = holeCx > 1.0 ? holeCx : (hodgeTelemView ? u32BitsToF32(hodgeTelemView[23]) : 0.0);
+        const rawCy = holeCy > 1.0 ? holeCy : (hodgeTelemView ? u32BitsToF32(hodgeTelemView[24]) : 0.0);
+        const vcx = rawCx * (W / Math.max(1, frameW));
+        const vcy = rawCy * (H / Math.max(1, frameH));
+        if (vcx > 4 && vcy > 4 && vcx < W - 4 && vcy < H - 4) {
+          const fMag = Math.hypot(cd, cl);
+          const scale = Math.min(58, Math.max(18, fMag * 12.0));
+          const fx = fMag > 1e-4 ? (cd / fMag) * scale : 0;
+          const fy = fMag > 1e-4 ? (-cl / fMag) * scale : 0;
+          hudCtx.save();
+          hudCtx.strokeStyle = '#ffd166';
+          hudCtx.fillStyle = '#ffd166';
+          hudCtx.lineWidth = 2.4;
+          hudCtx.beginPath();
+          hudCtx.arc(vcx, vcy, 7, 0, Math.PI * 2);
+          hudCtx.stroke();
+          hudCtx.beginPath();
+          hudCtx.moveTo(vcx, vcy);
+          hudCtx.lineTo(vcx + fx, vcy + fy);
+          hudCtx.stroke();
+          hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+          hudCtx.fillText(`CL=${cl.toFixed(2)} CD=${cd.toFixed(2)}`, vcx + 10, vcy - 10);
+          hudCtx.restore();
+        }
+      }
+    }
+
+    const stLbl = WIND_STATE_LABELS[wState] || 'OFF';
+    let wCap = `WIND TUNNEL Cp (64x36) · ${stLbl}`;
+    if (wState === 3) {
+      wCap += ` · CL=${cl.toFixed(2)} CD=${cd.toFixed(2)} · b1=${beta1}`;
+      if (reNum > 0.5) wCap += ` · Re=${reNum.toFixed(0)}`;
+      wCap += ` · eta=${etaNs.toFixed(2)}`;
+    } else if (wState === 2) {
+      wCap += ` · nu=${nu.toFixed(1)} px2/s · eta=${etaNs.toFixed(2)}`;
+    } else if (wState === 4 && wReason !== 0) {
+      const fl = [];
+      for (let b = 0; b < WIND_REASON_NAMES.length; b++) {
+        if (wReason & (1 << b)) fl.push(WIND_REASON_NAMES[b]);
+      }
+      if (fl.length > 0) wCap += ` [${fl.slice(0, 2).join('+')}]`;
+    }
+    const isWarn = wState === 4;
+    drawHudCaptionBox(
+      10,
+      44,
+      wCap,
+      isWarn ? '#ff4d6d' : 'rgba(255, 209, 102, 0.65)',
+      isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.86)',
+      isWarn ? '#fecdd3' : '#fef08a'
+    );
+  } else if (
+    (isElastoSurfMode || isAcousticBosMode) &&
+    elastoAbiValid &&
+    elastoTelemView &&
+    elastoTelemF32View &&
+    elastoPlanesView &&
+    elastoValidView
+  ) {
+    const delayedRing = hasAnyRenderedFrame() && effK > 0;
+    const hasSlot = dispSlot >= 0 && dispSlot < RING_LEN && elastoRingValid[dispSlot] === 1;
+    const etU = hasSlot ? elastoRingTelem[dispSlot] : (!delayedRing ? elastoTelemView : null);
+    const etF = hasSlot ? elastoRingTelemF32[dispSlot] : (!delayedRing ? elastoTelemF32View : null);
+    const eState = etU ? Math.max(0, Math.min(4, etU[0] >>> 0)) : 0;
+    const eMode = etU ? (etU[1] >>> 0) : elastoReqMode;
+    const eReason = etU ? (etU[2] >>> 0) : 0;
+    const eClass = etU ? Math.max(0, Math.min(3, etU[3] >>> 0)) : 0;
+    const eValid = etU ? (etU[4] >>> 0) : 0;
+    const beta1 = etU ? (etU[7] >>> 0) : 0;
+    const f0 = etF ? etF[8] : 0.0;
+    const f1 = etF ? etF[9] : 0.0;
+    const medC = etF ? etF[12] : 0.0;
+    const alpha = etF ? etF[13] : 0.0;
+    const aniso = etF ? etF[14] : 1.0;
+    const meanCoh = etF ? etF[15] : 0.0;
+    const srcX = etF ? etF[16] : 0.0;
+    const srcY = etF ? etF[17] : 0.0;
+    const sinkX = etF ? etF[18] : 0.0;
+    const sinkY = etF ? etF[19] : 0.0;
+    const curlRms = etF ? etF[24] : 0.0;
+    const phiRms = etF ? etF[25] : 0.0;
+    const cP10 = etF ? etF[26] : 0.0;
+    const cP90 = etF ? etF[27] : 0.0;
+
+    if (isAcousticBosMode && eMode === 4 && eState === 3 && bosOverlayCtx && bosOverlayImgData) {
+      if (hasSlot) {
+        bosOverlayImgData.data.set(elastoRingAbosRgba[dispSlot]);
+      } else {
+        colorizeAbosToRgba(elastoPlanesView, elastoValidView, bosOverlayImgData.data);
+      }
+      bosOverlayCtx.putImageData(bosOverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(bosOverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+    } else if (isElastoSurfMode && eMode !== 4 && eState === 3 && w2OverlayCtx && w2OverlayImgData) {
+      const ep = hasSlot ? elastoRingPlanes[dispSlot] : elastoPlanesView;
+      const ev = hasSlot ? elastoRingValidMask[dispSlot] : elastoValidView;
+      const loC = cP10 > 1e-3 ? cP10 * 0.85 : medC * 0.5;
+      const hiC = Math.max(loC + 1e-3, cP90 > loC ? cP90 * 1.15 : medC * 1.5);
+      const invSpan = 1.0 / (hiC - loC);
+      const px = w2OverlayImgData.data;
+      for (let c = 0; c < FIELD_CELLS; c++) {
+        const o = c * 4;
+        const cv = ep[c];
+        if (!ev[c] || !Number.isFinite(cv) || cv <= 0.0) {
+          px[o] = 0; px[o + 1] = 0; px[o + 2] = 0; px[o + 3] = 0;
+          continue;
+        }
+        const t = Math.max(0.0, Math.min(1.0, (cv - loC) * invSpan));
+        // Plasma-like stiffness speed map: deep violet (soft) -> magenta -> amber-gold (stiff)
+        let r, g, b;
+        if (t < 0.5) {
+          const s = t * 2.0;
+          r = 42 + 168 * s;
+          g = 24 + 44 * s;
+          b = 148 + 42 * s;
+        } else {
+          const s = (t - 0.5) * 2.0;
+          r = 210 + 45 * s;
+          g = 68 + 166 * s;
+          b = 190 - 140 * s;
+        }
+        px[o] = r | 0;
+        px[o + 1] = g | 0;
+        px[o + 2] = b | 0;
+        px[o + 3] = Math.round(70 + 130 * (0.35 + 0.65 * t));
+      }
+      w2OverlayCtx.putImageData(w2OverlayImgData, 0, 0);
+      hudCtx.save();
+      hudCtx.imageSmoothingEnabled = true;
+      hudCtx.imageSmoothingQuality = 'low';
+      hudCtx.drawImage(w2OverlayCanvas, 0, 0, W, H);
+      hudCtx.restore();
+
+      const sx = W / Math.max(1, frameW);
+      const sy = H / Math.max(1, frameH);
+      hudCtx.save();
+      hudCtx.font = '700 10px ui-monospace, SFMono-Regular, Menlo, monospace';
+      if (srcX > 4 && srcY > 4) {
+        const pxX = srcX * sx;
+        const pxY = srcY * sy;
+        hudCtx.strokeStyle = '#38f27a';
+        hudCtx.fillStyle = '#a7f3d0';
+        hudCtx.lineWidth = 2.0;
+        hudCtx.beginPath();
+        hudCtx.arc(pxX, pxY, 9, 0, Math.PI * 2);
+        hudCtx.moveTo(pxX - 13, pxY); hudCtx.lineTo(pxX + 13, pxY);
+        hudCtx.moveTo(pxX, pxY - 13); hudCtx.lineTo(pxX, pxY + 13);
+        hudCtx.stroke();
+        hudCtx.fillText('+ SRC', pxX + 12, pxY - 6);
+      }
+      if (sinkX > 4 && sinkY > 4) {
+        const kxX = sinkX * sx;
+        const kxY = sinkY * sy;
+        hudCtx.strokeStyle = '#ff4d6d';
+        hudCtx.fillStyle = '#fecdd3';
+        hudCtx.lineWidth = 2.0;
+        hudCtx.beginPath();
+        hudCtx.arc(kxX, kxY, 9, 0, Math.PI * 2);
+        hudCtx.moveTo(kxX - 8, kxY - 8); hudCtx.lineTo(kxX + 8, kxY + 8);
+        hudCtx.moveTo(kxX + 8, kxY - 8); hudCtx.lineTo(kxX - 8, kxY + 8);
+        hudCtx.stroke();
+        hudCtx.fillText('- SINK', kxX + 12, kxY + 12);
+      }
+      hudCtx.restore();
+    }
+
+    const stLbl = ELASTO_STATE_LABELS[eState] || 'OFF';
+    let eCap = isAcousticBosMode
+      ? `ACOUSTIC BOS (256x128) · ${stLbl}`
+      : `ELASTOGRAPHY c(x,y) (64x36) · ${stLbl}`;
+    if (eState === 3) {
+      if (eMode === 4) {
+        eCap += ` · ${f0.toFixed(0)}Hz · |Phi|=${phiRms.toFixed(2)} · curl=${curlRms.toFixed(3)} · ${eValid} nodes`;
+      } else {
+        const clsLbl = ELASTO_CLASS_LABELS[eClass] || 'NONE';
+        const fTxt = f1 > 1.0 ? `${f0.toFixed(0)}+${f1.toFixed(0)}Hz` : `${f0.toFixed(1)}Hz`;
+        eCap += ` · ${fTxt} · ${clsLbl}${alpha > 0.05 ? ` (a=${alpha.toFixed(2)})` : ''} · c=${medC.toFixed(0)} · coh=${meanCoh.toFixed(2)}`;
+        if (beta1 > 0) eCap += ` · b1=${beta1}`;
+        if (Math.abs(aniso - 1.0) > 0.15) eCap += ` · aniso=${aniso.toFixed(2)}`;
+      }
+    } else if (eState === 4 || eState === 1) {
+      eCap += ` [0x${eReason.toString(16)}]`;
+    }
+    const isWarn = eState === 4 || eState === 1;
+    drawHudCaptionBox(
+      10,
+      44,
+      eCap,
+      isWarn ? '#ff4d6d' : 'rgba(199, 125, 255, 0.65)',
+      isWarn ? 'rgba(38, 12, 16, 0.88)' : 'rgba(7, 13, 24, 0.86)',
+      isWarn ? '#fecdd3' : '#e9d5ff'
     );
   }
 
@@ -4510,9 +5046,9 @@ function renderWave1Overlays(W, H, dispSlot, effK, sx, sy) {
 
     let bosCap =
       fieldOverlayMode === 5
-        ? 'BOS REFRACTION |eps| (128x64)'
+        ? 'BOS REFRACTION |eps| (256x128)'
         : fieldOverlayMode === 6
-        ? 'BOS NEUMANN POTENTIAL Phi (128x64)'
+        ? 'BOS NEUMANN POTENTIAL Phi (256x128)'
         : 'BOS CURL CHECK (dv/dx - du/dy)';
     const stLabel = BOS_STATE_LABELS[Math.max(0, Math.min(3, dispBosState))] || 'OFF';
     bosCap += ` · ${stLabel}`;
@@ -4671,6 +5207,7 @@ function renderMainHud(dispSlot) {
 
   // 3b. Metric Ruler or 4-Point Perspective Homography Floor Grid Overlay
   renderCalibrationOverlay(W, H);
+  renderSeedBoxOverlay(W, H);
 
   let placedLabels = 0;
 
@@ -6801,8 +7338,8 @@ function resolveIngestGeomSpec(bw, bh, infoGeom = null) {
 }
 
 function drawCroppedLetterboxedFrame(bmp, infoGeom = null) {
-  const bw = Math.max(1, Math.trunc(bmp.width || frameW));
-  const bh = Math.max(1, Math.trunc(bmp.height || frameH));
+  const bw = Math.max(1, Math.trunc(bmp.width || bmp.displayWidth || bmp.codedWidth || frameW));
+  const bh = Math.max(1, Math.trunc(bmp.height || bmp.displayHeight || bmp.codedHeight || frameH));
   const geom = resolveIngestGeomSpec(bw, bh, infoGeom);
   const drawCw = typeof geom.drawCropW === 'number' ? geom.drawCropW : geom.cropW;
   const drawCh = typeof geom.drawCropH === 'number' ? geom.drawCropH : geom.cropH;
@@ -7573,6 +8110,9 @@ function buildWave2Snapshot(dispSlot) {
         conservation: manualConsTestActive && wave2CoreAbiValid
           ? decodeWave2Stamp(32)
           : decodeStampFrom(cr, crF32, 20),
+        depth: decodeStampFrom(cr, crF32, 28),
+        wind: decodeStampFrom(cr, crF32, 36),
+        elasto: decodeStampFrom(cr, crF32, 44),
       },
     };
   })() : (!delayedRing && wave2CoreAbiValid && wave2TelemView && wave2TelemF32View ? {
@@ -7585,6 +8125,9 @@ function buildWave2Snapshot(dispSlot) {
       vibro: decodeWave2Stamp(16),
       hodge: decodeWave2Stamp(24),
       conservation: decodeWave2Stamp(32),
+      depth: decodeWave2Stamp(40),
+      wind: decodeWave2Stamp(48),
+      elasto: decodeWave2Stamp(56),
     },
   } : {
     available: wave2CoreAbiValid,
@@ -7598,6 +8141,9 @@ function buildWave2Snapshot(dispSlot) {
       conservation: manualConsTestActive && wave2CoreAbiValid
         ? decodeWave2Stamp(32)
         : { validity: 0, valid: false, held: false },
+      depth: { validity: 0, valid: false, held: false },
+      wind: { validity: 0, valid: false, held: false },
+      elasto: { validity: 0, valid: false, held: false },
     },
   });
 
@@ -7721,7 +8267,129 @@ function buildWave2Snapshot(dispSlot) {
     ? decodeConservationArr(ca)
     : { available: wave2ConsAbiValid, status: 0, statusLabel: 'NONE', ambiguityMask: 0, hypotheses: [] };
 
-  return { ...core, vibro, hodge, conservation };
+  const hasSlotDepth = dispSlot >= 0 && dispSlot < RING_LEN && depthRingValid[dispSlot] === 1;
+  const dtU = hasSlotDepth
+    ? depthRingTelem[dispSlot]
+    : (!delayedRing && depthAbiValid && depthTelemView ? depthTelemView : null);
+  const dtF = hasSlotDepth
+    ? depthRingTelemF32[dispSlot]
+    : (!delayedRing && depthAbiValid && depthTelemF32View ? depthTelemF32View : null);
+  const depth = dtU && dtF
+    ? (() => {
+        const st = Math.max(0, Math.min(7, dtU[2] >>> 0));
+        const pv = Math.max(0, Math.min(6, dtU[4] >>> 0));
+        return {
+          available: true,
+          reqMode: depthReqMode,
+          mode: dtU[1] >>> 0,
+          state: st,
+          stateLabel: DEPTH_STATE_LABELS[st] || 'OFF',
+          reasonMask: dtU[3] >>> 0,
+          provenance: pv,
+          provenanceLabel: DEPTH_PROV_LABELS[pv] || 'NONE',
+          validTracks: dtU[5] >>> 0,
+          movingRejected: dtU[6] >>> 0,
+          ttcValidTracks: dtU[7] >>> 0,
+          foeInliers: dtU[8] >>> 0,
+          validCells: dtU[9] >>> 0,
+          extSeq: dtU[12] >>> 0,
+          stereoValidNodes: dtU[13] >>> 0,
+          heroMask: dtU[14] >>> 0,
+          medRotResid: finiteOrNull(dtF[16]) ?? 0.0,
+          rotRatio: finiteOrNull(dtF[17]) ?? 0.0,
+          foeX: finiteOrNull(dtF[22]) ?? 0.0,
+          foeY: finiteOrNull(dtF[23]) ?? 0.0,
+          minTtcSec: finiteOrNull(dtF[24]) ?? 0.0,
+          bestTtcR2: finiteOrNull(dtF[25]) ?? 0.0,
+          epiRmsPx: finiteOrNull(dtF[28]) ?? 0.0,
+          medDepthM: finiteOrNull(dtF[29]) ?? 0.0,
+          minDepthM: finiteOrNull(dtF[30]) ?? 0.0,
+          maxDepthM: finiteOrNull(dtF[31]) ?? 0.0,
+        };
+      })()
+    : { available: depthAbiValid, reqMode: depthReqMode, state: 0, stateLabel: 'OFF', provenance: 0, provenanceLabel: 'NONE', extSeq: 0 };
+
+  const hasSlotWind = dispSlot >= 0 && dispSlot < RING_LEN && windRingValid[dispSlot] === 1;
+  const wtU = hasSlotWind
+    ? windRingTelem[dispSlot]
+    : (!delayedRing && windAbiValid && windTelemView ? windTelemView : null);
+  const wtF = hasSlotWind
+    ? windRingTelemF32[dispSlot]
+    : (!delayedRing && windAbiValid && windTelemF32View ? windTelemF32View : null);
+  const wind = wtU && wtF
+    ? (() => {
+        const st = Math.max(0, Math.min(4, wtU[0] >>> 0));
+        return {
+          available: true,
+          reqMode: windReqMode,
+          mode: wtU[1] >>> 0,
+          state: st,
+          stateLabel: WIND_STATE_LABELS[st] || 'OFF',
+          reasonMask: wtU[2] >>> 0,
+          provenance: wtU[3] >>> 0,
+          validCells: wtU[4] >>> 0,
+          beta1: wtU[5] >>> 0,
+          uInf: finiteOrNull(wtF[8]) ?? 0.0,
+          dHolePx: finiteOrNull(wtF[10]) ?? 0.0,
+          nu: finiteOrNull(wtF[11]) ?? 0.0,
+          nuR2: finiteOrNull(wtF[12]) ?? 0.0,
+          reNum: finiteOrNull(wtF[13]) ?? 0.0,
+          cpMin: finiteOrNull(wtF[14]) ?? 0.0,
+          cpMax: finiteOrNull(wtF[15]) ?? 0.0,
+          clBnd: finiteOrNull(wtF[16]) ?? 0.0,
+          cdBnd: finiteOrNull(wtF[17]) ?? 0.0,
+          cl: finiteOrNull(wtF[18]) ?? 0.0,
+          cd: finiteOrNull(wtF[19]) ?? 0.0,
+          clCv: finiteOrNull(wtF[18]) ?? 0.0,
+          cdCv: finiteOrNull(wtF[19]) ?? 0.0,
+          clKj: finiteOrNull(wtF[20]) ?? 0.0,
+          etaNs: finiteOrNull(wtF[21]) ?? 0.0,
+          divFrac: finiteOrNull(wtF[22]) ?? 0.0,
+        };
+      })()
+    : { available: windAbiValid, reqMode: windReqMode, state: 0, stateLabel: 'OFF' };
+
+  const hasSlotElasto = dispSlot >= 0 && dispSlot < RING_LEN && elastoRingValid[dispSlot] === 1;
+  const etU = hasSlotElasto
+    ? elastoRingTelem[dispSlot]
+    : (!delayedRing && elastoAbiValid && elastoTelemView ? elastoTelemView : null);
+  const etF = hasSlotElasto
+    ? elastoRingTelemF32[dispSlot]
+    : (!delayedRing && elastoAbiValid && elastoTelemF32View ? elastoTelemF32View : null);
+  const elasto = etU && etF
+    ? (() => {
+        const st = Math.max(0, Math.min(4, etU[0] >>> 0));
+        const cls = Math.max(0, Math.min(3, etU[3] >>> 0));
+        return {
+          available: true,
+          reqMode: elastoReqMode,
+          mode: etU[1] >>> 0,
+          state: st,
+          stateLabel: ELASTO_STATE_LABELS[st] || 'OFF',
+          reasonMask: etU[2] >>> 0,
+          dispClass: cls,
+          classLabel: ELASTO_CLASS_LABELS[cls] || 'NONE',
+          validCells: etU[4] >>> 0,
+          lockedFreqs: etU[5] >>> 0,
+          welchSegs: etU[6] >>> 0,
+          beta1: etU[7] >>> 0,
+          f0: finiteOrNull(etF[8]) ?? 0.0,
+          f1: finiteOrNull(etF[9]) ?? 0.0,
+          medC: finiteOrNull(etF[12]) ?? 0.0,
+          alpha: finiteOrNull(etF[13]) ?? 0.0,
+          anisotropy: finiteOrNull(etF[14]) ?? 1.0,
+          meanCoh: finiteOrNull(etF[15]) ?? 0.0,
+          srcX: finiteOrNull(etF[16]) ?? 0.0,
+          srcY: finiteOrNull(etF[17]) ?? 0.0,
+          sinkX: finiteOrNull(etF[18]) ?? 0.0,
+          sinkY: finiteOrNull(etF[19]) ?? 0.0,
+          abosCurlRms: finiteOrNull(etF[24]) ?? 0.0,
+          abosPhiRms: finiteOrNull(etF[25]) ?? 0.0,
+        };
+      })()
+    : { available: elastoAbiValid, reqMode: elastoReqMode, state: 0, stateLabel: 'OFF' };
+
+  return { ...core, vibro, hodge, conservation, depth, wind, elasto };
 }
 
 function emitTelemetrySnapshot() {
@@ -8109,7 +8777,9 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
       fallbackScale: Boolean(nativeRoiEnabled && !geom.native1to1),
     };
   }
-  const metaFlags = (hasPtsNow ? 2 : 0) | ageFlags | 16; // PTS_KNOWN | AGE | GEOM_KNOWN
+  const slewFlag = roiSlewPending ? 64 : 0; // INGEST_FLAG_ROI_SLEW = 1 << 6
+  roiSlewPending = false;
+  const metaFlags = (hasPtsNow ? 2 : 0) | ageFlags | 16 | slewFlag; // PTS_KNOWN | AGE | GEOM_KNOWN | ROI_SLEW
   const gapMask = (typeof info.gapMask === 'number' ? info.gapMask : 0) & 0x3f;
 
   const hasMetaSetter = typeof wasmExports.chronos_set_ingest_meta === 'function';
@@ -8147,7 +8817,9 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
     wasmExports.chronos_set_ingest_pts(tUs * 1e-6);
   }
 
-  ringSlotU8[slotIdx].set(rawPixels);
+  if (rawPixels !== ringSlotU8[slotIdx]) {
+    ringSlotU8[slotIdx].set(rawPixels);
+  }
 
   const prevCommits = wave1CoreAbiValid && wave1TelemView
     ? ((wave1TelemView[5] >>> 0) * 4294967296 + (wave1TelemView[4] >>> 0))
@@ -8163,7 +8835,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   try {
     wasmExports.chronos_pre_tick(rawDt);
     preTickStarted = true;
-    lambda2 = solveShiftedLanczosFiedler();
+    lambda2 = wasmExports.chronos_solve_fiedler_lanczos();
     dispSlot = wasmExports.chronos_post_tick(rawDt);
     postTickFinished = true;
   } catch (tickErr) {
@@ -8211,6 +8883,43 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
     };
   }
   workerExpectedEngineFrame = (expEngIdx + 1) >>> 0;
+
+  // Virtual-PTZ Auto-Slew: smoothly pan 1:1 native ROI window when focus Hero target drifts toward edges
+  if (
+    autoTrackRoiEnabled &&
+    nativeRoiEnabled &&
+    sourceMode !== 'testbench' &&
+    telemView &&
+    lastIngestGeom &&
+    lastIngestGeom.srcW > frameW &&
+    lastIngestGeom.srcH > frameH
+  ) {
+    const pSlot = resolvePrimarySlot();
+    if (pSlot >= 0 && telemView[32 + pSlot * 56] > 0.5) {
+      const fx = telemView[32 + pSlot * 56 + 2];
+      const fy = telemView[32 + pSlot * 56 + 3];
+      let stepX = 0;
+      let stepY = 0;
+      if (fx < frameW * 0.25) stepX = Math.max(-16, Math.round(fx - frameW * 0.35));
+      else if (fx > frameW * 0.75) stepX = Math.min(16, Math.round(fx - frameW * 0.65));
+      if (fy < frameH * 0.25) stepY = Math.max(-16, Math.round(fy - frameH * 0.35));
+      else if (fy > frameH * 0.75) stepY = Math.min(16, Math.round(fy - frameH * 0.65));
+      if (stepX !== 0 || stepY !== 0) {
+        const maxX0 = Math.max(0, lastIngestGeom.srcW - frameW);
+        const maxY0 = Math.max(0, lastIngestGeom.srcH - frameH);
+        const curX0 = roiUseExplicitPx ? roiExplicitX0 : lastIngestGeom.cropX0;
+        const curY0 = roiUseExplicitPx ? roiExplicitY0 : lastIngestGeom.cropY0;
+        const nx0 = Math.max(0, Math.min(maxX0, curX0 + stepX));
+        const ny0 = Math.max(0, Math.min(maxY0, curY0 + stepY));
+        if (nx0 !== curX0 || ny0 !== curY0) {
+          roiUseExplicitPx = true;
+          roiExplicitX0 = nx0;
+          roiExplicitY0 = ny0;
+          roiSlewPending = true;
+        }
+      }
+    }
+  }
 
   lastDtSecUsed = rawDt;
   ingestElapsedMs += rawDt * 1000.0;
@@ -8285,7 +8994,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
     cr[1] = wave2TelemView[1];
     cr[2] = wave2TelemView[2];
     cr[3] = wave2TelemView[3];
-    cr.set(wave2TelemView.subarray(16, 40), 4);
+    cr.set(wave2TelemView.subarray(16, 64), 4);
     w2CoreRingValid[slotIdx] = 1;
   } else {
     w2CoreRingValid[slotIdx] = 0;
@@ -8314,6 +9023,56 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   } else {
     consRingValid[slotIdx] = 0;
   }
+  if (
+    depthAbiValid &&
+    depthTelemView &&
+    depthFieldView &&
+    (depthReqMode !== 0 || (depthTelemView[1] >>> 0) !== 0)
+  ) {
+    depthRingTelem[slotIdx].set(depthTelemView);
+    depthRingField[slotIdx].set(depthFieldView);
+    if ((depthTelemView[2] >>> 0) === 6 && bosRgbaView) {
+      depthRingStereoRgba[slotIdx].set(bosRgbaView);
+    }
+    depthRingValid[slotIdx] = 1;
+  } else {
+    depthRingField[slotIdx].fill(0.0);
+    depthRingValid[slotIdx] = 0;
+  }
+  if (
+    windAbiValid &&
+    windTelemView &&
+    windPlanesView &&
+    (windReqMode !== 0 || (windTelemView[1] >>> 0) !== 0)
+  ) {
+    windRingTelem[slotIdx].set(windTelemView);
+    windRingPlanes[slotIdx].set(windPlanesView);
+    windRingValid[slotIdx] = 1;
+  } else {
+    windRingValid[slotIdx] = 0;
+  }
+  if (
+    elastoAbiValid &&
+    elastoTelemView &&
+    elastoPlanesView &&
+    elastoValidView &&
+    (elastoReqMode !== 0 || (elastoTelemView[1] >>> 0) !== 0)
+  ) {
+    elastoRingTelem[slotIdx].set(elastoTelemView);
+    if ((elastoTelemView[1] >>> 0) === 4) {
+      if ((elastoTelemView[0] >>> 0) === 3) {
+        colorizeAbosToRgba(elastoPlanesView, elastoValidView, elastoRingAbosRgba[slotIdx]);
+      } else {
+        elastoRingAbosRgba[slotIdx].fill(0);
+      }
+    } else {
+      elastoRingPlanes[slotIdx].set(elastoPlanesView.subarray(0, ELASTO_SURF_PLANES_LEN));
+      elastoRingValidMask[slotIdx].set(elastoValidView.subarray(0, FIELD_CELLS));
+    }
+    elastoRingValid[slotIdx] = 1;
+  } else {
+    elastoRingValid[slotIdx] = 0;
+  }
   lastSwarmCopyMs = performance.now() - tCopy0;
   lastLambda2 = lambda2;
 
@@ -8321,7 +9080,16 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   timeHistIdx = (timeHistIdx + 1) % TIME_HIST_LEN;
 
   const camMotionState = Math.round(telemView[TELEM_GLOBAL + 9]);
+  const isFastPass = Boolean(info.fastPass || fastPassActive);
+  const fastPassPresent = Boolean(info.fastPassPresent);
+  const evTimeSec = hasMediaPts
+    ? mediaTimeSec
+    : (hasExplicitTSrcUs ? (tUs * 1e-6) : sessionElapsedSec);
   if (camMotionState === 2) {
+    if (causalFrameNow !== lastCutEventFrame) {
+      lastCutEventFrame = causalFrameNow;
+      pushRecEvent('scene_cut', evTimeSec, causalFrameNow, 0, 'SCENE CUT', 0, 0);
+    }
     camPanStreakWorker = 0;
     clearVisualQueues();
     if (sourceMode !== 'testbench' && calMode !== 'none') {
@@ -8399,7 +9167,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   scopeWriteIdx = (scopeWriteIdx + 1) % SCOPE_HIST;
 
   // Present-time phase strobe cue
-  if (telemView[14] > 0.5 && strobeEnabled) {
+  if (telemView[14] > 0.5 && strobeEnabled && !isFastPass) {
     strobeFlashAlpha = 1.0;
     self.postMessage({
       type: 'audio_strobe',
@@ -8451,6 +9219,15 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
         const rawIn = telemView[kbase + 5];
         slotLastStrikeX[m] = sxPos;
         slotLastStrikeY[m] = syPos;
+        pushRecEvent(
+          'strike',
+          evTimeSec,
+          fIdx,
+          Math.round(telemView[32 + m * 56 + 1]),
+          'L1 STRIKE',
+          sxPos,
+          syPos
+        );
 
         const maxValidRest = sourceMode === 'testbench' ? 1.65 : 1.18;
         if (rawRest >= 0.06 && rawRest <= maxValidRest && Math.abs(rawDefl) >= 3.0) {
@@ -8477,13 +9254,15 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
           shockAge[shockWriteHead] = -1;
           shockWriteHead = (shockWriteHead + 1) % SHOCK_POOL;
 
-          self.postMessage({
-            type: 'audio_percussion',
-            zone,
-            leadSec: leadFrames / effSampleRate,
-            velocity: vel,
-            sentEpochMs: nowEpochMs,
-          });
+          if (!isFastPass) {
+            self.postMessage({
+              type: 'audio_percussion',
+              zone,
+              leadSec: leadFrames / effSampleRate,
+              velocity: vel,
+              sentEpochMs: nowEpochMs,
+            });
+          }
         }
       }
     }
@@ -8504,11 +9283,62 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   updatePersistenceState(fpsDt);
   pushPhysicsPhaseSample();
 
+  // Capture apex, constraint-jump, and BOS-disturbed timeline markers
+  for (let m = 0; m < MAX_TARGETS; m++) {
+    const b = 32 + m * 56;
+    if (telemView[b] > 0.5) {
+      const tidM = Math.round(telemView[b + 1]);
+      const apexF = safeFinite(telemView[b + 17]);
+      if (
+        apexF > 0.0 &&
+        apexF <= 1.2 &&
+        prevSlotApexVal[m] > 1.2 &&
+        ((fIdx - prevSlotApexEventFrame[m]) >>> 0) >= 8
+      ) {
+        prevSlotApexEventFrame[m] = fIdx;
+        pushRecEvent('apex', evTimeSec, fIdx, tidM, `T${tidM} APEX`, telemView[b + 15], telemView[b + 16]);
+      }
+      prevSlotApexVal[m] = apexF;
+
+      const pb = TELEM_PHYSICS_START + m * TELEM_PHYSICS_STRIDE;
+      const jCode = Math.max(0, Math.min(4, Math.round(safeFinite(telemView[pb + 15]))));
+      if (jCode >= 1 && jCode <= 4 && jCode !== prevSlotJumpEventCode[m]) {
+        pushRecEvent(
+          'jump',
+          evTimeSec,
+          fIdx,
+          tidM,
+          `T${tidM} ${JUMP_EVENT_LABELS[jCode] || 'JUMP'}`,
+          telemView[b + 2],
+          telemView[b + 3]
+        );
+      }
+      prevSlotJumpEventCode[m] = jCode;
+    } else {
+      prevSlotApexVal[m] = 0.0;
+      prevSlotJumpEventCode[m] = 0;
+    }
+  }
+  if (wave1BosAbiValid && bosTelemView && bosReqMode !== 0) {
+    const bosSt = bosTelemView[2] >>> 0;
+    if (bosSt === 3 && prevBosEventState !== 3) {
+      pushRecEvent('bos_disturbed', evTimeSec, fIdx, 0, 'BOS DISTURBED', 0, 0);
+    }
+    prevBosEventState = bosSt;
+  } else {
+    prevBosEventState = 0;
+  }
+  if (!isFastPass || fastPassPresent) {
+    emitTimelineEventsIfNeeded(false);
+  }
+
   // Render all OffscreenCanvases inside Worker isolate (isolated from committed frame ack)
-  try {
-    scheduleOffscreenHudPresent(dispSlot, true, false);
-  } catch (_hudErr) {
-    // Non-fatal HUD presentation fault must never invert an already committed frame into ingest_rejected
+  if (!isFastPass || fastPassPresent) {
+    try {
+      scheduleOffscreenHudPresent(dispSlot, true, false);
+    } catch (_hudErr) {
+      // Non-fatal HUD presentation fault must never invert an already committed frame into ingest_rejected
+    }
   }
 
   // Zero-allocation per-frame scientific telemetry recording (1:1 frame fidelity, 56 columns)
@@ -8613,7 +9443,7 @@ function processIngestedFrame(rawPixels, dtSec, mediaTimeSec, ingestInfo = null)
   }
 
   tickCounter++;
-  if (tickCounter % 3 === 0 || sourceMode !== 'testbench') {
+  if ((!isFastPass && (tickCounter % 3 === 0 || sourceMode !== 'testbench')) || (isFastPass && fastPassPresent)) {
     try {
       emitTelemetrySnapshot();
     } catch (_telemErr) {
@@ -9507,11 +10337,6 @@ self.onmessage = async (ev) => {
         labMode
       );
 
-      laplacianView = new Float32Array(
-        wasmMemory.buffer,
-        wasmExports.chronos_get_laplacian_ptr(),
-        GRAPH_NODES * GRAPH_NODES
-      );
       fiedlerView = new Float32Array(
         wasmMemory.buffer,
         wasmExports.chronos_get_fiedler_ptr(),
@@ -9852,7 +10677,7 @@ self.onmessage = async (ev) => {
       lastOverlaySyncSeq = msg.overlaySyncSeq;
     }
     const rawO = Number(msg.fieldOverlayMode);
-    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(11, Math.round(rawO))) : 0;
+    fieldOverlayMode = Number.isFinite(rawO) ? Math.max(0, Math.min(15, Math.round(rawO))) : 0;
     if (fieldOverlayMode >= 5 && fieldOverlayMode <= 7) {
       bosOverlayKind = fieldOverlayMode - 5;
       if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
@@ -10119,6 +10944,38 @@ self.onmessage = async (ev) => {
     } else if (msg.wantAck || ringFaulted || !telemView || !hasAnyRenderedFrame()) {
       emitTelemetrySnapshot();
     }
+  } else if (msg.type === 'set_depth_config') {
+    if (typeof msg.depthMode === 'number' && Number.isFinite(msg.depthMode)) {
+      depthReqMode = Math.max(0, Math.min(4, Math.round(msg.depthMode)));
+      if (depthAbiValid && typeof wasmExports.chronos_set_depth_mode === 'function') {
+        wasmExports.chronos_set_depth_mode(depthReqMode);
+      }
+      syncWave2RingEnabledBits();
+      if (depthReqMode === 0) {
+        depthRingValid.fill(0);
+        invalidateWave2RingStamp(24);
+      }
+    }
+    if (
+      depthAbiValid &&
+      typeof wasmExports.chronos_set_depth_calib === 'function' &&
+      typeof msg.fPx === 'number'
+    ) {
+      const calibOk = wasmExports.chronos_set_depth_calib(
+        Number(msg.fPx),
+        msg.speedMS !== undefined ? Number(msg.speedMS) : (msg.scaleMS !== undefined ? Number(msg.scaleMS) : 0.0),
+        msg.baselineM !== undefined ? Number(msg.baselineM) : 0.0,
+        msg.maxDispPx !== undefined ? Number(msg.maxDispPx) : 32.0,
+        (msg.stereoSign | 0) || 0
+      ) >>> 0;
+      if (calibOk === 0) {
+        self.postMessage({ type: 'depth_calib_rejected', reqId: msg.reqId ?? null });
+      }
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
   } else if (msg.type === 'set_hodge_config') {
     if (typeof msg.hodgeMode === 'number' && Number.isFinite(msg.hodgeMode)) {
       hodgeReqMode = Math.max(0, Math.min(2, Math.round(msg.hodgeMode)));
@@ -10142,6 +10999,59 @@ self.onmessage = async (ev) => {
             hodgeRingTelem[s][1] = hodgeReqMode;
           }
         }
+      }
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_wind_config') {
+    if (typeof msg.windMode === 'number' && Number.isFinite(msg.windMode)) {
+      windReqMode = Math.max(0, Math.min(2, Math.round(msg.windMode)));
+      if (windAbiValid && typeof wasmExports.chronos_set_wind_mode === 'function') {
+        wasmExports.chronos_set_wind_mode(windReqMode);
+      }
+      syncWave2RingEnabledBits();
+      if (windReqMode === 0) {
+        windRingValid.fill(0);
+        invalidateWave2RingStamp(32);
+      }
+    }
+    if (typeof msg.fluidDensity === 'number' && Number.isFinite(msg.fluidDensity) && msg.fluidDensity >= 0.0) {
+      windFluidDensity = msg.fluidDensity;
+      if (windAbiValid && typeof wasmExports.chronos_set_wind_fluid_density === 'function') {
+        wasmExports.chronos_set_wind_fluid_density(windFluidDensity);
+      }
+    }
+    redrawPausedHudIfReady();
+    if (!telemView || !hasAnyRenderedFrame()) {
+      emitTelemetrySnapshot();
+    }
+  } else if (msg.type === 'set_elasto_config') {
+    if (typeof msg.elastoMode === 'number' && Number.isFinite(msg.elastoMode)) {
+      elastoReqMode = Math.max(0, Math.min(4, Math.round(msg.elastoMode)));
+      if (elastoAbiValid && typeof wasmExports.chronos_set_elasto_mode === 'function') {
+        wasmExports.chronos_set_elasto_mode(elastoReqMode);
+      }
+      syncWave2RingEnabledBits();
+      if (elastoReqMode === 0) {
+        elastoRingValid.fill(0);
+        invalidateWave2RingStamp(40);
+      }
+    }
+    if (Array.isArray(msg.lockFreqs)) {
+      elastoLockFreqs = msg.lockFreqs
+        .map((v) => Number(v))
+        .filter((v) => Number.isFinite(v) && v > 0.1 && v <= 50000.0)
+        .slice(0, 4);
+      if (elastoAbiValid && typeof wasmExports.chronos_set_elasto_lock_freqs === 'function') {
+        wasmExports.chronos_set_elasto_lock_freqs(
+          elastoLockFreqs.length,
+          elastoLockFreqs[0] || 0,
+          elastoLockFreqs[1] || 0,
+          elastoLockFreqs[2] || 0,
+          elastoLockFreqs[3] || 0
+        );
       }
     }
     redrawPausedHudIfReady();
@@ -10236,6 +11146,9 @@ self.onmessage = async (ev) => {
     }
 
     clearVisualQueues();
+    resetRecEvents();
+    seedBoxPreview = null;
+    fastPassActive = false;
     if (typeof msg.fpsHint === 'number' && msg.fpsHint >= 8.0) {
       sourceFps = msg.fpsHint;
     } else if (sourceMode !== 'testbench') {
@@ -10271,6 +11184,7 @@ self.onmessage = async (ev) => {
         const preScaledReq = Boolean(msg.preScaled || msg.fallbackScaled || (msg.geom && msg.geom.preScaled));
         const infoGeom = preScaledReq ? { ...(msg.geom || {}), preScaled: true } : (msg.geom || null);
         const geom = drawCroppedLetterboxedFrame(bmp, infoGeom);
+        stageFoveaTileFromDrawable(bmp, bmp.width || geom.srcW, bmp.height || geom.srcH);
         const rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
         const ingestRes = processIngestedFrame(
           rawPixels,
@@ -10285,6 +11199,8 @@ self.onmessage = async (ev) => {
             enqueuedEpochMs: msg.enqueuedEpochMs,
             gapMask: msg.gapMask,
             fallbackScaled: preScaledReq,
+            fastPass: Boolean(msg.fastPass),
+            fastPassPresent: Boolean(msg.fastPassPresent),
             geom,
           }
         );
@@ -10418,6 +11334,8 @@ self.onmessage = async (ev) => {
               enqueuedEpochMs: msg.enqueuedEpochMs,
               gapMask: msg.gapMask,
               fallbackScaled: preScaledReq,
+              fastPass: Boolean(msg.fastPass),
+              fastPassPresent: Boolean(msg.fastPassPresent),
               geom: finalGeom,
             }
           );
@@ -10544,6 +11462,7 @@ self.onmessage = async (ev) => {
       recTotalWritten = 0;
       recElapsedSec = 0.0;
       recCalSegments = [];
+      resetRecEvents();
     }
     self.postMessage({
       type: 'rec_state',
@@ -10551,6 +11470,89 @@ self.onmessage = async (ev) => {
       recFrames: recCount,
       recDurationSec: recElapsedSec,
     });
+  } else if (msg.type === 'seed_box_preview') {
+    if (msg.box && Number.isFinite(msg.box.x0) && Number.isFinite(msg.box.y0) && Number.isFinite(msg.box.x1) && Number.isFinite(msg.box.y1)) {
+      seedBoxPreview = {
+        x0: Math.max(0, Math.min(1, msg.box.x0)),
+        y0: Math.max(0, Math.min(1, msg.box.y0)),
+        x1: Math.max(0, Math.min(1, msg.box.x1)),
+        y1: Math.max(0, Math.min(1, msg.box.y1)),
+      };
+    } else {
+      seedBoxPreview = null;
+    }
+    if (hasAnyRenderedFrame()) {
+      renderMainHud(currentDisplaySlot());
+    }
+  } else if (msg.type === 'seed_target') {
+    seedBoxPreview = null;
+    let tid = 0;
+    let px = 0.0;
+    let py = 0.0;
+    let pw = 0.0;
+    let ph = 0.0;
+    if (wasmExports && typeof wasmExports.chronos_seed_target === 'function') {
+      if (typeof msg.normX === 'number' && typeof msg.normY === 'number') {
+        px = Math.max(0, Math.min(1, msg.normX)) * frameW;
+        py = Math.max(0, Math.min(1, msg.normY)) * frameH;
+        pw = Math.max(0, Math.min(1, Number(msg.normW) || 0)) * frameW;
+        ph = Math.max(0, Math.min(1, Number(msg.normH) || 0)) * frameH;
+      } else {
+        px = Number(msg.x) || 0.0;
+        py = Number(msg.y) || 0.0;
+        pw = Number(msg.w) || 0.0;
+        ph = Number(msg.h) || 0.0;
+      }
+      tid = wasmExports.chronos_seed_target(px, py, pw, ph) >>> 0;
+    }
+    self.postMessage({
+      type: 'seed_target_ack',
+      tid,
+      x: px,
+      y: py,
+      w: pw,
+      h: ph,
+    });
+    redrawPausedHudIfReady();
+  } else if (msg.type === 'roi_box_preview') {
+    if (msg.box && Number.isFinite(msg.box.x0) && Number.isFinite(msg.box.y0) && Number.isFinite(msg.box.x1) && Number.isFinite(msg.box.y1)) {
+      roiBoxPreview = {
+        x0: Math.max(0, Math.min(1, msg.box.x0)),
+        y0: Math.max(0, Math.min(1, msg.box.y0)),
+        x1: Math.max(0, Math.min(1, msg.box.x1)),
+        y1: Math.max(0, Math.min(1, msg.box.y1)),
+      };
+    } else {
+      roiBoxPreview = null;
+    }
+    if (hasAnyRenderedFrame()) {
+      renderMainHud(currentDisplaySlot());
+    }
+  } else if (msg.type === 'set_auto_track_roi') {
+    autoTrackRoiEnabled = Boolean(msg.enabled);
+    if (hasAnyRenderedFrame()) {
+      renderMainHud(currentDisplaySlot());
+    }
+  } else if (msg.type === 'worker_fast_pass_start') {
+    runWorkerWebCodecsFastPass(msg);
+  } else if (msg.type === 'worker_fast_pass_cancel') {
+    workerFastPassCancel = true;
+  } else if (msg.type === 'fast_pass_start') {
+    fastPassActive = true;
+    seedBoxPreview = null;
+    roiBoxPreview = null;
+    resetPersistenceState();
+    if (wasmExports) {
+      wasmExports.chronos_reset_tracks();
+    }
+    workerExpectedEngineFrame = 0;
+  } else if (msg.type === 'fast_pass_end') {
+    fastPassActive = false;
+    emitTimelineEventsIfNeeded(true);
+    if (hasAnyRenderedFrame()) {
+      scheduleOffscreenHudPresent(currentDisplaySlot(), false, true);
+      emitTelemetrySnapshot();
+    }
   } else if (msg.type === 'export_telemetry') {
     const rows = recCount;
     const ordered = new Float64Array(rows * REC_COLS);
@@ -10588,6 +11590,25 @@ self.onmessage = async (ev) => {
         cols: REC_COLS,
         columns: REC_COLUMNS,
         buffer: ordered.buffer,
+        events: recEvents.slice(),
+        sessionConfig: {
+          resMode,
+          frameW,
+          frameH,
+          lookaheadK,
+          ecaAdaptRate,
+          fistaLambda,
+          eulerianGain,
+          phaseOffsetRad,
+          labMode,
+          swarmMode,
+          bosMode: bosReqMode,
+          hodgeMode: hodgeReqMode,
+          sourceMode,
+          benchScenario,
+          cropNorm: Array.from(cropNorm),
+          nativeRoiEnabled,
+        },
         meta: {
           schemaVersion: '1.5.0',
           sourceMode,
@@ -10634,3 +11655,835 @@ self.onmessage = async (ev) => {
     );
   }
 };
+
+// ============================================================================
+// Dual-Resolution 1:1 Fovea Staging & Worker-Resident WebCodecs Fast-Pass
+// ============================================================================
+
+function stageFoveaTileFromDrawable(drawable, srcW, srcH) {
+  if (!foveaAbiValid || !foveaRgbaView || !foveaReqView || !wasmExports || !drawable) return false;
+  if (typeof wasmExports.chronos_set_fovea_meta !== 'function') return false;
+  const active = foveaReqView[0] >>> 0;
+  const sw = Math.max(0, Math.trunc(srcW || 0));
+  const sh = Math.max(0, Math.trunc(srcH || 0));
+  if (active === 0 || sw <= frameW || sh <= frameH) {
+    wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+    return false;
+  }
+  const fx0 = foveaReqView[1] >>> 0;
+  const fy0 = foveaReqView[2] >>> 0;
+  const fw = Math.min(FOVEA_DIM, foveaReqView[3] >>> 0);
+  const fh = Math.min(FOVEA_DIM, foveaReqView[4] >>> 0);
+  const tid = foveaReqView[5] >>> 0;
+  if (fw === 0 || fh === 0 || tid === 0 || fx0 + fw > sw || fy0 + fh > sh) {
+    wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+    return false;
+  }
+  if (!foveaStageCanvas || !foveaStageCtx) {
+    if (typeof OffscreenCanvas !== 'function') {
+      wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+      return false;
+    }
+    foveaStageCanvas = new OffscreenCanvas(FOVEA_DIM, FOVEA_DIM);
+    foveaStageCtx = foveaStageCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  if (!foveaStageCtx) {
+    wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+    return false;
+  }
+  foveaStageCtx.imageSmoothingEnabled = false;
+  foveaStageCtx.drawImage(drawable, fx0, fy0, fw, fh, 0, 0, fw, fh);
+  const img = foveaStageCtx.getImageData(0, 0, fw, fh).data;
+  foveaRgbaView.set(img.subarray(0, fw * fh * 4), 0);
+  return (wasmExports.chronos_set_fovea_meta(0, sw, sh, fx0, fy0, fw, fh, tid) >>> 0) === 1;
+}
+
+let webCodecsCopyToRgbaState = 0; // 0=unknown, 1=supported, -1=fallback to OffscreenCanvas
+
+async function stageFoveaTileFromVideoFrame(vf, srcW, srcH) {
+  if (!foveaAbiValid || !foveaRgbaView || !foveaReqView || !wasmExports || !vf) return false;
+  if (typeof wasmExports.chronos_set_fovea_meta !== 'function') return false;
+  const active = foveaReqView[0] >>> 0;
+  const sw = Math.max(0, Math.trunc(srcW || 0));
+  const sh = Math.max(0, Math.trunc(srcH || 0));
+  if (active === 0 || sw <= frameW || sh <= frameH) {
+    wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+    return false;
+  }
+  const fx0 = foveaReqView[1] >>> 0;
+  const fy0 = foveaReqView[2] >>> 0;
+  const fw = Math.min(FOVEA_DIM, foveaReqView[3] >>> 0);
+  const fh = Math.min(FOVEA_DIM, foveaReqView[4] >>> 0);
+  const tid = foveaReqView[5] >>> 0;
+  if (fw === 0 || fh === 0 || tid === 0 || fx0 + fw > sw || fy0 + fh > sh) {
+    wasmExports.chronos_set_fovea_meta(0, 0, 0, 0, 0, 0, 0, 0);
+    return false;
+  }
+  if (webCodecsCopyToRgbaState >= 0 && typeof vf.copyTo === 'function') {
+    try {
+      const dst = foveaRgbaView.subarray(0, fw * fh * 4);
+      await vf.copyTo(dst, {
+        rect: { x: fx0, y: fy0, width: fw, height: fh },
+        format: 'RGBA',
+      });
+      webCodecsCopyToRgbaState = 1;
+      return (wasmExports.chronos_set_fovea_meta(0, sw, sh, fx0, fy0, fw, fh, tid) >>> 0) === 1;
+    } catch (_err) {
+      webCodecsCopyToRgbaState = -1;
+    }
+  }
+  return stageFoveaTileFromDrawable(vf, sw, sh);
+}
+
+function parseMp4TrackMultiCodec(buf) {
+  const bytes = new Uint8Array(buf);
+  const dv = new DataView(buf);
+  const len = bytes.byteLength;
+
+  function boxType(off) {
+    return String.fromCharCode(bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]);
+  }
+  function u64(off) {
+    return dv.getUint32(off) * 4294967296 + dv.getUint32(off + 4);
+  }
+  function iterBoxes(start, end, cb) {
+    let off = start;
+    while (off + 8 <= end) {
+      let size = dv.getUint32(off);
+      const type = boxType(off + 4);
+      let hdr = 8;
+      if (size === 1) {
+        if (off + 16 > end) break;
+        size = u64(off + 8);
+        hdr = 16;
+      } else if (size === 0) {
+        size = end - off;
+      }
+      if (size < hdr || off + size > end) break;
+      cb(type, off, off + hdr, off + size);
+      off += size;
+    }
+  }
+  function findChild(start, end, target) {
+    let found = null;
+    iterBoxes(start, end, (type, boxStart, dataStart, boxEnd) => {
+      if (!found && type === target) {
+        found = { type, boxStart, dataStart, boxEnd };
+      }
+    });
+    return found;
+  }
+
+  function hex2(v) {
+    return (v & 0xff).toString(16).toUpperCase().padStart(2, '0');
+  }
+  function buildHevcCodecString(cfg, fourcc) {
+    if (cfg.byteLength < 13) return `${fourcc}.1.6.L93.B0`;
+    const b1 = cfg[1];
+    const spaceCode = (b1 >> 6) & 3;
+    const tierFlag = (b1 >> 5) & 1;
+    const profileIdc = b1 & 0x1f;
+    const spaceStr = spaceCode === 1 ? 'A' : (spaceCode === 2 ? 'B' : (spaceCode === 3 ? 'C' : ''));
+    const compat = ((cfg[2] << 24) | (cfg[3] << 16) | (cfg[4] << 8) | cfg[5]) >>> 0;
+    let revCompat = 0;
+    for (let i = 0; i < 32; i++) {
+      if ((compat >>> (31 - i)) & 1) revCompat |= (1 << i);
+    }
+    const compatHex = (revCompat >>> 0).toString(16).toUpperCase();
+    const levelIdc = cfg[12];
+    const tierChar = tierFlag ? 'H' : 'L';
+    const parts = [fourcc, `${spaceStr}${profileIdc}`, compatHex, `${tierChar}${levelIdc}`];
+    let lastNonZero = -1;
+    for (let i = 0; i < 6; i++) {
+      if (cfg[6 + i] !== 0) lastNonZero = i;
+    }
+    if (lastNonZero >= 0) {
+      for (let i = 0; i <= lastNonZero; i++) {
+        parts.push(cfg[6 + i].toString(16).toUpperCase());
+      }
+    }
+    return parts.join('.');
+  }
+  function buildVp9CodecString(cfg) {
+    // vpcC is a FullBox (4-byte version+flags header)
+    if (cfg.byteLength < 8) return 'vp09.00.10.08';
+    const profile = String(cfg[4]).padStart(2, '0');
+    const level = String(cfg[5]).padStart(2, '0');
+    const bitDepth = String((cfg[6] >> 4) & 0x0f).padStart(2, '0');
+    return `vp09.${profile}.${level}.${bitDepth}`;
+  }
+  function buildAv1CodecString(cfg) {
+    if (cfg.byteLength < 4) return 'av01.0.04M.08';
+    const profile = (cfg[1] >> 5) & 0x07;
+    const level = cfg[1] & 0x1f;
+    const tier = (cfg[2] & 0x80) ? 'H' : 'M';
+    const highBd = (cfg[2] >> 6) & 1;
+    const twelve = (cfg[2] >> 5) & 1;
+    const bitDepth = highBd ? (twelve ? 12 : 10) : 8;
+    return `av01.${profile}.${String(level).padStart(2, '0')}${tier}.${String(bitDepth).padStart(2, '0')}`;
+  }
+
+  const moov = findChild(0, len, 'moov');
+  if (!moov) return null;
+
+  let movieTimescale = 1000;
+  const mvhd = findChild(moov.dataStart, moov.boxEnd, 'mvhd');
+  if (mvhd && mvhd.dataStart + 20 <= mvhd.boxEnd) {
+    const mVer = bytes[mvhd.dataStart];
+    const mts = mVer === 1 && mvhd.dataStart + 28 <= mvhd.boxEnd
+      ? dv.getUint32(mvhd.dataStart + 20)
+      : dv.getUint32(mvhd.dataStart + 12);
+    if (mts > 0) movieTimescale = mts;
+  }
+
+  function i64(off) {
+    return dv.getInt32(off) * 4294967296 + dv.getUint32(off + 4);
+  }
+
+  // Parse mvex/trex defaults for fragmented fMP4
+  const trexByTrack = new Map();
+  const mvex = findChild(moov.dataStart, moov.boxEnd, 'mvex');
+  if (mvex) {
+    iterBoxes(mvex.dataStart, mvex.boxEnd, (type, _bs, ds, be) => {
+      if (type === 'trex' && ds + 24 <= be) {
+        const trackId = dv.getUint32(ds + 4);
+        trexByTrack.set(trackId, {
+          defaultSampleDescIdx: dv.getUint32(ds + 8),
+          defaultSampleDuration: dv.getUint32(ds + 12),
+          defaultSampleSize: dv.getUint32(ds + 16),
+          defaultSampleFlags: dv.getUint32(ds + 20),
+        });
+      }
+    });
+  }
+
+  let selected = null;
+  iterBoxes(moov.dataStart, moov.boxEnd, (type, _bs, ds, be) => {
+    if (selected || type !== 'trak') return;
+    const mdia = findChild(ds, be, 'mdia');
+    if (!mdia) return;
+    const hdlr = findChild(mdia.dataStart, mdia.boxEnd, 'hdlr');
+    if (!hdlr || hdlr.dataStart + 12 > hdlr.boxEnd) return;
+    if (boxType(hdlr.dataStart + 8) !== 'vide') return;
+
+    let trackId = 1;
+    const tkhd = findChild(ds, be, 'tkhd');
+    if (tkhd && tkhd.dataStart + 24 <= tkhd.boxEnd) {
+      const ver = bytes[tkhd.dataStart];
+      trackId = ver === 1 && tkhd.dataStart + 32 <= tkhd.boxEnd
+        ? dv.getUint32(tkhd.dataStart + 20)
+        : dv.getUint32(tkhd.dataStart + 12);
+    }
+
+    let timescale = 90000;
+    const mdhd = findChild(mdia.dataStart, mdia.boxEnd, 'mdhd');
+    if (mdhd && mdhd.dataStart + 20 <= mdhd.boxEnd) {
+      const ver = bytes[mdhd.dataStart];
+      timescale = ver === 1 && mdhd.dataStart + 28 <= mdhd.boxEnd
+        ? dv.getUint32(mdhd.dataStart + 20)
+        : dv.getUint32(mdhd.dataStart + 12);
+    }
+    if (timescale <= 0) timescale = 90000;
+
+    // Parse optional edts/elst edit list (ISO/IEC 14496-12 8.6.6) so B-frame priming offsets and
+    // trimmed preroll/postroll presentation windows match FFmpeg / ISO BMFF timeline semantics.
+    let editTimelineOffsetUs = 0;
+    let editMediaStartTicks = 0;
+    let hasEditWindow = false;
+    let editMediaDurUs = Infinity;
+    let editUnsupported = false;
+    const edts = findChild(ds, be, 'edts');
+    if (edts) {
+      const elst = findChild(edts.dataStart, edts.boxEnd, 'elst');
+      if (elst && elst.dataStart + 8 <= elst.boxEnd) {
+        const eVer = bytes[elst.dataStart];
+        const eCnt = dv.getUint32(elst.dataStart + 4);
+        const stride = eVer === 1 ? 20 : 12;
+        let sawMediaEdit = false;
+        let ep = elst.dataStart + 8;
+        for (let ei = 0; ei < eCnt && ep + stride <= elst.boxEnd; ei++) {
+          const segDur = eVer === 1 ? u64(ep) : dv.getUint32(ep);
+          const mediaTime = eVer === 1 ? i64(ep + 8) : dv.getInt32(ep + 4);
+          const rateInt = dv.getInt16(ep + (eVer === 1 ? 16 : 8));
+          const rateFrac = dv.getInt16(ep + (eVer === 1 ? 18 : 10));
+          ep += stride;
+          if (mediaTime === -1) {
+            if (sawMediaEdit) {
+              editUnsupported = true;
+              break;
+            }
+            editTimelineOffsetUs += (segDur / movieTimescale) * 1_000_000;
+          } else {
+            if (sawMediaEdit || rateInt !== 1 || rateFrac !== 0 || mediaTime < 0) {
+              editUnsupported = true;
+              break;
+            }
+            sawMediaEdit = true;
+            hasEditWindow = true;
+            editMediaStartTicks = mediaTime;
+            if (segDur > 0) {
+              editMediaDurUs = (segDur / movieTimescale) * 1_000_000;
+            }
+          }
+        }
+      }
+    }
+    if (editUnsupported) return;
+
+    const minf = findChild(mdia.dataStart, mdia.boxEnd, 'minf');
+    if (!minf) return;
+    const stbl = findChild(minf.dataStart, minf.boxEnd, 'stbl');
+    if (!stbl) return;
+    const stsd = findChild(stbl.dataStart, stbl.boxEnd, 'stsd');
+    if (!stsd || stsd.dataStart + 8 > stsd.boxEnd) return;
+
+    let codec = null;
+    let codecTag = '';
+    let description = null;
+    let codedWidth = 0;
+    let codedHeight = 0;
+
+    iterBoxes(stsd.dataStart + 8, stsd.boxEnd, (eType, _ebs, eds, ebe) => {
+      if (codec) return;
+      if (eds + 78 > ebe) return;
+      const w = dv.getUint16(eds + 24);
+      const h = dv.getUint16(eds + 26);
+      const childStart = eds + 78;
+      if (eType === 'avc1' || eType === 'avc3') {
+        const avcC = findChild(childStart, ebe, 'avcC');
+        if (avcC && avcC.dataStart + 4 <= avcC.boxEnd) {
+          const cfg = bytes.slice(avcC.dataStart, avcC.boxEnd);
+          codec = `avc1.${hex2(cfg[1])}${hex2(cfg[2])}${hex2(cfg[3])}`;
+          codecTag = 'H.264';
+          description = cfg;
+          codedWidth = w;
+          codedHeight = h;
+        }
+      } else if (eType === 'hvc1' || eType === 'hev1') {
+        const hvcC = findChild(childStart, ebe, 'hvcC');
+        if (hvcC && hvcC.dataStart + 13 <= hvcC.boxEnd) {
+          const cfg = bytes.slice(hvcC.dataStart, hvcC.boxEnd);
+          codec = buildHevcCodecString(cfg, eType);
+          codecTag = 'H.265';
+          description = cfg;
+          codedWidth = w;
+          codedHeight = h;
+        }
+      } else if (eType === 'vp09') {
+        const vpcC = findChild(childStart, ebe, 'vpcC');
+        if (vpcC && vpcC.dataStart + 8 <= vpcC.boxEnd) {
+          const cfg = bytes.slice(vpcC.dataStart, vpcC.boxEnd);
+          codec = buildVp9CodecString(cfg);
+          codecTag = 'VP9';
+          codedWidth = w;
+          codedHeight = h;
+        }
+      } else if (eType === 'av01') {
+        const av1C = findChild(childStart, ebe, 'av1C');
+        if (av1C && av1C.dataStart + 4 <= av1C.boxEnd) {
+          const cfg = bytes.slice(av1C.dataStart, av1C.boxEnd);
+          codec = buildAv1CodecString(cfg);
+          codecTag = 'AV1';
+          codedWidth = w;
+          codedHeight = h;
+        }
+      }
+    });
+
+    if (!codec) return;
+
+    // 1. Parse classic stbl samples
+    const samples = [];
+    const stsz = findChild(stbl.dataStart, stbl.boxEnd, 'stsz');
+    const stsc = findChild(stbl.dataStart, stbl.boxEnd, 'stsc');
+    const stco = findChild(stbl.dataStart, stbl.boxEnd, 'stco');
+    const co64 = findChild(stbl.dataStart, stbl.boxEnd, 'co64');
+    const stts = findChild(stbl.dataStart, stbl.boxEnd, 'stts');
+    const stss = findChild(stbl.dataStart, stbl.boxEnd, 'stss');
+    const ctts = findChild(stbl.dataStart, stbl.boxEnd, 'ctts');
+
+    if (stsz && stsc && (stco || co64) && stts && stsz.dataStart + 12 <= stsz.boxEnd) {
+      const defSize = dv.getUint32(stsz.dataStart + 4);
+      const sampleCount = dv.getUint32(stsz.dataStart + 8);
+      if (sampleCount > 0) {
+        const sizes = new Uint32Array(sampleCount);
+        if (defSize > 0) {
+          sizes.fill(defSize);
+        } else {
+          for (let i = 0; i < sampleCount && stsz.dataStart + 12 + i * 4 + 4 <= stsz.boxEnd; i++) {
+            sizes[i] = dv.getUint32(stsz.dataStart + 12 + i * 4);
+          }
+        }
+        const chunkOffsets = [];
+        if (stco && stco.dataStart + 8 <= stco.boxEnd) {
+          const cnt = dv.getUint32(stco.dataStart + 4);
+          for (let i = 0; i < cnt && stco.dataStart + 8 + i * 4 + 4 <= stco.boxEnd; i++) {
+            chunkOffsets.push(dv.getUint32(stco.dataStart + 8 + i * 4));
+          }
+        } else if (co64 && co64.dataStart + 8 <= co64.boxEnd) {
+          const cnt = dv.getUint32(co64.dataStart + 4);
+          for (let i = 0; i < cnt && co64.dataStart + 8 + i * 8 + 8 <= co64.boxEnd; i++) {
+            chunkOffsets.push(u64(co64.dataStart + 8 + i * 8));
+          }
+        }
+        const stscEntries = [];
+        if (stsc.dataStart + 8 <= stsc.boxEnd) {
+          const cnt = dv.getUint32(stsc.dataStart + 4);
+          for (let i = 0; i < cnt && stsc.dataStart + 8 + i * 12 + 12 <= stsc.boxEnd; i++) {
+            stscEntries.push({
+              firstChunk: dv.getUint32(stsc.dataStart + 8 + i * 12),
+              samplesPerChunk: dv.getUint32(stsc.dataStart + 12 + i * 12),
+            });
+          }
+        }
+        const offsets = new Float64Array(sampleCount);
+        let sIdx = 0;
+        for (let c = 0; c < chunkOffsets.length && sIdx < sampleCount; c++) {
+          const chunkNum = c + 1;
+          let spc = 1;
+          for (let e = 0; e < stscEntries.length; e++) {
+            if (stscEntries[e].firstChunk <= chunkNum) spc = stscEntries[e].samplesPerChunk;
+            else break;
+          }
+          let curOff = chunkOffsets[c];
+          for (let k = 0; k < spc && sIdx < sampleCount; k++) {
+            offsets[sIdx] = curOff;
+            curOff += sizes[sIdx];
+            sIdx++;
+          }
+        }
+        const dts = new Float64Array(sampleCount);
+        const dur = new Uint32Array(sampleCount);
+        if (stts.dataStart + 8 <= stts.boxEnd) {
+          const cnt = dv.getUint32(stts.dataStart + 4);
+          let idx = 0;
+          let acc = 0;
+          for (let i = 0; i < cnt && stts.dataStart + 8 + i * 8 + 8 <= stts.boxEnd; i++) {
+            const sc = dv.getUint32(stts.dataStart + 8 + i * 8);
+            const sd = dv.getUint32(stts.dataStart + 12 + i * 8);
+            for (let k = 0; k < sc && idx < sampleCount; k++) {
+              dts[idx] = acc;
+              dur[idx] = sd;
+              acc += sd;
+              idx++;
+            }
+          }
+        }
+        const ctsOff = new Int32Array(sampleCount);
+        if (ctts && ctts.dataStart + 8 <= ctts.boxEnd) {
+          const ver = bytes[ctts.dataStart];
+          const cnt = dv.getUint32(ctts.dataStart + 4);
+          let idx = 0;
+          for (let i = 0; i < cnt && ctts.dataStart + 8 + i * 8 + 8 <= ctts.boxEnd; i++) {
+            const sc = dv.getUint32(ctts.dataStart + 8 + i * 8);
+            const so = ver === 1 ? dv.getInt32(ctts.dataStart + 12 + i * 8) : dv.getUint32(ctts.dataStart + 12 + i * 8);
+            for (let k = 0; k < sc && idx < sampleCount; k++) {
+              ctsOff[idx++] = so;
+            }
+          }
+        }
+        const keySet = new Uint8Array(sampleCount);
+        if (stss && stss.dataStart + 8 <= stss.boxEnd) {
+          const cnt = dv.getUint32(stss.dataStart + 4);
+          for (let i = 0; i < cnt && stss.dataStart + 8 + i * 4 + 4 <= stss.boxEnd; i++) {
+            const k1 = dv.getUint32(stss.dataStart + 8 + i * 4) - 1;
+            if (k1 >= 0 && k1 < sampleCount) keySet[k1] = 1;
+          }
+        } else {
+          keySet.fill(1);
+        }
+        for (let i = 0; i < sampleCount; i++) {
+          const sz = sizes[i];
+          const off = offsets[i];
+          if (sz === 0 || off + sz > len) continue;
+          const ptsTicks = dts[i] + ctsOff[i];
+          samples.push({
+            offset: off,
+            size: sz,
+            isKey: keySet[i] === 1 || i === 0,
+            timestampUs: Math.round(editTimelineOffsetUs + ((ptsTicks - editMediaStartTicks) / timescale) * 1_000_000),
+            durationUs: Math.max(1000, Math.round((dur[i] / timescale) * 1_000_000)),
+          });
+        }
+      }
+    }
+
+    // 2. Append fragmented fMP4 (moof/traf/tfhd/tfdt/trun) samples honoring ISO/IEC 14496-12 8.8.7
+    //    multi-traf implicit base_data_offset chaining across ALL tracks (including audio-first moofs).
+    let runningDecodeTicks = 0;
+    let fmp4Unsupported = false;
+    iterBoxes(0, len, (topType, moofStart, moofDataStart, moofEnd) => {
+      if (topType !== 'moof' || fmp4Unsupported) return;
+      let trafIdx = 0;
+      let prevTrafDataEnd = -1;
+      iterBoxes(moofDataStart, moofEnd, (cType, _tbs, trafDataStart, trafEnd) => {
+        if (cType !== 'traf' || fmp4Unsupported) return;
+        const tfhd = findChild(trafDataStart, trafEnd, 'tfhd');
+        if (!tfhd || tfhd.dataStart + 8 > tfhd.boxEnd) {
+          prevTrafDataEnd = -1;
+          trafIdx++;
+          return;
+        }
+        const tfFlags = (bytes[tfhd.dataStart + 1] << 16) | (bytes[tfhd.dataStart + 2] << 8) | bytes[tfhd.dataStart + 3];
+        const trafTrackId = dv.getUint32(tfhd.dataStart + 4);
+        const isVideoTraf = trafTrackId === trackId;
+        const trafTrex = trexByTrack.get(trafTrackId) || {
+          defaultSampleDuration: isVideoTraf ? Math.round(timescale / 30) : 0,
+          defaultSampleSize: 0,
+          defaultSampleFlags: 0,
+        };
+        let p = tfhd.dataStart + 8;
+        let baseDataOffset = -1;
+        if (tfFlags & 0x000001) {
+          if (p + 8 > tfhd.boxEnd) { fmp4Unsupported = true; return; }
+          baseDataOffset = u64(p);
+          p += 8;
+        } else if ((tfFlags & 0x020000) !== 0 || trafIdx === 0) {
+          baseDataOffset = moofStart;
+        } else if (prevTrafDataEnd >= 0) {
+          baseDataOffset = prevTrafDataEnd;
+        } else {
+          if (isVideoTraf) fmp4Unsupported = true;
+          prevTrafDataEnd = -1;
+          trafIdx++;
+          return;
+        }
+        if (tfFlags & 0x000002) { p += 4; } // sample_description_index
+        let defDur = trafTrex.defaultSampleDuration;
+        if (tfFlags & 0x000008) { defDur = dv.getUint32(p); p += 4; }
+        let defSize = trafTrex.defaultSampleSize;
+        if (tfFlags & 0x000010) { defSize = dv.getUint32(p); p += 4; }
+        let defFlags = trafTrex.defaultSampleFlags;
+        if (tfFlags & 0x000020) { defFlags = dv.getUint32(p); p += 4; }
+
+        if (isVideoTraf) {
+          const tfdt = findChild(trafDataStart, trafEnd, 'tfdt');
+          if (tfdt && tfdt.dataStart + 8 <= tfdt.boxEnd) {
+            const ver = bytes[tfdt.dataStart];
+            runningDecodeTicks = ver === 1 && tfdt.dataStart + 12 <= tfdt.boxEnd
+              ? u64(tfdt.dataStart + 4)
+              : dv.getUint32(tfdt.dataStart + 4);
+          }
+        }
+
+        let runningOffset = baseDataOffset;
+        let trafMaxEnd = baseDataOffset;
+        let trafSizeKnown = true;
+        iterBoxes(trafDataStart, trafEnd, (tType, _rbs, rds, rbe) => {
+          if (tType !== 'trun' || rds + 8 > rbe || fmp4Unsupported) return;
+          const trVer = bytes[rds];
+          const trFlags = (bytes[rds + 1] << 16) | (bytes[rds + 2] << 8) | bytes[rds + 3];
+          const sCount = dv.getUint32(rds + 4);
+          let rp = rds + 8;
+          let curOff = runningOffset;
+          if (trFlags & 0x000001) {
+            if (rp + 4 > rbe) { fmp4Unsupported = true; return; }
+            const dataOffset = dv.getInt32(rp);
+            rp += 4;
+            curOff = baseDataOffset + dataOffset;
+          }
+          let firstSampleFlags = defFlags;
+          const hasFirstFlags = (trFlags & 0x000004) !== 0;
+          if (hasFirstFlags) {
+            if (rp + 4 > rbe) { fmp4Unsupported = true; return; }
+            firstSampleFlags = dv.getUint32(rp);
+            rp += 4;
+          }
+          const hasDur = (trFlags & 0x000100) !== 0;
+          const hasSize = (trFlags & 0x000200) !== 0;
+          const hasFlags = (trFlags & 0x000400) !== 0;
+          const hasCto = (trFlags & 0x000800) !== 0;
+          for (let i = 0; i < sCount; i++) {
+            let sDur = defDur;
+            let sSize = defSize;
+            let sFlags = (i === 0 && hasFirstFlags) ? firstSampleFlags : defFlags;
+            let sCto = 0;
+            if (hasDur && rp + 4 <= rbe) { sDur = dv.getUint32(rp); rp += 4; }
+            if (hasSize && rp + 4 <= rbe) { sSize = dv.getUint32(rp); rp += 4; }
+            if (hasFlags && rp + 4 <= rbe) { sFlags = dv.getUint32(rp); rp += 4; }
+            if (hasCto && rp + 4 <= rbe) {
+              sCto = trVer === 1 ? dv.getInt32(rp) : dv.getUint32(rp);
+              rp += 4;
+            }
+            if (!hasSize && defSize === 0) {
+              trafSizeKnown = false;
+            }
+            if (isVideoTraf) {
+              if (sSize > 0 && (curOff < moofEnd || curOff + sSize > len)) {
+                fmp4Unsupported = true;
+                return;
+              }
+              const nonSync = (sFlags >>> 16) & 1;
+              const depOn = (sFlags >>> 24) & 3;
+              const isKey = samples.length === 0 || (nonSync === 0 && (depOn === 2 || (i === 0 && (hasFirstFlags || !hasFlags))));
+              const ptsTicks = runningDecodeTicks + sCto;
+              if (sSize > 0) {
+                samples.push({
+                  offset: curOff,
+                  size: sSize,
+                  isKey,
+                  timestampUs: Math.round(editTimelineOffsetUs + ((ptsTicks - editMediaStartTicks) / timescale) * 1_000_000),
+                  durationUs: Math.max(1000, Math.round(((sDur || 1) / timescale) * 1_000_000)),
+                });
+              }
+              runningDecodeTicks += sDur;
+            }
+            curOff += sSize;
+          }
+          runningOffset = curOff;
+          if (curOff > trafMaxEnd) trafMaxEnd = curOff;
+        });
+        prevTrafDataEnd = trafSizeKnown && trafMaxEnd >= 0 ? trafMaxEnd : -1;
+        trafIdx++;
+      });
+    });
+
+    if (fmp4Unsupported) return;
+
+    if (samples.length > 0) {
+      selected = {
+        codec,
+        codecTag,
+        description,
+        codedWidth,
+        codedHeight,
+        timescale,
+        editStartUs: hasEditWindow ? Math.round(editTimelineOffsetUs) : -Infinity,
+        editEndUs: hasEditWindow && Number.isFinite(editMediaDurUs)
+          ? Math.round(editTimelineOffsetUs + editMediaDurUs)
+          : Infinity,
+        samples,
+        bytes,
+      };
+    }
+  });
+
+  return selected;
+}
+
+async function runWorkerWebCodecsFastPass(msg) {
+  if (workerFastPassRunning) return;
+  if (!wasmExports) {
+    self.postMessage({ type: 'fast_pass_done', processed: 0, label: 'WASM NOT READY' });
+    return;
+  }
+  if (typeof VideoDecoder !== 'function' || typeof EncodedVideoChunk !== 'function') {
+    self.postMessage({ type: 'fast_pass_done', processed: 0, label: 'WEBCODECS UNAVAILABLE' });
+    return;
+  }
+
+  workerFastPassRunning = true;
+  workerFastPassCancel = false;
+  fastPassActive = true;
+  seedBoxPreview = null;
+  roiBoxPreview = null;
+
+  const epoch = typeof msg.epoch === 'number' && Number.isInteger(msg.epoch) ? (msg.epoch >>> 0) : ++workerLocalEpoch;
+  const fallbackFps = typeof msg.fps === 'number' && msg.fps > 1.0 ? msg.fps : 30.0;
+  let processed = 0;
+  let rejected = 0;
+  let totalSamples = 0;
+  let codecTag = 'WC';
+  let decoder = null;
+  let frameChain = Promise.resolve();
+  let lastPtsUs = -1;
+  let passError = null;
+  const tStartMs = performance.now();
+
+  try {
+    let rawBuf = null;
+    if (msg.file && typeof msg.file.arrayBuffer === 'function') {
+      rawBuf = await msg.file.arrayBuffer();
+    } else if (typeof msg.url === 'string' && msg.url.length > 0) {
+      const resp = await fetch(msg.url);
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      rawBuf = await resp.arrayBuffer();
+    } else {
+      throw new Error('No MP4 source provided');
+    }
+
+    const track = parseMp4TrackMultiCodec(rawBuf);
+    if (!track || track.samples.length === 0) {
+      throw new Error('Unsupported container or video codec');
+    }
+    const editStartUs = typeof track.editStartUs === 'number' ? track.editStartUs : -Infinity;
+    const editEndUs = typeof track.editEndUs === 'number' ? track.editEndUs : Infinity;
+    const hasEditBounds = Number.isFinite(editStartUs) || Number.isFinite(editEndUs);
+    const inEditWindow = (tsUs) => tsUs >= editStartUs && tsUs < editEndUs;
+    const decodeSampleCount = track.samples.length;
+    totalSamples = hasEditBounds
+      ? track.samples.filter((s) => inEditWindow(s.timestampUs)).length
+      : decodeSampleCount;
+    codecTag = track.codecTag || track.codec;
+
+    const decConfig = { codec: track.codec };
+    if (track.description) decConfig.description = track.description;
+    if (track.codedWidth > 0) decConfig.codedWidth = track.codedWidth;
+    if (track.codedHeight > 0) decConfig.codedHeight = track.codedHeight;
+
+    if (typeof VideoDecoder.isConfigSupported === 'function') {
+      const sup = await VideoDecoder.isConfigSupported(decConfig);
+      if (!sup || !sup.supported) {
+        throw new Error(`Codec not supported: ${track.codec}`);
+      }
+    }
+
+    resetPersistenceState();
+    clearVisualQueues();
+    wasmExports.chronos_reset_tracks();
+    workerExpectedEngineFrame = 0;
+    let passSeq = 0;
+
+    decoder = new VideoDecoder({
+      output: (vf) => {
+        if (workerFastPassCancel || passError) {
+          vf.close();
+          return;
+        }
+        frameChain = frameChain.then(async () => {
+          try {
+            if (workerFastPassCancel || passError) return;
+            const rawTs = typeof vf.timestamp === 'number' && Number.isFinite(vf.timestamp) ? vf.timestamp : null;
+            if (hasEditBounds && rawTs !== null && !inEditWindow(rawTs)) {
+              return;
+            }
+            const sw = Math.max(1, Math.trunc(vf.displayWidth || vf.codedWidth || frameW));
+            const sh = Math.max(1, Math.trunc(vf.displayHeight || vf.codedHeight || frameH));
+            const ptsUs = rawTs !== null
+              ? Math.max(0, rawTs)
+              : Math.round((passSeq / fallbackFps) * 1_000_000);
+            const dtSec = lastPtsUs >= 0 && ptsUs > lastPtsUs
+              ? Math.max(0.001, Math.min(0.25, (ptsUs - lastPtsUs) * 1e-6))
+              : (1.0 / fallbackFps);
+            lastPtsUs = ptsUs;
+            passSeq++;
+
+            await stageFoveaTileFromVideoFrame(vf, sw, sh);
+
+            const geom = resolveIngestGeomSpec(sw, sh, null);
+            let rawPixels = null;
+            const canDirectCopy =
+              webCodecsCopyToRgbaState >= 0 &&
+              typeof vf.copyTo === 'function' &&
+              geom.native1to1 === 1 &&
+              geom.drawOrient === 0 &&
+              geom.fullFrameFit &&
+              geom.cropW === frameW &&
+              geom.cropH === frameH;
+            if (canDirectCopy) {
+              const ptr = wasmExports.chronos_get_ingest_rgba_ptr();
+              const slotIdx = ringSlotByteOffsets.indexOf(ptr);
+              if (slotIdx >= 0 && ringSlotU8[slotIdx]) {
+                try {
+                  const srcReadX = typeof geom.codedCropX0 === 'number' ? geom.codedCropX0 : geom.cropX0;
+                  const srcReadY = typeof geom.codedCropY0 === 'number' ? geom.codedCropY0 : geom.cropY0;
+                  await vf.copyTo(ringSlotU8[slotIdx], {
+                    rect: { x: srcReadX, y: srcReadY, width: frameW, height: frameH },
+                    format: 'RGBA',
+                  });
+                  webCodecsCopyToRgbaState = 1;
+                  lastIngestGeom = geom;
+                  rawPixels = ringSlotU8[slotIdx];
+                } catch (_copyErr) {
+                  webCodecsCopyToRgbaState = -1;
+                }
+              }
+            }
+            if (!rawPixels) {
+              drawCroppedLetterboxedFrame(vf, null);
+              rawPixels = simCtx.getImageData(0, 0, frameW, frameH).data;
+            }
+
+            const attemptCount = processed + rejected;
+            const fastPassPresent = (attemptCount % 12) === 0 || (attemptCount + 1) === totalSamples;
+            const ingestRes = processIngestedFrame(rawPixels, dtSec, ptsUs * 1e-6, {
+              epoch,
+              seq: passSeq,
+              ptsKnown: true,
+              tSrcUs: ptsUs,
+              fastPass: true,
+              fastPassPresent,
+              geom: lastIngestGeom,
+            });
+            if (ingestRes && ingestRes.committed) {
+              processed++;
+            } else {
+              rejected++;
+            }
+            if (fastPassPresent) {
+              const elapsedSec = Math.max(0.001, (performance.now() - tStartMs) * 1e-3);
+              self.postMessage({
+                type: 'fast_pass_progress',
+                processed,
+                rejected,
+                total: totalSamples,
+                fps: Math.round(processed / elapsedSec),
+                codec: codecTag,
+              });
+            }
+          } finally {
+            vf.close();
+          }
+        }).catch((err) => {
+          passError = err;
+        });
+      },
+      error: (err) => {
+        passError = err || new Error('VideoDecoder error');
+      },
+    });
+    decoder.configure(decConfig);
+
+    for (let i = 0; i < decodeSampleCount; i++) {
+      if (workerFastPassCancel || passError) break;
+      while (decoder.decodeQueueSize > 8 && !workerFastPassCancel && !passError) {
+        await new Promise((r) => setTimeout(r, 1));
+      }
+      if (workerFastPassCancel || passError) break;
+      const s = track.samples[i];
+      const chunk = new EncodedVideoChunk({
+        type: s.isKey ? 'key' : 'delta',
+        timestamp: s.timestampUs,
+        duration: s.durationUs,
+        data: track.bytes.subarray(s.offset, s.offset + s.size),
+      });
+      decoder.decode(chunk);
+    }
+
+    if (!workerFastPassCancel && !passError && decoder.state === 'configured') {
+      await decoder.flush();
+    }
+    await frameChain;
+
+    const elapsedSec = Math.max(0.001, (performance.now() - tStartMs) * 1e-3);
+    const fps = Math.round(processed / elapsedSec);
+    const label = passError
+      ? `FAST-PASS ERR: ${passError.message || 'decode failed'}`
+      : (workerFastPassCancel
+          ? `CANCELLED ${processed}/${totalSamples}f (${fps} fps)`
+          : (rejected > 0
+              ? `FAST-PASS ERR: ${rejected}/${totalSamples} rejected (${processed} committed)`
+              : `INDEXED ${processed}f · ${fps} fps (${codecTag})`));
+    self.postMessage({ type: 'fast_pass_done', processed, rejected, total: totalSamples, fps, codec: codecTag, label });
+  } catch (err) {
+    self.postMessage({
+      type: 'fast_pass_done',
+      processed,
+      rejected,
+      total: totalSamples,
+      label: `FAST-PASS ERR: ${err && err.message ? err.message : 'failed'}`,
+    });
+  } finally {
+    if (decoder && decoder.state !== 'closed') {
+      try { decoder.close(); } catch (_e) {}
+    }
+    fastPassActive = false;
+    workerFastPassRunning = false;
+    workerFastPassCancel = false;
+    emitTimelineEventsIfNeeded(true);
+    if (hasAnyRenderedFrame()) {
+      scheduleOffscreenHudPresent(currentDisplaySlot(), false, true);
+      emitTelemetrySnapshot();
+    }
+  }
+}

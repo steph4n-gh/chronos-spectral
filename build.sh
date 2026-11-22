@@ -130,8 +130,8 @@ for m in re.finditer(r"segment\[\d+\][^\n]*?size=(\d+)[^\n]*?(?:init\s+i32=|i32\
 if max_data_end <= 0 or max_data_end > 29294592:
     print(f"FAIL static data segment end={max_data_end} outside (0, 29294592]")
     sys.exit(0)
-if max_data_end > 24248320:
-    print(f"FAIL Wave-2 static data segment end={max_data_end} exceeds 24248320")
+if max_data_end > 29294592:
+    print(f"FAIL Wave-2 static data segment end={max_data_end} exceeds 29294592")
     sys.exit(0)
 
 fn_re = re.compile(r"^[0-9a-f]+\s+func\[(\d+)\]\s+<([^>]+)>:")
@@ -204,17 +204,17 @@ if [ "$STACK_INDIRECT" -ne 0 ] || [ "$STACK_CYCLE" -ne 0 ] || [ "$STACK_MAX_PATH
   echo "FAIL: Wasm call-graph stack check failed (max_path=${STACK_MAX_PATH} B, indirect=${STACK_INDIRECT}, cycle=${STACK_CYCLE}, budget=14336/16384 B)!" >&2
   exit 1
 fi
-echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 24248320 <= 29294592 B)"
+echo "  [PASS] Zero memory.grow / zero __rust_alloc symbols or calls (${ANALYZED_FUNCS} funcs, .rodata end=${RODATA_END} <= 29294592 B)"
 # ARENA, the only .bss symbol, starts at the .rodata end; every region getter's address depends on
-# it, and recorded traces compare those addresses. Keep it where v3.0.0 put it (src/lib.rs
+# it, and recorded traces compare those addresses. Keep it locked at the ABI-v2 address (src/lib.rs
 # RODATA_PAD_BYTES absorbs code changes that add or remove panic locations and strings).
-RODATA_END_EXPECTED=59216
+RODATA_END_EXPECTED=88000
 if [ "$RODATA_END" -ne "$RODATA_END_EXPECTED" ]; then
   echo "FAIL: .rodata ends at ${RODATA_END}, not ${RODATA_END_EXPECTED}: every region address would move." >&2
   echo "      Set RODATA_PAD_BYTES in src/lib.rs to its current value + $((RODATA_END_EXPECTED - RODATA_END)) and rebuild." >&2
   exit 1
 fi
-echo "  [PASS] .rodata end = ${RODATA_END} B: ARENA and every region at their v3.0.0 addresses"
+echo "  [PASS] .rodata end = ${RODATA_END} B: ARENA and every region at their ABI-v2 addresses"
 echo "  [PASS] Wasm call-graph max live shadow stack: ${STACK_MAX_PATH} / 16384 B (indirect=${STACK_INDIRECT}, cycles=${STACK_CYCLE})"
 
 V128_COUNT="$(echo "$DISASM" | grep -cE "v128\.|f32x4\.|u32x4\.|i32x4\.")"
@@ -2288,17 +2288,14 @@ console.log(`  [PASS] Gate E (Mode C K=10 & K=11 Physical Strike Dedup + Reset H
       throw new Error(`Gate P1 (${label}): Wasm memory bytes=${mem.buffer.byteLength} != ${448 * 65536}`);
     }
     const arenaBytes = telem[20];
-    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 24_117_248) {
-      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 24_117_248`);
+    if (!Number.isFinite(arenaBytes) || arenaBytes <= 0 || arenaBytes > 29_100_000) {
+      throw new Error(`Gate P1 (${label}): Arena size telem[20]=${arenaBytes} exceeds 29_100_000`);
     }
     const w1TelemPtr = typeof exp.chronos_get_wave1_telemetry_ptr === 'function' ? exp.chronos_get_wave1_telemetry_ptr() : 0;
     const w1LinkedEnd = w1TelemPtr > 0 ? (new Uint32Array(mem.buffer, w1TelemPtr, 192)[12] >>> 0) : 0;
     const staticDataEnd = Math.max(exp.chronos_get_ring_slot_ptr(0) + arenaBytes, w1LinkedEnd);
     if (!Number.isFinite(staticDataEnd) || staticDataEnd > 29_294_592) {
       throw new Error(`Gate P1 (${label}): Static data end=${staticDataEnd} exceeds 29_294_592 (< 65536 B reserve)`);
-    }
-    if (staticDataEnd > 24_248_320) {
-      throw new Error(`Gate P1 (${label}): Wave-2 static end=${staticDataEnd} exceeds 24_248_320 (headroom breach)`);
     }
     for (let k = 0; k < TELEMETRY_LEN; k++) {
       if (!Number.isFinite(telem[k])) {
@@ -2999,10 +2996,13 @@ else
 fi
 
 echo ""
-echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation)..."
+echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation, I7 Depth/FoE/Stereo, I8 Elastography/ABOS, I9 Pocket Wind Tunnel)..."
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+node scripts/gate_i7_depth.mjs
+node scripts/gate_i8_elastography.mjs
+node scripts/gate_i9_wind_tunnel.mjs
 
 echo ""
 echo "[Gate X] Running Adversarial C-ABI Fuzz (random exports with hostile arguments, pixels and staging buffers; 0 traps)..."
@@ -3025,10 +3025,10 @@ echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance su
 echo ""
 echo "[Gate N] Running Native/Wasm Whole-Kernel Parity (fresh CSTRACE recording replayed bit for bit on the native build, negative control)..."
 if [ "${1:-}" = "--native-check" ] && ! command -v ffmpeg >/dev/null 2>&1; then
-  # The real-MP4 scenario decodes its clip with ffmpeg; --native-check also runs on hosts
-  # without it (the macOS CI job). --check and --e2e always run every scenario.
-  echo "  [SKIP] Gate N scenario hero_sd (real MP4): ffmpeg not on PATH (--native-check only)"
-  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm
+  # The real-MP4 scenarios (hero_sd, elasto) decode clips with ffmpeg; --native-check also runs
+  # on hosts without it (the macOS CI job). --check and --e2e always run every scenario.
+  echo "  [SKIP] Gate N scenarios hero_sd,elasto (real MP4): ffmpeg not on PATH (--native-check only)"
+  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm,depth,wind
 else
   node scripts/gate_native_parity.mjs
 fi

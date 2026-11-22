@@ -20,14 +20,14 @@ use crate::simd::{
     f64x2_mul, f64x2_splat, f64x2_sqrt, f64x2_sub, i32x4_bitmask, v128, v128_and,
 };
 
-pub const BOS_GRID_W: usize = 128;
-pub const BOS_GRID_H: usize = 64;
-pub const BOS_NODES: usize = BOS_GRID_W * BOS_GRID_H; // 8,192
-pub const BOS_MAX_FRAME_W: usize = 640;
-pub const BOS_MAX_FRAME_H: usize = 360;
-pub const BOS_MAX_PIXELS: usize = BOS_MAX_FRAME_W * BOS_MAX_FRAME_H; // 230,400
+pub const BOS_GRID_W: usize = 256;
+pub const BOS_GRID_H: usize = 128;
+pub const BOS_NODES: usize = BOS_GRID_W * BOS_GRID_H; // 32,768
+pub const BOS_MAX_FRAME_W: usize = crate::MAX_FRAME_W;
+pub const BOS_MAX_FRAME_H: usize = crate::MAX_FRAME_H;
+pub const BOS_MAX_PIXELS: usize = BOS_MAX_FRAME_W * BOS_MAX_FRAME_H;
 pub const BOS_TELEM_LEN: usize = 32;
-pub const BOS_PLANES_LEN: usize = 6 * BOS_NODES; // 49,152
+pub const BOS_PLANES_LEN: usize = 6 * BOS_NODES; // 196,608
 
 pub const BOS_PLANE_EPS_X: usize = 0;
 pub const BOS_PLANE_EPS_Y: usize = 1;
@@ -71,7 +71,7 @@ const BOS_MAINT_STREAK_REQ: u8 = 120;
 const BOS_MAINT_ALPHA: f32 = 1.0 / 4096.0;
 const BOS_MAX_ANCHORS: usize = 16;
 const BOS_MIN_ANCHORS: usize = 8;
-const BOS_PCG_MAX_ITERS: u32 = 16;
+const BOS_PCG_MAX_ITERS: u32 = 24;
 
 const GAP_BIT_SEEK: u32 = 1 << 3;
 const GAP_BIT_GEOM: u32 = 1 << 4;
@@ -178,30 +178,42 @@ const fn const_sqrt_f64(x: f64) -> f64 {
 }
 
 struct DctTables {
+    bitrev128: [u8; 128],
     bitrev64: [u8; 64],
-    bitrev32: [u8; 32],
-    tw64_re: [f64; 64],
-    tw64_im: [f64; 64],
-    wn128_re: [f64; 64],
-    wn128_im: [f64; 64],
-    wd128_re: [f64; 64],
-    wd128_im: [f64; 64],
-    sin2_x: [f64; 128],
-    sin2_y: [f64; 64],
+    tw128_re: [f64; 128],
+    tw128_im: [f64; 128],
+    wn256_re: [f64; 128],
+    wn256_im: [f64; 128],
+    wd256_re: [f64; 128],
+    wd256_im: [f64; 128],
+    sin2_x: [f64; 256],
+    sin2_y: [f64; 128],
+    sqrt_256: f64,
     sqrt_128: f64,
-    sqrt_64: f64,
+    scale_fwd_256: f64,
     scale_fwd_128: f64,
-    scale_fwd_64: f64,
+    scale_dc_256: f64,
     scale_dc_128: f64,
-    scale_dc_64: f64,
+    scale_nyq_256: f64,
     scale_nyq_128: f64,
-    scale_nyq_64: f64,
-    inv_32: f64,
     inv_64: f64,
+    inv_128: f64,
 }
 
 impl DctTables {
     const fn new() -> Self {
+        let mut bitrev128 = [0u8; 128];
+        let mut i = 0usize;
+        while i < 128 {
+            let mut r = 0usize;
+            let mut b = 0usize;
+            while b < 7 {
+                r = (r << 1) | ((i >> b) & 1);
+                b += 1;
+            }
+            bitrev128[i] = r as u8;
+            i += 1;
+        }
         let mut bitrev64 = [0u8; 64];
         let mut i = 0usize;
         while i < 64 {
@@ -214,83 +226,71 @@ impl DctTables {
             bitrev64[i] = r as u8;
             i += 1;
         }
-        let mut bitrev32 = [0u8; 32];
-        let mut i = 0usize;
-        while i < 32 {
-            let mut r = 0usize;
-            let mut b = 0usize;
-            while b < 5 {
-                r = (r << 1) | ((i >> b) & 1);
-                b += 1;
-            }
-            bitrev32[i] = r as u8;
-            i += 1;
-        }
 
-        let mut tw64_re = [0.0f64; 64];
-        let mut tw64_im = [0.0f64; 64];
-        let mut wn128_re = [0.0f64; 64];
-        let mut wn128_im = [0.0f64; 64];
-        let mut wd128_re = [0.0f64; 64];
-        let mut wd128_im = [0.0f64; 64];
+        let mut tw128_re = [0.0f64; 128];
+        let mut tw128_im = [0.0f64; 128];
+        let mut wn256_re = [0.0f64; 128];
+        let mut wn256_im = [0.0f64; 128];
+        let mut wd256_re = [0.0f64; 128];
+        let mut wd256_im = [0.0f64; 128];
         let mut k = 0usize;
-        while k < 64 {
-            let ang64 = -TWO_PI_64 * (k as f64) / 64.0;
-            tw64_re[k] = const_cos_f64(ang64);
-            tw64_im[k] = const_sin_f64(ang64);
-
+        while k < 128 {
             let ang128 = -TWO_PI_64 * (k as f64) / 128.0;
-            wn128_re[k] = const_cos_f64(ang128);
-            wn128_im[k] = const_sin_f64(ang128);
+            tw128_re[k] = const_cos_f64(ang128);
+            tw128_im[k] = const_sin_f64(ang128);
 
-            let ang_d = -PI_64 * (k as f64) / 256.0;
-            wd128_re[k] = const_cos_f64(ang_d);
-            wd128_im[k] = const_sin_f64(ang_d);
+            let ang256 = -TWO_PI_64 * (k as f64) / 256.0;
+            wn256_re[k] = const_cos_f64(ang256);
+            wn256_im[k] = const_sin_f64(ang256);
+
+            let ang_d = -PI_64 * (k as f64) / 512.0;
+            wd256_re[k] = const_cos_f64(ang_d);
+            wd256_im[k] = const_sin_f64(ang_d);
             k += 1;
         }
 
-        let mut sin2_x = [0.0f64; 128];
+        let mut sin2_x = [0.0f64; 256];
         let mut k = 0usize;
-        while k < 128 {
-            let s = const_sin_f64(PI_64 * (k as f64) / 256.0);
+        while k < 256 {
+            let s = const_sin_f64(PI_64 * (k as f64) / 512.0);
             sin2_x[k] = 4.0 * s * s;
             k += 1;
         }
-        let mut sin2_y = [0.0f64; 64];
+        let mut sin2_y = [0.0f64; 128];
         let mut l = 0usize;
-        while l < 64 {
-            let s = const_sin_f64(PI_64 * (l as f64) / 128.0);
+        while l < 128 {
+            let s = const_sin_f64(PI_64 * (l as f64) / 256.0);
             sin2_y[l] = 4.0 * s * s;
             l += 1;
         }
 
+        let sqrt_256 = const_sqrt_f64(256.0);
         let sqrt_128 = const_sqrt_f64(128.0);
-        let sqrt_64 = const_sqrt_f64(64.0);
+        let scale_fwd_256 = const_sqrt_f64(2.0 / 256.0);
         let scale_fwd_128 = const_sqrt_f64(2.0 / 128.0);
-        let scale_fwd_64 = const_sqrt_f64(2.0 / 64.0);
         let inv_sqrt2 = const_sqrt_f64(0.5);
 
         Self {
+            bitrev128,
             bitrev64,
-            bitrev32,
-            tw64_re,
-            tw64_im,
-            wn128_re,
-            wn128_im,
-            wd128_re,
-            wd128_im,
+            tw128_re,
+            tw128_im,
+            wn256_re,
+            wn256_im,
+            wd256_re,
+            wd256_im,
             sin2_x,
             sin2_y,
+            sqrt_256,
             sqrt_128,
-            sqrt_64,
+            scale_fwd_256,
             scale_fwd_128,
-            scale_fwd_64,
+            scale_dc_256: const_sqrt_f64(1.0 / 256.0),
             scale_dc_128: const_sqrt_f64(1.0 / 128.0),
-            scale_dc_64: const_sqrt_f64(1.0 / 64.0),
+            scale_nyq_256: inv_sqrt2 * scale_fwd_256,
             scale_nyq_128: inv_sqrt2 * scale_fwd_128,
-            scale_nyq_64: inv_sqrt2 * scale_fwd_64,
-            inv_32: 1.0 / 32.0,
             inv_64: 1.0 / 64.0,
+            inv_128: 1.0 / 128.0,
         }
     }
 }
@@ -319,25 +319,29 @@ pub struct BosCtrl {
     /// across `init_in_place`, so `BosRefCache` entries tagged with an older value are never reused.
     /// `0` only in a zeroed arena, where the cache is empty too.
     pub ref_gen: u32,
-    pub _reserved: [u32; 13],
+    pub stereo_ref_ready: u8,
+    pub stereo_ref_fresh: u8,
+    pub _pad_stereo: [u8; 2],
+    pub stereo_ref_epoch: u32,
+    pub stereo_ref_frame_idx: u32,
+    pub _reserved: [u32; 10],
 }
 
 const _: () = assert!(core::mem::size_of::<BosCtrl>() == 128);
 
-/// Static zero-allocation Background-Oriented Schlieren (`BOS`) kernel state (`1,777,920 B`).
+/// Static zero-allocation Background-Oriented Schlieren (`BOS`) kernel state (`256x128`).
 #[repr(C, align(16))]
 pub struct BosState {
-    // f64 solver planes (6 * 65,536 + 65,536 + 4,096 = 462,848 B)
+    // f64 solver planes (6 * 262,144 + 8,192 = 1,581,056 B; solve_lp is reused for component sums)
     pub solve_x: [f64; BOS_NODES],
     pub solve_b: [f64; BOS_NODES],
     pub solve_r: [f64; BOS_NODES],
     pub solve_p: [f64; BOS_NODES],
     pub solve_z: [f64; BOS_NODES],
     pub solve_lp: [f64; BOS_NODES],
-    pub comp_sum: [f64; BOS_NODES],
-    pub fft_line: [f64; 512],
+    pub fft_line: [f64; 1024],
 
-    // f32 / u32 buffers (921,600 + 32,768 + 196,608 + 65,536 + 128 = 1,216,640 B)
+    // f32 / u32 buffers
     pub ref_luma: [f32; BOS_MAX_PIXELS],
     pub ref_noise_var: [f32; BOS_NODES],
     pub planes: [f32; BOS_PLANES_LEN],
@@ -345,7 +349,7 @@ pub struct BosState {
     pub w_y: [f32; BOS_NODES],
     pub telem: [u32; BOS_TELEM_LEN],
 
-    // u16 / u8 buffers (49,152 + 32,768 + 16,384 = 98,304 B)
+    // u16 / u8 buffers
     pub comp_id: [u16; BOS_NODES],
     pub bfs_queue: [u16; BOS_NODES],
     pub comp_count: [u16; BOS_NODES],
@@ -357,10 +361,11 @@ pub struct BosState {
     pub ctrl: BosCtrl,
 }
 
-const _: () = assert!(core::mem::size_of::<BosState>() <= 1_777_920);
+#[cfg(not(all(feature = "hires-720p", not(target_arch = "wasm32"))))]
+const _: () = assert!(core::mem::size_of::<BosState>() <= 4_120_000);
 
 #[inline(always)]
-fn node_coord(i: usize, j: usize, frame_w: usize, frame_h: usize) -> (f32, f32) {
+pub(crate) fn node_coord(i: usize, j: usize, frame_w: usize, frame_h: usize) -> (f32, f32) {
     let hx = (frame_w as f32) * (1.0 / (BOS_GRID_W as f32));
     let hy = (frame_h as f32) * (1.0 / (BOS_GRID_H as f32));
     (
@@ -519,28 +524,28 @@ fn next_gen(g: u32) -> u32 {
 }
 
 /// What `ref_patch_restore` needs to rebuild one node's `PatchRefData` without the reductions.
-#[repr(C, align(16))]
+/// Compact `f32` layout (`44 B`) saves `1.18 MiB` at `256x128` (`32,768` nodes).
+#[repr(C, align(4))]
 #[derive(Clone, Copy)]
 pub struct BosRefCacheEntry {
-    mu_t: f64,
-    var_sum_t: f64,
-    mean_gx: f64,
-    mean_gy: f64,
-    a_gx: f64,
-    a_gy: f64,
-    h_xx: f64,
-    h_xy: f64,
-    h_yy: f64,
+    mu_t: f32,
+    var_sum_t: f32,
+    mean_gx: f32,
+    mean_gy: f32,
+    a_gx: f32,
+    a_gy: f32,
+    h_xx: f32,
+    h_xy: f32,
+    h_yy: f32,
     /// `BosCtrl::ref_gen` the entry was computed for (`0`: empty).
     gen: u32,
     /// The result of the reference-patch checks (`0`: the node has no usable reference patch).
     ok: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<BosRefCacheEntry>() == 80);
+const _: () = assert!(core::mem::size_of::<BosRefCacheEntry>() == 44);
 
-/// Per-node reference-patch reductions (`build_ref_patch_node`), `655,376 B`. Lives at the end of
-/// the `Arena`, after every region, so adding it moved none of them. All-zero is the empty cache.
+/// Per-node reference-patch reductions (`build_ref_patch_node`), `1,441,808 B`.
 #[repr(C, align(16))]
 pub struct BosRefCache {
     entries: [BosRefCacheEntry; BOS_NODES],
@@ -552,7 +557,7 @@ pub struct BosRefCache {
     _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<BosRefCache>() == 655_376);
+const _: () = assert!(core::mem::size_of::<BosRefCache>() == 1_441_808);
 
 impl BosRefCache {
     #[inline(always)]
@@ -567,6 +572,426 @@ impl BosRefCache {
             self.frame_h = h as u32;
         }
         self.last_gen = ref_gen;
+    }
+}
+
+pub const BOS_PYR_W: usize = 160;
+pub const BOS_PYR_H: usize = 90;
+pub const BOS_COARSE_W: usize = 32;
+pub const BOS_COARSE_H: usize = 16;
+
+/// Arena-tail 160x90 reference pyramid and 32x16 coarse displacement scratch for 2-level
+/// coarse-to-fine BOS IC-LK (extends capture range from 1.5 px to ~8 px on strong plumes while
+/// staying bit-identical on <= 0.45 px displacements).
+#[repr(C, align(16))]
+pub struct BosPyrScratch {
+    pub ref_pyr: [f32; BOS_PYR_W * BOS_PYR_H],
+    pub coarse_uv: [f32; BOS_COARSE_W * BOS_COARSE_H * 2],
+    pub coarse_ok: [u8; BOS_COARSE_W * BOS_COARSE_H],
+    pub tmp_t: [f32; 16],
+    pub tmp_gx: [f32; 16],
+    pub tmp_gy: [f32; 16],
+    pub tmp_cur: [f32; 16],
+    pub ref_gen: u32,
+    pub frame_w: u32,
+    pub frame_h: u32,
+    pub valid: u32,
+}
+
+impl BosPyrScratch {
+    #[inline(never)]
+    pub fn reset(&mut self) {
+        self.coarse_ok.fill(0);
+        self.coarse_uv.fill(0.0);
+        self.ref_gen = 0;
+        self.frame_w = 0;
+        self.frame_h = 0;
+        self.valid = 0;
+    }
+}
+
+#[inline(never)]
+fn sync_bos_ref_pyr(ref_luma: &[f32], frame_w: usize, frame_h: usize, ref_gen: u32, pyr: &mut BosPyrScratch) {
+    if pyr.valid != 0
+        && pyr.ref_gen == ref_gen
+        && pyr.frame_w == frame_w as u32
+        && pyr.frame_h == frame_h as u32
+    {
+        return;
+    }
+    if frame_w == 640 && frame_h == 360 {
+        let mut py = 0usize;
+        while py < BOS_PYR_H {
+            let y0 = py * 4;
+            let r0 = y0 * 640;
+            let r1 = (y0 + 1) * 640;
+            let r2 = (y0 + 2) * 640;
+            let r3 = (y0 + 3) * 640;
+            let mut px = 0usize;
+            while px < BOS_PYR_W {
+                let x0 = px * 4;
+                let s = ref_luma[r0 + x0]
+                    + ref_luma[r0 + x0 + 1]
+                    + ref_luma[r0 + x0 + 2]
+                    + ref_luma[r0 + x0 + 3]
+                    + ref_luma[r1 + x0]
+                    + ref_luma[r1 + x0 + 1]
+                    + ref_luma[r1 + x0 + 2]
+                    + ref_luma[r1 + x0 + 3]
+                    + ref_luma[r2 + x0]
+                    + ref_luma[r2 + x0 + 1]
+                    + ref_luma[r2 + x0 + 2]
+                    + ref_luma[r2 + x0 + 3]
+                    + ref_luma[r3 + x0]
+                    + ref_luma[r3 + x0 + 1]
+                    + ref_luma[r3 + x0 + 2]
+                    + ref_luma[r3 + x0 + 3];
+                pyr.ref_pyr[py * BOS_PYR_W + px] = s * (1.0 / 16.0);
+                px += 1;
+            }
+            py += 1;
+        }
+    } else if frame_w == 1280 && frame_h == 720 {
+        let mut py = 0usize;
+        while py < BOS_PYR_H {
+            let y0 = py * 8;
+            let mut px = 0usize;
+            while px < BOS_PYR_W {
+                let x0 = px * 8;
+                let mut s = 0.0f32;
+                let mut dy = 0usize;
+                while dy < 8 {
+                    let r = (y0 + dy) * 1280 + x0;
+                    s += ref_luma[r]
+                        + ref_luma[r + 1]
+                        + ref_luma[r + 2]
+                        + ref_luma[r + 3]
+                        + ref_luma[r + 4]
+                        + ref_luma[r + 5]
+                        + ref_luma[r + 6]
+                        + ref_luma[r + 7];
+                    dy += 1;
+                }
+                pyr.ref_pyr[py * BOS_PYR_W + px] = s * (1.0 / 64.0);
+                px += 1;
+            }
+            py += 1;
+        }
+    } else if frame_w == 320 && frame_h == 180 {
+        let mut py = 0usize;
+        while py < BOS_PYR_H {
+            let y0 = py * 2;
+            let r0 = y0 * 320;
+            let r1 = (y0 + 1) * 320;
+            let mut px = 0usize;
+            while px < BOS_PYR_W {
+                let x0 = px * 2;
+                let s = ref_luma[r0 + x0]
+                    + ref_luma[r0 + x0 + 1]
+                    + ref_luma[r1 + x0]
+                    + ref_luma[r1 + x0 + 1];
+                pyr.ref_pyr[py * BOS_PYR_W + px] = s * 0.25;
+                px += 1;
+            }
+            py += 1;
+        }
+    } else {
+        let sx = (frame_w as f32) * (1.0 / (BOS_PYR_W as f32));
+        let sy = (frame_h as f32) * (1.0 / (BOS_PYR_H as f32));
+        let mut py = 0usize;
+        while py < BOS_PYR_H {
+            let fy = ((py as f32) + 0.5) * sy - 0.5;
+            let mut px = 0usize;
+            while px < BOS_PYR_W {
+                let fx = ((px as f32) + 0.5) * sx - 0.5;
+                pyr.ref_pyr[py * BOS_PYR_W + px] =
+                    sample_bilinear_checked(ref_luma, frame_w, frame_h, fx.max(0.0).min((frame_w - 2) as f32), fy.max(0.0).min((frame_h - 2) as f32))
+                        .unwrap_or(0.0);
+                px += 1;
+            }
+            py += 1;
+        }
+    }
+    pyr.ref_gen = ref_gen;
+    pyr.frame_w = frame_w as u32;
+    pyr.frame_h = frame_h as u32;
+    pyr.valid = 1;
+}
+
+#[inline(never)]
+fn compute_bos_coarse_pyr_lk(
+    cur_pyr: &[f32],
+    pyr: &mut BosPyrScratch,
+    frame_w: usize,
+    frame_h: usize,
+) {
+    pyr.coarse_ok.fill(0);
+    pyr.coarse_uv.fill(0.0);
+    if pyr.valid == 0 || cur_pyr.len() < BOS_PYR_W * BOS_PYR_H {
+        return;
+    }
+    let scale_x = (frame_w as f32) * (1.0 / (BOS_PYR_W as f32));
+    let scale_y = (frame_h as f32) * (1.0 / (BOS_PYR_H as f32));
+    let step_cx = (BOS_PYR_W as f32) * (1.0 / (BOS_COARSE_W as f32));
+    let step_cy = (BOS_PYR_H as f32) * (1.0 / (BOS_COARSE_H as f32));
+
+    let mut cj = 0usize;
+    while cj < BOS_COARSE_H {
+        let pcy = ((cj as f32) + 0.5) * step_cy - 0.5;
+        let mut ci = 0usize;
+        while ci < BOS_COARSE_W {
+            let pcx = ((ci as f32) + 0.5) * step_cx - 0.5;
+            let cidx = cj * BOS_COARSE_W + ci;
+
+            // Sample 4x4 reference patch & finite-difference gradients
+            let mut ok_ref = true;
+            let mut sum_t = 0.0f32;
+            let mut k = 0usize;
+            let mut dy = 0usize;
+            while dy < 4 {
+                let sy = pcy + (dy as f32) - 1.5;
+                let mut dx = 0usize;
+                while dx < 4 {
+                    let sx = pcx + (dx as f32) - 1.5;
+                    if let Some(v) = sample_bilinear_unsat_checked(&pyr.ref_pyr, BOS_PYR_W, BOS_PYR_H, sx, sy) {
+                        pyr.tmp_t[k] = v;
+                        sum_t += v;
+                    } else {
+                        ok_ref = false;
+                        break;
+                    }
+                    k += 1;
+                    dx += 1;
+                }
+                if !ok_ref {
+                    break;
+                }
+                dy += 1;
+            }
+            if ok_ref {
+                let mu_t = sum_t * (1.0 / 16.0);
+                let mut var_t = 0.0f32;
+                let mut h_xx = 0.0f32;
+                let mut h_xy = 0.0f32;
+                let mut h_yy = 0.0f32;
+                let mut r = 0usize;
+                while r < 4 {
+                    let mut c = 0usize;
+                    while c < 4 {
+                        let idx = r * 4 + c;
+                        let dt = pyr.tmp_t[idx] - mu_t;
+                        var_t += dt * dt;
+                        let gx = if c == 0 {
+                            pyr.tmp_t[idx + 1] - pyr.tmp_t[idx]
+                        } else if c == 3 {
+                            pyr.tmp_t[idx] - pyr.tmp_t[idx - 1]
+                        } else {
+                            0.5 * (pyr.tmp_t[idx + 1] - pyr.tmp_t[idx - 1])
+                        };
+                        let gy = if r == 0 {
+                            pyr.tmp_t[idx + 4] - pyr.tmp_t[idx]
+                        } else if r == 3 {
+                            pyr.tmp_t[idx] - pyr.tmp_t[idx - 4]
+                        } else {
+                            0.5 * (pyr.tmp_t[idx + 4] - pyr.tmp_t[idx - 4])
+                        };
+                        pyr.tmp_gx[idx] = gx;
+                        pyr.tmp_gy[idx] = gy;
+                        h_xx += gx * gx;
+                        h_xy += gx * gy;
+                        h_yy += gy * gy;
+                        c += 1;
+                    }
+                    r += 1;
+                }
+                let tr = h_xx + h_yy;
+                let det = h_xx * h_yy - h_xy * h_xy;
+                if var_t > 16.0 * 1.0e-5 && tr > 0.002 && det > 1e-6 * tr * tr + 1e-10 {
+                    let inv_det = 1.0 / det;
+                    let mut pex = 0.0f32;
+                    let mut pey = 0.0f32;
+                    let mut it_ok = true;
+                    let mut it = 0usize;
+                    while it < 2 {
+                        let mut sum_c = 0.0f32;
+                        let mut ok_c = true;
+                        let mut p = 0usize;
+                        let mut oy = 0usize;
+                        while oy < 4 {
+                            let sy = pcy + (oy as f32) - 1.5 + pey;
+                            let mut ox = 0usize;
+                            while ox < 4 {
+                                let sx = pcx + (ox as f32) - 1.5 + pex;
+                                if let Some(v) = sample_bilinear_unsat_checked(cur_pyr, BOS_PYR_W, BOS_PYR_H, sx, sy) {
+                                    pyr.tmp_cur[p] = v;
+                                    sum_c += v;
+                                } else {
+                                    ok_c = false;
+                                    break;
+                                }
+                                p += 1;
+                                ox += 1;
+                            }
+                            if !ok_c {
+                                break;
+                            }
+                            oy += 1;
+                        }
+                        if !ok_c {
+                            it_ok = false;
+                            break;
+                        }
+                        let mu_c = sum_c * (1.0 / 16.0);
+                        let mut cov_ct = 0.0f32;
+                        let mut j = 0usize;
+                        while j < 16 {
+                            cov_ct += (pyr.tmp_cur[j] - mu_c) * (pyr.tmp_t[j] - mu_t);
+                            j += 1;
+                        }
+                        let gain = cov_ct / var_t;
+                        if !gain.is_finite() || gain < 0.5 || gain > 2.0 {
+                            it_ok = false;
+                            break;
+                        }
+                        let offset = mu_c - gain * mu_t;
+                        let mut bx = 0.0f32;
+                        let mut by = 0.0f32;
+                        let mut j = 0usize;
+                        while j < 16 {
+                            let res = pyr.tmp_cur[j] - (gain * pyr.tmp_t[j] + offset);
+                            bx += pyr.tmp_gx[j] * res;
+                            by += pyr.tmp_gy[j] * res;
+                            j += 1;
+                        }
+                        let sx_step = -(h_yy * bx - h_xy * by) * inv_det / gain;
+                        let sy_step = -(-h_xy * bx + h_xx * by) * inv_det / gain;
+                        if !sx_step.is_finite() || !sy_step.is_finite() {
+                            it_ok = false;
+                            break;
+                        }
+                        pex += sx_step;
+                        pey += sy_step;
+                        if pex * pex + pey * pey > 5.0625 {
+                            it_ok = false;
+                            break;
+                        }
+                        if sx_step * sx_step + sy_step * sy_step < 1e-4 {
+                            break;
+                        }
+                        it += 1;
+                    }
+                    if it_ok && (pex * pex + pey * pey) <= 5.0625 {
+                        // Verify final coarse residual
+                        let mut sum_c = 0.0f32;
+                        let mut ok_f = true;
+                        let mut p = 0usize;
+                        let mut oy = 0usize;
+                        while oy < 4 {
+                            let sy = pcy + (oy as f32) - 1.5 + pey;
+                            let mut ox = 0usize;
+                            while ox < 4 {
+                                let sx = pcx + (ox as f32) - 1.5 + pex;
+                                if let Some(v) = sample_bilinear_unsat_checked(cur_pyr, BOS_PYR_W, BOS_PYR_H, sx, sy) {
+                                    pyr.tmp_cur[p] = v;
+                                    sum_c += v;
+                                } else {
+                                    ok_f = false;
+                                    break;
+                                }
+                                p += 1;
+                                ox += 1;
+                            }
+                            if !ok_f {
+                                break;
+                            }
+                            oy += 1;
+                        }
+                        if ok_f {
+                            let mu_c = sum_c * (1.0 / 16.0);
+                            let mut cov_ct = 0.0f32;
+                            let mut j = 0usize;
+                            while j < 16 {
+                                cov_ct += (pyr.tmp_cur[j] - mu_c) * (pyr.tmp_t[j] - mu_t);
+                                j += 1;
+                            }
+                            let gain = cov_ct / var_t;
+                            if gain.is_finite() && gain >= 0.5 && gain <= 2.0 {
+                                let offset = mu_c - gain * mu_t;
+                                let mut mse = 0.0f32;
+                                let mut j = 0usize;
+                                while j < 16 {
+                                    let r = pyr.tmp_cur[j] - (gain * pyr.tmp_t[j] + offset);
+                                    mse += r * r;
+                                    j += 1;
+                                }
+                                mse *= 1.0 / 16.0;
+                                let ref_var = var_t * (1.0 / 16.0);
+                                let mse_lim = (0.04 * 0.04f32).max(0.30 * ref_var);
+                                if mse.is_finite() && mse <= mse_lim {
+                                    pyr.coarse_uv[cidx * 2] = pex * scale_x;
+                                    pyr.coarse_uv[cidx * 2 + 1] = pey * scale_y;
+                                    pyr.coarse_ok[cidx] = 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            ci += 1;
+        }
+        cj += 1;
+    }
+}
+
+#[inline(always)]
+fn sample_bos_coarse_uv(pyr: &BosPyrScratch, i: usize, j: usize) -> (f32, f32, bool) {
+    if pyr.valid == 0 {
+        return (0.0, 0.0, false);
+    }
+    let fx = (((i as f32) + 0.5) * ((BOS_COARSE_W as f32) / (BOS_GRID_W as f32)) - 0.5)
+        .max(0.0)
+        .min((BOS_COARSE_W - 1) as f32);
+    let fy = (((j as f32) + 0.5) * ((BOS_COARSE_H as f32) / (BOS_GRID_H as f32)) - 0.5)
+        .max(0.0)
+        .min((BOS_COARSE_H - 1) as f32);
+    let x0 = floor_f32(fx) as usize;
+    let y0 = floor_f32(fy) as usize;
+    let x1 = (x0 + 1).min(BOS_COARSE_W - 1);
+    let y1 = (y0 + 1).min(BOS_COARSE_H - 1);
+    let tx = fx - (x0 as f32);
+    let ty = fy - (y0 as f32);
+
+    let ws = [
+        (1.0 - tx) * (1.0 - ty),
+        tx * (1.0 - ty),
+        (1.0 - tx) * ty,
+        tx * ty,
+    ];
+    let idxs = [
+        y0 * BOS_COARSE_W + x0,
+        y0 * BOS_COARSE_W + x1,
+        y1 * BOS_COARSE_W + x0,
+        y1 * BOS_COARSE_W + x1,
+    ];
+    let mut w_sum = 0.0f32;
+    let mut u_sum = 0.0f32;
+    let mut v_sum = 0.0f32;
+    let mut k = 0usize;
+    while k < 4 {
+        let id = idxs[k];
+        if pyr.coarse_ok[id] != 0 {
+            let w = ws[k];
+            w_sum += w;
+            u_sum += w * pyr.coarse_uv[id * 2];
+            v_sum += w * pyr.coarse_uv[id * 2 + 1];
+        }
+        k += 1;
+    }
+    if w_sum > 0.25 {
+        let inv = 1.0 / w_sum;
+        (u_sum * inv, v_sum * inv, true)
+    } else {
+        (0.0, 0.0, false)
     }
 }
 
@@ -760,27 +1185,63 @@ fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry
     let inv_m = 1.0 / (out.m_cnt as f64);
     let mu_t = sum_t * inv_m;
     out.mu_t = mu_t;
-    e.mu_t = mu_t;
+    e.mu_t = mu_t as f32;
 
-    let mut var_sum_t = 0.0f64;
-    let mut mean_gx = 0.0f64;
-    let mut mean_gy = 0.0f64;
-    let mut dot_tgx = 0.0f64;
-    let mut dot_tgy = 0.0f64;
+    let mut var_sum_t0 = f64x2_splat(0.0);
+    let mut var_sum_t1 = f64x2_splat(0.0);
+    let mut mean_gx0 = f64x2_splat(0.0);
+    let mut mean_gx1 = f64x2_splat(0.0);
+    let mut mean_gy0 = f64x2_splat(0.0);
+    let mut mean_gy1 = f64x2_splat(0.0);
+    let mut dot_tgx0 = f64x2_splat(0.0);
+    let mut dot_tgx1 = f64x2_splat(0.0);
+    let mut dot_tgy0 = f64x2_splat(0.0);
+    let mut dot_tgy1 = f64x2_splat(0.0);
+    let v_mu_t = f64x2_splat(mu_t);
     let mut k = 0usize;
     while k < 64 {
-        if out.valid_flag[k] != 0 {
-            let dt = (out.t[k] as f64) - mu_t;
-            let gx = out.gx_raw[k] as f64;
-            let gy = out.gy_raw[k] as f64;
-            var_sum_t += dt * dt;
-            mean_gx += gx;
-            mean_gy += gy;
-            dot_tgx += dt * gx;
-            dot_tgy += dt * gy;
-        }
-        k += 1;
+        let m0 = f64x2(
+            if out.valid_flag[k] != 0 { 1.0 } else { 0.0 },
+            if out.valid_flag[k + 1] != 0 { 1.0 } else { 0.0 },
+        );
+        let dt0 = f64x2_mul(
+            f64x2_sub(f64x2(out.t[k] as f64, out.t[k + 1] as f64), v_mu_t),
+            m0,
+        );
+        let gx0 = f64x2_mul(f64x2(out.gx_raw[k] as f64, out.gx_raw[k + 1] as f64), m0);
+        let gy0 = f64x2_mul(f64x2(out.gy_raw[k] as f64, out.gy_raw[k + 1] as f64), m0);
+        var_sum_t0 = f64x2_add(var_sum_t0, f64x2_mul(dt0, dt0));
+        mean_gx0 = f64x2_add(mean_gx0, gx0);
+        mean_gy0 = f64x2_add(mean_gy0, gy0);
+        dot_tgx0 = f64x2_add(dot_tgx0, f64x2_mul(dt0, gx0));
+        dot_tgy0 = f64x2_add(dot_tgy0, f64x2_mul(dt0, gy0));
+
+        let m1 = f64x2(
+            if out.valid_flag[k + 2] != 0 { 1.0 } else { 0.0 },
+            if out.valid_flag[k + 3] != 0 { 1.0 } else { 0.0 },
+        );
+        let dt1 = f64x2_mul(
+            f64x2_sub(f64x2(out.t[k + 2] as f64, out.t[k + 3] as f64), v_mu_t),
+            m1,
+        );
+        let gx1 = f64x2_mul(f64x2(out.gx_raw[k + 2] as f64, out.gx_raw[k + 3] as f64), m1);
+        let gy1 = f64x2_mul(f64x2(out.gy_raw[k + 2] as f64, out.gy_raw[k + 3] as f64), m1);
+        var_sum_t1 = f64x2_add(var_sum_t1, f64x2_mul(dt1, dt1));
+        mean_gx1 = f64x2_add(mean_gx1, gx1);
+        mean_gy1 = f64x2_add(mean_gy1, gy1);
+        dot_tgx1 = f64x2_add(dot_tgx1, f64x2_mul(dt1, gx1));
+        dot_tgy1 = f64x2_add(dot_tgy1, f64x2_mul(dt1, gy1));
+        k += 4;
     }
+    let hsum2 = |v0: v128, v1: v128| -> f64 {
+        let s = f64x2_add(v0, v1);
+        f64x2_extract_lane::<0>(s) + f64x2_extract_lane::<1>(s)
+    };
+    let var_sum_t = hsum2(var_sum_t0, var_sum_t1);
+    let mut mean_gx = hsum2(mean_gx0, mean_gx1);
+    let mut mean_gy = hsum2(mean_gy0, mean_gy1);
+    let dot_tgx = hsum2(dot_tgx0, dot_tgx1);
+    let dot_tgy = hsum2(dot_tgy0, dot_tgy1);
 
     let ref_var = var_sum_t * inv_m;
     if !ref_var.is_finite() || ref_var < 6.4e-5 || var_sum_t < 1e-6 {
@@ -793,32 +1254,82 @@ fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry
     mean_gy *= inv_m;
     let a_gx = dot_tgx / var_sum_t;
     let a_gy = dot_tgy / var_sum_t;
-    e.var_sum_t = var_sum_t;
-    e.mean_gx = mean_gx;
-    e.mean_gy = mean_gy;
-    e.a_gx = a_gx;
-    e.a_gy = a_gy;
+    e.var_sum_t = var_sum_t as f32;
+    e.mean_gx = mean_gx as f32;
+    e.mean_gy = mean_gy as f32;
+    e.a_gx = a_gx as f32;
+    e.a_gy = a_gy as f32;
 
-    let mut h_xx = 0.0f64;
-    let mut h_xy = 0.0f64;
-    let mut h_yy = 0.0f64;
+    let v_mean_gx = f64x2_splat(mean_gx);
+    let v_mean_gy = f64x2_splat(mean_gy);
+    let v_a_gx = f64x2_splat(a_gx);
+    let v_a_gy = f64x2_splat(a_gy);
+    let mut h_xx0 = f64x2_splat(0.0);
+    let mut h_xx1 = f64x2_splat(0.0);
+    let mut h_xy0 = f64x2_splat(0.0);
+    let mut h_xy1 = f64x2_splat(0.0);
+    let mut h_yy0 = f64x2_splat(0.0);
+    let mut h_yy1 = f64x2_splat(0.0);
     let mut k = 0usize;
     while k < 64 {
-        if out.valid_flag[k] != 0 {
-            let dt = (out.t[k] as f64) - mu_t;
-            let gxp = (out.gx_raw[k] as f64) - mean_gx - a_gx * dt;
-            let gyp = (out.gy_raw[k] as f64) - mean_gy - a_gy * dt;
-            out.gx_perp[k] = gxp as f32;
-            out.gy_perp[k] = gyp as f32;
-            h_xx += gxp * gxp;
-            h_xy += gxp * gyp;
-            h_yy += gyp * gyp;
-        } else {
-            out.gx_perp[k] = 0.0;
-            out.gy_perp[k] = 0.0;
-        }
-        k += 1;
+        let m0 = f64x2(
+            if out.valid_flag[k] != 0 { 1.0 } else { 0.0 },
+            if out.valid_flag[k + 1] != 0 { 1.0 } else { 0.0 },
+        );
+        let dt0 = f64x2_sub(f64x2(out.t[k] as f64, out.t[k + 1] as f64), v_mu_t);
+        let gxp0 = f64x2_mul(
+            f64x2_sub(
+                f64x2_sub(f64x2(out.gx_raw[k] as f64, out.gx_raw[k + 1] as f64), v_mean_gx),
+                f64x2_mul(v_a_gx, dt0),
+            ),
+            m0,
+        );
+        let gyp0 = f64x2_mul(
+            f64x2_sub(
+                f64x2_sub(f64x2(out.gy_raw[k] as f64, out.gy_raw[k + 1] as f64), v_mean_gy),
+                f64x2_mul(v_a_gy, dt0),
+            ),
+            m0,
+        );
+        out.gx_perp[k] = f64x2_extract_lane::<0>(gxp0) as f32;
+        out.gx_perp[k + 1] = f64x2_extract_lane::<1>(gxp0) as f32;
+        out.gy_perp[k] = f64x2_extract_lane::<0>(gyp0) as f32;
+        out.gy_perp[k + 1] = f64x2_extract_lane::<1>(gyp0) as f32;
+        h_xx0 = f64x2_add(h_xx0, f64x2_mul(gxp0, gxp0));
+        h_xy0 = f64x2_add(h_xy0, f64x2_mul(gxp0, gyp0));
+        h_yy0 = f64x2_add(h_yy0, f64x2_mul(gyp0, gyp0));
+
+        let m1 = f64x2(
+            if out.valid_flag[k + 2] != 0 { 1.0 } else { 0.0 },
+            if out.valid_flag[k + 3] != 0 { 1.0 } else { 0.0 },
+        );
+        let dt1 = f64x2_sub(f64x2(out.t[k + 2] as f64, out.t[k + 3] as f64), v_mu_t);
+        let gxp1 = f64x2_mul(
+            f64x2_sub(
+                f64x2_sub(f64x2(out.gx_raw[k + 2] as f64, out.gx_raw[k + 3] as f64), v_mean_gx),
+                f64x2_mul(v_a_gx, dt1),
+            ),
+            m1,
+        );
+        let gyp1 = f64x2_mul(
+            f64x2_sub(
+                f64x2_sub(f64x2(out.gy_raw[k + 2] as f64, out.gy_raw[k + 3] as f64), v_mean_gy),
+                f64x2_mul(v_a_gy, dt1),
+            ),
+            m1,
+        );
+        out.gx_perp[k + 2] = f64x2_extract_lane::<0>(gxp1) as f32;
+        out.gx_perp[k + 3] = f64x2_extract_lane::<1>(gxp1) as f32;
+        out.gy_perp[k + 2] = f64x2_extract_lane::<0>(gyp1) as f32;
+        out.gy_perp[k + 3] = f64x2_extract_lane::<1>(gyp1) as f32;
+        h_xx1 = f64x2_add(h_xx1, f64x2_mul(gxp1, gxp1));
+        h_xy1 = f64x2_add(h_xy1, f64x2_mul(gxp1, gyp1));
+        h_yy1 = f64x2_add(h_yy1, f64x2_mul(gyp1, gyp1));
+        k += 4;
     }
+    let h_xx = hsum2(h_xx0, h_xx1);
+    let h_xy = hsum2(h_xy0, h_xy1);
+    let h_yy = hsum2(h_yy0, h_yy1);
 
     let tr = h_xx + h_yy;
     let det = h_xx * h_yy - h_xy * h_xy;
@@ -840,39 +1351,52 @@ fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry
     out.h_yy = h_yy;
     out.det = det;
     out.tr = tr;
-    e.h_xx = h_xx;
-    e.h_xy = h_xy;
-    e.h_yy = h_yy;
+    e.h_xx = h_xx as f32;
+    e.h_xy = h_xy as f32;
+    e.h_yy = h_yy as f32;
     true
 }
 
 /// Second phase from a cache entry recorded by `ref_patch_reduce` for the same node and the same
-/// `ref_luma`: the same `out` with no reduction. The per-pixel values are recomputed with the
-/// expressions of `ref_patch_reduce`, the scalars are the recorded ones, and `ref_var`, `tr` and
-/// `det` are recomputed from them with the same operations, so `out` is bit-identical.
+/// `ref_luma`: SIMD128 `f32x4` per-pixel orthogonalization without reductions.
 #[inline(always)]
 fn ref_patch_restore(out: &mut PatchRefData, e: &BosRefCacheEntry) -> bool {
     let inv_m = 1.0 / (out.m_cnt as f64);
-    let mu_t = e.mu_t;
+    let mu_t = e.mu_t as f64;
     out.mu_t = mu_t;
-    out.var_sum_t = e.var_sum_t;
-    out.ref_var = e.var_sum_t * inv_m;
-    let (mean_gx, mean_gy, a_gx, a_gy) = (e.mean_gx, e.mean_gy, e.a_gx, e.a_gy);
-    let mut k = 0usize;
-    while k < 64 {
-        if out.valid_flag[k] != 0 {
-            let dt = (out.t[k] as f64) - mu_t;
-            let gxp = (out.gx_raw[k] as f64) - mean_gx - a_gx * dt;
-            let gyp = (out.gy_raw[k] as f64) - mean_gy - a_gy * dt;
-            out.gx_perp[k] = gxp as f32;
-            out.gy_perp[k] = gyp as f32;
-        } else {
-            out.gx_perp[k] = 0.0;
-            out.gy_perp[k] = 0.0;
+    out.var_sum_t = e.var_sum_t as f64;
+    out.ref_var = (e.var_sum_t as f64) * inv_m;
+    let v_mu = f32x4_splat(e.mu_t);
+    let v_mgx = f32x4_splat(e.mean_gx);
+    let v_mgy = f32x4_splat(e.mean_gy);
+    let v_agx = f32x4_splat(e.a_gx);
+    let v_agy = f32x4_splat(e.a_gy);
+    if out.m_cnt == 64 {
+        let mut k = 0usize;
+        while k < 64 {
+            let dt = f32x4_sub(ld4(&out.t, k), v_mu);
+            let gxp = f32x4_sub(f32x4_sub(ld4(&out.gx_raw, k), v_mgx), f32x4_mul(v_agx, dt));
+            let gyp = f32x4_sub(f32x4_sub(ld4(&out.gy_raw, k), v_mgy), f32x4_mul(v_agy, dt));
+            st4(&mut out.gx_perp, k, gxp);
+            st4(&mut out.gy_perp, k, gyp);
+            k += 4;
         }
-        k += 1;
+    } else {
+        let (mean_gx, mean_gy, a_gx, a_gy) = (e.mean_gx, e.mean_gy, e.a_gx, e.a_gy);
+        let mut k = 0usize;
+        while k < 64 {
+            if out.valid_flag[k] != 0 {
+                let dt = out.t[k] - e.mu_t;
+                out.gx_perp[k] = out.gx_raw[k] - mean_gx - a_gx * dt;
+                out.gy_perp[k] = out.gy_raw[k] - mean_gy - a_gy * dt;
+            } else {
+                out.gx_perp[k] = 0.0;
+                out.gy_perp[k] = 0.0;
+            }
+            k += 1;
+        }
     }
-    let (h_xx, h_xy, h_yy) = (e.h_xx, e.h_xy, e.h_yy);
+    let (h_xx, h_xy, h_yy) = (e.h_xx as f64, e.h_xy as f64, e.h_yy as f64);
     out.h_xx = h_xx;
     out.h_xy = h_xy;
     out.h_yy = h_yy;
@@ -1020,17 +1544,34 @@ fn eval_cur_patch_8x8(
                 k += 1;
             }
             let mu_t = ref_p.mu_t;
-            let mut sum_ti = 0.0f64;
-            let mut bx = 0.0f64;
-            let mut by = 0.0f64;
+            let v_mu_t = f64x2_splat(mu_t);
+            let mut sum_ti0 = f64x2_splat(0.0);
+            let mut sum_ti1 = f64x2_splat(0.0);
+            let mut bx0 = f64x2_splat(0.0);
+            let mut bx1 = f64x2_splat(0.0);
+            let mut by0 = f64x2_splat(0.0);
+            let mut by1 = f64x2_splat(0.0);
             let mut k = 0usize;
             while k < 64 {
-                let iv = out_cur[k] as f64;
-                sum_ti += ((ref_p.t[k] as f64) - mu_t) * iv;
-                bx += (ref_p.gx_perp[k] as f64) * iv;
-                by += (ref_p.gy_perp[k] as f64) * iv;
-                k += 1;
+                let iv0 = f64x2(out_cur[k] as f64, out_cur[k + 1] as f64);
+                let dt0 = f64x2_sub(f64x2(ref_p.t[k] as f64, ref_p.t[k + 1] as f64), v_mu_t);
+                sum_ti0 = f64x2_add(sum_ti0, f64x2_mul(dt0, iv0));
+                bx0 = f64x2_add(bx0, f64x2_mul(f64x2(ref_p.gx_perp[k] as f64, ref_p.gx_perp[k + 1] as f64), iv0));
+                by0 = f64x2_add(by0, f64x2_mul(f64x2(ref_p.gy_perp[k] as f64, ref_p.gy_perp[k + 1] as f64), iv0));
+
+                let iv1 = f64x2(out_cur[k + 2] as f64, out_cur[k + 3] as f64);
+                let dt1 = f64x2_sub(f64x2(ref_p.t[k + 2] as f64, ref_p.t[k + 3] as f64), v_mu_t);
+                sum_ti1 = f64x2_add(sum_ti1, f64x2_mul(dt1, iv1));
+                bx1 = f64x2_add(bx1, f64x2_mul(f64x2(ref_p.gx_perp[k + 2] as f64, ref_p.gx_perp[k + 3] as f64), iv1));
+                by1 = f64x2_add(by1, f64x2_mul(f64x2(ref_p.gy_perp[k + 2] as f64, ref_p.gy_perp[k + 3] as f64), iv1));
+                k += 4;
             }
+            let sum_ti_v = f64x2_add(sum_ti0, sum_ti1);
+            let bx_v = f64x2_add(bx0, bx1);
+            let by_v = f64x2_add(by0, by1);
+            let sum_ti = f64x2_extract_lane::<0>(sum_ti_v) + f64x2_extract_lane::<1>(sum_ti_v);
+            let bx = f64x2_extract_lane::<0>(bx_v) + f64x2_extract_lane::<1>(bx_v);
+            let by = f64x2_extract_lane::<0>(by_v) + f64x2_extract_lane::<1>(by_v);
             let gain = sum_ti / ref_p.var_sum_t;
             let offset = (sum_i * (1.0 / 64.0)) - gain * mu_t;
             return Some(CurPatchFit {
@@ -1200,10 +1741,411 @@ fn eval_cur_patch_8x8(
     })
 }
 
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn refine_best_match_subpx(
+    cur_luma: &[f32],
+    frame_w: usize,
+    icx: isize,
+    icy: usize,
+    t16: &[f32; 16],
+    var_t16: f32,
+    t1: &[f32; 16],
+    v11: f32,
+    v01: f32,
+    has_t1: bool,
+    dx_lo: isize,
+    dx_hi: isize,
+    mut best_dx: isize,
+    mut best_sc: f32,
+) -> (isize, f32, f32) {
+    let mut nb = [[0.0f32; 16]; 3];
+    let mut nb_var = [0.0f32; 3];
+    let mut nb_d0 = [0.0f32; 3];
+    let mut nb_ok = [false; 3];
+    let mut best_sc_ref = best_sc;
+    let center = best_dx;
+
+    let mut k = 0usize;
+    while k < 3 {
+        let dx_k = center + (k as isize) - 1;
+        if dx_k >= dx_lo && dx_k <= dx_hi {
+            let tx = icx + dx_k;
+            if tx >= 4 && tx + 4 < (frame_w as isize) {
+                let mut sum_c = 0.0f32;
+                let sx0 = (tx as usize) - 3;
+                for (r4, dst_row) in nb[k].chunks_exact_mut(4).enumerate() {
+                    let sy = icy - 3 + r4 * 2;
+                    let ro = sy * frame_w + sx0;
+                    if let Some(sl) = cur_luma.get(ro..ro + 7) {
+                        let [v0, _, v1, _, v2, _, v3] = match <[f32; 7]>::try_from(sl) {
+                            Ok(arr) => arr,
+                            Err(_) => [0.0; 7],
+                        };
+                        dst_row[0] = v0;
+                        dst_row[1] = v1;
+                        dst_row[2] = v2;
+                        dst_row[3] = v3;
+                        sum_c += v0 + v1 + v2 + v3;
+                    }
+                }
+                let mu_c = sum_c * (1.0 / 16.0);
+                let mut d0 = 0.0f32;
+                let mut d1 = 0.0f32;
+                let mut var_c = 0.0f32;
+                for ((slot, &t0_v), &t1_v) in
+                    nb[k].iter_mut().zip(t16.iter()).zip(t1.iter())
+                {
+                    let d = *slot - mu_c;
+                    *slot = d;
+                    d0 += t0_v * d;
+                    if has_t1 {
+                        d1 += t1_v * d;
+                    }
+                    var_c += d * d;
+                }
+                if var_c > 5.0e-5 {
+                    nb_var[k] = var_c;
+                    nb_d0[k] = d0;
+                    nb_ok[k] = true;
+                    if d0 > 0.0 {
+                        let sc = (d0 * d0) / (var_t16 * var_c);
+                        if sc > best_sc {
+                            best_sc = sc;
+                            best_dx = dx_k;
+                        }
+                        if sc > best_sc_ref {
+                            best_sc_ref = sc;
+                        }
+                    }
+                    if has_t1 && (d0 > 0.0 || d1 > 0.0) {
+                        let a = v11 * d0 - v01 * d1;
+                        let b = var_t16 * d1 - v01 * d0;
+                        if a > 0.0 && b > 0.0 {
+                            let w = (b / (a + b)).clamp(0.0, 1.0);
+                            let omw = 1.0 - w;
+                            let num = omw * d0 + w * d1;
+                            let den_t =
+                                omw * omw * var_t16 + 2.0 * omw * w * v01 + w * w * v11;
+                            if num > 0.0 && den_t > 5.0e-5 {
+                                let sc_sub = (num * num) / (den_t * var_c);
+                                if sc_sub > best_sc_ref {
+                                    best_sc_ref = sc_sub;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        k += 1;
+    }
+
+    let mut p = 0usize;
+    while p < 2 {
+        let a_i = p;
+        let b_i = p + 1;
+        if nb_ok[a_i] && nb_ok[b_i] && (nb_d0[a_i] > 0.0 || nb_d0[b_i] > 0.0) {
+            let mut v_ab = 0.0f32;
+            let mut kk = 0usize;
+            while kk < 16 {
+                v_ab += nb[a_i][kk] * nb[b_i][kk];
+                kk += 1;
+            }
+            let va = nb_var[a_i];
+            let vb = nb_var[b_i];
+            let det = va * vb - v_ab * v_ab;
+            if det > 1.0e-6 * va * vb {
+                let da = nb_d0[a_i];
+                let db = nb_d0[b_i];
+                let ca = vb * da - v_ab * db;
+                let cb = va * db - v_ab * da;
+                if ca > 0.0 && cb > 0.0 {
+                    let w = (cb / (ca + cb)).clamp(0.0, 1.0);
+                    let omw = 1.0 - w;
+                    let num = omw * da + w * db;
+                    let den = omw * omw * va + 2.0 * omw * w * v_ab + w * w * vb;
+                    if num > 0.0 && den > 5.0e-5 {
+                        let sc_rev = (num * num) / (var_t16 * den);
+                        if sc_rev > best_sc_ref {
+                            best_sc_ref = sc_rev;
+                        }
+                    }
+                }
+            }
+        }
+        p += 1;
+    }
+
+    (best_dx, best_sc, best_sc_ref)
+}
+
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn screen_patch_autocorr_1d(
+    img: &[f32],
+    frame_w: usize,
+    icx: isize,
+    icy: usize,
+    t16: &[f32; 16],
+    mu_t16: f32,
+    var_t16: f32,
+    t1: &[f32; 16],
+    v11: f32,
+    v01: f32,
+    has_t1: bool,
+    max_auto: isize,
+    thresh: f32,
+    mut best_rival: f32,
+) -> f32 {
+    let mut c_prev = [[0.0f32; 16]; 2];
+    let mut mu_prev = [0.0f32; 2];
+    let mut var_prev = [0.0f32; 2];
+    let mut d0_prev = [0.0f32; 2];
+    let mut sc_prev = [0.0f32; 2];
+    let mut cs_prev = [[0.0f32; 4]; 2];
+    let mut cq_prev = [[0.0f32; 4]; 2];
+    let mut cd_prev = [[0.0f32; 4]; 2];
+    let mut has_prev = [false; 2];
+
+    let mut s_auto = 4isize;
+    'auto_scan: while s_auto <= max_auto {
+        let mut dir = 0usize;
+        while dir < 2 {
+            let ax = if dir == 0 {
+                icx + s_auto
+            } else {
+                icx - s_auto
+            };
+            if ax >= 4 && ax + 4 < (frame_w as isize) {
+                let mut c16 = [0.0f32; 16];
+                let mut cs0 = 0.0f32;
+                let mut cs1 = 0.0f32;
+                let mut cs2 = 0.0f32;
+                let mut cs3 = 0.0f32;
+                let mut cq0 = 0.0f32;
+                let mut cq1 = 0.0f32;
+                let mut cq2 = 0.0f32;
+                let mut cq3 = 0.0f32;
+                let mut cd0 = 0.0f32;
+                let mut cd1 = 0.0f32;
+                let mut cd2 = 0.0f32;
+                let mut cd3 = 0.0f32;
+                let sx0 = (ax as usize) - 3;
+                for (r4, (c_row, t_row)) in
+                    c16.chunks_exact_mut(4).zip(t16.chunks_exact(4)).enumerate()
+                {
+                    let sy = icy - 3 + r4 * 2;
+                    let ro = sy * frame_w + sx0;
+                    if let Some(sl) = img.get(ro..ro + 7) {
+                        let [p0, _, p1, _, p2, _, p3] = match <[f32; 7]>::try_from(sl) {
+                            Ok(arr) => arr,
+                            Err(_) => [0.0; 7],
+                        };
+                        let v0 = p0 - mu_t16;
+                        let v1 = p1 - mu_t16;
+                        let v2 = p2 - mu_t16;
+                        let v3 = p3 - mu_t16;
+                        c_row[0] = v0;
+                        c_row[1] = v1;
+                        c_row[2] = v2;
+                        c_row[3] = v3;
+                        cs0 += v0;
+                        cs1 += v1;
+                        cs2 += v2;
+                        cs3 += v3;
+                        cq0 += v0 * v0;
+                        cq1 += v1 * v1;
+                        cq2 += v2 * v2;
+                        cq3 += v3 * v3;
+                        cd0 += t_row[0] * v0;
+                        cd1 += t_row[1] * v1;
+                        cd2 += t_row[2] * v2;
+                        cd3 += t_row[3] * v3;
+                    }
+                }
+                let cs = [cs0, cs1, cs2, cs3];
+                let cq = [cq0, cq1, cq2, cq3];
+                let cd = [cd0, cd1, cd2, cd3];
+                let sum_c = cs0 + cs1 + cs2 + cs3;
+                let sum_q = cq0 + cq1 + cq2 + cq3;
+                let d0 = cd0 + cd1 + cd2 + cd3;
+                let mu_c = sum_c * (1.0 / 16.0);
+                let var_c16 = sum_q - sum_c * mu_c;
+                if var_c16 > 5.0e-5
+                    && var_c16 >= 0.25 * var_t16
+                    && var_c16 <= 4.0 * var_t16
+                {
+                    let sc_int = if d0 > 0.0 {
+                        (d0 * d0) / (var_t16 * var_c16)
+                    } else {
+                        0.0
+                    };
+                    if sc_int > best_rival {
+                        best_rival = sc_int;
+                        if best_rival > thresh {
+                            break 'auto_scan;
+                        }
+                    }
+                    // Forward convex sub-pixel projection: c_cur onto span{t(icx), t(icx+1)}.
+                    // Skip dir==0 at s_auto==4 so the tested lag stays >= 4.0 px (avoiding the
+                    // main autocorrelation peak shoulder at 3.0..4.0 px on smooth natural edges).
+                    if has_t1 && !(dir == 0 && s_auto == 4) && sc_int >= 0.04 * thresh {
+                        let mut d1 = 0.0f32;
+                        let mut kk = 0usize;
+                        while kk < 16 {
+                            d1 += t1[kk] * c16[kk];
+                            kk += 1;
+                        }
+                        if d0 > 0.0 || d1 > 0.0 {
+                            let a = v11 * d0 - v01 * d1;
+                            let b = var_t16 * d1 - v01 * d0;
+                            if a > 0.0 && b > 0.0 {
+                                let w = (b / (a + b)).clamp(0.0, 1.0);
+                                let omw = 1.0 - w;
+                                let num = omw * d0 + w * d1;
+                                let den_t =
+                                    omw * omw * var_t16 + 2.0 * omw * w * v01 + w * w * v11;
+                                if num > 0.0 && den_t > 5.0e-5 {
+                                    let sc_sub = (num * num) / (den_t * var_c16);
+                                    if sc_sub > best_rival {
+                                        best_rival = sc_sub;
+                                        if best_rival > thresh {
+                                            break 'auto_scan;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if has_prev[dir] {
+                        // Reverse convex sub-pixel projection: t(icx) onto span{c(ax_prev), c(ax)}
+                        if sc_prev[dir] + sc_int >= 0.25 * thresh
+                            && (d0_prev[dir] > 0.0 || d0 > 0.0)
+                        {
+                            let mut dot_pc = 0.0f32;
+                            let mut kp = 0usize;
+                            while kp < 16 {
+                                dot_pc += c_prev[dir][kp] * c16[kp];
+                                kp += 1;
+                            }
+                            let v_pc = dot_pc - 16.0 * mu_prev[dir] * mu_c;
+                            let vp = var_prev[dir];
+                            let det_c = vp * var_c16 - v_pc * v_pc;
+                            if det_c > 1.0e-6 * vp * var_c16 {
+                                let dp = d0_prev[dir];
+                                let ac = var_c16 * dp - v_pc * d0;
+                                let bc = vp * d0 - v_pc * dp;
+                                if ac > 0.0 && bc > 0.0 {
+                                    let wc = (bc / (ac + bc)).clamp(0.0, 1.0);
+                                    let omwc = 1.0 - wc;
+                                    let numc = omwc * dp + wc * d0;
+                                    let denc = omwc * omwc * vp
+                                        + 2.0 * omwc * wc * v_pc
+                                        + wc * wc * var_c16;
+                                    if numc > 0.0 && denc > 5.0e-5 {
+                                        let sc_rev = (numc * numc) / (var_t16 * denc);
+                                        if sc_rev > best_rival {
+                                            best_rival = sc_rev;
+                                            if best_rival > thresh {
+                                                break 'auto_scan;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Monotone 4-column seam-split check (catches fractional-period nearest-neighbor
+                        // wrap seams where left m columns match lag s-1 and right 4-m match lag s, or vice versa)
+                        let cp_d = cd_prev[dir];
+                        let d_ub = cp_d[0].max(cd[0])
+                            + cp_d[1].max(cd[1])
+                            + cp_d[2].max(cd[2])
+                            + cp_d[3].max(cd[3]);
+                        if d_ub > 0.0
+                            && d_ub * d_ub > 0.15 * thresh * var_t16 * var_prev[dir].min(var_c16)
+                        {
+                            let cp_s = cs_prev[dir];
+                            let cp_q = cq_prev[dir];
+                            let sum_ps = cp_s[0] + cp_s[1] + cp_s[2] + cp_s[3];
+                            let sum_pq = cp_q[0] + cp_q[1] + cp_q[2] + cp_q[3];
+                            let sum_pd = cp_d[0] + cp_d[1] + cp_d[2] + cp_d[3];
+                            let mut ps = 0.0f32;
+                            let mut pq = 0.0f32;
+                            let mut pd = 0.0f32;
+                            let mut cs_pre = 0.0f32;
+                            let mut cq_pre = 0.0f32;
+                            let mut cd_pre = 0.0f32;
+                            let mut m = 0usize;
+                            while m < 3 {
+                                ps += cp_s[m];
+                                pq += cp_q[m];
+                                pd += cp_d[m];
+                                cs_pre += cs[m];
+                                cq_pre += cq[m];
+                                cd_pre += cd[m];
+                                // Split 1: [prev(0..=m), cur(m+1..4)]
+                                let d_a = pd + (d0 - cd_pre);
+                                if d_a > 0.0 {
+                                    let s_a = ps + (sum_c - cs_pre);
+                                    let q_a = pq + (sum_q - cq_pre);
+                                    let v_a = q_a - s_a * s_a * (1.0 / 16.0);
+                                    if v_a > 5.0e-5 {
+                                        let sc_a = (d_a * d_a) / (var_t16 * v_a);
+                                        if sc_a > best_rival {
+                                            best_rival = sc_a;
+                                            if best_rival > thresh {
+                                                break 'auto_scan;
+                                            }
+                                        }
+                                    }
+                                }
+                                // Split 2: [cur(0..=m), prev(m+1..4)]
+                                let d_b = cd_pre + (sum_pd - pd);
+                                if d_b > 0.0 {
+                                    let s_b = cs_pre + (sum_ps - ps);
+                                    let q_b = cq_pre + (sum_pq - pq);
+                                    let v_b = q_b - s_b * s_b * (1.0 / 16.0);
+                                    if v_b > 5.0e-5 {
+                                        let sc_b = (d_b * d_b) / (var_t16 * v_b);
+                                        if sc_b > best_rival {
+                                            best_rival = sc_b;
+                                            if best_rival > thresh {
+                                                break 'auto_scan;
+                                            }
+                                        }
+                                    }
+                                }
+                                m += 1;
+                            }
+                        }
+                    }
+                    c_prev[dir] = c16;
+                    mu_prev[dir] = mu_c;
+                    var_prev[dir] = var_c16;
+                    d0_prev[dir] = d0;
+                    sc_prev[dir] = sc_int;
+                    cs_prev[dir] = cs;
+                    cq_prev[dir] = cq;
+                    cd_prev[dir] = cd;
+                    has_prev[dir] = true;
+                } else {
+                    has_prev[dir] = false;
+                }
+            } else {
+                has_prev[dir] = false;
+            }
+            dir += 1;
+        }
+        s_auto += 1;
+    }
+    best_rival
+}
+
 impl BosState {
     /// Advances `ctrl.ref_gen` after `ref_luma` changed (skipping `0`, which means "no cache").
     #[inline(always)]
-    fn bump_ref_gen(&mut self) {
+    pub(crate) fn bump_ref_gen(&mut self) {
         self.ctrl.ref_gen = next_gen(self.ctrl.ref_gen);
     }
 
@@ -1215,7 +2157,7 @@ impl BosState {
         self.solve_p.fill(0.0);
         self.solve_z.fill(0.0);
         self.solve_lp.fill(0.0);
-        self.comp_sum.fill(0.0);
+        self.solve_lp.fill(0.0);
         self.fft_line.fill(0.0);
         self.ref_luma.fill(0.0);
         self.ref_noise_var.fill(0.0);
@@ -1247,7 +2189,12 @@ impl BosState {
             _pad: [0; 2],
             anchor_node_idx: [0; BOS_MAX_ANCHORS],
             ref_gen: next_ref_gen,
-            _reserved: [0; 13],
+            stereo_ref_ready: 0,
+            stereo_ref_fresh: 0,
+            _pad_stereo: [0; 2],
+            stereo_ref_epoch: 0,
+            stereo_ref_frame_idx: u32::MAX,
+            _reserved: [0; 10],
         };
         self.telem[0] = 1;
         self.telem[1] = BOS_MODE_OFF;
@@ -1394,6 +2341,7 @@ impl BosState {
         self.ctrl.clear_consec_frames = 0;
         self.ctrl.anchor_count = 0;
         self.ctrl.anchor_base_mse = 0.0;
+        self.invalidate_stereo_ref();
         self.ref_noise_var.fill(0.0);
         self.clear_streak.fill(0);
         self.invalidate_outputs();
@@ -1589,8 +2537,8 @@ impl BosState {
                 let node = best_nodes[max_pos];
                 best_scores[max_pos] = -1.0;
                 // Prefer spaced anchors first when gauge has plenty of nodes
-                let ni = (node as usize) & 127;
-                let nj = (node as usize) >> 7;
+                let ni = (node as usize) & 255;
+                let nj = (node as usize) >> 8;
                 let (ncx, ncy) = node_coord(ni, nj, frame_w, frame_h);
                 let mut too_close = false;
                 if gw * gh >= 32 {
@@ -1598,7 +2546,7 @@ impl BosState {
                     let mut k = 0usize;
                     while k < selected {
                         let ak = self.ctrl.anchor_node_idx[k] as usize;
-                        let (acx, acy) = node_coord(ak & 127, ak >> 7, frame_w, frame_h);
+                        let (acx, acy) = node_coord(ak & 255, ak >> 8, frame_w, frame_h);
                         if (ncx - acx).abs() < min_sep && (ncy - acy).abs() < min_sep {
                             too_close = true;
                             break;
@@ -1640,7 +2588,7 @@ impl BosState {
         let mut a = 0usize;
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
-            let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
+            let (cx, cy) = node_coord(node & 255, node >> 8, frame_w, frame_h);
             if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
@@ -1668,7 +2616,7 @@ impl BosState {
         let mut a = 0usize;
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
-            let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
+            let (cx, cy) = node_coord(node & 255, node >> 8, frame_w, frame_h);
             if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
@@ -1696,7 +2644,7 @@ impl BosState {
         let mut a = 0usize;
         while a < k_cnt {
             let node = self.ctrl.anchor_node_idx[a] as usize;
-            let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
+            let (cx, cy) = node_coord(node & 255, node >> 8, frame_w, frame_h);
             if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, p_r) {
                 if eval_cur_patch_8x8(cur_luma, frame_w, frame_h, cx, cy, tx, ty, p_r, cb, cm)
                     .is_some()
@@ -1752,7 +2700,7 @@ impl BosState {
             let mut a = 0usize;
             while a < k_cnt {
                 let node = self.ctrl.anchor_node_idx[a] as usize;
-                let (cx, cy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
+                let (cx, cy) = node_coord(node & 255, node >> 8, frame_w, frame_h);
                 if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, node, &mut p_ref) {
                     if let Some(fit) = eval_cur_patch_8x8(
                         cur_luma,
@@ -1866,6 +2814,7 @@ impl BosState {
     fn extract_dense_lk(
         &mut self,
         cache: &mut BosRefCache,
+        pyr: &BosPyrScratch,
         cur_luma: &[f32],
         frame_w: usize,
         frame_h: usize,
@@ -1893,10 +2842,13 @@ impl BosState {
                 let mut node_clear_ok = false;
 
                 if build_ref_patch_node(cache, self.ctrl.ref_gen, &self.ref_luma, frame_w, frame_h, idx, &mut p_ref) {
-                    let mut ex = 0.0f32;
-                    let mut ey = 0.0f32;
+                    let (cx0, cy0, c_ok) = sample_bos_coarse_uv(pyr, i, j);
+                    let use_coarse = c_ok && (cx0 * cx0 + cy0 * cy0) > (0.45 * 0.45);
+                    let mut ex = if use_coarse { cx0 } else { 0.0f32 };
+                    let mut ey = if use_coarse { cy0 } else { 0.0f32 };
                     let mut last_gain = 1.0f64;
                     let mut iter_ok = true;
+                    let mut reusable_fit = None;
 
                     let mut it = 0usize;
                     while it < 2 {
@@ -1920,21 +2872,33 @@ impl BosState {
                             let inv_det = 1.0 / fit.det;
                             let step_x = (-(fit.h_yy * fit.bx - fit.h_xy * fit.by)
                                 * inv_det
-                                / fit.gain) as f32;
+                                * (1.0 / fit.gain)) as f32;
                             let step_y = (-(-fit.h_xy * fit.bx + fit.h_xx * fit.by)
                                 * inv_det
-                                / fit.gain) as f32;
+                                * (1.0 / fit.gain)) as f32;
                             if !step_x.is_finite() || !step_y.is_finite() {
                                 iter_ok = false;
                                 break;
                             }
                             ex += step_x;
                             ey += step_y;
-                            if ex * ex + ey * ey > 2.25 {
+                            let within_cap = if use_coarse {
+                                let ddx = ex - cx0;
+                                let ddy = ey - cy0;
+                                (ddx * ddx + ddy * ddy) <= 4.0 && (ex * ex + ey * ey) <= 64.0
+                            } else {
+                                (ex * ex + ey * ey) <= 2.25
+                            };
+                            if !within_cap {
                                 iter_ok = false;
                                 break;
                             }
-                            if step_x * step_x + step_y * step_y < 1e-4 {
+                            let step2 = step_x * step_x + step_y * step_y;
+                            if step2 < 1.0e-6 {
+                                reusable_fit = Some(fit);
+                                break;
+                            }
+                            if step2 < 1.0e-5 {
                                 break;
                             }
                         } else {
@@ -1944,34 +2908,87 @@ impl BosState {
                         it += 1;
                     }
 
-                    if iter_ok && (ex * ex + ey * ey) <= 2.25 {
-                        // Evaluate variance and residual consistency at the exact final warp (ex, ey).
-                        if let Some(final_fit) = eval_cur_patch_8x8(
-                            cur_luma,
-                            frame_w,
-                            frame_h,
-                            cx,
-                            cy,
-                            ex,
-                            ey,
-                            &p_ref,
-                            &mut cur_buf,
-                            &mut cur_mask,
-                        ) {
+                    let final_within_cap = if use_coarse {
+                        let ddx = ex - cx0;
+                        let ddy = ey - cy0;
+                        (ddx * ddx + ddy * ddy) <= 4.0 && (ex * ex + ey * ey) <= 64.0
+                    } else {
+                        (ex * ex + ey * ey) <= 2.25
+                    };
+                    if iter_ok && final_within_cap {
+                        // Reuse converged static patch fit (< 0.001 px step); otherwise evaluate at final (ex, ey).
+                        let final_fit_opt = if reusable_fit.is_some() {
+                            reusable_fit
+                        } else {
+                            eval_cur_patch_8x8(
+                                cur_luma,
+                                frame_w,
+                                frame_h,
+                                cx,
+                                cy,
+                                ex,
+                                ey,
+                                &p_ref,
+                                &mut cur_buf,
+                                &mut cur_mask,
+                            )
+                        };
+                        if let Some(final_fit) = final_fit_opt {
                             let m_cnt = final_fit.cnt;
                             let gain = final_fit.gain;
                             let offset = final_fit.offset;
                             if gain.is_finite() && gain >= 0.5 && gain <= 2.0 && m_cnt >= 40 {
-                                let mut sum_r2 = 0.0f64;
-                                let mut k = 0usize;
-                                while k < 64 {
-                                    if cur_mask[k] != 0 {
-                                        let r = (cur_buf[k] as f64)
-                                            - (gain * (p_ref.t[k] as f64) + offset);
-                                        sum_r2 += r * r;
+                                let v_gain = f64x2_splat(gain);
+                                let v_off = f64x2_splat(offset);
+                                let mut s2_0 = f64x2_splat(0.0);
+                                let mut s2_1 = f64x2_splat(0.0);
+                                if m_cnt == 64 {
+                                    let mut k = 0usize;
+                                    while k < 64 {
+                                        let r0 = f64x2_sub(
+                                            f64x2(cur_buf[k] as f64, cur_buf[k + 1] as f64),
+                                            f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k] as f64, p_ref.t[k + 1] as f64)), v_off),
+                                        );
+                                        let r1 = f64x2_sub(
+                                            f64x2(cur_buf[k + 2] as f64, cur_buf[k + 3] as f64),
+                                            f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k + 2] as f64, p_ref.t[k + 3] as f64)), v_off),
+                                        );
+                                        s2_0 = f64x2_add(s2_0, f64x2_mul(r0, r0));
+                                        s2_1 = f64x2_add(s2_1, f64x2_mul(r1, r1));
+                                        k += 4;
                                     }
-                                    k += 1;
+                                } else {
+                                    let mut k = 0usize;
+                                    while k < 64 {
+                                        let m0 = f64x2(
+                                            if cur_mask[k] != 0 { 1.0 } else { 0.0 },
+                                            if cur_mask[k + 1] != 0 { 1.0 } else { 0.0 },
+                                        );
+                                        let r0 = f64x2_mul(
+                                            f64x2_sub(
+                                                f64x2(cur_buf[k] as f64, cur_buf[k + 1] as f64),
+                                                f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k] as f64, p_ref.t[k + 1] as f64)), v_off),
+                                            ),
+                                            m0,
+                                        );
+                                        let m1 = f64x2(
+                                            if cur_mask[k + 2] != 0 { 1.0 } else { 0.0 },
+                                            if cur_mask[k + 3] != 0 { 1.0 } else { 0.0 },
+                                        );
+                                        let r1 = f64x2_mul(
+                                            f64x2_sub(
+                                                f64x2(cur_buf[k + 2] as f64, cur_buf[k + 3] as f64),
+                                                f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k + 2] as f64, p_ref.t[k + 3] as f64)), v_off),
+                                            ),
+                                            m1,
+                                        );
+                                        s2_0 = f64x2_add(s2_0, f64x2_mul(r0, r0));
+                                        s2_1 = f64x2_add(s2_1, f64x2_mul(r1, r1));
+                                        k += 4;
+                                    }
                                 }
+                                let s2_v = f64x2_add(s2_0, s2_1);
+                                let sum_r2 = f64x2_extract_lane::<0>(s2_v) + f64x2_extract_lane::<1>(s2_v);
                                 let final_mse = sum_r2 / (m_cnt as f64);
                                 let noise_base = self.ref_noise_var[idx] as f64;
                                 let res_limit = (25.0 * noise_base)
@@ -2043,10 +3060,90 @@ impl BosState {
         (valid_nodes, rms_disp)
     }
 
+    /// Lightweight `256x128` 1-iter affine `8x8` IC-LK against `self.ref_luma` for Lock-In Acoustic BOS.
+    /// Writes per-frame `(eps_x, eps_y)` into `self.w_x`/`self.w_y` and validity (`1`/`0`) into
+    /// `self.clear_streak`, leaving `self.planes`, `self.valid_mask`, and `self.solve_*` untouched!
+    #[inline(never)]
+    pub(crate) fn extract_dense_lk_raw(
+        &mut self,
+        cache: &mut BosRefCache,
+        cur_luma: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+    ) -> u32 {
+        let mut p_ref = PatchRefData::empty();
+        let mut cur_buf = [0.0f32; 64];
+        let mut cur_mask = [0u8; 64];
+        let mut valid_nodes = 0u32;
+
+        let mut j = 0usize;
+        while j < BOS_GRID_H {
+            let mut i = 0usize;
+            while i < BOS_GRID_W {
+                let idx = j * BOS_GRID_W + i;
+                let (cx, cy) = node_coord(i, j, frame_w, frame_h);
+                let mut accepted = false;
+                if build_ref_patch_node(
+                    cache,
+                    self.ctrl.ref_gen,
+                    &self.ref_luma,
+                    frame_w,
+                    frame_h,
+                    idx,
+                    &mut p_ref,
+                ) {
+                    if let Some(fit) = eval_cur_patch_8x8(
+                        cur_luma,
+                        frame_w,
+                        frame_h,
+                        cx,
+                        cy,
+                        0.0,
+                        0.0,
+                        &p_ref,
+                        &mut cur_buf,
+                        &mut cur_mask,
+                    ) {
+                        if fit.det > 1e-12
+                            && fit.gain.is_finite()
+                            && fit.gain >= 0.5
+                            && fit.gain <= 2.0
+                        {
+                            let inv_dg = 1.0 / (fit.det * fit.gain);
+                            let ex = (-(fit.h_yy * fit.bx - fit.h_xy * fit.by) * inv_dg) as f32;
+                            let ey = (-(-fit.h_xy * fit.bx + fit.h_xx * fit.by) * inv_dg) as f32;
+                            if ex.is_finite() && ey.is_finite() && (ex * ex + ey * ey) <= 4.0 {
+                                self.w_x[idx] = ex;
+                                self.w_y[idx] = ey;
+                                self.clear_streak[idx] = 1;
+                                valid_nodes += 1;
+                                accepted = true;
+                            }
+                        }
+                    }
+                }
+                if !accepted {
+                    self.w_x[idx] = 0.0;
+                    self.w_y[idx] = 0.0;
+                    self.clear_streak[idx] = 0;
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+        valid_nodes
+    }
+
     /// Mode 2 selective maintenance: updates each eligible pixel INSIDE `gauge_roi` and OUTSIDE
     /// frozen anchor halos ONCE per frame after `120` consecutive clear samples (`alpha = 1/4096`).
     #[inline(never)]
-    fn update_mode2_reference(&mut self, cur_luma: &[f32], frame_w: usize, frame_h: usize) {
+    fn update_mode2_reference(
+        &mut self,
+        cache: &mut BosRefCache,
+        cur_luma: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+    ) {
         if self.ctrl.requested_mode != BOS_MODE_MAINT || self.ctrl.clear_consec_frames < 120 {
             return;
         }
@@ -2068,7 +3165,10 @@ impl BosState {
         let k_cnt = self.ctrl.anchor_count as usize;
         let inv_hx = 1.0 / hx;
         let inv_hy = 1.0 / hy;
-        let mut ref_changed = false;
+        let mut mod_x0 = usize::MAX;
+        let mut mod_y0 = usize::MAX;
+        let mut mod_x1 = 0usize;
+        let mut mod_y1 = 0usize;
 
         let mut py = py0;
         while py < py1 {
@@ -2083,7 +3183,7 @@ impl BosState {
                 let mut a = 0usize;
                 while a < k_cnt {
                     let node = self.ctrl.anchor_node_idx[a] as usize;
-                    let (acx, acy) = node_coord(node & 127, node >> 7, frame_w, frame_h);
+                    let (acx, acy) = node_coord(node & 255, node >> 8, frame_w, frame_h);
                     if (pxf - acx).abs() <= 6.0 && (pyf - acy).abs() <= 6.0 {
                         inside_anchor_halo = true;
                         break;
@@ -2099,15 +3199,49 @@ impl BosState {
                     {
                         let idx = row_off + px;
                         self.ref_luma[idx] += (cur_luma[idx] - self.ref_luma[idx]) * BOS_MAINT_ALPHA;
-                        ref_changed = true;
+                        if px < mod_x0 {
+                            mod_x0 = px;
+                        }
+                        if px > mod_x1 {
+                            mod_x1 = px;
+                        }
+                        if py < mod_y0 {
+                            mod_y0 = py;
+                        }
+                        if py > mod_y1 {
+                            mod_y1 = py;
+                        }
                     }
                 }
                 px += 1;
             }
             py += 1;
         }
-        if ref_changed {
-            self.bump_ref_gen();
+        if mod_x0 <= mod_x1 && mod_y0 <= mod_y1 {
+            self.ctrl.stereo_ref_ready = 0;
+            self.ctrl.stereo_ref_fresh = 0;
+            self.ctrl.stereo_ref_epoch = 0;
+            // Each node (i, j) samples a 10x10 bilinear window covering [cx - 5.5, cx + 6.5]
+            // (conservative 6.5 px radius around node_coord). Invalidate only overlapping nodes
+            // instead of flushing the entire 8,192-node cache.
+            let x_lo = (mod_x0 as f32) - 6.5;
+            let x_hi = (mod_x1 as f32) + 6.5;
+            let y_lo = (mod_y0 as f32) - 6.5;
+            let y_hi = (mod_y1 as f32) + 6.5;
+            let ni_lo = floor_f32((x_lo + 0.5) * inv_hx - 0.5).max(0.0) as usize;
+            let ni_hi = (floor_f32((x_hi + 0.5) * inv_hx + 0.5).max(0.0) as usize).min(BOS_GRID_W - 1);
+            let nj_lo = floor_f32((y_lo + 0.5) * inv_hy - 0.5).max(0.0) as usize;
+            let nj_hi = (floor_f32((y_hi + 0.5) * inv_hy + 0.5).max(0.0) as usize).min(BOS_GRID_H - 1);
+            let mut j = nj_lo;
+            while j <= nj_hi {
+                let row_n = j * BOS_GRID_W;
+                let mut i = ni_lo;
+                while i <= ni_hi {
+                    cache.entries[row_n + i].gen = 0;
+                    i += 1;
+                }
+                j += 1;
+            }
         }
     }
 
@@ -2134,10 +3268,9 @@ impl BosState {
             idx += 1;
         }
 
-        // 1. Discrete curl on 4-valid-corner plaquettes
+        // 1. Discrete curl on 4-valid-corner plaquettes + exact 2x2 Kelvin-Stokes macro-plaquette
+        // average matching the 8x8 LK patch support on 256x128 (`5.0 x 5.625 px` loop).
         let mut curl_cnt = 0u32;
-        let mut curl_sum2 = 0.0f64;
-        let mut max_abs_curl = 0.0f64;
 
         let mut j = 0usize;
         while j < BOS_GRID_H - 1 {
@@ -2183,11 +3316,42 @@ impl BosState {
                         self.planes[BOS_PLANE_CURL * BOS_NODES + tl] = omega_f32;
                         self.valid_mask[tl] |= BOS_VALID_CURL;
                         curl_cnt += 1;
-                        curl_sum2 += omega * omega;
-                        let ao = omega.abs();
-                        if ao > max_abs_curl {
-                            max_abs_curl = ao;
+                    }
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+
+        let mut curl_sum2 = 0.0f64;
+        let mut max_abs_curl = 0.0f64;
+        j = 0;
+        while j < BOS_GRID_H - 1 {
+            let mut i = 0usize;
+            while i < BOS_GRID_W - 1 {
+                let tl = j * BOS_GRID_W + i;
+                if (self.valid_mask[tl] & BOS_VALID_CURL) != 0 {
+                    let mut omega = self.planes[BOS_PLANE_CURL * BOS_NODES + tl] as f64;
+                    if i + 2 < BOS_GRID_W && j + 2 < BOS_GRID_H {
+                        let tr = tl + 1;
+                        let bl = tl + BOS_GRID_W;
+                        let br = bl + 1;
+                        if (self.valid_mask[tr] & BOS_VALID_CURL) != 0
+                            && (self.valid_mask[bl] & BOS_VALID_CURL) != 0
+                            && (self.valid_mask[br] & BOS_VALID_CURL) != 0
+                        {
+                            omega = 0.25
+                                * (omega
+                                    + (self.planes[BOS_PLANE_CURL * BOS_NODES + tr] as f64)
+                                    + (self.planes[BOS_PLANE_CURL * BOS_NODES + bl] as f64)
+                                    + (self.planes[BOS_PLANE_CURL * BOS_NODES + br] as f64));
+                            self.planes[BOS_PLANE_CURL * BOS_NODES + tl] = omega as f32;
                         }
+                    }
+                    curl_sum2 += omega * omega;
+                    let ao = omega.abs();
+                    if ao > max_abs_curl {
+                        max_abs_curl = ao;
                     }
                 }
                 i += 1;
@@ -2329,7 +3493,7 @@ impl BosState {
         while u < BOS_NODES {
             if self.comp_id[u] == 0 {
                 let i = u & (BOS_GRID_W - 1);
-                let j = u >> 7;
+                let j = u >> 8;
                 let has_edge = (i + 1 < BOS_GRID_W && self.w_x[u] > 0.0)
                     || (i > 0 && self.w_x[u - 1] > 0.0)
                     || (j + 1 < BOS_GRID_H && self.w_y[u] > 0.0)
@@ -2349,7 +3513,7 @@ impl BosState {
                         qh += 1;
                         c_size += 1;
                         let ci = cur & (BOS_GRID_W - 1);
-                        let cj = cur >> 7;
+                        let cj = cur >> 8;
                         if ci + 1 < BOS_GRID_W && self.w_x[cur] > 0.0 && self.comp_id[cur + 1] == 0
                         {
                             self.comp_id[cur + 1] = cid;
@@ -2386,11 +3550,11 @@ impl BosState {
 
     /// Iterative Cooley-Tukey radix-2 `f64x2` forward complex FFT on `fft_line` (`m = 64` or `32`).
     /// `fft_line[0..2*m]` holds real lanes (`f64x2` paired), `fft_line[2*m..4*m]` holds imag lanes.
-    /// Note: caller writes input in bit-reversed order; `m` must be `64` or `32`.
+    /// Note: caller writes input in bit-reversed order; `m` must be `128` or `64`.
     #[inline(always)]
     fn fft_radix2_paired(&mut self, m: usize) {
         let mut half = 1usize;
-        let mut step_tw = 32usize;
+        let mut step_tw = 64usize;
         while half < m {
             let len = half << 1;
             let mut i = 0usize;
@@ -2398,8 +3562,8 @@ impl BosState {
                 let mut k = 0usize;
                 let mut tw_idx = 0usize;
                 while k < half {
-                    let wr = f64x2_splat(DCT_TABLES.tw64_re[tw_idx]);
-                    let wi = f64x2_splat(DCT_TABLES.tw64_im[tw_idx]);
+                    let wr = f64x2_splat(DCT_TABLES.tw128_re[tw_idx]);
+                    let wi = f64x2_splat(DCT_TABLES.tw128_im[tw_idx]);
                     let p0 = i + k;
                     let p1 = p0 + half;
                     let u_r = f64x2(self.fft_line[p0 * 2], self.fft_line[p0 * 2 + 1]);
@@ -2435,15 +3599,80 @@ impl BosState {
         }
     }
 
-    /// Paired orthonormal 1D DCT-II across two rows (`N = 128`, `m = 64`) or two columns (`N = 64`, `m = 32`).
+    /// Paired orthonormal 1D DCT-II across two rows (`N = 256`, `m = 128`) or two columns (`N = 128`, `m = 64`).
     /// Operates in-place on `solve_z` using `fft_line` (`f64x2` SIMD128).
     #[inline(never)]
     fn dct2_2d_solve_z(&mut self) {
-        // 1. 64 rows of N = 128 (32 pairs)
+        // 1. 128 rows of N = 256 (64 pairs)
         let mut r = 0usize;
         while r < BOS_GRID_H {
             let r0 = r * BOS_GRID_W;
             let r1 = r0 + BOS_GRID_W;
+            let mut dst = 0usize;
+            while dst < 128 {
+                let p = DCT_TABLES.bitrev128[dst] as usize;
+                let (e_idx, o_idx) = if p < 64 {
+                    (4 * p, 4 * p + 2)
+                } else {
+                    let q = 127 - p;
+                    (4 * q + 3, 4 * q + 1)
+                };
+                self.fft_line[dst * 2] = self.solve_z[r0 + e_idx];
+                self.fft_line[dst * 2 + 1] = self.solve_z[r1 + e_idx];
+                self.fft_line[(128 + dst) * 2] = self.solve_z[r0 + o_idx];
+                self.fft_line[(128 + dst) * 2 + 1] = self.solve_z[r1 + o_idx];
+                dst += 1;
+            }
+            self.fft_radix2_paired(128);
+
+            let e0 = f64x2(self.fft_line[0], self.fft_line[1]);
+            let o0 = f64x2(self.fft_line[256], self.fft_line[257]);
+            let dc = f64x2_mul(f64x2_add(e0, o0), f64x2_splat(DCT_TABLES.scale_dc_256));
+            let nyq = f64x2_mul(f64x2_sub(e0, o0), f64x2_splat(DCT_TABLES.scale_nyq_256));
+            self.solve_z[r0] = f64x2_extract_lane::<0>(dc);
+            self.solve_z[r1] = f64x2_extract_lane::<1>(dc);
+            self.solve_z[r0 + 128] = f64x2_extract_lane::<0>(nyq);
+            self.solve_z[r1 + 128] = f64x2_extract_lane::<1>(nyq);
+
+            let half = f64x2_splat(0.5);
+            let sc = f64x2_splat(DCT_TABLES.scale_fwd_256);
+            let mut k = 1usize;
+            while k < 128 {
+                let mk = 128 - k;
+                let zkr = f64x2(self.fft_line[k * 2], self.fft_line[k * 2 + 1]);
+                let zki = f64x2(self.fft_line[(128 + k) * 2], self.fft_line[(128 + k) * 2 + 1]);
+                let zmr = f64x2(self.fft_line[mk * 2], self.fft_line[mk * 2 + 1]);
+                let zmi = f64x2(-self.fft_line[(128 + mk) * 2], -self.fft_line[(128 + mk) * 2 + 1]);
+
+                let er = f64x2_mul(half, f64x2_add(zkr, zmr));
+                let ei = f64x2_mul(half, f64x2_add(zki, zmi));
+                let or = f64x2_mul(half, f64x2_sub(zki, zmi));
+                let oi = f64x2_mul(half, f64x2_sub(zmr, zkr));
+
+                let wnr = f64x2_splat(DCT_TABLES.wn256_re[k]);
+                let wni = f64x2_splat(DCT_TABLES.wn256_im[k]);
+                let yr = f64x2_add(er, f64x2_sub(f64x2_mul(or, wnr), f64x2_mul(oi, wni)));
+                let yi = f64x2_add(ei, f64x2_add(f64x2_mul(or, wni), f64x2_mul(oi, wnr)));
+
+                let wdr = f64x2_splat(DCT_TABLES.wd256_re[k]);
+                let wdi = f64x2_splat(DCT_TABLES.wd256_im[k]);
+                let xk = f64x2_mul(sc, f64x2_sub(f64x2_mul(yr, wdr), f64x2_mul(yi, wdi)));
+                let xnk = f64x2_mul(
+                    f64x2_splat(-DCT_TABLES.scale_fwd_256),
+                    f64x2_add(f64x2_mul(yr, wdi), f64x2_mul(yi, wdr)),
+                );
+                self.solve_z[r0 + k] = f64x2_extract_lane::<0>(xk);
+                self.solve_z[r1 + k] = f64x2_extract_lane::<1>(xk);
+                self.solve_z[r0 + 256 - k] = f64x2_extract_lane::<0>(xnk);
+                self.solve_z[r1 + 256 - k] = f64x2_extract_lane::<1>(xnk);
+                k += 1;
+            }
+            r += 2;
+        }
+
+        // 2. 256 columns of N = 128 (128 adjacent column pairs)
+        let mut c = 0usize;
+        while c < BOS_GRID_W {
             let mut dst = 0usize;
             while dst < 64 {
                 let p = DCT_TABLES.bitrev64[dst] as usize;
@@ -2453,10 +3682,12 @@ impl BosState {
                     let q = 63 - p;
                     (4 * q + 3, 4 * q + 1)
                 };
-                self.fft_line[dst * 2] = self.solve_z[r0 + e_idx];
-                self.fft_line[dst * 2 + 1] = self.solve_z[r1 + e_idx];
-                self.fft_line[(64 + dst) * 2] = self.solve_z[r0 + o_idx];
-                self.fft_line[(64 + dst) * 2 + 1] = self.solve_z[r1 + o_idx];
+                let erow = e_idx * BOS_GRID_W + c;
+                let orow = o_idx * BOS_GRID_W + c;
+                self.fft_line[dst * 2] = self.solve_z[erow];
+                self.fft_line[dst * 2 + 1] = self.solve_z[erow + 1];
+                self.fft_line[(64 + dst) * 2] = self.solve_z[orow];
+                self.fft_line[(64 + dst) * 2 + 1] = self.solve_z[orow + 1];
                 dst += 1;
             }
             self.fft_radix2_paired(64);
@@ -2465,10 +3696,10 @@ impl BosState {
             let o0 = f64x2(self.fft_line[128], self.fft_line[129]);
             let dc = f64x2_mul(f64x2_add(e0, o0), f64x2_splat(DCT_TABLES.scale_dc_128));
             let nyq = f64x2_mul(f64x2_sub(e0, o0), f64x2_splat(DCT_TABLES.scale_nyq_128));
-            self.solve_z[r0] = f64x2_extract_lane::<0>(dc);
-            self.solve_z[r1] = f64x2_extract_lane::<1>(dc);
-            self.solve_z[r0 + 64] = f64x2_extract_lane::<0>(nyq);
-            self.solve_z[r1 + 64] = f64x2_extract_lane::<1>(nyq);
+            self.solve_z[c] = f64x2_extract_lane::<0>(dc);
+            self.solve_z[c + 1] = f64x2_extract_lane::<1>(dc);
+            self.solve_z[64 * BOS_GRID_W + c] = f64x2_extract_lane::<0>(nyq);
+            self.solve_z[64 * BOS_GRID_W + c + 1] = f64x2_extract_lane::<1>(nyq);
 
             let half = f64x2_splat(0.5);
             let sc = f64x2_splat(DCT_TABLES.scale_fwd_128);
@@ -2485,87 +3716,20 @@ impl BosState {
                 let or = f64x2_mul(half, f64x2_sub(zki, zmi));
                 let oi = f64x2_mul(half, f64x2_sub(zmr, zkr));
 
-                let wnr = f64x2_splat(DCT_TABLES.wn128_re[k]);
-                let wni = f64x2_splat(DCT_TABLES.wn128_im[k]);
+                let wnr = f64x2_splat(DCT_TABLES.wn256_re[k * 2]);
+                let wni = f64x2_splat(DCT_TABLES.wn256_im[k * 2]);
                 let yr = f64x2_add(er, f64x2_sub(f64x2_mul(or, wnr), f64x2_mul(oi, wni)));
                 let yi = f64x2_add(ei, f64x2_add(f64x2_mul(or, wni), f64x2_mul(oi, wnr)));
 
-                let wdr = f64x2_splat(DCT_TABLES.wd128_re[k]);
-                let wdi = f64x2_splat(DCT_TABLES.wd128_im[k]);
+                let wdr = f64x2_splat(DCT_TABLES.wd256_re[k * 2]);
+                let wdi = f64x2_splat(DCT_TABLES.wd256_im[k * 2]);
                 let xk = f64x2_mul(sc, f64x2_sub(f64x2_mul(yr, wdr), f64x2_mul(yi, wdi)));
                 let xnk = f64x2_mul(
                     f64x2_splat(-DCT_TABLES.scale_fwd_128),
                     f64x2_add(f64x2_mul(yr, wdi), f64x2_mul(yi, wdr)),
                 );
-                self.solve_z[r0 + k] = f64x2_extract_lane::<0>(xk);
-                self.solve_z[r1 + k] = f64x2_extract_lane::<1>(xk);
-                self.solve_z[r0 + 128 - k] = f64x2_extract_lane::<0>(xnk);
-                self.solve_z[r1 + 128 - k] = f64x2_extract_lane::<1>(xnk);
-                k += 1;
-            }
-            r += 2;
-        }
-
-        // 2. 128 columns of N = 64 (64 adjacent column pairs)
-        let mut c = 0usize;
-        while c < BOS_GRID_W {
-            let mut dst = 0usize;
-            while dst < 32 {
-                let p = DCT_TABLES.bitrev32[dst] as usize;
-                let (e_idx, o_idx) = if p < 16 {
-                    (4 * p, 4 * p + 2)
-                } else {
-                    let q = 31 - p;
-                    (4 * q + 3, 4 * q + 1)
-                };
-                let erow = e_idx * BOS_GRID_W + c;
-                let orow = o_idx * BOS_GRID_W + c;
-                self.fft_line[dst * 2] = self.solve_z[erow];
-                self.fft_line[dst * 2 + 1] = self.solve_z[erow + 1];
-                self.fft_line[(32 + dst) * 2] = self.solve_z[orow];
-                self.fft_line[(32 + dst) * 2 + 1] = self.solve_z[orow + 1];
-                dst += 1;
-            }
-            self.fft_radix2_paired(32);
-
-            let e0 = f64x2(self.fft_line[0], self.fft_line[1]);
-            let o0 = f64x2(self.fft_line[64], self.fft_line[65]);
-            let dc = f64x2_mul(f64x2_add(e0, o0), f64x2_splat(DCT_TABLES.scale_dc_64));
-            let nyq = f64x2_mul(f64x2_sub(e0, o0), f64x2_splat(DCT_TABLES.scale_nyq_64));
-            self.solve_z[c] = f64x2_extract_lane::<0>(dc);
-            self.solve_z[c + 1] = f64x2_extract_lane::<1>(dc);
-            self.solve_z[32 * BOS_GRID_W + c] = f64x2_extract_lane::<0>(nyq);
-            self.solve_z[32 * BOS_GRID_W + c + 1] = f64x2_extract_lane::<1>(nyq);
-
-            let half = f64x2_splat(0.5);
-            let sc = f64x2_splat(DCT_TABLES.scale_fwd_64);
-            let mut k = 1usize;
-            while k < 32 {
-                let mk = 32 - k;
-                let zkr = f64x2(self.fft_line[k * 2], self.fft_line[k * 2 + 1]);
-                let zki = f64x2(self.fft_line[(32 + k) * 2], self.fft_line[(32 + k) * 2 + 1]);
-                let zmr = f64x2(self.fft_line[mk * 2], self.fft_line[mk * 2 + 1]);
-                let zmi = f64x2(-self.fft_line[(32 + mk) * 2], -self.fft_line[(32 + mk) * 2 + 1]);
-
-                let er = f64x2_mul(half, f64x2_add(zkr, zmr));
-                let ei = f64x2_mul(half, f64x2_add(zki, zmi));
-                let or = f64x2_mul(half, f64x2_sub(zki, zmi));
-                let oi = f64x2_mul(half, f64x2_sub(zmr, zkr));
-
-                let wnr = f64x2_splat(DCT_TABLES.wn128_re[k * 2]);
-                let wni = f64x2_splat(DCT_TABLES.wn128_im[k * 2]);
-                let yr = f64x2_add(er, f64x2_sub(f64x2_mul(or, wnr), f64x2_mul(oi, wni)));
-                let yi = f64x2_add(ei, f64x2_add(f64x2_mul(or, wni), f64x2_mul(oi, wnr)));
-
-                let wdr = f64x2_splat(DCT_TABLES.wd128_re[k * 2]);
-                let wdi = f64x2_splat(DCT_TABLES.wd128_im[k * 2]);
-                let xk = f64x2_mul(sc, f64x2_sub(f64x2_mul(yr, wdr), f64x2_mul(yi, wdi)));
-                let xnk = f64x2_mul(
-                    f64x2_splat(-DCT_TABLES.scale_fwd_64),
-                    f64x2_add(f64x2_mul(yr, wdi), f64x2_mul(yi, wdr)),
-                );
                 let row_k = k * BOS_GRID_W + c;
-                let row_nk = (64 - k) * BOS_GRID_W + c;
+                let row_nk = (128 - k) * BOS_GRID_W + c;
                 self.solve_z[row_k] = f64x2_extract_lane::<0>(xk);
                 self.solve_z[row_k + 1] = f64x2_extract_lane::<1>(xk);
                 self.solve_z[row_nk] = f64x2_extract_lane::<0>(xnk);
@@ -2579,137 +3743,44 @@ impl BosState {
     /// Paired orthonormal 2D DCT-III (inverse of DCT-II) across `solve_z` using `fft_line`.
     #[inline(never)]
     fn dct3_2d_solve_z(&mut self) {
-        // 1. 128 columns of N = 64 (64 pairs)
-        let s0_64 = f64x2_splat(DCT_TABLES.sqrt_64);
-        let sk_64 = f64x2_splat(DCT_TABLES.sqrt_64 * 0.70710678118654752440);
+        // 1. 256 columns of N = 128 (128 pairs)
+        let s0_128 = f64x2_splat(DCT_TABLES.sqrt_128);
+        let sk_128 = f64x2_splat(DCT_TABLES.sqrt_128 * 0.70710678118654752440);
         let half = f64x2_splat(0.5);
 
         let mut c = 0usize;
         while c < BOS_GRID_W {
-            let y0 = f64x2_mul(s0_64, f64x2(self.solve_z[c], self.solve_z[c + 1]));
+            let y0 = f64x2_mul(s0_128, f64x2(self.solve_z[c], self.solve_z[c + 1]));
             let ym = f64x2_mul(
-                s0_64,
+                s0_128,
                 f64x2(
-                    self.solve_z[32 * BOS_GRID_W + c],
-                    self.solve_z[32 * BOS_GRID_W + c + 1],
+                    self.solve_z[64 * BOS_GRID_W + c],
+                    self.solve_z[64 * BOS_GRID_W + c + 1],
                 ),
             );
-            // Store yRe[0..32] at fft_line[256..320], yIm[0..32] at fft_line[320..384]
-            self.fft_line[256] = f64x2_extract_lane::<0>(y0);
-            self.fft_line[257] = f64x2_extract_lane::<1>(y0);
-            self.fft_line[320] = 0.0;
-            self.fft_line[321] = 0.0;
-            let mut k = 1usize;
-            while k < 32 {
-                let row_k = k * BOS_GRID_W + c;
-                let row_nk = (64 - k) * BOS_GRID_W + c;
-                let ur = f64x2_mul(sk_64, f64x2(self.solve_z[row_k], self.solve_z[row_k + 1]));
-                let ui = f64x2_mul(sk_64, f64x2(-self.solve_z[row_nk], -self.solve_z[row_nk + 1]));
-                let wdr = f64x2_splat(DCT_TABLES.wd128_re[k * 2]);
-                let wdi = f64x2_splat(-DCT_TABLES.wd128_im[k * 2]); // +pi*k/(2N)
-                let yr = f64x2_sub(f64x2_mul(ur, wdr), f64x2_mul(ui, wdi));
-                let yi = f64x2_add(f64x2_mul(ur, wdi), f64x2_mul(ui, wdr));
-                self.fft_line[256 + k * 2] = f64x2_extract_lane::<0>(yr);
-                self.fft_line[256 + k * 2 + 1] = f64x2_extract_lane::<1>(yr);
-                self.fft_line[320 + k * 2] = f64x2_extract_lane::<0>(yi);
-                self.fft_line[320 + k * 2 + 1] = f64x2_extract_lane::<1>(yi);
-                k += 1;
-            }
-
-            // Build bit-reversed conj(Z) directly into fft_line[0..128]
-            let z0r = f64x2_mul(half, f64x2_add(y0, ym));
-            let z0i = f64x2_mul(half, f64x2_sub(y0, ym));
-            self.fft_line[0] = f64x2_extract_lane::<0>(z0r);
-            self.fft_line[1] = f64x2_extract_lane::<1>(z0r);
-            self.fft_line[64] = -f64x2_extract_lane::<0>(z0i); // conj
-            self.fft_line[65] = -f64x2_extract_lane::<1>(z0i);
-
-            let mut k = 1usize;
-            while k < 32 {
-                let dst = DCT_TABLES.bitrev32[k] as usize;
-                let mk = 32 - k;
-                let ykr = f64x2(self.fft_line[256 + k * 2], self.fft_line[256 + k * 2 + 1]);
-                let yki = f64x2(self.fft_line[320 + k * 2], self.fft_line[320 + k * 2 + 1]);
-                let ymr = f64x2(self.fft_line[256 + mk * 2], self.fft_line[256 + mk * 2 + 1]);
-                let ymi = f64x2(-self.fft_line[320 + mk * 2], -self.fft_line[320 + mk * 2 + 1]);
-
-                let er = f64x2_mul(half, f64x2_add(ykr, ymr));
-                let ei = f64x2_mul(half, f64x2_add(yki, ymi));
-                let dr = f64x2_mul(half, f64x2_sub(ykr, ymr));
-                let di = f64x2_mul(half, f64x2_sub(yki, ymi));
-                let wnr = f64x2_splat(DCT_TABLES.wn128_re[k * 2]);
-                let wni = f64x2_splat(-DCT_TABLES.wn128_im[k * 2]); // +2*pi*k/N
-                let or = f64x2_sub(f64x2_mul(dr, wnr), f64x2_mul(di, wni));
-                let oi = f64x2_add(f64x2_mul(dr, wni), f64x2_mul(di, wnr));
-
-                let zr = f64x2_sub(er, oi);
-                let zi = f64x2_add(ei, or);
-                self.fft_line[dst * 2] = f64x2_extract_lane::<0>(zr);
-                self.fft_line[dst * 2 + 1] = f64x2_extract_lane::<1>(zr);
-                self.fft_line[(32 + dst) * 2] = -f64x2_extract_lane::<0>(zi); // conj
-                self.fft_line[(32 + dst) * 2 + 1] = -f64x2_extract_lane::<1>(zi);
-                k += 1;
-            }
-            self.fft_radix2_paired(32);
-
-            let inv_m = f64x2_splat(DCT_TABLES.inv_32);
-            let mut r = 0usize;
-            while r < 32 {
-                let ye = f64x2_mul(inv_m, f64x2(self.fft_line[r * 2], self.fft_line[r * 2 + 1]));
-                let yo = f64x2_mul(
-                    f64x2_splat(-DCT_TABLES.inv_32),
-                    f64x2(self.fft_line[(32 + r) * 2], self.fft_line[(32 + r) * 2 + 1]),
-                );
-                let (e_idx, o_idx) = if r < 16 {
-                    (4 * r, 4 * r + 2)
-                } else {
-                    let q = 31 - r;
-                    (4 * q + 3, 4 * q + 1)
-                };
-                let erow = e_idx * BOS_GRID_W + c;
-                let orow = o_idx * BOS_GRID_W + c;
-                self.solve_z[erow] = f64x2_extract_lane::<0>(ye);
-                self.solve_z[erow + 1] = f64x2_extract_lane::<1>(ye);
-                self.solve_z[orow] = f64x2_extract_lane::<0>(yo);
-                self.solve_z[orow + 1] = f64x2_extract_lane::<1>(yo);
-                r += 1;
-            }
-            c += 2;
-        }
-
-        // 2. 64 rows of N = 128 (32 pairs)
-        let s0_128 = f64x2_splat(DCT_TABLES.sqrt_128);
-        let sk_128 = f64x2_splat(DCT_TABLES.sqrt_128 * 0.70710678118654752440);
-
-        let mut r = 0usize;
-        while r < BOS_GRID_H {
-            let r0 = r * BOS_GRID_W;
-            let r1 = r0 + BOS_GRID_W;
-            let y0 = f64x2_mul(s0_128, f64x2(self.solve_z[r0], self.solve_z[r1]));
-            let ym = f64x2_mul(s0_128, f64x2(self.solve_z[r0 + 64], self.solve_z[r1 + 64]));
-            // Store yRe[0..64] at fft_line[256..384], yIm[0..64] at fft_line[384..512]
-            self.fft_line[256] = f64x2_extract_lane::<0>(y0);
-            self.fft_line[257] = f64x2_extract_lane::<1>(y0);
-            self.fft_line[384] = 0.0;
-            self.fft_line[385] = 0.0;
+            // Store yRe[0..64] at fft_line[512..640], yIm[0..64] at fft_line[640..768]
+            self.fft_line[512] = f64x2_extract_lane::<0>(y0);
+            self.fft_line[513] = f64x2_extract_lane::<1>(y0);
+            self.fft_line[640] = 0.0;
+            self.fft_line[641] = 0.0;
             let mut k = 1usize;
             while k < 64 {
-                let ur = f64x2_mul(sk_128, f64x2(self.solve_z[r0 + k], self.solve_z[r1 + k]));
-                let ui = f64x2_mul(
-                    sk_128,
-                    f64x2(-self.solve_z[r0 + 128 - k], -self.solve_z[r1 + 128 - k]),
-                );
-                let wdr = f64x2_splat(DCT_TABLES.wd128_re[k]);
-                let wdi = f64x2_splat(-DCT_TABLES.wd128_im[k]);
+                let row_k = k * BOS_GRID_W + c;
+                let row_nk = (128 - k) * BOS_GRID_W + c;
+                let ur = f64x2_mul(sk_128, f64x2(self.solve_z[row_k], self.solve_z[row_k + 1]));
+                let ui = f64x2_mul(sk_128, f64x2(-self.solve_z[row_nk], -self.solve_z[row_nk + 1]));
+                let wdr = f64x2_splat(DCT_TABLES.wd256_re[k * 2]);
+                let wdi = f64x2_splat(-DCT_TABLES.wd256_im[k * 2]);
                 let yr = f64x2_sub(f64x2_mul(ur, wdr), f64x2_mul(ui, wdi));
                 let yi = f64x2_add(f64x2_mul(ur, wdi), f64x2_mul(ui, wdr));
-                self.fft_line[256 + k * 2] = f64x2_extract_lane::<0>(yr);
-                self.fft_line[256 + k * 2 + 1] = f64x2_extract_lane::<1>(yr);
-                self.fft_line[384 + k * 2] = f64x2_extract_lane::<0>(yi);
-                self.fft_line[384 + k * 2 + 1] = f64x2_extract_lane::<1>(yi);
+                self.fft_line[512 + k * 2] = f64x2_extract_lane::<0>(yr);
+                self.fft_line[512 + k * 2 + 1] = f64x2_extract_lane::<1>(yr);
+                self.fft_line[640 + k * 2] = f64x2_extract_lane::<0>(yi);
+                self.fft_line[640 + k * 2 + 1] = f64x2_extract_lane::<1>(yi);
                 k += 1;
             }
 
+            // Build bit-reversed conj(Z) directly into fft_line[0..256]
             let z0r = f64x2_mul(half, f64x2_add(y0, ym));
             let z0i = f64x2_mul(half, f64x2_sub(y0, ym));
             self.fft_line[0] = f64x2_extract_lane::<0>(z0r);
@@ -2721,17 +3792,17 @@ impl BosState {
             while k < 64 {
                 let dst = DCT_TABLES.bitrev64[k] as usize;
                 let mk = 64 - k;
-                let ykr = f64x2(self.fft_line[256 + k * 2], self.fft_line[256 + k * 2 + 1]);
-                let yki = f64x2(self.fft_line[384 + k * 2], self.fft_line[384 + k * 2 + 1]);
-                let ymr = f64x2(self.fft_line[256 + mk * 2], self.fft_line[256 + mk * 2 + 1]);
-                let ymi = f64x2(-self.fft_line[384 + mk * 2], -self.fft_line[384 + mk * 2 + 1]);
+                let ykr = f64x2(self.fft_line[512 + k * 2], self.fft_line[512 + k * 2 + 1]);
+                let yki = f64x2(self.fft_line[640 + k * 2], self.fft_line[640 + k * 2 + 1]);
+                let ymr = f64x2(self.fft_line[512 + mk * 2], self.fft_line[512 + mk * 2 + 1]);
+                let ymi = f64x2(-self.fft_line[640 + mk * 2], -self.fft_line[640 + mk * 2 + 1]);
 
                 let er = f64x2_mul(half, f64x2_add(ykr, ymr));
                 let ei = f64x2_mul(half, f64x2_add(yki, ymi));
                 let dr = f64x2_mul(half, f64x2_sub(ykr, ymr));
                 let di = f64x2_mul(half, f64x2_sub(yki, ymi));
-                let wnr = f64x2_splat(DCT_TABLES.wn128_re[k]);
-                let wni = f64x2_splat(-DCT_TABLES.wn128_im[k]);
+                let wnr = f64x2_splat(DCT_TABLES.wn256_re[k * 2]);
+                let wni = f64x2_splat(-DCT_TABLES.wn256_im[k * 2]);
                 let or = f64x2_sub(f64x2_mul(dr, wnr), f64x2_mul(di, wni));
                 let oi = f64x2_add(f64x2_mul(dr, wni), f64x2_mul(di, wnr));
 
@@ -2746,20 +3817,113 @@ impl BosState {
             self.fft_radix2_paired(64);
 
             let inv_m = f64x2_splat(DCT_TABLES.inv_64);
-            let mut idx_r = 0usize;
-            while idx_r < 64 {
-                let ye = f64x2_mul(inv_m, f64x2(self.fft_line[idx_r * 2], self.fft_line[idx_r * 2 + 1]));
+            let mut r = 0usize;
+            while r < 64 {
+                let ye = f64x2_mul(inv_m, f64x2(self.fft_line[r * 2], self.fft_line[r * 2 + 1]));
                 let yo = f64x2_mul(
                     f64x2_splat(-DCT_TABLES.inv_64),
+                    f64x2(self.fft_line[(64 + r) * 2], self.fft_line[(64 + r) * 2 + 1]),
+                );
+                let (e_idx, o_idx) = if r < 32 {
+                    (4 * r, 4 * r + 2)
+                } else {
+                    let q = 63 - r;
+                    (4 * q + 3, 4 * q + 1)
+                };
+                let erow = e_idx * BOS_GRID_W + c;
+                let orow = o_idx * BOS_GRID_W + c;
+                self.solve_z[erow] = f64x2_extract_lane::<0>(ye);
+                self.solve_z[erow + 1] = f64x2_extract_lane::<1>(ye);
+                self.solve_z[orow] = f64x2_extract_lane::<0>(yo);
+                self.solve_z[orow + 1] = f64x2_extract_lane::<1>(yo);
+                r += 1;
+            }
+            c += 2;
+        }
+
+        // 2. 128 rows of N = 256 (64 pairs)
+        let s0_256 = f64x2_splat(DCT_TABLES.sqrt_256);
+        let sk_256 = f64x2_splat(DCT_TABLES.sqrt_256 * 0.70710678118654752440);
+
+        let mut r = 0usize;
+        while r < BOS_GRID_H {
+            let r0 = r * BOS_GRID_W;
+            let r1 = r0 + BOS_GRID_W;
+            let y0 = f64x2_mul(s0_256, f64x2(self.solve_z[r0], self.solve_z[r1]));
+            let ym = f64x2_mul(s0_256, f64x2(self.solve_z[r0 + 128], self.solve_z[r1 + 128]));
+            // Store yRe[0..128] at fft_line[512..768], yIm[0..128] at fft_line[768..1024]
+            self.fft_line[512] = f64x2_extract_lane::<0>(y0);
+            self.fft_line[513] = f64x2_extract_lane::<1>(y0);
+            self.fft_line[768] = 0.0;
+            self.fft_line[769] = 0.0;
+            let mut k = 1usize;
+            while k < 128 {
+                let ur = f64x2_mul(sk_256, f64x2(self.solve_z[r0 + k], self.solve_z[r1 + k]));
+                let ui = f64x2_mul(
+                    sk_256,
+                    f64x2(-self.solve_z[r0 + 256 - k], -self.solve_z[r1 + 256 - k]),
+                );
+                let wdr = f64x2_splat(DCT_TABLES.wd256_re[k]);
+                let wdi = f64x2_splat(-DCT_TABLES.wd256_im[k]);
+                let yr = f64x2_sub(f64x2_mul(ur, wdr), f64x2_mul(ui, wdi));
+                let yi = f64x2_add(f64x2_mul(ur, wdi), f64x2_mul(ui, wdr));
+                self.fft_line[512 + k * 2] = f64x2_extract_lane::<0>(yr);
+                self.fft_line[512 + k * 2 + 1] = f64x2_extract_lane::<1>(yr);
+                self.fft_line[768 + k * 2] = f64x2_extract_lane::<0>(yi);
+                self.fft_line[768 + k * 2 + 1] = f64x2_extract_lane::<1>(yi);
+                k += 1;
+            }
+
+            let z0r = f64x2_mul(half, f64x2_add(y0, ym));
+            let z0i = f64x2_mul(half, f64x2_sub(y0, ym));
+            self.fft_line[0] = f64x2_extract_lane::<0>(z0r);
+            self.fft_line[1] = f64x2_extract_lane::<1>(z0r);
+            self.fft_line[256] = -f64x2_extract_lane::<0>(z0i);
+            self.fft_line[257] = -f64x2_extract_lane::<1>(z0i);
+
+            let mut k = 1usize;
+            while k < 128 {
+                let dst = DCT_TABLES.bitrev128[k] as usize;
+                let mk = 128 - k;
+                let ykr = f64x2(self.fft_line[512 + k * 2], self.fft_line[512 + k * 2 + 1]);
+                let yki = f64x2(self.fft_line[768 + k * 2], self.fft_line[768 + k * 2 + 1]);
+                let ymr = f64x2(self.fft_line[512 + mk * 2], self.fft_line[512 + mk * 2 + 1]);
+                let ymi = f64x2(-self.fft_line[768 + mk * 2], -self.fft_line[768 + mk * 2 + 1]);
+
+                let er = f64x2_mul(half, f64x2_add(ykr, ymr));
+                let ei = f64x2_mul(half, f64x2_add(yki, ymi));
+                let dr = f64x2_mul(half, f64x2_sub(ykr, ymr));
+                let di = f64x2_mul(half, f64x2_sub(yki, ymi));
+                let wnr = f64x2_splat(DCT_TABLES.wn256_re[k]);
+                let wni = f64x2_splat(-DCT_TABLES.wn256_im[k]);
+                let or = f64x2_sub(f64x2_mul(dr, wnr), f64x2_mul(di, wni));
+                let oi = f64x2_add(f64x2_mul(dr, wni), f64x2_mul(di, wnr));
+
+                let zr = f64x2_sub(er, oi);
+                let zi = f64x2_add(ei, or);
+                self.fft_line[dst * 2] = f64x2_extract_lane::<0>(zr);
+                self.fft_line[dst * 2 + 1] = f64x2_extract_lane::<1>(zr);
+                self.fft_line[(128 + dst) * 2] = -f64x2_extract_lane::<0>(zi);
+                self.fft_line[(128 + dst) * 2 + 1] = -f64x2_extract_lane::<1>(zi);
+                k += 1;
+            }
+            self.fft_radix2_paired(128);
+
+            let inv_m = f64x2_splat(DCT_TABLES.inv_128);
+            let mut idx_r = 0usize;
+            while idx_r < 128 {
+                let ye = f64x2_mul(inv_m, f64x2(self.fft_line[idx_r * 2], self.fft_line[idx_r * 2 + 1]));
+                let yo = f64x2_mul(
+                    f64x2_splat(-DCT_TABLES.inv_128),
                     f64x2(
-                        self.fft_line[(64 + idx_r) * 2],
-                        self.fft_line[(64 + idx_r) * 2 + 1],
+                        self.fft_line[(128 + idx_r) * 2],
+                        self.fft_line[(128 + idx_r) * 2 + 1],
                     ),
                 );
-                let (e_idx, o_idx) = if idx_r < 32 {
+                let (e_idx, o_idx) = if idx_r < 64 {
                     (4 * idx_r, 4 * idx_r + 2)
                 } else {
-                    let q = 63 - idx_r;
+                    let q = 127 - idx_r;
                     (4 * q + 3, 4 * q + 1)
                 };
                 self.solve_z[r0 + e_idx] = f64x2_extract_lane::<0>(ye);
@@ -2775,7 +3939,7 @@ impl BosState {
     /// Runs `L_0^\dagger` in-place on `solve_z` using uniform positive weights `(wx_c, wy_c)`
     /// and grid spacings `(hx, hy)`.
     #[inline(never)]
-    fn apply_dct_poisson_solve_z(&mut self, wx_c: f64, wy_c: f64, hx: f64, hy: f64) {
+    pub(crate) fn apply_dct_poisson_solve_z(&mut self, wx_c: f64, wy_c: f64, hx: f64, hy: f64) {
         self.dct2_2d_solve_z();
         let inv_hx2 = wx_c / (hx * hx);
         let inv_hy2 = wy_c / (hy * hy);
@@ -2846,20 +4010,20 @@ impl BosState {
             }
             return;
         }
-        self.comp_sum[1..=nc].fill(0.0);
+        self.solve_lp[1..=nc].fill(0.0);
         let mut u = 0usize;
         while u < BOS_NODES {
             let cid = self.comp_id[u] as usize;
             if cid > 0 {
                 let val = if target_is_z { self.solve_z[u] } else { self.solve_r[u] };
-                self.comp_sum[cid] += val;
+                self.solve_lp[cid] += val;
             }
             u += 1;
         }
         let mut c = 1usize;
         while c <= nc {
             let cnt = self.comp_count[c] as f64;
-            self.comp_sum[c] = if cnt > 0.0 { self.comp_sum[c] / cnt } else { 0.0 };
+            self.solve_lp[c] = if cnt > 0.0 { self.solve_lp[c] / cnt } else { 0.0 };
             c += 1;
         }
         let mut u = 0usize;
@@ -2867,13 +4031,13 @@ impl BosState {
             let cid = self.comp_id[u] as usize;
             if target_is_z {
                 self.solve_z[u] = if cid > 0 {
-                    self.solve_z[u] - self.comp_sum[cid]
+                    self.solve_z[u] - self.solve_lp[cid]
                 } else {
                     0.0
                 };
             } else {
                 self.solve_r[u] = if cid > 0 {
-                    self.solve_r[u] - self.comp_sum[cid]
+                    self.solve_r[u] - self.solve_lp[cid]
                 } else {
                     0.0
                 };
@@ -2889,26 +4053,26 @@ impl BosState {
             self.solve_x.fill(0.0);
             return;
         }
-        self.comp_sum[1..=nc].fill(0.0);
+        self.solve_lp[1..=nc].fill(0.0);
         let mut u = 0usize;
         while u < BOS_NODES {
             let cid = self.comp_id[u] as usize;
             if cid > 0 {
-                self.comp_sum[cid] += self.solve_x[u];
+                self.solve_lp[cid] += self.solve_x[u];
             }
             u += 1;
         }
         let mut c = 1usize;
         while c <= nc {
             let cnt = self.comp_count[c] as f64;
-            self.comp_sum[c] = if cnt > 0.0 { self.comp_sum[c] / cnt } else { 0.0 };
+            self.solve_lp[c] = if cnt > 0.0 { self.solve_lp[c] / cnt } else { 0.0 };
             c += 1;
         }
         let mut u = 0usize;
         while u < BOS_NODES {
             let cid = self.comp_id[u] as usize;
             self.solve_x[u] = if cid > 0 {
-                self.solve_x[u] - self.comp_sum[cid]
+                self.solve_x[u] - self.solve_lp[cid]
             } else {
                 0.0
             };
@@ -3110,7 +4274,7 @@ impl BosState {
         }
         let nc = num_comps as usize;
         self.comp_count[1..=nc].fill(0); // temporarily reuse comp_count for gauge overlap count
-        self.comp_sum[1..=nc].fill(0.0); // temporarily reuse comp_sum for gauge sum
+        self.solve_lp[1..=nc].fill(0.0); // temporarily reuse solve_lp for gauge sum
         let mut best_cid = 0usize;
         let mut best_overlap = 0u16;
         let mut best_min_idx = usize::MAX;
@@ -3133,7 +4297,7 @@ impl BosState {
                 let cid = self.comp_id[u] as usize;
                 if cid > 0 {
                     self.comp_count[cid] = self.comp_count[cid].saturating_add(1);
-                    self.comp_sum[cid] += self.solve_x[u];
+                    self.solve_lp[cid] += self.solve_x[u];
                 }
                 i += 1;
             }
@@ -3158,7 +4322,7 @@ impl BosState {
             return false;
         }
 
-        let gauge_mean = self.comp_sum[best_cid] / (best_overlap as f64);
+        let gauge_mean = self.solve_lp[best_cid] / (best_overlap as f64);
         if !gauge_mean.is_finite() {
             self.telem[3] |= BOS_REASON_NONCONV;
             self.telem[7] = 0;
@@ -3329,9 +4493,11 @@ impl BosState {
     /// Executes one full BOS frame step using already-ingested planar `luma`.
     /// Returns `true` when `state == BOS_STATE_READY` with valid displacement measurements.
     #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
     pub fn step(
         &mut self,
         cur_luma: &[f32],
+        cur_pyr: &[f32],
         frame_w: usize,
         frame_h: usize,
         continuity_epoch: u32,
@@ -3343,6 +4509,7 @@ impl BosState {
         ext_pan_or_cut: bool,
         ext_scene_cut: bool,
         cache: &mut BosRefCache,
+        pyr: &mut BosPyrScratch,
     ) -> bool {
         if self.ctrl.initialized == 0 {
             self.init_in_place();
@@ -3395,6 +4562,9 @@ impl BosState {
 
         if hard_reset {
             self.ctrl.last_continuity_epoch = continuity_epoch;
+            self.ctrl.stereo_ref_ready = 0;
+            self.ctrl.stereo_ref_fresh = 0;
+            self.ctrl.stereo_ref_epoch = 0;
             self.ctrl.warmup_count = 0;
             self.ctrl.clear_consec_frames = 0;
             self.ctrl.anchor_count = 0;
@@ -3432,6 +4602,9 @@ impl BosState {
             }
 
             if self.ctrl.warmup_count == 0 {
+                self.ctrl.stereo_ref_ready = 0;
+                self.ctrl.stereo_ref_fresh = 0;
+                self.ctrl.stereo_ref_epoch = 0;
                 self.ref_luma[..need_px].copy_from_slice(&cur_luma[..need_px]);
                 self.bump_ref_gen();
                 self.ref_noise_var.fill(0.0);
@@ -3501,6 +4674,9 @@ impl BosState {
 
             let n_next = self.ctrl.warmup_count + 1;
             let alpha = 1.0f32 / (n_next as f32);
+            self.ctrl.stereo_ref_ready = 0;
+            self.ctrl.stereo_ref_fresh = 0;
+            self.ctrl.stereo_ref_epoch = 0;
             let mut p = 0usize;
             while p < need_px {
                 self.ref_luma[p] += (cur_luma[p] - self.ref_luma[p]) * alpha;
@@ -3570,10 +4746,12 @@ impl BosState {
             return false;
         }
 
-        // 3. Dense 128x64 Subpixel Refractive Displacement Extraction
+        // 3. Dense 128x64 Subpixel Refractive Displacement Extraction (with 2-level coarse-to-fine pyramid)
         let maint_mode = self.ctrl.requested_mode == BOS_MODE_MAINT;
+        sync_bos_ref_pyr(&self.ref_luma, frame_w, frame_h, self.ctrl.ref_gen, pyr);
+        compute_bos_coarse_pyr_lk(cur_pyr, pyr, frame_w, frame_h);
         let (valid_disp, rms_disp) =
-            self.extract_dense_lk(cache, cur_luma, frame_w, frame_h, maint_mode);
+            self.extract_dense_lk(cache, pyr, cur_luma, frame_w, frame_h, maint_mode);
         let valid_frac = (valid_disp as f32) * (1.0 / (BOS_NODES as f32));
         if !valid_frac.is_finite() || !rms_disp.is_finite() {
             self.ctrl.clear_consec_frames = 0;
@@ -3632,7 +4810,7 @@ impl BosState {
             if gauge_tot > 0 && gauge_clear * 2 >= gauge_tot {
                 self.ctrl.clear_consec_frames = self.ctrl.clear_consec_frames.saturating_add(1);
                 if self.ctrl.clear_consec_frames >= 120 {
-                    self.update_mode2_reference(cur_luma, frame_w, frame_h);
+                    self.update_mode2_reference(cache, cur_luma, frame_w, frame_h);
                 }
             } else {
                 self.ctrl.clear_consec_frames = 0;
@@ -3697,16 +4875,40 @@ impl BosState {
                             && fit.gain <= 2.0
                             && fit.cnt >= 40
                         {
-                            let mut s2 = 0.0f64;
+                            let v_gain = f64x2_splat(fit.gain);
+                            let v_off = f64x2_splat(fit.offset);
+                            let mut s2_0 = f64x2_splat(0.0);
+                            let mut s2_1 = f64x2_splat(0.0);
                             let mut k = 0usize;
                             while k < 64 {
-                                if cur_mask[k] != 0 {
-                                    let r = (cur_buf[k] as f64)
-                                        - (fit.gain * (p_ref.t[k] as f64) + fit.offset);
-                                    s2 += r * r;
-                                }
-                                k += 1;
+                                let m0 = f64x2(
+                                    if cur_mask[k] != 0 { 1.0 } else { 0.0 },
+                                    if cur_mask[k + 1] != 0 { 1.0 } else { 0.0 },
+                                );
+                                let r0 = f64x2_mul(
+                                    f64x2_sub(
+                                        f64x2(cur_buf[k] as f64, cur_buf[k + 1] as f64),
+                                        f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k] as f64, p_ref.t[k + 1] as f64)), v_off),
+                                    ),
+                                    m0,
+                                );
+                                let m1 = f64x2(
+                                    if cur_mask[k + 2] != 0 { 1.0 } else { 0.0 },
+                                    if cur_mask[k + 3] != 0 { 1.0 } else { 0.0 },
+                                );
+                                let r1 = f64x2_mul(
+                                    f64x2_sub(
+                                        f64x2(cur_buf[k + 2] as f64, cur_buf[k + 3] as f64),
+                                        f64x2_add(f64x2_mul(v_gain, f64x2(p_ref.t[k + 2] as f64, p_ref.t[k + 3] as f64)), v_off),
+                                    ),
+                                    m1,
+                                );
+                                s2_0 = f64x2_add(s2_0, f64x2_mul(r0, r0));
+                                s2_1 = f64x2_add(s2_1, f64x2_mul(r1, r1));
+                                k += 4;
                             }
+                            let s2_v = f64x2_add(s2_0, s2_1);
+                            let s2 = f64x2_extract_lane::<0>(s2_v) + f64x2_extract_lane::<1>(s2_v);
                             self.ref_noise_var[idx] += (s2 / (fit.cnt as f64)) as f32;
                         }
                     }
@@ -3759,8 +4961,8 @@ impl BosState {
             let mut i = 0usize;
             while i < BOS_GRID_W {
                 let u = j * BOS_GRID_W + i;
-                let in_hole = j >= 24 && j < 40 && i >= 55 && i < 73;
-                let in_split = i >= 60 && i < 65;
+                let in_hole = j >= 48 && j < 80 && i >= 110 && i < 146;
+                let in_split = i >= 120 && i < 130;
                 let node_valid = match case_id {
                     0 | 7 | 8 => true,
                     1 | 3 | 6 | 9 => !in_hole,
@@ -3866,7 +5068,7 @@ impl BosState {
         let num_comps = self.label_pos_edge_components();
         let (gx0, gy0, gx1, gy1) = if case_id == 6 {
             // Force empty gauge overlap inside masked-out hole
-            (55usize, 24usize, 73usize, 40usize)
+            (110usize, 48usize, 146usize, 80usize)
         } else if self.has_valid_gauge() {
             (
                 self.ctrl.gauge_x0 as usize,
@@ -3883,5 +5085,1166 @@ impl BosState {
         );
         self.render_bos_rgba();
         1
+    }
+
+    #[inline(always)]
+    pub fn has_fresh_stereo_ref(
+        &self,
+        frame_w: usize,
+        frame_h: usize,
+        frame_idx: u32,
+        continuity_epoch: u32,
+    ) -> bool {
+        self.ctrl.stereo_ref_ready != 0
+            && self.ctrl.stereo_ref_fresh != 0
+            && self.ctrl.stereo_ref_frame_idx == frame_idx
+            && self.ctrl.stereo_ref_epoch == continuity_epoch
+            && (self.ctrl.last_frame_w as usize) == frame_w
+            && (self.ctrl.last_frame_h as usize) == frame_h
+            && frame_w >= 16
+            && frame_h >= 16
+    }
+
+    #[inline(always)]
+    pub fn invalidate_stereo_ref(&mut self) {
+        self.ctrl.stereo_ref_ready = 0;
+        self.ctrl.stereo_ref_fresh = 0;
+        self.ctrl.stereo_ref_epoch = 0;
+        self.ctrl.stereo_ref_frame_idx = u32::MAX;
+    }
+
+    /// Zero all `f64` solver scratch planes (`solve_x..solve_lp`) on scratch-owner handoff
+    /// so mutually exclusive organs (`WindTunnelState`, `ElastoState`, `BosState`) never
+    /// observe stale data from a prior owner.
+    #[inline(never)]
+    pub(crate) fn clear_solver_scratch(&mut self) {
+        self.solve_x.fill(0.0);
+        self.solve_b.fill(0.0);
+        self.solve_r.fill(0.0);
+        self.solve_p.fill(0.0);
+        self.solve_z.fill(0.0);
+        self.solve_lp.fill(0.0);
+    }
+
+    /// Capture an RGBA8 frame directly as the Left rectified stereo reference bound to
+    /// `(frame_idx, continuity_epoch)`, without advancing `ring_cursor`. Invalidates BOS tripod
+    /// state cleanly so BOS never misinterprets stereo `ref_luma` as a static Schlieren background.
+    #[inline(never)]
+    pub fn capture_stereo_left_rgba(
+        &mut self,
+        rgba: &[u8],
+        frame_w: usize,
+        frame_h: usize,
+        frame_idx: u32,
+        continuity_epoch: u32,
+    ) -> u32 {
+        let need_px = frame_w.saturating_mul(frame_h);
+        if frame_w < 16
+            || frame_h < 16
+            || frame_w > BOS_MAX_FRAME_W
+            || frame_h > BOS_MAX_FRAME_H
+            || rgba.len() < need_px.saturating_mul(4)
+        {
+            return 0;
+        }
+        if self.ctrl.initialized == 0 {
+            self.init_in_place();
+        }
+        const INV255: f32 = 1.0 / 255.0;
+        let mut p = 0usize;
+        while p < need_px {
+            let o = p * 4;
+            let r = rgba[o] as f32;
+            let g = rgba[o + 1] as f32;
+            let b = rgba[o + 2] as f32;
+            self.ref_luma[p] = (0.299 * r + 0.587 * g + 0.114 * b) * INV255;
+            p += 1;
+        }
+        self.bump_ref_gen();
+        self.ref_noise_var.fill(1.0e-5);
+        self.ctrl.warmup_count = 0;
+        self.ctrl.anchor_count = 0;
+        self.ctrl.clear_consec_frames = 0;
+        self.telem[2] = BOS_STATE_OFF;
+        self.telem[4] = 0;
+        self.ctrl.last_frame_w = frame_w as u16;
+        self.ctrl.last_frame_h = frame_h as u16;
+        self.ctrl.stereo_ref_ready = 1;
+        self.ctrl.stereo_ref_fresh = 1;
+        self.ctrl.stereo_ref_epoch = continuity_epoch;
+        self.ctrl.stereo_ref_frame_idx = frame_idx;
+        1
+    }
+
+    /// Option B: `256x128` Calibrated Rectified Stereo Disparity & Metric Depth (`SURVEYED_STEREO`).
+    ///
+    /// - Consumes the single-pair Left reference (`stereo_ref_fresh = 0`).
+    /// - Coarse-to-fine 1D horizontal ZNCC epipolar search (`d <= max_disp_px`) with peak-uniqueness
+    ///   rejection (`second_sc <= 0.88 * best_sc`) and reverse R->L pyramid consistency check.
+    /// - SIMD128 `8x8` affine-brightness-invariant IC-LK subpixel refiner + strict `|ey| <= 0.25 px`
+    ///   and `d <= max_disp_px` bounds.
+    /// - 720p-safe scanline visibility / half-occlusion culling via `self.solve_x[..frame_w]`.
+    /// - Left-reference metric `Z` in `BOS_PLANE_PHI`, `1/Z` in `BOS_PLANE_CURL`, local fit
+    ///   uncertainty `sigma_Z` in `BOS_PLANE_VAR_Y`; Right-frame z-buffered depth colormap in `rgba`.
+    /// - Never writes `BOS_STATE_READY` into `self.telem[2]` so BOS Schlieren ABI stays isolated.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_stereo(
+        &mut self,
+        cache: &mut BosRefCache,
+        pyr: &mut BosPyrScratch,
+        cur_luma: &[f32],
+        cur_pyr: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+        f_px: f32,
+        baseline_m: f32,
+        max_disp_px: f32,
+        sign: i32,
+    ) -> (u32, f32, f32, f32, f32) {
+        // Consume pair immediately so unpaired subsequent frames fail closed
+        let was_fresh = self.ctrl.stereo_ref_ready != 0 && self.ctrl.stereo_ref_fresh != 0;
+        self.ctrl.stereo_ref_fresh = 0;
+
+        let need_px = frame_w.saturating_mul(frame_h);
+        if !was_fresh
+            || (self.ctrl.last_frame_w as usize) != frame_w
+            || (self.ctrl.last_frame_h as usize) != frame_h
+            || cur_luma.len() < need_px
+            || !f_px.is_finite()
+            || f_px < 10.0
+            || !baseline_m.is_finite()
+            || baseline_m < 1e-4
+            || !max_disp_px.is_finite()
+            || max_disp_px < 1.0
+            || max_disp_px > 64.0
+        {
+            self.invalidate_outputs();
+            self.telem[2] = BOS_STATE_OFF;
+            return (0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        let max_d = max_disp_px;
+        let wide_mode = max_d > 2.5;
+        let has_pyr = wide_mode && cur_pyr.len() >= BOS_PYR_W * BOS_PYR_H;
+        if has_pyr {
+            sync_bos_ref_pyr(&self.ref_luma, frame_w, frame_h, self.ctrl.ref_gen, pyr);
+        }
+
+        let scale_px_x = (frame_w as f32) * (1.0 / (BOS_PYR_W as f32));
+        let inv_scale_x = (BOS_PYR_W as f32) / (frame_w as f32);
+        let inv_scale_y = (BOS_PYR_H as f32) / (frame_h as f32);
+        let max_dc = (floor_f32(max_d * inv_scale_x) as isize) + 1;
+        let dc_lo = if sign > 0 { 0 } else { -max_dc };
+        let dc_hi = if sign < 0 { 0 } else { max_dc };
+        let dx_int_lo_glob = if sign > 0 { 0isize } else { -(floor_f32(max_d) as isize) };
+        let dx_int_hi_glob = if sign < 0 { 0isize } else { floor_f32(max_d) as isize };
+
+        let mut p_ref = PatchRefData::empty();
+        let mut cur_buf = [0.0f32; 64];
+        let mut cur_mask = [0u8; 64];
+
+        self.planes.fill(0.0);
+        self.valid_mask.fill(0);
+
+        let mut raw_valid = 0u32;
+        let mut pos_cnt = 0u32;
+        let mut neg_cnt = 0u32;
+
+        let mut j = 0usize;
+        while j < BOS_GRID_H {
+            let mut i = 0usize;
+            while i < BOS_GRID_W {
+                let idx = j * BOS_GRID_W + i;
+                let (cx, cy) = node_coord(i, j, frame_w, frame_h);
+                if build_ref_patch_node(
+                    cache,
+                    self.ctrl.ref_gen,
+                    &self.ref_luma,
+                    frame_w,
+                    frame_h,
+                    idx,
+                    &mut p_ref,
+                ) {
+                    let mut init_ex = 0.0f32;
+                    let mut coarse_ok = true;
+                    if wide_mode {
+                        let mut center_dx = 0isize;
+                        let mut pyr_found = false;
+                        if has_pyr {
+                            let pcx = floor_f32(cx * inv_scale_x + 0.5) as isize;
+                            let pcy = floor_f32(cy * inv_scale_y + 0.5) as isize;
+                            if pcx >= 1
+                                && pcx + 1 < (BOS_PYR_W as isize)
+                                && pcy >= 1
+                                && pcy + 1 < (BOS_PYR_H as isize)
+                            {
+                                let mut rt = [0.0f32; 9];
+                                let mut sum_rt = 0.0f32;
+                                let mut r = 0usize;
+                                while r < 3 {
+                                    let row_off =
+                                        ((pcy as usize) + r - 1) * BOS_PYR_W + (pcx as usize) - 1;
+                                    rt[r * 3] = pyr.ref_pyr[row_off];
+                                    rt[r * 3 + 1] = pyr.ref_pyr[row_off + 1];
+                                    rt[r * 3 + 2] = pyr.ref_pyr[row_off + 2];
+                                    sum_rt += rt[r * 3] + rt[r * 3 + 1] + rt[r * 3 + 2];
+                                    r += 1;
+                                }
+                                let mu_rt = sum_rt * (1.0 / 9.0);
+                                let mut var_rt = 0.0f32;
+                                let mut k = 0usize;
+                                while k < 9 {
+                                    rt[k] -= mu_rt;
+                                    var_rt += rt[k] * rt[k];
+                                    k += 1;
+                                }
+                                if var_rt > 2.0e-5 {
+                                    // Store scores across dc_lo..=dc_hi to enforce true peak uniqueness (72 covers sign==0 up to 320px/64px)
+                                    let mut dc_scores = [-1.0f32; 72];
+                                    let mut best_score = -1.0f32;
+                                    let mut best_dc = 0isize;
+                                    let mut best_c_patch = [0.0f32; 9];
+                                    let mut best_c_var = 0.0f32;
+                                    let mut dc = dc_lo;
+                                    while dc <= dc_hi {
+                                        let slot_dc = (dc - dc_lo) as usize;
+                                        let ccx = pcx + dc;
+                                        if ccx >= 1 && ccx + 1 < (BOS_PYR_W as isize) {
+                                            let mut sum_c = 0.0f32;
+                                            let mut cv = [0.0f32; 9];
+                                            let mut rr = 0usize;
+                                            while rr < 3 {
+                                                let ro = ((pcy as usize) + rr - 1) * BOS_PYR_W
+                                                    + (ccx as usize)
+                                                    - 1;
+                                                let v0 = cur_pyr[ro];
+                                                let v1 = cur_pyr[ro + 1];
+                                                let v2 = cur_pyr[ro + 2];
+                                                cv[rr * 3] = v0;
+                                                cv[rr * 3 + 1] = v1;
+                                                cv[rr * 3 + 2] = v2;
+                                                sum_c += v0 + v1 + v2;
+                                                rr += 1;
+                                            }
+                                            let mu_c = sum_c * (1.0 / 9.0);
+                                            let mut cov = 0.0f32;
+                                            let mut var_c = 0.0f32;
+                                            let mut kk = 0usize;
+                                            while kk < 9 {
+                                                let d = cv[kk] - mu_c;
+                                                cv[kk] = d;
+                                                cov += rt[kk] * d;
+                                                var_c += d * d;
+                                                kk += 1;
+                                            }
+                                            if cov > 0.0 && var_c > 2.0e-5 {
+                                                let sc = (cov * cov) / (var_rt * var_c);
+                                                if slot_dc < 72 {
+                                                    dc_scores[slot_dc] = sc;
+                                                }
+                                                if sc > best_score {
+                                                    best_score = sc;
+                                                    best_dc = dc;
+                                                    best_c_patch = cv;
+                                                    best_c_var = var_c;
+                                                }
+                                            }
+                                        }
+                                        dc += 1;
+                                    }
+
+                                    // Uniqueness check: reject ambiguous repetitive textures
+                                    let mut second_sc = -1.0f32;
+                                    let mut dc2 = dc_lo;
+                                    while dc2 <= dc_hi {
+                                        if (dc2 - best_dc).abs() >= 2 {
+                                            let slot_dc = (dc2 - dc_lo) as usize;
+                                            if slot_dc < 72 && dc_scores[slot_dc] > second_sc {
+                                                second_sc = dc_scores[slot_dc];
+                                            }
+                                        }
+                                        dc2 += 1;
+                                    }
+
+                                    if best_score > 0.30 && second_sc <= 0.85 * best_score {
+                                        // Reverse R->L pyramid consistency check
+                                        let rcx = pcx + best_dc;
+                                        let mut rev_best_sc = -1.0f32;
+                                        let mut rev_best_dc = 0isize;
+                                        let mut rdc = -dc_hi;
+                                        while rdc <= -dc_lo {
+                                            let lcx = rcx + rdc;
+                                            if lcx >= 1 && lcx + 1 < (BOS_PYR_W as isize) {
+                                                let mut sum_l = 0.0f32;
+                                                let mut lv = [0.0f32; 9];
+                                                let mut rr = 0usize;
+                                                while rr < 3 {
+                                                    let ro = ((pcy as usize) + rr - 1) * BOS_PYR_W
+                                                        + (lcx as usize)
+                                                        - 1;
+                                                    let v0 = pyr.ref_pyr[ro];
+                                                    let v1 = pyr.ref_pyr[ro + 1];
+                                                    let v2 = pyr.ref_pyr[ro + 2];
+                                                    lv[rr * 3] = v0;
+                                                    lv[rr * 3 + 1] = v1;
+                                                    lv[rr * 3 + 2] = v2;
+                                                    sum_l += v0 + v1 + v2;
+                                                    rr += 1;
+                                                }
+                                                let mu_l = sum_l * (1.0 / 9.0);
+                                                let mut cov = 0.0f32;
+                                                let mut var_l = 0.0f32;
+                                                let mut kk = 0usize;
+                                                while kk < 9 {
+                                                    let d = lv[kk] - mu_l;
+                                                    cov += best_c_patch[kk] * d;
+                                                    var_l += d * d;
+                                                    kk += 1;
+                                                }
+                                                if cov > 0.0 && var_l > 2.0e-5 {
+                                                    let sc = (cov * cov) / (best_c_var * var_l);
+                                                    if sc > rev_best_sc {
+                                                        rev_best_sc = sc;
+                                                        rev_best_dc = rdc;
+                                                    }
+                                                }
+                                            }
+                                            rdc += 1;
+                                        }
+                                        if rev_best_sc > 0.25 && (rev_best_dc + best_dc).abs() <= 1
+                                        {
+                                            center_dx =
+                                                floor_f32((best_dc as f32) * scale_px_x + 0.5)
+                                                    as isize;
+                                            pyr_found = true;
+                                        } else {
+                                            coarse_ok = false;
+                                        }
+                                    } else if second_sc > 0.85 * best_score && best_score > 0.30 {
+                                        // Explicitly reject periodic/ambiguous pyramid peak instead of falling through
+                                        coarse_ok = false;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Stage 1b: Full-res integer 1D scan over strided 4x4 subsample with uniqueness check
+                        if coarse_ok {
+                            let icx = floor_f32(cx + 0.5) as isize;
+                            let icy = floor_f32(cy + 0.5) as isize;
+                            if icx >= 4
+                                && icx + 4 < (frame_w as isize)
+                                && icy >= 4
+                                && icy + 4 < (frame_h as isize)
+                            {
+                                let mut t16 = [0.0f32; 16];
+                                let mut sum_t16 = 0.0f32;
+                                let mut q = 0usize;
+                                let mut py4 = 0usize;
+                                while py4 < 4 {
+                                    let sy = (icy as usize) - 3 + py4 * 2;
+                                    let row_o = sy * frame_w;
+                                    let mut px4 = 0usize;
+                                    while px4 < 4 {
+                                        let sx = (icx as usize) - 3 + px4 * 2;
+                                        let v = self.ref_luma[row_o + sx];
+                                        t16[q] = v;
+                                        sum_t16 += v;
+                                        q += 1;
+                                        px4 += 1;
+                                    }
+                                    py4 += 1;
+                                }
+                                let mu_t16 = sum_t16 * (1.0 / 16.0);
+                                let mut var_t16 = 0.0f32;
+                                let mut qq = 0usize;
+                                while qq < 16 {
+                                    t16[qq] -= mu_t16;
+                                    var_t16 += t16[qq] * t16[qq];
+                                    qq += 1;
+                                }
+                                if var_t16 > 5.0e-5 {
+                                    let (scan_lo, scan_hi, step) = if pyr_found {
+                                        (
+                                            (center_dx - 4).max(dx_int_lo_glob),
+                                            (center_dx + 4).min(dx_int_hi_glob),
+                                            1isize,
+                                        )
+                                    } else {
+                                        (dx_int_lo_glob, dx_int_hi_glob, 2isize)
+                                    };
+                                    let mut best_sc = -1.0f32;
+                                    let mut best_dx = 0isize;
+                                    let mut dx_i = scan_lo;
+                                    while dx_i <= scan_hi {
+                                        let tx = icx + dx_i;
+                                        if tx >= 4 && tx + 4 < (frame_w as isize) {
+                                            let mut c16 = [0.0f32; 16];
+                                            let mut sum_c16 = 0.0f32;
+                                            let mut idx16 = 0usize;
+                                            let mut r4 = 0usize;
+                                            while r4 < 4 {
+                                                let sy = (icy as usize) - 3 + r4 * 2;
+                                                let ro = sy * frame_w;
+                                                let mut c4 = 0usize;
+                                                while c4 < 4 {
+                                                    let sx = (tx as usize) - 3 + c4 * 2;
+                                                    let v = cur_luma[ro + sx];
+                                                    c16[idx16] = v;
+                                                    sum_c16 += v;
+                                                    idx16 += 1;
+                                                    c4 += 1;
+                                                }
+                                                r4 += 1;
+                                            }
+                                            let mu_c16 = sum_c16 * (1.0 / 16.0);
+                                            let mut cov = 0.0f32;
+                                            let mut var_c16 = 0.0f32;
+                                            let mut kk = 0usize;
+                                            while kk < 16 {
+                                                let d = c16[kk] - mu_c16;
+                                                cov += t16[kk] * d;
+                                                var_c16 += d * d;
+                                                kk += 1;
+                                            }
+                                            if cov > 0.0 && var_c16 > 5.0e-5 {
+                                                let sc = (cov * cov) / (var_t16 * var_c16);
+                                                if sc > best_sc {
+                                                    best_sc = sc;
+                                                    best_dx = dx_i;
+                                                }
+                                            }
+                                        }
+                                        dx_i += step;
+                                    }
+
+                                    // Sub-pixel refine best_dx match score (apples-to-apples with sub-pixel
+                                    // autocorrelation so sharp aperiodic textures at half-pixel disparity are
+                                    // never falsely rejected), then screen Right rivals and Left autocorrelation.
+                                    let mut best_sc_ref = best_sc;
+                                    let mut rival_sc = -1.0f32;
+                                    if best_sc > 0.15 {
+                                        let mut t1 = [0.0f32; 16];
+                                        let mut v11 = 0.0f32;
+                                        let mut v01 = 0.0f32;
+                                        let mut has_t1 = false;
+                                        if icx + 5 < (frame_w as isize) {
+                                            let mut sum_t1 = 0.0f32;
+                                            let mut q1 = 0usize;
+                                            let mut py1 = 0usize;
+                                            while py1 < 4 {
+                                                let sy = (icy as usize) - 3 + py1 * 2;
+                                                let row_o = sy * frame_w;
+                                                let mut px1 = 0usize;
+                                                while px1 < 4 {
+                                                    let sx = (icx as usize) - 2 + px1 * 2;
+                                                    let v = self.ref_luma[row_o + sx];
+                                                    t1[q1] = v;
+                                                    sum_t1 += v;
+                                                    q1 += 1;
+                                                    px1 += 1;
+                                                }
+                                                py1 += 1;
+                                            }
+                                            let mu_t1 = sum_t1 * (1.0 / 16.0);
+                                            let mut qq1 = 0usize;
+                                            while qq1 < 16 {
+                                                let d1 = t1[qq1] - mu_t1;
+                                                t1[qq1] = d1;
+                                                v11 += d1 * d1;
+                                                v01 += t16[qq1] * d1;
+                                                qq1 += 1;
+                                            }
+                                            let det_t01 = var_t16 * v11 - v01 * v01;
+                                            if v11 > 5.0e-5 && det_t01 > 1.0e-6 * var_t16 * v11 {
+                                                has_t1 = true;
+                                            }
+                                        }
+                                        let (ref_dx, _ref_int, ref_sub) = refine_best_match_subpx(
+                                            cur_luma,
+                                            frame_w,
+                                            icx,
+                                            icy as usize,
+                                            &t16,
+                                            var_t16,
+                                            &t1,
+                                            v11,
+                                            v01,
+                                            has_t1,
+                                            dx_int_lo_glob,
+                                            dx_int_hi_glob,
+                                            best_dx,
+                                            best_sc,
+                                        );
+                                        best_dx = ref_dx;
+                                        best_sc_ref = ref_sub;
+
+                                        if best_sc_ref > 0.40 {
+                                            let rival_thresh = 0.85 * best_sc_ref;
+                                            let mut r_dx = dx_int_lo_glob;
+                                            while r_dx <= dx_int_hi_glob {
+                                                if (r_dx - best_dx).abs() >= 4 {
+                                                    let tx = icx + r_dx;
+                                                    if tx >= 4 && tx + 4 < (frame_w as isize) {
+                                                        let mut c16 = [0.0f32; 16];
+                                                        let mut sum_c16 = 0.0f32;
+                                                        let mut idx16 = 0usize;
+                                                        let mut r4 = 0usize;
+                                                        while r4 < 4 {
+                                                            let sy = (icy as usize) - 3 + r4 * 2;
+                                                            let ro = sy * frame_w;
+                                                            let mut c4 = 0usize;
+                                                            while c4 < 4 {
+                                                                let sx = (tx as usize) - 3 + c4 * 2;
+                                                                let v = cur_luma[ro + sx];
+                                                                c16[idx16] = v;
+                                                                sum_c16 += v;
+                                                                idx16 += 1;
+                                                                c4 += 1;
+                                                            }
+                                                            r4 += 1;
+                                                        }
+                                                        let mu_c16 = sum_c16 * (1.0 / 16.0);
+                                                        let mut cov = 0.0f32;
+                                                        let mut var_c16 = 0.0f32;
+                                                        let mut kk = 0usize;
+                                                        while kk < 16 {
+                                                            let d = c16[kk] - mu_c16;
+                                                            cov += t16[kk] * d;
+                                                            var_c16 += d * d;
+                                                            kk += 1;
+                                                        }
+                                                        if cov > 0.0
+                                                            && var_c16 > 5.0e-5
+                                                            && var_c16 >= 0.25 * var_t16
+                                                            && var_c16 <= 4.0 * var_t16
+                                                        {
+                                                            let sc =
+                                                                (cov * cov) / (var_t16 * var_c16);
+                                                            if sc > rival_sc {
+                                                                rival_sc = sc;
+                                                                if rival_sc > rival_thresh {
+                                                                    break;
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                r_dx += 2;
+                                            }
+                                            if rival_sc <= rival_thresh {
+                                                let max_auto = (floor_f32(2.0 * max_d) as isize
+                                                    + 1)
+                                                    .clamp(4, 128);
+                                                rival_sc = screen_patch_autocorr_1d(
+                                                    &self.ref_luma,
+                                                    frame_w,
+                                                    icx,
+                                                    icy as usize,
+                                                    &t16,
+                                                    mu_t16,
+                                                    var_t16,
+                                                    &t1,
+                                                    v11,
+                                                    v01,
+                                                    has_t1,
+                                                    max_auto,
+                                                    rival_thresh,
+                                                    rival_sc,
+                                                );
+                                            }
+                                        }
+                                    }
+
+                                    if best_sc_ref > 0.40 && rival_sc <= 0.85 * best_sc_ref {
+                                        init_ex = best_dx as f32;
+                                    } else {
+                                        if best_sc_ref > 0.40 && rival_sc > 0.85 * best_sc_ref {
+                                            self.valid_mask[idx] = 0x80;
+                                        }
+                                        coarse_ok = false;
+                                    }
+                                } else {
+                                    coarse_ok = false;
+                                }
+                            } else {
+                                coarse_ok = false;
+                            }
+                        }
+                    }
+
+                    // Stage 2: SIMD128 8x8 Affine-Brightness-Invariant IC-LK Subpixel Refinement
+                    if coarse_ok {
+                        let mut ex = init_ex;
+                        let mut ey = 0.0f32;
+                        let mut iter_ok = true;
+                        let mut last_step2 = 0.0f32;
+                        let mut reusable_fit = None;
+                        let max_iters = 4usize;
+                        let mut it = 0usize;
+                        while it < max_iters {
+                            if let Some(fit) = eval_cur_patch_8x8(
+                                cur_luma,
+                                frame_w,
+                                frame_h,
+                                cx,
+                                cy,
+                                ex,
+                                ey,
+                                &p_ref,
+                                &mut cur_buf,
+                                &mut cur_mask,
+                            ) {
+                                if !fit.gain.is_finite() || fit.gain < 0.5 || fit.gain > 2.0 {
+                                    iter_ok = false;
+                                    break;
+                                }
+                                let inv_det = 1.0 / fit.det;
+                                let step_x = (-(fit.h_yy * fit.bx - fit.h_xy * fit.by)
+                                    * inv_det
+                                    * (1.0 / fit.gain)) as f32;
+                                let step_y = (-(-fit.h_xy * fit.bx + fit.h_xx * fit.by)
+                                    * inv_det
+                                    * (1.0 / fit.gain)) as f32;
+                                if !step_x.is_finite() || !step_y.is_finite() {
+                                    iter_ok = false;
+                                    break;
+                                }
+                                ex += step_x;
+                                ey += step_y;
+                                if (ex - init_ex).abs() > 2.5
+                                    || ex.abs() > max_d + 0.05
+                                    || ey.abs() > 1.25
+                                {
+                                    iter_ok = false;
+                                    break;
+                                }
+                                let step2 = step_x * step_x + step_y * step_y;
+                                last_step2 = step2;
+                                if step2 < 1.0e-6 {
+                                    reusable_fit = Some(fit);
+                                    break;
+                                }
+                                if step2 < 1.0e-5 {
+                                    break;
+                                }
+                            } else {
+                                iter_ok = false;
+                                break;
+                            }
+                            it += 1;
+                        }
+
+                        // Stage 3: Strict Rectified Vertical Epipolar Gate (|ey| <= 0.25 px),
+                        // IC-LK convergence check, and strict disparity bound |ex| <= max_d
+                        if iter_ok && last_step2 <= 0.02 && ey.abs() <= 0.25 && ex.abs() <= max_d {
+                            let final_fit_opt = if reusable_fit.is_some() {
+                                reusable_fit
+                            } else {
+                                eval_cur_patch_8x8(
+                                    cur_luma,
+                                    frame_w,
+                                    frame_h,
+                                    cx,
+                                    cy,
+                                    ex,
+                                    ey,
+                                    &p_ref,
+                                    &mut cur_buf,
+                                    &mut cur_mask,
+                                )
+                            };
+                            if let Some(final_fit) = final_fit_opt {
+                                let m_cnt = final_fit.cnt;
+                                let gain = final_fit.gain;
+                                let offset = final_fit.offset;
+                                if gain.is_finite() && gain >= 0.5 && gain <= 2.0 && m_cnt >= 40 {
+                                    let v_gain = f64x2_splat(gain);
+                                    let v_off = f64x2_splat(offset);
+                                    let mut s2_0 = f64x2_splat(0.0);
+                                    let mut s2_1 = f64x2_splat(0.0);
+                                    let mut k = 0usize;
+                                    while k < 64 {
+                                        let m0 = f64x2(
+                                            if cur_mask[k] != 0 { 1.0 } else { 0.0 },
+                                            if cur_mask[k + 1] != 0 { 1.0 } else { 0.0 },
+                                        );
+                                        let r0 = f64x2_mul(
+                                            f64x2_sub(
+                                                f64x2(cur_buf[k] as f64, cur_buf[k + 1] as f64),
+                                                f64x2_add(
+                                                    f64x2_mul(
+                                                        v_gain,
+                                                        f64x2(
+                                                            p_ref.t[k] as f64,
+                                                            p_ref.t[k + 1] as f64,
+                                                        ),
+                                                    ),
+                                                    v_off,
+                                                ),
+                                            ),
+                                            m0,
+                                        );
+                                        let m1 = f64x2(
+                                            if cur_mask[k + 2] != 0 { 1.0 } else { 0.0 },
+                                            if cur_mask[k + 3] != 0 { 1.0 } else { 0.0 },
+                                        );
+                                        let r1 = f64x2_mul(
+                                            f64x2_sub(
+                                                f64x2(
+                                                    cur_buf[k + 2] as f64,
+                                                    cur_buf[k + 3] as f64,
+                                                ),
+                                                f64x2_add(
+                                                    f64x2_mul(
+                                                        v_gain,
+                                                        f64x2(
+                                                            p_ref.t[k + 2] as f64,
+                                                            p_ref.t[k + 3] as f64,
+                                                        ),
+                                                    ),
+                                                    v_off,
+                                                ),
+                                            ),
+                                            m1,
+                                        );
+                                        s2_0 = f64x2_add(s2_0, f64x2_mul(r0, r0));
+                                        s2_1 = f64x2_add(s2_1, f64x2_mul(r1, r1));
+                                        k += 4;
+                                    }
+                                    let s2_v = f64x2_add(s2_0, s2_1);
+                                    let sum_r2 = f64x2_extract_lane::<0>(s2_v)
+                                        + f64x2_extract_lane::<1>(s2_v);
+                                    let final_mse = sum_r2 / (m_cnt as f64);
+                                    let res_limit = (0.035 * 0.035f64).max(0.35 * p_ref.ref_var);
+                                    if final_mse.is_finite() && final_mse <= res_limit {
+                                        let dof = (m_cnt - 4).max(1) as f64;
+                                        let inv_det = 1.0 / final_fit.det;
+                                        let sigma_ref2 = (sum_r2 / dof) / (gain * gain);
+                                        let vx = (sigma_ref2 * final_fit.h_yy * inv_det + 2.25e-4)
+                                            .max(1e-4);
+                                        if ex.is_finite()
+                                            && ey.is_finite()
+                                            && vx.is_finite()
+                                            && vx <= 0.1225
+                                        {
+                                            self.planes[BOS_PLANE_EPS_X * BOS_NODES + idx] = ex;
+                                            self.planes[BOS_PLANE_EPS_Y * BOS_NODES + idx] = ey;
+                                            self.planes[BOS_PLANE_VAR_X * BOS_NODES + idx] =
+                                                vx as f32;
+                                            self.valid_mask[idx] = BOS_VALID_DISP;
+                                            raw_valid += 1;
+                                            if ex > 0.05 {
+                                                pos_cnt += 1;
+                                            } else if ex < -0.05 {
+                                                neg_cnt += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+
+        // On rows with periodic rejections (`0x80`), verify surviving nodes in Right `cur_luma`
+        // (catches half-image large periods where the second cycle only appears in the shifted
+        // Right frame, skipping rows below the threshold on clean aperiodic scenes),
+        // then bridge narrow (~7.5 px) seam cracks flanked on BOTH horizontal sides by `0x80`,
+        // and clear the temporary `0x80` bit before downstream stages.
+        let max_auto_r = (floor_f32(4.0 * max_d) as isize + 1).clamp(4, 140);
+        let bridge_r: usize = if frame_w <= 320 {
+            6
+        } else if frame_w <= 640 {
+            3
+        } else {
+            2
+        };
+        let mut bj = 0usize;
+        while bj < BOS_GRID_H {
+            let row = bj * BOS_GRID_W;
+            let mut row_periodic = 0u32;
+            let mut pi = 0usize;
+            while pi < BOS_GRID_W {
+                if (self.valid_mask[row + pi] & 0x80) != 0 {
+                    row_periodic += 1;
+                }
+                pi += 1;
+            }
+            if wide_mode && row_periodic >= 4 {
+                let mut ri = 0usize;
+                while ri < BOS_GRID_W {
+                    let u = row + ri;
+                    if (self.valid_mask[u] & BOS_VALID_DISP) != 0 {
+                        let (cx, cy) = node_coord(ri, bj, frame_w, frame_h);
+                        let ex = self.planes[BOS_PLANE_EPS_X * BOS_NODES + u];
+                        let rx = floor_f32(cx + ex + 0.5) as isize;
+                        let icy = floor_f32(cy + 0.5) as isize;
+                        if rx >= 4
+                            && rx + 4 < (frame_w as isize)
+                            && icy >= 4
+                            && icy + 4 < (frame_h as isize)
+                        {
+                            let icy_u = icy as usize;
+                            let mut tr16 = [0.0f32; 16];
+                            let mut sum_tr16 = 0.0f32;
+                            let mut q = 0usize;
+                            let mut py4 = 0usize;
+                            while py4 < 4 {
+                                let sy = icy_u - 3 + py4 * 2;
+                                let ro = sy * frame_w;
+                                let mut px4 = 0usize;
+                                while px4 < 4 {
+                                    let sx = (rx as usize) - 3 + px4 * 2;
+                                    let v = cur_luma[ro + sx];
+                                    tr16[q] = v;
+                                    sum_tr16 += v;
+                                    q += 1;
+                                    px4 += 1;
+                                }
+                                py4 += 1;
+                            }
+                            let mu_tr16 = sum_tr16 * (1.0 / 16.0);
+                            let mut var_tr16 = 0.0f32;
+                            let mut qq = 0usize;
+                            while qq < 16 {
+                                tr16[qq] -= mu_tr16;
+                                var_tr16 += tr16[qq] * tr16[qq];
+                                qq += 1;
+                            }
+                            if var_tr16 > 5.0e-5 {
+                                let mut tr1 = [0.0f32; 16];
+                                let mut vr11 = 0.0f32;
+                                let mut vr01 = 0.0f32;
+                                let mut has_tr1 = false;
+                                if rx + 5 < (frame_w as isize) {
+                                    let mut sum_tr1 = 0.0f32;
+                                    let mut q1 = 0usize;
+                                    let mut py1 = 0usize;
+                                    while py1 < 4 {
+                                        let sy = icy_u - 3 + py1 * 2;
+                                        let ro = sy * frame_w;
+                                        let mut px1 = 0usize;
+                                        while px1 < 4 {
+                                            let sx = (rx as usize) - 2 + px1 * 2;
+                                            let v = cur_luma[ro + sx];
+                                            tr1[q1] = v;
+                                            sum_tr1 += v;
+                                            q1 += 1;
+                                            px1 += 1;
+                                        }
+                                        py1 += 1;
+                                    }
+                                    let mu_tr1 = sum_tr1 * (1.0 / 16.0);
+                                    let mut qq1 = 0usize;
+                                    while qq1 < 16 {
+                                        let d1 = tr1[qq1] - mu_tr1;
+                                        tr1[qq1] = d1;
+                                        vr11 += d1 * d1;
+                                        vr01 += tr16[qq1] * d1;
+                                        qq1 += 1;
+                                    }
+                                    let det_r01 = var_tr16 * vr11 - vr01 * vr01;
+                                    if vr11 > 5.0e-5 && det_r01 > 1.0e-6 * var_tr16 * vr11 {
+                                        has_tr1 = true;
+                                    }
+                                }
+                                let r_sc = screen_patch_autocorr_1d(
+                                    cur_luma,
+                                    frame_w,
+                                    rx,
+                                    icy_u,
+                                    &tr16,
+                                    mu_tr16,
+                                    var_tr16,
+                                    &tr1,
+                                    vr11,
+                                    vr01,
+                                    has_tr1,
+                                    max_auto_r,
+                                    0.85,
+                                    -1.0,
+                                );
+                                if r_sc > 0.85 {
+                                    self.valid_mask[u] = 0x80;
+                                    raw_valid = raw_valid.saturating_sub(1);
+                                    if ex > 0.05 {
+                                        pos_cnt = pos_cnt.saturating_sub(1);
+                                    } else if ex < -0.05 {
+                                        neg_cnt = neg_cnt.saturating_sub(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ri += 1;
+                }
+            }
+            let mut bi = 0usize;
+            while bi < BOS_GRID_W {
+                let u = row + bi;
+                if (self.valid_mask[u] & BOS_VALID_DISP) != 0 {
+                    let mut has_l = false;
+                    let mut kl = 1usize;
+                    while kl <= bridge_r && bi >= kl {
+                        if (self.valid_mask[u - kl] & 0x80) != 0 {
+                            has_l = true;
+                            break;
+                        }
+                        kl += 1;
+                    }
+                    if has_l {
+                        let mut has_r = false;
+                        let mut kr = 1usize;
+                        while kr <= bridge_r && bi + kr < BOS_GRID_W {
+                            if (self.valid_mask[u + kr] & 0x80) != 0 {
+                                has_r = true;
+                                break;
+                            }
+                            kr += 1;
+                        }
+                        if has_r {
+                            let ex = self.planes[BOS_PLANE_EPS_X * BOS_NODES + u];
+                            self.valid_mask[u] = 0;
+                            raw_valid = raw_valid.saturating_sub(1);
+                            if ex > 0.05 {
+                                pos_cnt = pos_cnt.saturating_sub(1);
+                            } else if ex < -0.05 {
+                                neg_cnt = neg_cnt.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+                bi += 1;
+            }
+            let mut ci = 0usize;
+            while ci < BOS_GRID_W {
+                self.valid_mask[row + ci] &= !0x80;
+                ci += 1;
+            }
+            bj += 1;
+        }
+
+        if raw_valid == 0 {
+            self.invalidate_outputs();
+            self.telem[2] = BOS_STATE_OFF;
+            return (0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        let eff_sign: f32 = if sign < 0 {
+            -1.0
+        } else if sign > 0 {
+            1.0
+        } else if neg_cnt >= pos_cnt {
+            -1.0
+        } else {
+            1.0
+        };
+
+        // Stage 4: 720p-Safe Scanline Visibility / Half-Occlusion Culling + Metric Depth Z = fB / d
+        // Reuse `self.solve_x[0..frame_w]` (`32,768` f64s, covers 320/640/1280 with 0 stack!).
+        let zbuf_len = frame_w.min(BOS_NODES);
+        let fb = f_px * baseline_m;
+        let mut valid_stereo = 0u32;
+        let mut epi_sq_sum = 0.0f64;
+        let mut min_z = f32::INFINITY;
+        let mut max_z = 0.0f32;
+        let mut min_iz = f32::INFINITY;
+        let mut max_iz = 0.0f32;
+
+        let mut j = 0usize;
+        while j < BOS_GRID_H {
+            if wide_mode {
+                let mut bx = 0usize;
+                while bx < zbuf_len {
+                    self.solve_x[bx] = 0.0;
+                    bx += 1;
+                }
+                let mut i = 0usize;
+                while i < BOS_GRID_W {
+                    let u = j * BOS_GRID_W + i;
+                    if (self.valid_mask[u] & BOS_VALID_DISP) != 0 {
+                        let ex = self.planes[BOS_PLANE_EPS_X * BOS_NODES + u];
+                        let d = eff_sign * ex;
+                        if d >= 0.05 && d <= max_d {
+                            let (cx, _) = node_coord(i, j, frame_w, frame_h);
+                            let xr = floor_f32(cx + ex + 0.5) as isize;
+                            if xr >= 0 && (xr as usize) < zbuf_len {
+                                let xru = xr as usize;
+                                if (d as f64) > self.solve_x[xru] {
+                                    self.solve_x[xru] = d as f64;
+                                }
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+            }
+
+            let mut i = 0usize;
+            while i < BOS_GRID_W {
+                let u = j * BOS_GRID_W + i;
+                if (self.valid_mask[u] & BOS_VALID_DISP) != 0 {
+                    let ex = self.planes[BOS_PLANE_EPS_X * BOS_NODES + u];
+                    let ey = self.planes[BOS_PLANE_EPS_Y * BOS_NODES + u];
+                    let vx = self.planes[BOS_PLANE_VAR_X * BOS_NODES + u];
+                    let d = eff_sign * ex;
+                    if d >= 0.05 && d <= max_d {
+                        let mut occluded = false;
+                        if wide_mode {
+                            let (cx, _) = node_coord(i, j, frame_w, frame_h);
+                            let xr = floor_f32(cx + ex + 0.5) as isize;
+                            if xr >= 0 && (xr as usize) < zbuf_len {
+                                let xru = xr as usize;
+                                let x0 = xru.saturating_sub(2);
+                                let x1 = (xru + 2).min(zbuf_len - 1);
+                                let mut d_front = 0.0f64;
+                                let mut xx = x0;
+                                while xx <= x1 {
+                                    if self.solve_x[xx] > d_front {
+                                        d_front = self.solve_x[xx];
+                                    }
+                                    xx += 1;
+                                }
+                                if d_front > (d as f64) + 2.0 {
+                                    occluded = true;
+                                }
+                            }
+                        }
+                        if !occluded {
+                            let z = fb / d;
+                            let inv_z = d / fb;
+                            let sigma_z = ((z * z) / fb) * sqrt_f32(vx.max(1e-6));
+                            if z.is_finite()
+                                && z > 0.0
+                                && inv_z.is_finite()
+                                && inv_z > 1e-6
+                                && sigma_z.is_finite()
+                            {
+                                self.planes[BOS_PLANE_PHI * BOS_NODES + u] = z;
+                                self.planes[BOS_PLANE_CURL * BOS_NODES + u] = inv_z;
+                                self.planes[BOS_PLANE_VAR_Y * BOS_NODES + u] = sigma_z;
+                                self.valid_mask[u] |= BOS_VALID_PHI;
+                                valid_stereo += 1;
+                                epi_sq_sum += (ey as f64) * (ey as f64);
+                                if z < min_z {
+                                    min_z = z;
+                                }
+                                if z > max_z {
+                                    max_z = z;
+                                }
+                                if inv_z < min_iz {
+                                    min_iz = inv_z;
+                                }
+                                if inv_z > max_iz {
+                                    max_iz = inv_z;
+                                }
+                            }
+                        }
+                    }
+                }
+                i += 1;
+            }
+            j += 1;
+        }
+
+        if valid_stereo == 0 {
+            self.invalidate_outputs();
+            self.telem[2] = BOS_STATE_OFF;
+            return (0, 0.0, 0.0, 0.0, 0.0);
+        }
+
+        // Coprime spatial sampling across all columns & rows for median Z (in `self.fft_line[..512]`)
+        let mut samp_n = 0usize;
+        let mut step_k = 0usize;
+        while step_k < BOS_NODES && samp_n < 512 {
+            let u = (step_k.wrapping_mul(67)) & (BOS_NODES - 1);
+            if (self.valid_mask[u] & BOS_VALID_PHI) != 0 {
+                self.fft_line[samp_n] = self.planes[BOS_PLANE_PHI * BOS_NODES + u] as f64;
+                samp_n += 1;
+            }
+            step_k += 1;
+        }
+        let mut gap = samp_n >> 1;
+        while gap > 0 {
+            let mut ii = gap;
+            while ii < samp_n {
+                let key = self.fft_line[ii];
+                let mut jj = ii;
+                while jj >= gap && self.fft_line[jj - gap] > key {
+                    self.fft_line[jj] = self.fft_line[jj - gap];
+                    jj -= gap;
+                }
+                self.fft_line[jj] = key;
+                ii += 1;
+            }
+            gap >>= 1;
+        }
+        let med_z = if samp_n > 0 {
+            self.fft_line[samp_n >> 1] as f32
+        } else {
+            min_z
+        };
+        let epi_rms = sqrt_f64(epi_sq_sum / (valid_stereo as f64)) as f32;
+
+        // Keep BOS Schlieren ABI isolated (`BOS_STATE_OFF`; stereo telemetry lives in `DepthState::telem`)
+        self.telem[2] = BOS_STATE_OFF;
+        self.telem[4] = 0;
+
+        // Stage 5: Render Right-frame z-buffered 256x128 perceptual inverse-depth heatmap into `self.rgba`
+        self.rgba.fill(0);
+        let iz_span = (max_iz - min_iz).max(1e-4);
+        let inv_span = 1.0 / iz_span;
+        let inv_hx = (BOS_GRID_W as f32) / (frame_w as f32);
+        let mut jj = 0usize;
+        while jj < BOS_GRID_H {
+            let mut bi = 0usize;
+            while bi < BOS_GRID_W {
+                self.solve_x[bi] = 0.0;
+                bi += 1;
+            }
+            let mut ii = 0usize;
+            while ii < BOS_GRID_W {
+                let u = jj * BOS_GRID_W + ii;
+                if (self.valid_mask[u] & BOS_VALID_PHI) != 0 {
+                    let iz = self.planes[BOS_PLANE_CURL * BOS_NODES + u];
+                    let ex = self.planes[BOS_PLANE_EPS_X * BOS_NODES + u];
+                    let (cx_l, _) = node_coord(ii, jj, frame_w, frame_h);
+                    let cx_r = cx_l + ex;
+                    if cx_r >= 0.0 && cx_r < (frame_w as f32) {
+                        let ir = (floor_f32(cx_r * inv_hx) as isize)
+                            .clamp(0, (BOS_GRID_W - 1) as isize) as usize;
+                        if (iz as f64) > self.solve_x[ir] {
+                            self.solve_x[ir] = iz as f64;
+                            let t = ((iz - min_iz) * inv_span).clamp(0.0, 1.0);
+                            let (r, g, b) = if t < 0.35 {
+                                let s = t * (1.0 / 0.35);
+                                (18.0 + 18.0 * s, 44.0 + 132.0 * s, 118.0 + 106.0 * s)
+                            } else if t < 0.70 {
+                                let s = (t - 0.35) * (1.0 / 0.35);
+                                (36.0 + 206.0 * s, 176.0 + 42.0 * s, 224.0 - 154.0 * s)
+                            } else {
+                                let s = (t - 0.70) * (1.0 / 0.30);
+                                (242.0 + 13.0 * s, 218.0 - 138.0 * s, 70.0 - 38.0 * s)
+                            };
+                            let off = (jj * BOS_GRID_W + ir) * 4;
+                            self.rgba[off] = r as u8;
+                            self.rgba[off + 1] = g as u8;
+                            self.rgba[off + 2] = b as u8;
+                            self.rgba[off + 3] = 220;
+                        }
+                    }
+                }
+                ii += 1;
+            }
+            jj += 1;
+        }
+
+        (valid_stereo, epi_rms, med_z, min_z, max_z)
     }
 }

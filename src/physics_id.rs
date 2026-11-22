@@ -1432,7 +1432,7 @@ fn verlet_drag_pos_rms(sc: &mut PhysicsIdScratch, n: usize, g_val: f32, beta_val
 // =============================================================================
 
 fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut PhysicsIdScratch) -> OdeResult {
-    if nv < 15 {
+    if nv < 7 {
         return OdeResult::zero(0.0);
     }
 
@@ -1460,9 +1460,9 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
         i += 1;
     }
 
-    // 2. Single-frame outlier spike cleanup
+    // 2. Single-frame outlier spike cleanup (cadence-scaled so 25 fps fast ballistic launches stay intact)
     let seg_len = nv - start_k;
-    if seg_len < 15 {
+    if seg_len < 7 {
         return OdeResult::zero(0.0);
     }
     let mut nc = 0usize;
@@ -1474,10 +1474,12 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
         let t0 = sc.ts_v[prev_i];
         let t1 = sc.ts_v[idx];
         let t2 = sc.ts_v[idx + 1];
-        let frac = (t1 - t0) / max_f32(t2 - t0, 1.0e-4);
+        let span_dt = max_f32(t2 - t0, 1.0e-4);
+        let frac = (t1 - t0) / span_dt;
         let px_int = sc.xs_v[prev_i] + frac * (sc.xs_v[idx + 1] - sc.xs_v[prev_i]);
         let py_int = sc.ys_v[prev_i] + frac * (sc.ys_v[idx + 1] - sc.ys_v[prev_i]);
-        if hypot_f32(sc.xs_v[idx] - px_int, sc.ys_v[idx] - py_int) <= 16.0 {
+        let spike_tol = 16.0 * (span_dt * 15.0).clamp(1.0, 2.5);
+        if hypot_f32(sc.xs_v[idx] - px_int, sc.ys_v[idx] - py_int) <= spike_tol {
             sc.clean_idx[nc] = idx as u8;
             nc += 1;
         }
@@ -1487,7 +1489,7 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
     nc += 1;
 
     let n = nc;
-    if n < 15 {
+    if n < 7 {
         return OdeResult::zero(0.0);
     }
     let t_base = sc.ts_v[sc.clean_idx[0] as usize];
@@ -1515,6 +1517,43 @@ fn discover_from_normalized_vis(nv: usize, s: f32, prior_flight: u8, sc: &mut Ph
         i += 1;
     }
     let t_span = sc.t_arr[n - 1];
+
+    // Dedicated short-arc pure-ballistic fast path for 7..=14 frame free-flight tosses (e.g. juggling arcs).
+    // Strictly requires strong downward vertical acceleration (`ay_q > 120`), near-zero horizontal accel,
+    // high quadratic R^2 (`>= 0.96`), and clear curvature gain over CV (`rms_quad <= 0.55 * rms_lin`).
+    if n < 15 {
+        if t_span < 0.20 {
+            return OdeResult::zero(0.0);
+        }
+        let (_, _, _, _, rss_lin, tss_lin) = fit_linear_xy(&sc.t_arr, &sc.xc, &sc.yc, 0, n);
+        let rms_lin = sqrt_f32(rss_lin * inv_n);
+        let (cx_q, cy_q, _tm_q, rss_q) = match fit_quad_xy(&sc.t_arr, &sc.xc, &sc.yc, 0, n) {
+            Some(v) => v,
+            None => return OdeResult::zero(rms_lin * s),
+        };
+        let rms_q = sqrt_f32(rss_q * inv_n);
+        let r2_q = 1.0 - rss_q / max_f32(tss_lin, 1.0e-6);
+        let ax_q = 2.0 * cx_q[2];
+        let ay_q = 2.0 * cy_q[2];
+        if ay_q > 120.0
+            && ay_q < 9000.0
+            && abs_f32(ax_q) <= 0.35 * ay_q
+            && rms_lin > 2.2
+            && rms_q <= 2.2
+            && rms_q <= 0.55 * rms_lin
+            && r2_q >= 0.96
+        {
+            let mut out = OdeResult::zero(rms_q * s);
+            out.phys_regime = PHYS_REGIME_BALLISTIC;
+            out.phys_regime_conf = ((r2_q - 0.90) / 0.10).clamp(0.55, 0.96);
+            out.ode_r2 = r2_q.clamp(0.0, 1.0);
+            out.active_terms = 1;
+            out.est_g_px_s2 = ay_q * s;
+            return out;
+        }
+        return OdeResult::zero(rms_lin * s);
+    }
+
     if t_span < 0.25 {
         return OdeResult::zero(0.0);
     }

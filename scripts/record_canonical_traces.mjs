@@ -85,6 +85,21 @@ const SCENARIOS = [
     what: 'ingest ring, ROI, worker ABI (gate_i0_i4_ingest.mjs)',
     argv: ['scripts/gate_i0_i4_ingest.mjs'],
   },
+  {
+    id: 'depth',
+    what: 'zero-ML depth sensing: mono parallax, micro/wide stereo BOS, external plane (gate_i7_depth.mjs --parity-lite)',
+    argv: ['scripts/gate_i7_depth.mjs', '--parity-lite'],
+  },
+  {
+    id: 'wind',
+    what: 'pocket wind tunnel: DEC pressure, lift/drag, weak-form Navier-Stokes viscosity (gate_i9_wind_tunnel.mjs --parity-lite)',
+    argv: ['scripts/gate_i9_wind_tunnel.mjs', '--parity-lite'],
+  },
+  {
+    id: 'elasto',
+    what: 'kHz optical elastography, structural power flow & lock-in acoustic BOS (gate_i8_elastography.mjs --parity-lite)',
+    argv: ['scripts/gate_i8_elastography.mjs', '--parity-lite'],
+  },
 ];
 
 const args = process.argv.slice(2);

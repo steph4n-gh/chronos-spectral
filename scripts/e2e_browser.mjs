@@ -1316,8 +1316,8 @@ async function main() {
         };
       })()`
     );
-    if (selectMeta.optgroups !== 4 || selectMeta.options !== 18) {
-      throw new Error(`Expected 4 <optgroup> and 18 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (selectMeta.optgroups !== 7 || selectMeta.options !== 36) {
+      throw new Error(`Expected 7 <optgroup> and 36 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);
@@ -6673,6 +6673,329 @@ async function main() {
         );
       } finally {
         await cdp.send('Target.closeTarget', { targetId: w2TargetId }).catch(() => {});
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 11: v3.2.0 Interactive Mode Demo Showcases (Depth Parallax, FoE/TTC,
+    //          Hodge 64x36 Circulation, 247.5 Hz RS Vibrometry & 720p Fovea)
+    // ------------------------------------------------------------------------
+    {
+      const { targetId: v32TargetId } = await cdp.send('Target.createTarget', {
+        url: new URL('/index.html?view=deck', appUrl).href,
+      });
+      const { sessionId: v32Session } = await cdp.send('Target.attachToTarget', {
+        targetId: v32TargetId,
+        flatten: true,
+      });
+      try {
+        await cdp.send('Page.enable', {}, v32Session);
+        await cdp.send('Runtime.enable', {}, v32Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+          v32Session
+        );
+        await waitForCondition(
+          cdp,
+          v32Session,
+          'v3.2.0 demos deck boot ready',
+          `(() => {
+            const btn = document.querySelector('.showcase-btn[data-showcase="depth_parallax"]');
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            return { ok: Boolean(btn) && Boolean(w2 && w2.available === true && w2.depth?.available), avail: Boolean(w2?.available) };
+          })()`,
+          20000
+        );
+        await cdp.evalJs(
+          v32Session,
+          `(() => {
+            window.__e2eV32Cls = 0;
+            window.__e2eV32ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eV32Cls += e.value;
+              }
+            });
+            window.__e2eV32ClsPo.observe({ type: 'layout-shift', buffered: false });
+            return true;
+          })()`
+        );
+
+        // Slow virtualized CI runners drop 30fps HD frames under software rendering, which triggers
+        // FRAME_GAP_SEQ -> continuity_epoch bumps and resets Depth/Hodge/RS sliding windows. Match
+        // Step 9's CI pacing (0.25x wall-clock, exact 1/30s mediaTimeSec per frame).
+        const ciPaceJs = process.env.CI
+          ? `(() => { const v = document.getElementById('hiddenVideoSource'); if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; } })()`
+          : '';
+        const v32WaitMs = process.env.CI ? 45000 : 25000;
+
+        // 11a. Zero-ML Lateral Depth Parallax showcase
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="depth_parallax"]')?.click(); ${ciPaceJs}; true;`);
+        const dpState = await waitForCondition(
+          cdp,
+          v32Session,
+          'depth_parallax READY_PARALLAX MONO_METRIC',
+          `(() => {
+            ${ciPaceJs};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const d = w2 && w2.depth;
+            return {
+              ok: Boolean(d && d.state === 2 && d.provenance === 2 && d.validTracks >= 20),
+              state: d ? d.state : 0,
+              prov: d ? d.provenance : 0,
+              tracks: d ? d.validTracks : 0,
+            };
+          })()`,
+          v32WaitMs
+        );
+
+        // 11a2. Zero-ML Forward Approach FoE & Looming TTC showcase
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="depth_foe_ttc"]')?.click(); ${ciPaceJs}; true;`);
+        const foeState = await waitForCondition(
+          cdp,
+          v32Session,
+          'depth_foe_ttc FoE lock + TTC tracks',
+          `(() => {
+            ${ciPaceJs};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const d = w2 && w2.depth;
+            return {
+              ok: Boolean(d && d.ttcValidTracks >= 4 && d.foeInliers >= 4 && d.bestTtcR2 >= 0.96),
+              state: d ? d.state : 0,
+              ttcTracks: d ? d.ttcValidTracks : 0,
+              foeInliers: d ? d.foeInliers : 0,
+              r2: d ? d.bestTtcR2 : 0,
+            };
+          })()`,
+          v32WaitMs
+        );
+
+        // 11b. Mesh Hodge 64x36 Cylinder Circulation showcase
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="hodge_cylinder"]')?.click(); ${ciPaceJs}; true;`);
+        const hcState = await waitForCondition(
+          cdp,
+          v32Session,
+          'hodge_cylinder READY with beta1>=1 and Ex/Co/Ha',
+          `(() => {
+            ${ciPaceJs};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const h = w2 && w2.hodge;
+            return {
+              ok: Boolean(h && h.state === 2 && h.beta1 >= 1 && h.coexactFrac > 0.05 && h.harmFrac > 0.05),
+              state: h ? h.state : 0,
+              beta1: h ? h.beta1 : 0,
+              ex: h ? h.exactFrac : 0,
+              co: h ? h.coexactFrac : 0,
+              ha: h ? h.harmFrac : 0,
+            };
+          })()`,
+          v32WaitMs
+        );
+
+        // 11c. 247.5 Hz Rolling-Shutter Vibrometry (RS_ONLY) showcase
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="rs_vibro_247hz"]')?.click(); ${ciPaceJs}; true;`);
+        const rsState = await waitForCondition(
+          cdp,
+          v32Session,
+          'rs_vibro_247hz READY near 247.5 Hz',
+          `(() => {
+            ${ciPaceJs};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const v = w2 && w2.vibro;
+            return {
+              ok: Boolean(v && v.state === 3 && Math.abs(v.domFreqHz - 247.5) < 5.0 && v.domAmpPx > 0.35),
+              state: v ? v.state : 0,
+              domFreqHz: v ? v.domFreqHz : 0,
+              domAmpPx: v ? v.domAmpPx : 0,
+            };
+          })()`,
+          v32WaitMs
+        );
+
+        // 11d. 720p Dual-Resolution 1:1 Fovea & PTZ showcase
+        await cdp.evalJs(v32Session, `document.querySelector('.showcase-btn[data-showcase="fovea_720p"]')?.click(); true;`);
+        const fvState = await waitForCondition(
+          cdp,
+          v32Session,
+          'fovea_720p native 1280x720 + 1:1 ROI active',
+          `(() => {
+            const v = document.getElementById('hiddenVideoSource');
+            const roi = document.getElementById('roiGeomMeta')?.textContent || '';
+            return {
+              ok: Boolean(v && v.videoWidth === 1280 && v.videoHeight === 720 && roi.includes('1:1 NATIVE')),
+              vw: v ? v.videoWidth : 0,
+              vh: v ? v.videoHeight : 0,
+              roi,
+            };
+          })()`,
+          20000
+        );
+
+        const v32Cls = await cdp.evalJs(
+          v32Session,
+          `(() => {
+            if (window.__e2eV32ClsPo) window.__e2eV32ClsPo.disconnect();
+            return window.__e2eV32Cls || 0;
+          })()`
+        );
+        if (v32Cls >= 0.000001) {
+          throw new Error(`Step 11: Expected 0.000000 CLS across v3.2.0 interactive demos, got ${v32Cls}`);
+        }
+        console.log(
+          `  [PASS] Step 11 (v3.2.0 Interactive Mode Demos): depthParallax=(MONO_METRIC, trk=${dpState.tracks}), foeTtc=(ttc=${foeState.ttcTracks}, R2=${foeState.r2.toFixed(3)}), hodgeCyl=(b1=${hcState.beta1}, Ex=${(hcState.ex*100).toFixed(0)}%/Co=${(hcState.co*100).toFixed(0)}%/Ha=${(hcState.ha*100).toFixed(0)}%), rsVibro=(${rsState.domFreqHz.toFixed(1)}Hz, amp=${rsState.domAmpPx.toFixed(2)}px), fovea720p=(${fvState.vw}x${fvState.vh}, ${fvState.roi}), CLS=${v32Cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: v32TargetId }).catch(() => {});
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // Step 12: v3.3.0 Interactive Mode Demos (Pocket Wind Tunnel Cp + Lift/Drag,
+    //          kHz Optical Elastography Crack Panel & 1.2 kHz Lock-In Acoustic BOS)
+    // ------------------------------------------------------------------------
+    {
+      const { targetId: v33TargetId } = await cdp.send('Target.createTarget', {
+        url: new URL('/index.html?view=deck', appUrl).href,
+      });
+      const { sessionId: v33Session } = await cdp.send('Target.attachToTarget', {
+        targetId: v33TargetId,
+        flatten: true,
+      });
+      try {
+        await cdp.send('Page.enable', {}, v33Session);
+        await cdp.send('Runtime.enable', {}, v33Session);
+        await cdp.send(
+          'Emulation.setDeviceMetricsOverride',
+          { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false },
+          v33Session
+        );
+        await waitForCondition(
+          cdp,
+          v33Session,
+          'v3.3.0 demos deck boot ready',
+          `(() => {
+            const btnW = document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]');
+            const btnE = document.querySelector('.showcase-btn[data-showcase="elasto_crack"]');
+            const btnA = document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]');
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            return {
+              ok: Boolean(btnW && btnE && btnA && w2 && w2.available === true && w2.wind?.available && w2.elasto?.available),
+              avail: Boolean(w2?.available),
+              windAvail: Boolean(w2?.wind?.available),
+              elastoAvail: Boolean(w2?.elasto?.available),
+            };
+          })()`,
+          20000
+        );
+        await cdp.evalJs(
+          v33Session,
+          `(() => {
+            window.__e2eV33Cls = 0;
+            window.__e2eV33ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eV33Cls += e.value;
+              }
+            });
+            window.__e2eV33ClsPo.observe({ type: 'layout-shift', buffered: false });
+            return true;
+          })()`
+        );
+
+        const ciPaceV33Js = process.env.CI
+          ? `(() => { const v = document.getElementById('hiddenVideoSource'); if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; } })()`
+          : '';
+        const v33WaitMs = process.env.CI ? 50000 : 30000;
+
+        // 12a. Pocket Wind Tunnel: Lifting Cylinder Cp & Kutta-Joukowski Lift/Drag
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]')?.click(); ${ciPaceV33Js}; true;`);
+        const wtState = await waitForCondition(
+          cdp,
+          v33Session,
+          'wind_lifting_cyl READY_LOADS with Cp + Kutta-Joukowski lift',
+          `(() => {
+            ${ciPaceV33Js};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const w = w2 && w2.wind;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(w && w.state === 3 && w.validCells >= 1200 && Math.abs(w.cl) > 1.5 && Math.abs(w.clKj) > 1.5 && om === 13),
+              state: w ? w.state : 0,
+              cells: w ? w.validCells : 0,
+              cl: w ? w.cl : 0,
+              cd: w ? w.cd : 0,
+              clKj: w ? w.clKj : 0,
+              om,
+            };
+          })()`,
+          v33WaitMs
+        );
+
+        // 12b. kHz Optical Elastography: Hidden Crack Panel (380+860 Hz Kirchhoff Plate)
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="elasto_crack"]')?.click(); ${ciPaceV33Js}; true;`);
+        const elState = await waitForCondition(
+          cdp,
+          v33Session,
+          'elasto_crack READY KIRCHHOFF_PLATE via muxed 48 kHz audio',
+          `(() => {
+            ${ciPaceV33Js};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const e = w2 && w2.elasto;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(e && e.state === 3 && e.dispClass === 1 && e.alpha > 0.35 && e.alpha < 0.72 && e.meanCoh > 0.75 && e.validCells >= 1500 && om === 14),
+              state: e ? e.state : 0,
+              cls: e ? e.dispClass : 0,
+              alpha: e ? e.alpha : 0,
+              medC: e ? e.medC : 0,
+              coh: e ? e.meanCoh : 0,
+              cells: e ? e.validCells : 0,
+              reason: e ? e.reasonMask : 0,
+              om,
+            };
+          })()`,
+          v33WaitMs
+        );
+
+        // 12c. Lock-In Acoustic BOS: 1,200 Hz Standing Wave (256x128 |Phi|)
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]')?.click(); ${ciPaceV33Js}; true;`);
+        const abosState = await waitForCondition(
+          cdp,
+          v33Session,
+          'acoustic_bos READY 256x128 |Phi| via muxed 48 kHz audio',
+          `(() => {
+            ${ciPaceV33Js};
+            const w2 = window.__chronosWave2Probe?.getLastWave2();
+            const e = w2 && w2.elasto;
+            const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
+            return {
+              ok: Boolean(e && e.state === 3 && e.mode === 4 && e.abosPhiRms > 0.15 && e.abosCurlRms < 0.08 && e.validCells >= 16000 && om === 15),
+              state: e ? e.state : 0,
+              mode: e ? e.mode : 0,
+              phiRms: e ? e.abosPhiRms : 0,
+              curlRms: e ? e.abosCurlRms : 0,
+              cells: e ? e.validCells : 0,
+              reason: e ? e.reasonMask : 0,
+              om,
+            };
+          })()`,
+          v33WaitMs
+        );
+
+        const v33Cls = await cdp.evalJs(
+          v33Session,
+          `(() => {
+            if (window.__e2eV33ClsPo) window.__e2eV33ClsPo.disconnect();
+            return window.__e2eV33Cls || 0;
+          })()`
+        );
+        if (v33Cls >= 0.000001) {
+          throw new Error(`Step 12: Expected 0.000000 CLS across v3.3.0 interactive demos, got ${v33Cls}`);
+        }
+        console.log(
+          `  [PASS] Step 12 (v3.3.0 Wind Tunnel, kHz Elastography & Acoustic BOS): wind=(CL=${wtState.cl.toFixed(2)}, KJ=${wtState.clKj.toFixed(2)}, cells=${wtState.cells}), elasto=(KIRCHHOFF, a=${elState.alpha.toFixed(2)}, c=${Math.round(elState.medC)}, coh=${elState.coh.toFixed(2)}), abos=(|Phi|=${abosState.phiRms.toFixed(3)}, curl=${abosState.curlRms.toFixed(3)}, cells=${abosState.cells}), CLS=${v33Cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: v33TargetId }).catch(() => {});
       }
     }
 

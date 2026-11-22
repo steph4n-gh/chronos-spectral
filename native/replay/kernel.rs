@@ -15,8 +15,8 @@ pub enum Ret {
     I32(u32),
     /// f32 result, raw bits.
     F32(u32),
-    /// Pointer result (native address). Not comparable with a wasm address.
-    Ptr(usize),
+    /// Pointer result (native address with full provenance). Not comparable with a wasm address.
+    Ptr(*mut u8),
 }
 
 pub trait Arg: Sized {
@@ -35,6 +35,19 @@ impl Arg for u32 {
         v
     }
     fn dummy() -> u32 {
+        0
+    }
+}
+
+impl Arg for i32 {
+    const CODE: u8 = VT_I32;
+    const SIZE: usize = 4;
+    fn read(b: &[u8], o: &mut usize) -> i32 {
+        let v = i32::from_le_bytes(b[*o..*o + 4].try_into().unwrap());
+        *o += 4;
+        v
+    }
+    fn dummy() -> i32 {
         0
     }
 }
@@ -94,7 +107,7 @@ impl<T> IntoRet for *const T {
     const RESULTS: &'static [u8] = &[VT_I32];
     const POINTER: bool = true;
     fn into_ret(self) -> Ret {
-        Ret::Ptr(self as usize)
+        Ret::Ptr(self.cast::<u8>().cast_mut())
     }
 }
 
@@ -102,7 +115,7 @@ impl<T> IntoRet for *mut T {
     const RESULTS: &'static [u8] = &[VT_I32];
     const POINTER: bool = true;
     fn into_ret(self) -> Ret {
-        Ret::Ptr(self as usize)
+        Ret::Ptr(self.cast::<u8>())
     }
 }
 
@@ -195,6 +208,9 @@ exports! {
     chronos_get_rigid_bodies_ptr();
     chronos_get_swarm_telemetry_ptr();
     chronos_get_modal_field_ptr();
+    chronos_get_fovea_rgba_ptr(u32);
+    chronos_set_fovea_meta(u32, u32, u32, u32, u32, u32, u32, u32);
+    chronos_get_fovea_request_ptr();
     chronos_set_ingest_meta(u32, u32, u32, u32, f32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32, u32);
     chronos_get_ring_meta_ptr();
     chronos_get_row_luma_ptr();
@@ -208,6 +224,17 @@ exports! {
     chronos_get_bos_valid_ptr();
     chronos_get_bos_rgba_ptr();
     chronos_bos_solve_manufactured_test(u32, f32, f32);
+    chronos_set_depth_mode(u32);
+    chronos_get_depth_mode();
+    chronos_set_depth_calib(f32, f32, f32, f32, i32);
+    chronos_depth_capture_stereo_left();
+    chronos_set_depth_external_meta(u32, u32, f32, u32, u32);
+    chronos_get_depth_telemetry_ptr();
+    chronos_get_depth_field_ptr();
+    chronos_get_depth_tracks_ptr();
+    chronos_get_depth_track_flags_ptr();
+    chronos_get_depth_hero_ptr();
+    chronos_get_depth_ingest_ptr();
     chronos_set_micro_metrology_mode(u32);
     chronos_get_micro_cov_ptr();
     chronos_get_micro_residual_ptr();
@@ -225,9 +252,20 @@ exports! {
     chronos_get_hodge_planes_ptr();
     chronos_get_hodge_inject_ptr();
     chronos_hodge_solve_injected(f32, f32);
+    chronos_set_wind_mode(u32);
+    chronos_set_wind_fluid_density(f32);
+    chronos_get_wind_telemetry_ptr();
+    chronos_get_wind_planes_ptr();
+    chronos_wind_solve_injected(f32, f32, f64);
+    chronos_set_elasto_mode(u32);
+    chronos_set_elasto_lock_freqs(u32, f32, f32, f32, f32);
+    chronos_get_elasto_telemetry_ptr();
+    chronos_get_elasto_planes_ptr();
+    chronos_get_elasto_valid_ptr();
     chronos_get_conservation_telemetry_ptr();
     chronos_get_conservation_input_ptr();
     chronos_eval_occluded_pair();
+    chronos_seed_target(f32, f32, f32, f32);
     chronos_inspect_field_point(f32, f32);
     chronos_inspect_micro_track(u32);
     chronos_pre_tick(f32);

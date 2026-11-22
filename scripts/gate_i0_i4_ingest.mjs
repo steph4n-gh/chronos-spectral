@@ -23,15 +23,15 @@ const WORKER_PATH = path.join(ROOT, 'web', 'worker.js');
 const PAGE_BYTES = 65536;
 const EXPECTED_PAGES = 448;
 const EXPECTED_MEM_BYTES = EXPECTED_PAGES * PAGE_BYTES; // 29,360,128
-const MAX_ARENA_BYTES = 24_117_248;
-const WAVE1_MAX_STATIC_END = 24_248_320;
+const MAX_ARENA_BYTES = 29_100_000;
+const WAVE1_MAX_STATIC_END = 29_294_592;
 const FULL_RING_SLOT_BYTES = 640 * 360 * 4; // 921,600 B
 const RING_LEN = 12;
 const RING_META_STRIDE = 24;
 const ROW_LUMA_H = 360;
 const WAVE1_TELEM_LEN = 192;
-const BOS_W = 128;
-const BOS_H = 64;
+const BOS_W = 256;
+const BOS_H = 128;
 const BOS_N = BOS_W * BOS_H;
 
 const STAMP_VALID = 1 << 0;
@@ -245,10 +245,10 @@ function createViews(exp, mem) {
       ? new Float32Array(mem.buffer, exp.chronos_get_bos_planes_ptr(), 6 * BOS_N)
       : null,
     microTracks: typeof exp.chronos_get_micro_tracks_ptr === 'function'
-      ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 1536 * 8)
+      ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 3072 * 8)
       : null,
     microCov: typeof exp.chronos_get_micro_cov_ptr === 'function'
-      ? new Float32Array(mem.buffer, exp.chronos_get_micro_cov_ptr(), 3 * 1536)
+      ? new Float32Array(mem.buffer, exp.chronos_get_micro_cov_ptr(), 3 * 3072)
       : null,
   };
 }
@@ -494,14 +494,16 @@ async function runWorkerRejectionHarness(wasmBytes) {
   assert(countType('frame_ack') === 2 && countType('ingest_rejected') === 3, 'Worker must recover and ack next valid frame');
   assert((vm.runInContext('wave1TelemView[4] >>> 0', sandbox)) === 2, `Expected commits=2 after recovery, got ${vm.runInContext('wave1TelemView[4] >>> 0', sandbox)}`);
 
-  // 5. Mid-tick JS throw between chronos_pre_tick and chronos_post_tick recovers cleanly without status=1, commit increment, or phase/sync wedge
+  // 5. Mid-tick throw between chronos_pre_tick and chronos_post_tick recovers cleanly without status=1, commit increment, or phase/sync wedge
   vm.runInContext(`
-    const __origFiedler = solveShiftedLanczosFiedler;
+    const __origWasmExports = wasmExports;
     let __throwOnce = true;
-    solveShiftedLanczosFiedler = function() {
-      if (__throwOnce) { __throwOnce = false; throw new Error('injected_mid_tick_fault'); }
-      return __origFiedler();
-    };
+    wasmExports = Object.assign({}, __origWasmExports, {
+      chronos_solve_fiedler_lanczos() {
+        if (__throwOnce) { __throwOnce = false; throw new Error('injected_mid_tick_fault'); }
+        return __origWasmExports.chronos_solve_fiedler_lanczos();
+      },
+    });
   `, sandbox);
   await fakeSelf.onmessage({
     data: {
@@ -1090,7 +1092,7 @@ function runGateI4Workload(wasmBytes, hdTex, budgetScale, flagsBase, hdBytes) {
   g4e.chronos_set_swarm_mode(2);
   g4e.chronos_set_micro_metrology_mode(2);
   g4e.chronos_set_bos_mode(1);
-  g4e.chronos_set_bos_gauge_roi(4, 4, 24, 60);
+  g4e.chronos_set_bos_gauge_roi(8, 8, 48, 120);
 
   const g4Ring0Ptr = g4e.chronos_get_ring_slot_ptr(0);
   const hdRing = Array.from({ length: RING_LEN }, (_, s) => new Uint8Array(g4.mem.buffer, g4e.chronos_get_ring_slot_ptr(s), hdBytes));
@@ -1221,9 +1223,34 @@ async function main() {
     'chronos_get_conservation_telemetry_ptr',
     'chronos_get_conservation_input_ptr',
     'chronos_eval_occluded_pair',
+    'chronos_seed_target',
+    'chronos_get_fovea_rgba_ptr',
+    'chronos_set_fovea_meta',
+    'chronos_get_fovea_request_ptr',
+    'chronos_set_depth_mode',
+    'chronos_get_depth_mode',
+    'chronos_set_depth_calib',
+    'chronos_depth_capture_stereo_left',
+    'chronos_set_depth_external_meta',
+    'chronos_get_depth_telemetry_ptr',
+    'chronos_get_depth_field_ptr',
+    'chronos_get_depth_tracks_ptr',
+    'chronos_get_depth_track_flags_ptr',
+    'chronos_get_depth_hero_ptr',
+    'chronos_get_depth_ingest_ptr',
+    'chronos_set_wind_mode',
+    'chronos_set_wind_fluid_density',
+    'chronos_wind_solve_injected',
+    'chronos_get_wind_telemetry_ptr',
+    'chronos_get_wind_planes_ptr',
+    'chronos_set_elasto_mode',
+    'chronos_set_elasto_lock_freqs',
+    'chronos_get_elasto_telemetry_ptr',
+    'chronos_get_elasto_planes_ptr',
+    'chronos_get_elasto_valid_ptr',
   ];
   const exportNames = Object.keys(exp);
-  assert(exportNames.length === 76, `Expected exact pinned Wasm export count 76, got ${exportNames.length}`);
+  assert(exportNames.length === 101, `Expected exact pinned Wasm export count 101, got ${exportNames.length}`);
   assert(typeof exp.chronos_get_micro_metrology_mode === 'undefined', 'Unpinned export chronos_get_micro_metrology_mode must not exist');
   for (const name of [...requiredWave1, ...requiredWave2]) {
     assert(typeof exp[name] === 'function', `Missing required export: ${name}`);
@@ -1264,17 +1291,28 @@ async function main() {
     ranges.push({ name: 'bos_planes', start: exp.chronos_get_bos_planes_ptr(), end: exp.chronos_get_bos_planes_ptr() + 6 * BOS_N * 4 });
   }
   if (typeof exp.chronos_get_micro_cov_ptr === 'function') {
-    ranges.push({ name: 'micro_cov', start: exp.chronos_get_micro_cov_ptr(), end: exp.chronos_get_micro_cov_ptr() + 3 * 1536 * 4 });
+    ranges.push({ name: 'micro_cov', start: exp.chronos_get_micro_cov_ptr(), end: exp.chronos_get_micro_cov_ptr() + 3 * 3072 * 4 });
   }
   ranges.push({ name: 'wave2_telem', start: exp.chronos_get_wave2_telemetry_ptr(), end: exp.chronos_get_wave2_telemetry_ptr() + 64 * 4 });
   ranges.push({ name: 'audio_staging', start: exp.chronos_get_audio_staging_ptr(), end: exp.chronos_get_audio_staging_ptr() + 4096 * 4 });
   ranges.push({ name: 'vibro_telem', start: exp.chronos_get_vibro_telemetry_ptr(), end: exp.chronos_get_vibro_telemetry_ptr() + 32 * 4 });
-  ranges.push({ name: 'vibro_planes', start: exp.chronos_get_vibro_planes_ptr(), end: exp.chronos_get_vibro_planes_ptr() + (3 * 880 + 64) * 4 });
+  ranges.push({ name: 'vibro_planes', start: exp.chronos_get_vibro_planes_ptr(), end: exp.chronos_get_vibro_planes_ptr() + (3 * 2304 + 128) * 4 });
   ranges.push({ name: 'hodge_telem', start: exp.chronos_get_hodge_telemetry_ptr(), end: exp.chronos_get_hodge_telemetry_ptr() + 32 * 4 });
-  ranges.push({ name: 'hodge_planes', start: exp.chronos_get_hodge_planes_ptr(), end: exp.chronos_get_hodge_planes_ptr() + 7 * 880 * 4 });
-  ranges.push({ name: 'hodge_inject', start: exp.chronos_get_hodge_inject_ptr(), end: exp.chronos_get_hodge_inject_ptr() + 3 * 880 * 4 });
+  ranges.push({ name: 'hodge_planes', start: exp.chronos_get_hodge_planes_ptr(), end: exp.chronos_get_hodge_planes_ptr() + 7 * 2304 * 4 });
+  ranges.push({ name: 'hodge_inject', start: exp.chronos_get_hodge_inject_ptr(), end: exp.chronos_get_hodge_inject_ptr() + 3 * 2304 * 4 });
   ranges.push({ name: 'conservation_telem', start: exp.chronos_get_conservation_telemetry_ptr(), end: exp.chronos_get_conservation_telemetry_ptr() + 32 * 4 });
   ranges.push({ name: 'conservation_input', start: exp.chronos_get_conservation_input_ptr(), end: exp.chronos_get_conservation_input_ptr() + 32 * 4 });
+  ranges.push({ name: 'depth_telem', start: exp.chronos_get_depth_telemetry_ptr(), end: exp.chronos_get_depth_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'depth_field', start: exp.chronos_get_depth_field_ptr(), end: exp.chronos_get_depth_field_ptr() + 64 * 36 * 2 * 4 });
+  ranges.push({ name: 'depth_tracks', start: exp.chronos_get_depth_tracks_ptr(), end: exp.chronos_get_depth_tracks_ptr() + 3072 * 2 * 4 });
+  ranges.push({ name: 'depth_track_flags', start: exp.chronos_get_depth_track_flags_ptr(), end: exp.chronos_get_depth_track_flags_ptr() + 3072 });
+  ranges.push({ name: 'depth_hero', start: exp.chronos_get_depth_hero_ptr(), end: exp.chronos_get_depth_hero_ptr() + 16 * 4 * 4 });
+  ranges.push({ name: 'depth_ingest', start: exp.chronos_get_depth_ingest_ptr(), end: exp.chronos_get_depth_ingest_ptr() + 128 * 64 * 4 });
+  ranges.push({ name: 'wind_telem', start: exp.chronos_get_wind_telemetry_ptr(), end: exp.chronos_get_wind_telemetry_ptr() + 32 * 4 });
+  ranges.push({ name: 'wind_planes', start: exp.chronos_get_wind_planes_ptr(), end: exp.chronos_get_wind_planes_ptr() + 3 * 2304 * 4 });
+  ranges.push({ name: 'elasto_telem', start: exp.chronos_get_elasto_telemetry_ptr(), end: exp.chronos_get_elasto_telemetry_ptr() + 32 * 4 });
+  assert(exp.chronos_get_elasto_planes_ptr() === exp.chronos_get_bos_planes_ptr(), 'elasto_planes must alias bos_planes');
+  assert(exp.chronos_get_elasto_valid_ptr() === exp.chronos_get_bos_valid_ptr(), 'elasto_valid must alias bos_valid');
   ranges.sort((a, b) => a.start - b.start);
   for (let i = 1; i < ranges.length; i++) {
     assert(ranges[i - 1].end <= ranges[i].start, `Overlap ${ranges[i - 1].name} vs ${ranges[i].name}`);
@@ -1400,7 +1438,7 @@ async function main() {
   exp.chronos_init();
   exp.chronos_set_resolution(1);
   exp.chronos_set_bos_mode(1);
-  exp.chronos_set_bos_gauge_roi(4, 4, 24, 60);
+  exp.chronos_set_bos_gauge_roi(8, 8, 48, 120);
   const hdHits = new Int32Array(RING_LEN);
   let seqHd = 100;
   let tHdUs = 0;
@@ -1696,7 +1734,7 @@ async function main() {
     se.chronos_set_swarm_mode(2);
     se.chronos_set_micro_metrology_mode(2);
     se.chronos_set_bos_mode(1);
-    se.chronos_set_bos_gauge_roi(4, 4, 24, 60);
+    se.chronos_set_bos_gauge_roi(8, 8, 48, 120);
 
     const lastFreshProd = new Array(6).fill(null);
     const prodFreshCount = new Int32Array(6);
@@ -1812,7 +1850,7 @@ async function main() {
       r.exp.chronos_set_swarm_mode(2);
       r.exp.chronos_set_micro_metrology_mode(2);
       r.exp.chronos_set_bos_mode(1);
-      r.exp.chronos_set_bos_gauge_roi(4, 4, 24, 60);
+      r.exp.chronos_set_bos_gauge_roi(8, 8, 48, 120);
       const rv = createViews(r.exp, r.mem);
       const scratch = new Uint8Array(hdBytes);
       for (let f = 0; f < 48; f++) {

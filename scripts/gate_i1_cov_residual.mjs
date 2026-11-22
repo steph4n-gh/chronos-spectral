@@ -24,7 +24,7 @@ import { spawn, spawnSync } from 'node:child_process';
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
 const W = 640;
 const H = 360;
-const MAX_MICRO = 1536;
+const MAX_MICRO = 3072;
 const MICRO_STRIDE = 8;
 
 const QUAL_EST_MASK = 0x7;
