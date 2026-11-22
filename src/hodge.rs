@@ -17,16 +17,16 @@
 //!   upstream inflow speed; a deficit hypothesis is an observational cue, not proof of a solid
 //!   obstacle.
 
-pub const HODGE_W: usize = 40;
-pub const HODGE_H: usize = 22;
-pub const HODGE_V: usize = HODGE_W * HODGE_H; // 880
-pub const HODGE_EX: usize = (HODGE_W - 1) * HODGE_H; // 858
-pub const HODGE_EY: usize = HODGE_W * (HODGE_H - 1); // 840
-pub const HODGE_E: usize = HODGE_EX + HODGE_EY; // 1,698
-pub const HODGE_F: usize = (HODGE_W - 1) * (HODGE_H - 1); // 819
+pub const HODGE_W: usize = 64;
+pub const HODGE_H: usize = 36;
+pub const HODGE_V: usize = HODGE_W * HODGE_H; // 2,304
+pub const HODGE_EX: usize = (HODGE_W - 1) * HODGE_H; // 2,268
+pub const HODGE_EY: usize = HODGE_W * (HODGE_H - 1); // 2,240
+pub const HODGE_E: usize = HODGE_EX + HODGE_EY; // 4,508
+pub const HODGE_F: usize = (HODGE_W - 1) * (HODGE_H - 1); // 2,205
 pub const HODGE_TELEM_LEN: usize = 32;
-pub const HODGE_PLANES_LEN: usize = 7 * HODGE_V; // 6,160
-pub const HODGE_INJECT_LEN: usize = 3 * HODGE_V; // 2,640
+pub const HODGE_PLANES_LEN: usize = 7 * HODGE_V; // 16,128
+pub const HODGE_INJECT_LEN: usize = 3 * HODGE_V; // 6,912
 
 pub const HODGE_PLANE_EXACT_U: usize = 0;
 pub const HODGE_PLANE_EXACT_V: usize = 1;
@@ -135,8 +135,8 @@ pub struct HodgeState {
     pub _pad: [u8; 3],
 }
 
-// Budget: export buffers (35.3 KiB) + unaliased f64 2-complex PCG solver (<= 256 KiB total inside 448-page Arena).
-const _: () = assert!(core::mem::size_of::<HodgeState>() <= 262_144);
+// Budget: export buffers (92 KiB) + unaliased f64 2-complex SSOR-PCG solver (<= 512 KiB total inside 448-page Arena).
+const _: () = assert!(core::mem::size_of::<HodgeState>() <= 524_288);
 
 #[inline(always)]
 const fn v_idx(c: usize, r: usize) -> usize {
@@ -1078,6 +1078,110 @@ impl HodgeState {
     }
 
     #[inline(never)]
+    fn apply_ssor_l0(&mut self) {
+        const OMEGA: f64 = 1.45;
+        let mut r = 0usize;
+        while r < HODGE_H {
+            let mut c = 0usize;
+            while c < HODGE_W {
+                let v = v_idx(c, r);
+                if self.v_act[v] != 0 {
+                    let mut acc = self.cg_r[v];
+                    if c > 0 {
+                        let e = ex_idx(c - 1, r);
+                        if self.e_act[e] != 0 {
+                            acc += OMEGA * self.w1_edge[e] * self.cg_z[v - 1];
+                        }
+                    }
+                    if r > 0 {
+                        let e = ey_idx(c, r - 1);
+                        if self.e_act[e] != 0 {
+                            acc += OMEGA * self.w1_edge[e] * self.cg_z[v - HODGE_W];
+                        }
+                    }
+                    self.cg_z[v] = self.cg_inv_diag[v] * acc;
+                } else {
+                    self.cg_z[v] = 0.0;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+        let mut rb = HODGE_H;
+        while rb > 0 {
+            rb -= 1;
+            let mut cb = HODGE_W;
+            while cb > 0 {
+                cb -= 1;
+                let v = v_idx(cb, rb);
+                if self.v_act[v] != 0 {
+                    let mut acc = 0.0f64;
+                    if cb + 1 < HODGE_W {
+                        let e = ex_idx(cb, rb);
+                        if self.e_act[e] != 0 {
+                            acc += self.w1_edge[e] * self.cg_z[v + 1];
+                        }
+                    }
+                    if rb + 1 < HODGE_H {
+                        let e = ey_idx(cb, rb);
+                        if self.e_act[e] != 0 {
+                            acc += self.w1_edge[e] * self.cg_z[v + HODGE_W];
+                        }
+                    }
+                    self.cg_z[v] += OMEGA * self.cg_inv_diag[v] * acc;
+                }
+            }
+        }
+    }
+
+    #[inline(never)]
+    fn apply_ssor_l2(&mut self) {
+        const OMEGA: f64 = 1.45;
+        let fw = HODGE_W - 1;
+        let fh = HODGE_H - 1;
+        let mut r = 0usize;
+        while r < fh {
+            let mut c = 0usize;
+            while c < fw {
+                let f = f_idx(c, r);
+                if self.f_act[f] != 0 {
+                    let mut acc = self.cg_r[f];
+                    if c > 0 && self.f_act[f - 1] != 0 {
+                        acc += (OMEGA / self.w1_edge[ey_idx(c, r)]) * self.cg_z[f - 1];
+                    }
+                    if r > 0 && self.f_act[f - fw] != 0 {
+                        acc += (OMEGA / self.w1_edge[ex_idx(c, r)]) * self.cg_z[f - fw];
+                    }
+                    self.cg_z[f] = self.cg_inv_diag[f] * acc;
+                } else {
+                    self.cg_z[f] = 0.0;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+        let mut rb = fh;
+        while rb > 0 {
+            rb -= 1;
+            let mut cb = fw;
+            while cb > 0 {
+                cb -= 1;
+                let f = f_idx(cb, rb);
+                if self.f_act[f] != 0 {
+                    let mut acc = 0.0f64;
+                    if cb + 1 < fw && self.f_act[f + 1] != 0 {
+                        acc += (1.0 / self.w1_edge[ey_idx(cb + 1, rb)]) * self.cg_z[f + 1];
+                    }
+                    if rb + 1 < fh && self.f_act[f + fw] != 0 {
+                        acc += (1.0 / self.w1_edge[ex_idx(cb, rb + 1)]) * self.cg_z[f + fw];
+                    }
+                    self.cg_z[f] += OMEGA * self.cg_inv_diag[f] * acc;
+                }
+            }
+        }
+    }
+
+    #[inline(never)]
     fn solve_exact_pcg(&mut self, comp_cnt: usize) -> (bool, u32, f64) {
         self.phi_0.fill(0.0);
         self.cg_rhs.fill(0.0);
@@ -1148,7 +1252,6 @@ impl HodgeState {
             let b = self.cg_rhs[v];
             b2 += b * b;
             self.cg_r[v] = b;
-            self.cg_z[v] = self.cg_inv_diag[v] * b;
             v += 1;
         }
         let b_norm = crate::wasm_sqrt_f64(b2);
@@ -1160,6 +1263,7 @@ impl HodgeState {
             return (true, 0, 0.0);
         }
 
+        self.apply_ssor_l0();
         project_zero_mean(
             &mut self.cg_z,
             &self.v_act,
@@ -1227,7 +1331,6 @@ impl HodgeState {
             while v < HODGE_V {
                 let rv = self.cg_r[v];
                 r2 += rv * rv;
-                self.cg_z[v] = self.cg_inv_diag[v] * rv;
                 v += 1;
             }
             let rel = crate::wasm_sqrt_f64(r2) / b_norm;
@@ -1235,6 +1338,7 @@ impl HodgeState {
                 break;
             }
 
+            self.apply_ssor_l0();
             project_zero_mean(
                 &mut self.cg_z,
                 &self.v_act,
@@ -1346,8 +1450,6 @@ impl HodgeState {
                     let b = self.cg_rhs[f];
                     b2 += b * b;
                     self.cg_r[f] = b;
-                    self.cg_z[f] = self.cg_inv_diag[f] * b;
-                    self.cg_p[f] = self.cg_z[f];
                 } else {
                     self.cg_r[f] = 0.0;
                     self.cg_z[f] = 0.0;
@@ -1367,9 +1469,11 @@ impl HodgeState {
             return (true, 0, 0.0);
         }
 
+        self.apply_ssor_l2();
         let mut rz = 0.0f64;
         let mut f = 0usize;
         while f < HODGE_F {
+            self.cg_p[f] = self.cg_z[f];
             rz += self.cg_r[f] * self.cg_z[f];
             f += 1;
         }
@@ -1425,13 +1529,12 @@ impl HodgeState {
                 break;
             }
 
+            self.apply_ssor_l2();
             let mut rz_new = 0.0f64;
             f = 0;
             while f < HODGE_F {
                 if self.f_act[f] != 0 {
-                    let zv = self.cg_inv_diag[f] * self.cg_r[f];
-                    self.cg_z[f] = zv;
-                    rz_new += self.cg_r[f] * zv;
+                    rz_new += self.cg_r[f] * self.cg_z[f];
                 }
                 f += 1;
             }

@@ -76,8 +76,8 @@ const HYST_FLAG_BOUND_HERO: u32 = 1 << 27;
 const HYST_FLAG_NEWLY_PROMO: u32 = 1 << 28;
 const HYST_FLAG_LOOM_FRESH: u32 = 1 << 29;
 
-pub const MAX_MICRO: usize = 1536;
-pub const MAX_MICRO_PEAKS: usize = 2048;
+pub const MAX_MICRO: usize = 3072;
+pub const MAX_MICRO_PEAKS: usize = 4096;
 pub const MAX_CSR_K: usize = 8;
 pub const SWARM_TELEM_LEN: usize = 64;
 
@@ -90,10 +90,15 @@ pub const MICRO_STATE_INACTIVE: u8 = 0;
 pub const MICRO_STATE_CONFIRMED: u8 = 1;
 pub const MICRO_STATE_TENTATIVE: u8 = 2;
 
-const MAX_RAW_PEAKS: usize = 4096;
-const NMS_BITMAP_WORDS: usize = 3600; // 360 rows * 10 u64/row (covers up to 640x360)
-const SCORE_RING_STRIDE: usize = 640;
+const MAX_RAW_PEAKS: usize = 8192;
+const NMS_BITMAP_WORDS: usize = crate::MAX_FRAME_H * ((crate::MAX_FRAME_W + 63) >> 6);
+const SCORE_RING_STRIDE: usize = crate::MAX_FRAME_W;
 const SCORE_RING_ROWS: usize = 3;
+const SCORE_RING_LEN: usize = if SCORE_RING_STRIDE * SCORE_RING_ROWS > MAX_MICRO {
+    SCORE_RING_STRIDE * SCORE_RING_ROWS
+} else {
+    MAX_MICRO
+};
 
 const R_NMS_HD: usize = 3; // Euclidean < 3 px HD (`>= 3 px` survives -> >85% recall on 1,200)
 const R_NMS_SD: usize = 2; // Euclidean < 2 px SD
@@ -247,7 +252,7 @@ const CSR_CELL_W: usize = 64;
 const CSR_CELL_H: usize = 36;
 const CSR_CELLS: usize = CSR_CELL_W * CSR_CELL_H;
 
-/// Arena-resident Wave-1 metrology, residual, 3-chord looming, and Hero hysteresis state (`240,160 B`).
+/// Arena-resident Wave-1 metrology, residual, 3-chord looming, and Hero hysteresis state (`479,776 B`).
 #[repr(C, align(16))]
 pub struct MetrologyState {
     pub export_micro_cov: [f32; 3 * MAX_MICRO],
@@ -267,7 +272,7 @@ pub struct MetrologyState {
     pub metrology_ctrl: [u32; 4], // [mode, cur_epoch, obs_frames_total, promo_epoch]
 }
 
-const _: () = assert!(core::mem::size_of::<MetrologyState>() == 240_160);
+const _: () = assert!(core::mem::size_of::<MetrologyState>() == 479_776);
 
 impl MetrologyState {
     pub const fn zeroed() -> Self {
@@ -466,7 +471,7 @@ pub struct MicroSwarmState {
 
     // NMS bitmask + 3-row active score ring (zero stack >= 64 B)
     pub nms_bitmap: [u64; NMS_BITMAP_WORDS],
-    pub score_ring: [f32; SCORE_RING_STRIDE * SCORE_RING_ROWS],
+    pub score_ring: [f32; SCORE_RING_LEN],
     pub raw_sort_order: [u16; MAX_RAW_PEAKS],
     pub raw_sort_tmp: [u16; MAX_RAW_PEAKS],
 
@@ -474,8 +479,8 @@ pub struct MicroSwarmState {
     // `csr_cost` is re-used at start of frame as 4096-entry pre-NMS raw candidate float min-heap.
     pub csr_cost: [f32; MAX_MICRO * MAX_CSR_K],     // 12,288 f32s (exact Q12 integers during Auction)
     pub csr_peak_idx: [i16; MAX_MICRO * MAX_CSR_K], // 12,288 i16s
-    pub rev_head: [i16; MAX_MICRO_PEAKS],           // Peak->edge linked head for Reverse Auction cleanup
-    pub rev_next: [i16; MAX_MICRO * MAX_CSR_K],     // Next edge index in `0..12288`
+    pub rev_head: [u16; MAX_MICRO_PEAKS],           // Peak->edge linked head for Reverse Auction cleanup (`u16::MAX` = empty)
+    pub rev_next: [u16; MAX_MICRO * MAX_CSR_K],     // Next edge index in `0..24576` (`u16::MAX` = end)
     pub csr_len: [u8; MAX_MICRO],
     pub peak_price_q: [i32; MAX_MICRO_PEAKS],
     pub peak_owner: [i16; MAX_MICRO_PEAKS],
@@ -538,6 +543,29 @@ pub struct MicroSwarmState {
     pub metrology: MetrologyState,
 }
 
+/// Arena-tail sidecar for swarm duplicate-merge temporal hysteresis and 4x4 coarse pyramid IC-LK
+/// (`160x90 -> 640x360`). Kept out of `MicroSwarmState` so all v3.1.0 Arena region offsets stay fixed.
+#[repr(C, align(16))]
+pub struct SwarmAuxScratch {
+    pub dup_overlap_streak: [u8; MAX_MICRO],
+    pub dup_seen_cur: [u8; MAX_MICRO],
+    pub coarse_valid: [u8; MAX_MICRO],
+    pub coarse_tpl: [[i8; 16]; MAX_MICRO],
+    pub coarse_lk_tpl: [f32; 16],
+    pub coarse_lk_gx: [f32; 16],
+    pub coarse_lk_gy: [f32; 16],
+    pub coarse_lk_warp: [f32; 16],
+}
+
+impl SwarmAuxScratch {
+    #[inline(never)]
+    pub fn reset(&mut self) {
+        self.dup_overlap_streak.fill(0);
+        self.dup_seen_cur.fill(0);
+        self.coarse_valid.fill(0);
+    }
+}
+
 impl MicroSwarmState {
     pub const fn zeroed() -> Self {
         Self {
@@ -561,13 +589,13 @@ impl MicroSwarmState {
             track_next: [-1; MAX_MICRO],
             radix_cnt: [0; 256],
             nms_bitmap: [0; NMS_BITMAP_WORDS],
-            score_ring: [0.0; SCORE_RING_STRIDE * SCORE_RING_ROWS],
+            score_ring: [0.0; SCORE_RING_LEN],
             raw_sort_order: [0; MAX_RAW_PEAKS],
             raw_sort_tmp: [0; MAX_RAW_PEAKS],
             csr_cost: [0.0; MAX_MICRO * MAX_CSR_K],
             csr_peak_idx: [-1; MAX_MICRO * MAX_CSR_K],
-            rev_head: [-1; MAX_MICRO_PEAKS],
-            rev_next: [-1; MAX_MICRO * MAX_CSR_K],
+            rev_head: [u16::MAX; MAX_MICRO_PEAKS],
+            rev_next: [u16::MAX; MAX_MICRO * MAX_CSR_K],
             csr_len: [0; MAX_MICRO],
             peak_price_q: [0; MAX_MICRO_PEAKS],
             peak_owner: [-1; MAX_MICRO_PEAKS],
@@ -644,8 +672,8 @@ impl MicroSwarmState {
         self.track_cell_head.fill(-1);
         self.track_next.fill(-1);
         self.csr_peak_idx.fill(-1);
-        self.rev_head.fill(-1);
-        self.rev_next.fill(-1);
+        self.rev_head.fill(u16::MAX);
+        self.rev_next.fill(u16::MAX);
         self.peak_owner.fill(-1);
         self.track_match.fill(-1);
         self.prelim_cands.fill(PrelimCand::EMPTY);
@@ -1802,6 +1830,107 @@ pub fn patch_8x8_sad_i8_simd128(a: &[i8; 64], b: &[i8; 64]) -> u32 {
     }
 }
 
+/// Illumination-invariant 8x8 `i8` zero-mean normalized cross-correlation (ZMNCC) using
+/// portable SIMD `i16x8_extend_*` + `i32x4_dot_i16x8`. Called only as fallback when SAD > 1966.
+#[inline(always)]
+unsafe fn patch_8x8_zmncc_preloaded_i8_simd128(
+    va0: v128,
+    va1: v128,
+    va2: v128,
+    va3: v128,
+    b: &[i8; 64],
+) -> f32 {
+    let pb = b.as_ptr() as *const v128;
+    let vb0 = v128_load(pb);
+    let vb1 = v128_load(pb.add(1));
+    let vb2 = v128_load(pb.add(2));
+    let vb3 = v128_load(pb.add(3));
+
+    let a0l = i16x8_extend_low_i8x16(va0);
+    let a0h = i16x8_extend_high_i8x16(va0);
+    let a1l = i16x8_extend_low_i8x16(va1);
+    let a1h = i16x8_extend_high_i8x16(va1);
+    let a2l = i16x8_extend_low_i8x16(va2);
+    let a2h = i16x8_extend_high_i8x16(va2);
+    let a3l = i16x8_extend_low_i8x16(va3);
+    let a3h = i16x8_extend_high_i8x16(va3);
+
+    let b0l = i16x8_extend_low_i8x16(vb0);
+    let b0h = i16x8_extend_high_i8x16(vb0);
+    let b1l = i16x8_extend_low_i8x16(vb1);
+    let b1h = i16x8_extend_high_i8x16(vb1);
+    let b2l = i16x8_extend_low_i8x16(vb2);
+    let b2h = i16x8_extend_high_i8x16(vb2);
+    let b3l = i16x8_extend_low_i8x16(vb3);
+    let b3h = i16x8_extend_high_i8x16(vb3);
+
+    let ones16 = i16x8_splat(1);
+    let sa16 = i16x8_add(
+        i16x8_add(i16x8_add(a0l, a0h), i16x8_add(a1l, a1h)),
+        i16x8_add(i16x8_add(a2l, a2h), i16x8_add(a3l, a3h)),
+    );
+    let sb16 = i16x8_add(
+        i16x8_add(i16x8_add(b0l, b0h), i16x8_add(b1l, b1h)),
+        i16x8_add(i16x8_add(b2l, b2h), i16x8_add(b3l, b3h)),
+    );
+    let sa32 = i32x4_dot_i16x8(sa16, ones16);
+    let sb32 = i32x4_dot_i16x8(sb16, ones16);
+
+    let saa = i32x4_add(
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(a0l, a0l), i32x4_dot_i16x8(a0h, a0h)),
+            i32x4_add(i32x4_dot_i16x8(a1l, a1l), i32x4_dot_i16x8(a1h, a1h)),
+        ),
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(a2l, a2l), i32x4_dot_i16x8(a2h, a2h)),
+            i32x4_add(i32x4_dot_i16x8(a3l, a3l), i32x4_dot_i16x8(a3h, a3h)),
+        ),
+    );
+    let sbb = i32x4_add(
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(b0l, b0l), i32x4_dot_i16x8(b0h, b0h)),
+            i32x4_add(i32x4_dot_i16x8(b1l, b1l), i32x4_dot_i16x8(b1h, b1h)),
+        ),
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(b2l, b2l), i32x4_dot_i16x8(b2h, b2h)),
+            i32x4_add(i32x4_dot_i16x8(b3l, b3l), i32x4_dot_i16x8(b3h, b3h)),
+        ),
+    );
+    let sab = i32x4_add(
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(a0l, b0l), i32x4_dot_i16x8(a0h, b0h)),
+            i32x4_add(i32x4_dot_i16x8(a1l, b1l), i32x4_dot_i16x8(a1h, b1h)),
+        ),
+        i32x4_add(
+            i32x4_add(i32x4_dot_i16x8(a2l, b2l), i32x4_dot_i16x8(a2h, b2h)),
+            i32x4_add(i32x4_dot_i16x8(a3l, b3l), i32x4_dot_i16x8(a3h, b3h)),
+        ),
+    );
+
+    #[inline(always)]
+    fn hsum_i32x4(v: v128) -> f32 {
+        let s1 = i32x4_add(v, i32x4_shuffle::<2, 3, 0, 1>(v, v));
+        let s2 = i32x4_add(s1, i32x4_shuffle::<1, 0, 3, 2>(s1, s1));
+        i32x4_extract_lane::<0>(s2) as f32
+    }
+
+    let sum_a = hsum_i32x4(sa32);
+    let sum_b = hsum_i32x4(sb32);
+    let sum_aa = hsum_i32x4(saa);
+    let sum_bb = hsum_i32x4(sbb);
+    let sum_ab = hsum_i32x4(sab);
+
+    let num = 64.0 * sum_ab - sum_a * sum_b;
+    let va = (64.0 * sum_aa - sum_a * sum_a).max(0.0);
+    let vb = (64.0 * sum_bb - sum_b * sum_b).max(0.0);
+    let denom = wasm_sqrtf(va * vb);
+    if denom > 1.0e-3 {
+        num / denom
+    } else {
+        0.0
+    }
+}
+
 /// Inline minimum 2-adic distance across current & anchor signatures using hardware `clz`.
 #[inline(always)]
 fn padic_min_inline(sig_curr: u32, sig_anc: u32, p_sig: u32) -> f32 {
@@ -2195,12 +2324,13 @@ unsafe fn raw_heap_push_overflow_ptr(
     mut heap_state: u64,
     score: f32,
     xy: u32,
+    raw_cap: usize,
 ) -> u64 {
     if ((heap_state >> 16) & 1) == 0 {
-        let mut k = MAX_RAW_PEAKS >> 1;
+        let mut k = raw_cap >> 1;
         while k > 0 {
             k -= 1;
-            raw_heap_sift_down_ptr(scores, xy_packed, MAX_RAW_PEAKS, k);
+            raw_heap_sift_down_ptr(scores, xy_packed, raw_cap, k);
         }
         heap_state |= 1u64 << 16;
     }
@@ -2209,7 +2339,7 @@ unsafe fn raw_heap_push_overflow_ptr(
     if score > *scores {
         *scores = score;
         *xy_packed = xy;
-        raw_heap_sift_down_ptr(scores, xy_packed, MAX_RAW_PEAKS, 0);
+        raw_heap_sift_down_ptr(scores, xy_packed, raw_cap, 0);
     }
     heap_state
 }
@@ -2221,14 +2351,15 @@ unsafe fn raw_heap_push_lazy_packed(
     heap_state: u64,
     score: f32,
     xy: u32,
+    raw_cap: usize,
 ) -> u64 {
     let len = (heap_state & 0xFFFF) as usize;
-    if len < MAX_RAW_PEAKS {
+    if len < raw_cap {
         *scores.add(len) = score;
         *xy_packed.add(len) = xy;
         (heap_state & !0xFFFFu64) | ((len + 1) as u64)
     } else if (heap_state & 0x1_0000) == 0 || score > *scores {
-        raw_heap_push_overflow_ptr(scores, xy_packed, heap_state, score, xy)
+        raw_heap_push_overflow_ptr(scores, xy_packed, heap_state, score, xy, raw_cap)
     } else {
         let trunc = ((heap_state >> 32) as u32).saturating_add(1);
         (heap_state & 0xFFFF_FFFF) | ((trunc as u64) << 32)
@@ -3463,6 +3594,7 @@ unsafe fn eval_cand_4px(
 
 #[inline(never)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 unsafe fn extract_phase1a_3x3_max(
     sp: *const f32,
     raw_scores: *mut f32,
@@ -3476,6 +3608,7 @@ unsafe fn extract_phase1a_3x3_max(
     m0: u64,
     m1: u64,
     m2: u64,
+    raw_cap: usize,
 ) -> u64 {
     let x_limit = x_end - 1;
     let y_hi_bits = ((ym1 as u16) as u32) << 16;
@@ -3528,6 +3661,7 @@ unsafe fn extract_phase1a_3x3_max(
                                     heap_state,
                                     f32x4_extract_lane::<$lane>(vs),
                                     (((cx4 + $lane) as u16) as u32) | y_hi_bits,
+                                    raw_cap,
                                 );
                             }
                         };
@@ -3559,7 +3693,7 @@ pub fn extract_phase1a_raw(
     pan_mag: f32,
 ) -> usize {
     const _: () = assert!(
-        SCORE_RING_STRIDE <= 768
+        SCORE_RING_STRIDE <= crate::MAX_FRAME_W
             && SCORE_RING_STRIDE % 16 == 0
             && SCORE_RING_ROWS == 3
             && core::mem::offset_of!(MicroSwarmState, csr_peak_idx) % 4 == 0
@@ -3569,7 +3703,7 @@ pub fn extract_phase1a_raw(
         w >= 16
             && w <= SCORE_RING_STRIDE
             && h >= 16
-            && h <= 360
+            && h <= crate::MAX_FRAME_H
             && luma.len() >= w * h
             && bg_luma.len() >= w * h
             && eca_res.len() >= w * h
@@ -3732,6 +3866,128 @@ pub fn extract_phase1a_raw(
             let mut x = 8usize.min(x_end);
             let wi = w as isize;
             let row_lp = lum_base.offset((y as isize) * wi);
+            while x + 16 <= x_end {
+                let va0 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x) as *const v128));
+                let vd0 = f32x4_abs(f32x4_sub(
+                    core::ptr::read_unaligned(lum_p.add(x) as *const v128),
+                    core::ptr::read_unaligned(bg_p.add(x) as *const v128),
+                ));
+                let hit0 = v128_or(f32x4_gt(va0, vadapt), f32x4_gt(vd0, vtrem));
+
+                let x1 = x + 4;
+                let va1 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x1) as *const v128));
+                let vd1 = f32x4_abs(f32x4_sub(
+                    core::ptr::read_unaligned(lum_p.add(x1) as *const v128),
+                    core::ptr::read_unaligned(bg_p.add(x1) as *const v128),
+                ));
+                let hit1 = v128_or(f32x4_gt(va1, vadapt), f32x4_gt(vd1, vtrem));
+
+                let x2 = x + 8;
+                let va2 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x2) as *const v128));
+                let vd2 = f32x4_abs(f32x4_sub(
+                    core::ptr::read_unaligned(lum_p.add(x2) as *const v128),
+                    core::ptr::read_unaligned(bg_p.add(x2) as *const v128),
+                ));
+                let hit2 = v128_or(f32x4_gt(va2, vadapt), f32x4_gt(vd2, vtrem));
+
+                let x3 = x + 12;
+                let va3 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x3) as *const v128));
+                let vd3 = f32x4_abs(f32x4_sub(
+                    core::ptr::read_unaligned(lum_p.add(x3) as *const v128),
+                    core::ptr::read_unaligned(bg_p.add(x3) as *const v128),
+                ));
+                let hit3 = v128_or(f32x4_gt(va3, vadapt), f32x4_gt(vd3, vtrem));
+
+                let hit01 = v128_or(hit0, hit1);
+                let hit23 = v128_or(hit2, hit3);
+                if v128_any_true(v128_or(hit01, hit23)) {
+                    if v128_any_true(hit01) {
+                        let va0 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x) as *const v128));
+                        let vd0 = f32x4_abs(f32x4_sub(
+                            core::ptr::read_unaligned(lum_p.add(x) as *const v128),
+                            core::ptr::read_unaligned(bg_p.add(x) as *const v128),
+                        ));
+                        let ee0 = f32x4_gt(va0, vadapt);
+                        let dd0 = f32x4_gt(vd0, vtrem);
+                        let va1 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x1) as *const v128));
+                        let vd1 = f32x4_abs(f32x4_sub(
+                            core::ptr::read_unaligned(lum_p.add(x1) as *const v128),
+                            core::ptr::read_unaligned(bg_p.add(x1) as *const v128),
+                        ));
+                        let ee1 = f32x4_gt(va1, vadapt);
+                        let dd1 = f32x4_gt(vd1, vtrem);
+                        let m = eval_cand_8px_pair(
+                            sr_p,
+                            row_lp,
+                            wi,
+                            x,
+                            va0,
+                            vd0,
+                            ee0,
+                            dd0,
+                            hit0,
+                            va1,
+                            vd1,
+                            ee1,
+                            dd1,
+                            hit1,
+                            min_c_eca_2,
+                            min_c_trem_2,
+                            v_score_floor,
+                            v_safe_floor,
+                        );
+                        if (m & 1) != 0 {
+                            mark_chunk!(x);
+                        }
+                        if (m & 2) != 0 {
+                            mark_chunk!(x1);
+                        }
+                    }
+                    if v128_any_true(hit23) {
+                        let va2 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x2) as *const v128));
+                        let vd2 = f32x4_abs(f32x4_sub(
+                            core::ptr::read_unaligned(lum_p.add(x2) as *const v128),
+                            core::ptr::read_unaligned(bg_p.add(x2) as *const v128),
+                        ));
+                        let ee2 = f32x4_gt(va2, vadapt);
+                        let dd2 = f32x4_gt(vd2, vtrem);
+                        let va3 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x3) as *const v128));
+                        let vd3 = f32x4_abs(f32x4_sub(
+                            core::ptr::read_unaligned(lum_p.add(x3) as *const v128),
+                            core::ptr::read_unaligned(bg_p.add(x3) as *const v128),
+                        ));
+                        let ee3 = f32x4_gt(va3, vadapt);
+                        let dd3 = f32x4_gt(vd3, vtrem);
+                        let m = eval_cand_8px_pair(
+                            sr_p,
+                            row_lp,
+                            wi,
+                            x2,
+                            va2,
+                            vd2,
+                            ee2,
+                            dd2,
+                            hit2,
+                            va3,
+                            vd3,
+                            ee3,
+                            dd3,
+                            hit3,
+                            min_c_eca_2,
+                            min_c_trem_2,
+                            v_score_floor,
+                            v_safe_floor,
+                        );
+                        if (m & 1) != 0 {
+                            mark_chunk!(x2);
+                        }
+                        if (m & 2) != 0 {
+                            mark_chunk!(x3);
+                        }
+                    }
+                }
+                x += 16;
+            }
             while x + 8 <= x_end {
                 let va0 = f32x4_abs(core::ptr::read_unaligned(eca_p.add(x) as *const v128));
                 let vd0 = f32x4_abs(f32x4_sub(
@@ -3824,6 +4080,7 @@ pub fn extract_phase1a_raw(
 
         // Test previous row `y - 1` for strict 3x3 local maxima across dirty 4-px chunks only
         if y >= 7 && (mid_m0 | mid_m1 | mid_m2) != 0 {
+            let raw_cap = if ms.swarm_mode == 1 { 4096usize } else { MAX_RAW_PEAKS };
             unsafe {
                 heap_state = extract_phase1a_3x3_max(
                     sr_base,
@@ -3838,6 +4095,7 @@ pub fn extract_phase1a_raw(
                     mid_m0,
                     mid_m1,
                     mid_m2,
+                    raw_cap,
                 );
                 if (heap_state & 0x1_0000) != 0 {
                     let fl = *raw_scores_p;
@@ -4056,7 +4314,7 @@ pub fn extract_phase1c_patches(
         w >= 16
             && w <= SCORE_RING_STRIDE
             && h >= 16
-            && h <= 360
+            && h <= crate::MAX_FRAME_H
             && luma.len() >= w * h
             && rgba.len() >= w * h * 4
             && raw_heap_len <= MAX_RAW_PEAKS
@@ -4114,10 +4372,12 @@ pub fn extract_phase1c_patches(
         let ptpl_p = ms.peak_tpl8.as_mut_ptr();
 
     let mut n_peaks = 0usize;
-    let peak_cap = if ms.swarm_active != 0 && ms.confirmed_count >= 1030 && raw_heap_len >= 1950 {
+    let peak_cap = if ms.swarm_mode == 1 && ms.swarm_active != 0 && ms.confirmed_count >= 1030 && raw_heap_len >= 1950 {
+        1568usize
+    } else if ms.swarm_mode == 1 && ms.swarm_active != 0 && ms.active_count >= 1024 && raw_heap_len >= 2200 {
         1664usize
-    } else if ms.swarm_active != 0 && ms.active_count >= 1024 && raw_heap_len >= 2200 {
-        1792usize
+    } else if ms.swarm_mode == 1 {
+        2048usize
     } else {
         MAX_MICRO_PEAKS
     };
@@ -4277,6 +4537,8 @@ pub fn imm_predict_micro_simd128(
     safe_dt: f32,
     pan_dx_f: f32,
     pan_dy_f: f32,
+    warp_tier: u8,
+    warp_h: &[f32; 8],
     scene_cut: bool,
 ) {
     if scene_cut {
@@ -4284,14 +4546,58 @@ pub fn imm_predict_micro_simd128(
         return;
     }
 
+    if warp_tier >= 1 {
+        let cx = 0.5 * ((w - 1) as f32);
+        let cy = 0.5 * ((h - 1) as f32);
+        let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
+        let warp_pt = |x: f32, y: f32| -> (f32, f32) {
+            let xr = x - cx;
+            let yr = y - cy;
+            let d = 1.0 + warp_h[6] * xr + warp_h[7] * yr;
+            let inv_d = if d.abs() > 0.25 { 1.0 / d } else { 1.0 };
+            (
+                cx + ((1.0 + warp_h[0]) * xr + warp_h[1] * yr + warp_h[2]) * inv_d,
+                cy + (warp_h[3] * xr + (1.0 + warp_h[4]) * yr + warp_h[5]) * inv_d,
+            )
+        };
+        let mut i = 0usize;
+        while i < MAX_MICRO {
+            if ms.tracks.state[i] != MICRO_STATE_INACTIVE {
+                let (px0, py0) = (ms.tracks.pos_x[i], ms.tracks.pos_y[i]);
+                (ms.tracks.pos_x[i], ms.tracks.pos_y[i]) = warp_pt(px0, py0);
+                (ms.tracks.last_obs_x[i], ms.tracks.last_obs_y[i]) =
+                    warp_pt(ms.tracks.last_obs_x[i], ms.tracks.last_obs_y[i]);
+                (ms.tracks.eq_x[i], ms.tracks.eq_y[i]) =
+                    warp_pt(ms.tracks.eq_x[i], ms.tracks.eq_y[i]);
+                (ms.tracks.ftle_a_x0[i], ms.tracks.ftle_a_y0[i]) =
+                    warp_pt(ms.tracks.ftle_a_x0[i], ms.tracks.ftle_a_y0[i]);
+                (ms.tracks.ftle_b_x0[i], ms.tracks.ftle_b_y0[i]) =
+                    warp_pt(ms.tracks.ftle_b_x0[i], ms.tracks.ftle_b_y0[i]);
+                if metro_on {
+                    let (lx, ly) =
+                        warp_pt(ms.metrology.loom_anchor[i], ms.metrology.loom_anchor[MAX_MICRO + i]);
+                    ms.metrology.loom_anchor[i] = lx;
+                    ms.metrology.loom_anchor[MAX_MICRO + i] = ly;
+                }
+                let vx = ms.tracks.vel_x[i];
+                let vy = ms.tracks.vel_y[i];
+                ms.tracks.vel_x[i] = (1.0 + warp_h[0]) * vx + warp_h[1] * vy;
+                ms.tracks.vel_y[i] = warp_h[3] * vx + (1.0 + warp_h[4]) * vy;
+            }
+            i += 1;
+        }
+    }
+
+    let eff_pan_x = if warp_tier >= 1 { 0.0 } else { pan_dx_f };
+    let eff_pan_y = if warp_tier >= 1 { 0.0 } else { pan_dy_f };
     let max_x = (w - 2) as f32;
     let max_y = (h - 2) as f32;
     let inv_w_255 = 255.0 / (w as f32);
     let inv_h_255 = 255.0 / (h as f32);
 
     unsafe {
-        let v_pan_x = f32x4_splat(pan_dx_f);
-        let v_pan_y = f32x4_splat(pan_dy_f);
+        let v_pan_x = f32x4_splat(eff_pan_x);
+        let v_pan_y = f32x4_splat(eff_pan_y);
         let v_dt = f32x4_splat(safe_dt);
         let v_bal_dt = f32x4_splat(1.06 * safe_dt);
         let v_osc_k = f32x4_splat(0.95);
@@ -4321,7 +4627,7 @@ pub fn imm_predict_micro_simd128(
         let p_w_osc = ms.tracks.imm_w_osc.as_ptr() as *const v128;
         let state_ptr = ms.tracks.state.as_ptr();
 
-        let has_pan = pan_dx_f != 0.0 || pan_dy_f != 0.0;
+        let has_pan = eff_pan_x != 0.0 || eff_pan_y != 0.0;
         let metro_on = ms.metrology.metrology_ctrl[0] != METROLOGY_OFF;
         let p_loom_ax = ms.metrology.loom_anchor.as_mut_ptr() as *mut v128;
         let p_loom_ay = ms.metrology.loom_anchor[MAX_MICRO..].as_mut_ptr() as *mut v128;
@@ -4395,23 +4701,23 @@ pub fn imm_predict_micro_simd128(
                     let i = base + lane;
                     if *state_ptr.add(i) != MICRO_STATE_INACTIVE {
                         let (x, y, eqx, eqy) = if has_pan {
-                            let x = ms.tracks.pos_x[i] + pan_dx_f;
-                            let y = ms.tracks.pos_y[i] + pan_dy_f;
-                            let eqx = ms.tracks.eq_x[i] + pan_dx_f;
-                            let eqy = ms.tracks.eq_y[i] + pan_dy_f;
+                            let x = ms.tracks.pos_x[i] + eff_pan_x;
+                            let y = ms.tracks.pos_y[i] + eff_pan_y;
+                            let eqx = ms.tracks.eq_x[i] + eff_pan_x;
+                            let eqy = ms.tracks.eq_y[i] + eff_pan_y;
                             ms.tracks.pos_x[i] = x;
                             ms.tracks.pos_y[i] = y;
-                            ms.tracks.last_obs_x[i] += pan_dx_f;
-                            ms.tracks.last_obs_y[i] += pan_dy_f;
+                            ms.tracks.last_obs_x[i] += eff_pan_x;
+                            ms.tracks.last_obs_y[i] += eff_pan_y;
                             ms.tracks.eq_x[i] = eqx;
                             ms.tracks.eq_y[i] = eqy;
-                            ms.tracks.ftle_a_x0[i] += pan_dx_f;
-                            ms.tracks.ftle_a_y0[i] += pan_dy_f;
-                            ms.tracks.ftle_b_x0[i] += pan_dx_f;
-                            ms.tracks.ftle_b_y0[i] += pan_dy_f;
+                            ms.tracks.ftle_a_x0[i] += eff_pan_x;
+                            ms.tracks.ftle_a_y0[i] += eff_pan_y;
+                            ms.tracks.ftle_b_x0[i] += eff_pan_x;
+                            ms.tracks.ftle_b_y0[i] += eff_pan_y;
                             if metro_on {
-                                ms.metrology.loom_anchor[i] += pan_dx_f;
-                                ms.metrology.loom_anchor[MAX_MICRO + i] += pan_dy_f;
+                                ms.metrology.loom_anchor[i] += eff_pan_x;
+                                ms.metrology.loom_anchor[MAX_MICRO + i] += eff_pan_y;
                             }
                             (x, y, eqx, eqy)
                         } else {
@@ -4473,6 +4779,10 @@ pub fn imm_predict_micro_simd128(
         let aq_p = ms.auction_q.as_mut_ptr();
         let mut slot = 0usize;
         while slot < MAX_MICRO {
+            if (slot & 7) == 0 && core::ptr::read_unaligned(st_p.add(slot) as *const u64) == 0 {
+                slot += 8;
+                continue;
+            }
             if *st_p.add(slot) != MICRO_STATE_INACTIVE {
                 let finite_ok = (*px_p.add(slot)).is_finite()
                     && (*py_p.add(slot)).is_finite()
@@ -4575,8 +4885,20 @@ pub fn gather_csr_candidates(ms: &mut MicroSwarmState, w: usize, h: usize, safe_
     let dense_swarm_fast = ms.swarm_active != 0 && ms.active_count >= 960 && ms.num_peaks >= 960;
     let dense_clutter = ms.active_count >= 1024 && ms.num_peaks >= 1500;
     let is_dense = ms.active_count >= 512;
-    let prelim_cap = if dense_swarm_fast { 3 } else { MAX_PRELIM_CANDS };
-    let row_cap = if dense_swarm_fast { 3 } else { MAX_CSR_K };
+    let prelim_cap = if dense_clutter {
+        3
+    } else if dense_swarm_fast {
+        4
+    } else {
+        MAX_PRELIM_CANDS
+    };
+    let row_cap = if dense_clutter {
+        3
+    } else if dense_swarm_fast {
+        4
+    } else {
+        MAX_CSR_K
+    };
 
     // Precompute quadratic distance gate multipliers `(u, u^2)` for confirmed & tentative thresholds
     let max_prelim_conf = ((COAST_Q_CONF as f32) - 0.5) * (1.0 / AUCTION_SCALE_Q);
@@ -4659,7 +4981,7 @@ pub fn gather_csr_candidates(ms: &mut MicroSwarmState, w: usize, h: usize, safe_
                 if age >= 2 {
                     (6.2 * q + 1.35 * step_dist).min(12.2 * q)
                 } else {
-                    7.2 * q
+                    10.5 * q
                 }
             } else if is_dense {
                 if age >= 2 {
@@ -4672,21 +4994,15 @@ pub fn gather_csr_candidates(ms: &mut MicroSwarmState, w: usize, h: usize, safe_
             }
         } else {
             let max_c = if dense_clutter {
-                if coast >= 3 {
-                    9.5 * q
-                } else if coast >= 2 {
-                    10.5 * q
-                } else {
-                    13.5 * q
-                }
+                (11.0 + 2.5 * (coast as f32)).min(18.5) * q
             } else {
                 (18.0 + 4.0 * (coast as f32)).min(42.0) * q
             };
             if dense_clutter {
                 if step_dist < 1.5 * q && age >= 3 {
-                    (6.2 * q + 1.0 * (coast as f32) * q).min(9.5 * q)
+                    (6.8 * q + 1.4 * (coast as f32) * q).min(14.5 * q)
                 } else {
-                    (6.4 * q + (1.4 * q + 0.55 * step_dist) * (coast as f32).min(2.5)).min(max_c)
+                    (6.8 * q + (1.8 * q + 0.65 * step_dist) * (coast as f32).min(3.5)).min(max_c)
                 }
             } else if is_dense {
                 if step_dist < 1.5 * q && age >= 3 {
@@ -5275,10 +5591,21 @@ unsafe fn gather_csr_stage2_track(
                 &*peak_tpl_ptr.add(pi),
             )
         };
-        if coast == 0 && sad > 1966 {
-            continue;
-        }
-        let sad_norm = (sad as f32) * inv_sad_scale;
+        let sad_norm = if coast == 0 && sad > 1966 {
+            let zmncc = patch_8x8_zmncc_preloaded_i8_simd128(
+                t0,
+                t1,
+                t2,
+                t3,
+                &*peak_tpl_ptr.add(pi),
+            );
+            if zmncc < 0.55 {
+                continue;
+            }
+            clamp_f32(1.0 - zmncc, 0.0, 1.0)
+        } else {
+            (sad as f32) * inv_sad_scale
+        };
         let pre_chroma_cost = dist_only_cost + 0.45 * sad_norm;
         if gate_en && pre_chroma_cost >= lb_cost {
             continue;
@@ -5573,9 +5900,9 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
                             let rpi = *csr_peak_ptr.add(e) as usize;
                             if rpi < num_peaks {
                                 *rev_next_ptr.add(e) = *rev_head_ptr.add(rpi);
-                                *rev_head_ptr.add(rpi) = e as i16;
+                                *rev_head_ptr.add(rpi) = e as u16;
                             } else {
-                                *rev_next_ptr.add(e) = -1;
+                                *rev_next_ptr.add(e) = u16::MAX;
                             }
                             rj += 1;
                         }
@@ -5601,7 +5928,7 @@ pub fn solve_epsilon_auction(ms: &mut MicroSwarmState) {
                     let mut best_edge_cost: i32 = i32::MAX;
 
                     let mut e_idx = *rev_head_ptr.add(pi);
-                    while e_idx >= 0 {
+                    while e_idx != u16::MAX {
                         let e = e_idx as usize;
                         let ti = e >> 3;
                         let edge_cost = *csr_cost_ptr.add(e);
@@ -6903,23 +7230,232 @@ fn alloc_micro_track_id(ms: &mut MicroSwarmState) -> u32 {
     cand
 }
 
+const SWARM_PYR_W: usize = 160;
+const SWARM_PYR_H: usize = 90;
+
+#[inline(always)]
+fn sample_pyr_bilinear(pyr: &[f32], x: f32, y: f32) -> f32 {
+    let xc = clamp_f32(x, 0.0, (SWARM_PYR_W - 2) as f32);
+    let yc = clamp_f32(y, 0.0, (SWARM_PYR_H - 2) as f32);
+    let ix = wasm_floorf(xc) as usize;
+    let iy = wasm_floorf(yc) as usize;
+    let fx = xc - (ix as f32);
+    let fy = yc - (iy as f32);
+    let r0 = iy * SWARM_PYR_W + ix;
+    let r1 = r0 + SWARM_PYR_W;
+    let v00 = pyr[r0];
+    let v10 = pyr[r0 + 1];
+    let v01 = pyr[r1];
+    let v11 = pyr[r1 + 1];
+    let t0 = v00 + fx * (v10 - v00);
+    let t1 = v01 + fx * (v11 - v01);
+    t0 + fy * (t1 - t0)
+}
+
+#[inline(never)]
+fn update_coarse_pyr_tpl_4x4(
+    pyr_luma: &[f32],
+    px_pyr: f32,
+    py_pyr: f32,
+    dst: &mut [i8; 16],
+    valid: &mut u8,
+    tmp: &mut [f32; 16],
+) {
+    if pyr_luma.len() < SWARM_PYR_W * SWARM_PYR_H
+        || !px_pyr.is_finite()
+        || !py_pyr.is_finite()
+        || px_pyr < 2.0
+        || py_pyr < 2.0
+        || px_pyr > (SWARM_PYR_W as f32) - 3.0
+        || py_pyr > (SWARM_PYR_H as f32) - 3.0
+    {
+        return;
+    }
+    let mut sum = 0.0f32;
+    let mut k = 0usize;
+    let mut dy = 0usize;
+    while dy < 4 {
+        let sy = py_pyr + (dy as f32) - 1.5;
+        let mut dx = 0usize;
+        while dx < 4 {
+            let sx = px_pyr + (dx as f32) - 1.5;
+            let v = sample_pyr_bilinear(pyr_luma, sx, sy);
+            tmp[k] = v;
+            sum += v;
+            k += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    let mu = sum * (1.0 / 16.0);
+    let blend = *valid != 0;
+    let mut i = 0usize;
+    while i < 16 {
+        let qv = clamp_f32((tmp[i] - mu) * 127.0, -127.0, 127.0) as i32;
+        if blend {
+            let old = dst[i] as i32;
+            dst[i] = ((3 * old + qv) / 4).clamp(-127, 127) as i8;
+        } else {
+            dst[i] = qv as i8;
+        }
+        i += 1;
+    }
+    *valid = 1;
+}
+
+/// 2-iteration 4x4 Inverse-Compositional Lucas-Kanade on the 160x90 coarse luma pyramid.
+/// Recovers up to +/-2.5 pyr px (+/-10 HD px) when full-resolution 8x8 IC-LK misses on rapid motion.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+fn refine_coarse_ic_lk_4x4(
+    pyr_luma: &[f32],
+    tpl_i8: &[i8; 16],
+    init_x: f32,
+    init_y: f32,
+    max_shift: f32,
+    tpl_f: &mut [f32; 16],
+    gx_f: &mut [f32; 16],
+    gy_f: &mut [f32; 16],
+    w_vals: &mut [f32; 16],
+) -> (f32, f32, f32, bool) {
+    if pyr_luma.len() < SWARM_PYR_W * SWARM_PYR_H
+        || !init_x.is_finite()
+        || !init_y.is_finite()
+        || init_x < 2.5
+        || init_y < 2.5
+        || init_x > (SWARM_PYR_W as f32) - 3.5
+        || init_y > (SWARM_PYR_H as f32) - 3.5
+    {
+        return (init_x, init_y, 1.0, false);
+    }
+
+    let inv127 = 1.0f32 / 127.0;
+    let mut i = 0usize;
+    while i < 16 {
+        tpl_f[i] = (tpl_i8[i] as f32) * inv127;
+        i += 1;
+    }
+
+    let mut h_xx = 0.0f32;
+    let mut h_xy = 0.0f32;
+    let mut h_yy = 0.0f32;
+    let mut r = 0usize;
+    while r < 4 {
+        let mut c = 0usize;
+        while c < 4 {
+            let idx = r * 4 + c;
+            let gx = if c == 0 {
+                tpl_f[idx + 1] - tpl_f[idx]
+            } else if c == 3 {
+                tpl_f[idx] - tpl_f[idx - 1]
+            } else {
+                0.5 * (tpl_f[idx + 1] - tpl_f[idx - 1])
+            };
+            let gy = if r == 0 {
+                tpl_f[idx + 4] - tpl_f[idx]
+            } else if r == 3 {
+                tpl_f[idx] - tpl_f[idx - 4]
+            } else {
+                0.5 * (tpl_f[idx + 4] - tpl_f[idx - 4])
+            };
+            gx_f[idx] = gx;
+            gy_f[idx] = gy;
+            h_xx += gx * gx;
+            h_xy += gx * gy;
+            h_yy += gy * gy;
+            c += 1;
+        }
+        r += 1;
+    }
+    let tr = h_xx + h_yy;
+    let det = h_xx * h_yy - h_xy * h_xy;
+    if tr < 0.004 || det <= 1e-6 * tr * tr + 1e-9 {
+        return (init_x, init_y, 1.0, false);
+    }
+    let inv_det = 1.0 / det;
+
+    let mut cx = init_x;
+    let mut cy = init_y;
+    let mut last_res = 1.0f32;
+    let mut it = 0usize;
+    while it < 2 {
+        let mut mean_w = 0.0f32;
+        let mut k = 0usize;
+        let mut dy = 0usize;
+        while dy < 4 {
+            let sy = cy + (dy as f32) - 1.5;
+            let mut dx = 0usize;
+            while dx < 4 {
+                let sx = cx + (dx as f32) - 1.5;
+                let v = sample_pyr_bilinear(pyr_luma, sx, sy);
+                w_vals[k] = v;
+                mean_w += v;
+                k += 1;
+                dx += 1;
+            }
+            dy += 1;
+        }
+        mean_w *= 1.0 / 16.0;
+
+        let mut bx = 0.0f32;
+        let mut by = 0.0f32;
+        let mut err2 = 0.0f32;
+        let mut j = 0usize;
+        while j < 16 {
+            let e = (w_vals[j] - mean_w) - tpl_f[j];
+            bx += gx_f[j] * e;
+            by += gy_f[j] * e;
+            err2 += e * e;
+            j += 1;
+        }
+        last_res = wasm_sqrtf(err2 * (1.0 / 16.0));
+        let step_x = (h_yy * bx - h_xy * by) * inv_det;
+        let step_y = (-h_xy * bx + h_xx * by) * inv_det;
+        if !step_x.is_finite() || !step_y.is_finite() {
+            return (init_x, init_y, 1.0, false);
+        }
+        cx -= clamp_f32(step_x, -1.5, 1.5);
+        cy -= clamp_f32(step_y, -1.5, 1.5);
+        let ddx = cx - init_x;
+        let ddy = cy - init_y;
+        if ddx * ddx + ddy * ddy > max_shift * max_shift {
+            return (init_x, init_y, 1.0, false);
+        }
+        if step_x * step_x + step_y * step_y < 1e-4 {
+            break;
+        }
+        it += 1;
+    }
+    if cx < 2.0 || cy < 2.0 || cx > (SWARM_PYR_W as f32) - 3.0 || cy > (SWARM_PYR_H as f32) - 3.0 {
+        return (init_x, init_y, 1.0, false);
+    }
+    (cx, cy, last_res, last_res.is_finite() && last_res < 0.12)
+}
+
 /// Applies 2-iter SIMD128 IC-LK sub-pixel refinement, IMM probability updates, lifecycle
 /// transitions, global synchronized `20f`/`10f` FTLE anchor banks (strict reset on first missed,
 /// coasting, or ambiguous frame), and greedy seeding of unmatched peaks.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_lifecycle_and_seed(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
     luma: &[f32],
+    pyr_luma: &[f32],
+    cont_field: &[f32],
+    cont_valid: &[u8],
     w: usize,
     h: usize,
     safe_dt: f32,
     frame_idx: u32,
 ) {
     let (mut res_sum, mut res_cnt, reacq_cnt, mature_cnt, shock_cnt) =
-        update_step1_matched(ms, luma, w, h, safe_dt);
+        update_step1_matched(ms, aux, luma, pyr_luma, w, h, safe_dt, frame_idx);
     update_step2_coast_merge_direct(
         ms,
+        aux,
         luma,
+        pyr_luma,
         w,
         h,
         safe_dt,
@@ -6927,7 +7463,7 @@ pub fn update_lifecycle_and_seed(
         &mut res_sum,
         &mut res_cnt,
     );
-    let births = update_step3_seed(ms, w, h, frame_idx);
+    let births = update_step3_seed(ms, aux, cont_field, cont_valid, w, h, frame_idx);
     update_step4_ftle_tallies(
         ms,
         frame_idx,
@@ -6941,12 +7477,16 @@ pub fn update_lifecycle_and_seed(
 }
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_step1_matched(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
     luma: &[f32],
+    pyr_luma: &[f32],
     w: usize,
     h: usize,
     safe_dt: f32,
+    frame_idx: u32,
 ) -> (f32, u32, u32, u32, u32) {
     let q = (w as f32) * (1.0 / 640.0);
     let inv_dt = 1.0 / safe_dt.max(1e-4);
@@ -7335,6 +7875,22 @@ pub fn update_step1_matched(
                             c += 1;
                         }
                     }
+                    if lk_res < 0.06
+                        && new_age >= 2
+                        && pyr_luma.len() >= SWARM_PYR_W * SWARM_PYR_H
+                        && (aux.coarse_valid[ti] == 0 || ((frame_idx ^ (ti as u32)) & 3) == 0)
+                    {
+                        let sx_pyr = (SWARM_PYR_W as f32) / (w as f32);
+                        let sy_pyr = (SWARM_PYR_H as f32) / (h as f32);
+                        update_coarse_pyr_tpl_4x4(
+                            pyr_luma,
+                            nx * sx_pyr,
+                            ny * sy_pyr,
+                            &mut aux.coarse_tpl[ti],
+                            &mut aux.coarse_valid[ti],
+                            &mut aux.coarse_lk_tpl,
+                        );
+                    }
                 }
             }
             ord_i += 1;
@@ -7347,7 +7903,9 @@ pub fn update_step1_matched(
 #[allow(clippy::too_many_arguments)]
 unsafe fn update_step2_direct_locks(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
     luma: &[f32],
+    pyr_luma: &[f32],
     w: usize,
     h: usize,
     q: f32,
@@ -7450,7 +8008,7 @@ unsafe fn update_step2_direct_locks(
                 }
                 *track_match_ptr.add(ti) = -2;
             } else {
-                let (lx, ly, lk_res, grad_tr, ok) = refine_ic_lk_8x8_2iter(
+                let (mut lx, mut ly, mut lk_res, mut grad_tr, mut ok) = refine_ic_lk_8x8_2iter(
                     luma,
                     w,
                     h,
@@ -7466,7 +8024,8 @@ unsafe fn update_step2_direct_locks(
                     fast_lk,
                     metro_on,
                 );
-                if ok
+                let mut coarse_recovered = false;
+                let mut fine_pass = ok
                     && lk_res >= 0.0
                     && lk_res < 0.08
                     && grad_tr > 0.016
@@ -7474,7 +8033,70 @@ unsafe fn update_step2_direct_locks(
                     && lx >= 0.0
                     && lx < 1.0e30
                     && ly >= 0.0
-                    && ly < 1.0e30
+                    && ly < 1.0e30;
+                if !fine_pass
+                    && aux.coarse_valid[ti] != 0
+                    && pyr_luma.len() >= SWARM_PYR_W * SWARM_PYR_H
+                    && w >= 320
+                {
+                    let sx_pyr = (SWARM_PYR_W as f32) / (w as f32);
+                    let sy_pyr = (SWARM_PYR_H as f32) / (h as f32);
+                    let p0x = px * sx_pyr;
+                    let p0y = py * sy_pyr;
+                    let (cx_p, cy_p, _c_res, c_ok) = refine_coarse_ic_lk_4x4(
+                        pyr_luma,
+                        &aux.coarse_tpl[ti],
+                        p0x,
+                        p0y,
+                        2.5,
+                        &mut aux.coarse_lk_tpl,
+                        &mut aux.coarse_lk_gx,
+                        &mut aux.coarse_lk_gy,
+                        &mut aux.coarse_lk_warp,
+                    );
+                    let cdx = cx_p - p0x;
+                    let cdy = cy_p - p0y;
+                    if c_ok && (cdx * cdx + cdy * cdy) > 0.04 {
+                        let rx0 = clamp_f32(cx_p / sx_pyr, 2.0, max_x);
+                        let ry0 = clamp_f32(cy_p / sy_pyr, 2.0, max_y);
+                        let (flx, fly, flk_res, fgrad_tr, fok) = refine_ic_lk_8x8_2iter(
+                            luma,
+                            w,
+                            h,
+                            q,
+                            &*tpl8_ptr.add(ti),
+                            rx0,
+                            ry0,
+                            1.5 * q,
+                            &mut ms.lk_tpl_f,
+                            &mut ms.lk_gx,
+                            &mut ms.lk_gy,
+                            &mut ms.lk_warp_f,
+                            fast_lk,
+                            metro_on,
+                        );
+                        if fok
+                            && flk_res >= 0.0
+                            && flk_res < 0.08
+                            && fgrad_tr > 0.016
+                            && fgrad_tr < 1.0e30
+                            && flx >= 2.0
+                            && flx <= max_x
+                            && fly >= 2.0
+                            && fly <= max_y
+                        {
+                            lx = flx;
+                            ly = fly;
+                            lk_res = flk_res;
+                            grad_tr = fgrad_tr;
+                            ok = fok;
+                            fine_pass = true;
+                            coarse_recovered = true;
+                        }
+                    }
+                }
+                let _ = (ok, grad_tr);
+                if fine_pass
                     && !has_nearby_active_track_raw(
                         state_ptr,
                         pos_x_ptr,
@@ -7510,7 +8132,7 @@ unsafe fn update_step2_direct_locks(
                     *score_ring_ptr.add(ti) = lx;
                     *csr_cost_ptr.add(ti * MAX_CSR_K + 1) = ly;
                     *csr_cost_ptr.add(ti * MAX_CSR_K) = lk_res;
-                    *track_match_ptr.add(ti) = -3;
+                    *track_match_ptr.add(ti) = if coarse_recovered { -4 } else { -3 };
                     accept_cands += 1;
                 } else {
                     apply_coast_or_retire_raw(
@@ -7537,6 +8159,10 @@ unsafe fn update_step2_direct_locks(
                         inv_cw,
                         inv_ch,
                     );
+                    if *state_ptr.add(ti) == MICRO_STATE_INACTIVE {
+                        aux.coarse_valid[ti] = 0;
+                        aux.dup_overlap_streak[ti] = 0;
+                    }
                     if metro_on {
                         update_slot_metrology_after_coast_or_retire(
                             &mut ms.metrology,
@@ -7558,7 +8184,9 @@ unsafe fn update_step2_direct_locks(
         ord_i = 0;
         while ord_i < act_n {
             let ti = *track_order_ptr.add(ord_i) as usize;
-            if *track_match_ptr.add(ti) == -3 {
+            let mcode = *track_match_ptr.add(ti);
+            if mcode == -3 || mcode == -4 {
+                let is_coarse_rec = mcode == -4;
                 let px = *pred_x_ptr.add(ti);
                 let py = *pred_y_ptr.add(ti);
                 let lx = *score_ring_ptr.add(ti);
@@ -7600,7 +8228,12 @@ unsafe fn update_step2_direct_locks(
                     *last_obs_x_ptr.add(ti) = lx;
                     *last_obs_y_ptr.add(ti) = ly;
                     *coasting_ptr.add(ti) = 0;
-                    *reacq_flag_ptr.add(ti) = if was_coasting > 0 { 1 } else { 0 };
+                    *reacq_flag_ptr.add(ti) = if was_coasting > 0 || is_coarse_rec { 1 } else { 0 };
+                    if is_coarse_rec {
+                        *ftle_a_frame_ptr.add(ti) = FTLE_INVALID_FRAME;
+                        *ftle_b_frame_ptr.add(ti) = FTLE_INVALID_FRAME;
+                        *ftle_val_ptr.add(ti) = FTLE_INVALID_VAL;
+                    }
                     *age_ptr.add(ti) = (*age_ptr.add(ti)).saturating_add(1);
                     *state_ptr.add(ti) = MICRO_STATE_CONFIRMED;
                     *res_sum += lk_res;
@@ -7625,7 +8258,7 @@ unsafe fn update_step2_direct_locks(
                             cyy,
                             qual_base,
                             true,
-                            was_coasting > 0,
+                            was_coasting > 0 || is_coarse_rec,
                             *ambig_ptr.add(ti) != 0,
                             false,
                         );
@@ -7662,6 +8295,10 @@ unsafe fn update_step2_direct_locks(
                         inv_cw,
                         inv_ch,
                     );
+                    if *state_ptr.add(ti) == MICRO_STATE_INACTIVE {
+                        aux.coarse_valid[ti] = 0;
+                        aux.dup_overlap_streak[ti] = 0;
+                    }
                     if metro_on {
                         update_slot_metrology_after_coast_or_retire(
                             &mut ms.metrology,
@@ -7679,9 +8316,12 @@ unsafe fn update_step2_direct_locks(
 }
 
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_step2_coast_merge_direct(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
     luma: &[f32],
+    pyr_luma: &[f32],
     w: usize,
     h: usize,
     safe_dt: f32,
@@ -7801,191 +8441,247 @@ pub fn update_step2_coast_merge_direct(
                     inv_cw,
                     inv_ch,
                 );
-                if metro_on {
-                    update_slot_metrology_after_coast_or_retire(
-                        &mut ms.metrology,
-                        *state_ptr.add(ti),
-                        *ambig_ptr.add(ti) != 0,
-                        t_cur_us,
-                        ti,
-                    );
-                }
-                *track_match_ptr.add(ti) = -2;
-            } else {
-                direct_cands += 1;
-            }
-            ord_i += 1;
-        }
-
-        // Prune co-moving duplicate tracks on saturated silhouettes (retire younger track < 5.25*q
-        // while preserving crossing paths via velocity consistency) via contiguous 64x36 SIMD cells.
-        if act_n >= 800 && ms.num_peaks >= 1420 && (frame_idx & 1) == 1 {
-            let cell_off_ptr = ms.cell_off.as_mut_ptr();
-            let fine_cell_ptr = ms.csr_peak_idx.as_mut_ptr();
-            let cpx_ptr = ms.cell_px.as_mut_ptr();
-            let cpy_ptr = ms.cell_py.as_mut_ptr();
-            let cidx_ptr = ms.cell_pidx.as_mut_ptr();
-            core::ptr::write_bytes(cell_off_ptr, 0, CSR_CELLS + 2);
-            let inv_fcw = (CSR_CELL_W as f32) / (w as f32);
-            let inv_fch = (CSR_CELL_H as f32) / (h as f32);
-            ord_i = 0;
-            while ord_i < act_n {
-                let ti = *track_order_ptr.add(ord_i) as usize;
-                if *track_match_ptr.add(ti) >= 0 {
-                    let fcx = cell_coord(*pos_x_ptr.add(ti), inv_fcw, CSR_CELL_W - 1);
-                    let fcy = cell_coord(*pos_y_ptr.add(ti), inv_fch, CSR_CELL_H - 1);
-                    let fcell = fcy * CSR_CELL_W + fcx;
-                    *fine_cell_ptr.add(ti) = fcell as i16;
-                    *cell_off_ptr.add(fcell + 2) += 1;
-                }
-                ord_i += 1;
-            }
-            let mut acc = 0u16;
-            let mut fc = 2usize;
-            while fc < CSR_CELLS + 2 {
-                acc += *cell_off_ptr.add(fc);
-                *cell_off_ptr.add(fc) = acc;
-                fc += 1;
-            }
-            ord_i = 0;
-            while ord_i < act_n {
-                let ti = *track_order_ptr.add(ord_i) as usize;
-                if *track_match_ptr.add(ti) >= 0 {
-                    let fcell = *fine_cell_ptr.add(ti) as usize;
-                    let dst = *cell_off_ptr.add(fcell + 1) as usize;
-                    *cell_off_ptr.add(fcell + 1) = (dst + 1) as u16;
-                    *cpx_ptr.add(dst) = *pos_x_ptr.add(ti);
-                    *cpy_ptr.add(dst) = *pos_y_ptr.add(ti);
-                    *cidx_ptr.add(dst) = ti as u16;
-                }
-                ord_i += 1;
-            }
-
-            macro_rules! retire_dup_slot {
-                ($slot:expr) => {{
-                    let victim = $slot;
-                    unlink_track_cell_raw(
-                        pos_x_ptr,
-                        pos_y_ptr,
-                        cell_head_ptr,
-                        track_next_ptr,
-                        victim,
-                        inv_cw,
-                        inv_ch,
-                    );
-                    *state_ptr.add(victim) = MICRO_STATE_INACTIVE;
-                    *track_id_ptr.add(victim) = 0;
-                    *coasting_ptr.add(victim) = 0;
-                    *ambig_ptr.add(victim) = 0;
-                    *body_id_ptr.add(victim) = 0;
-                    *age_ptr.add(victim) = 0;
-                    *ftle_a_frame_ptr.add(victim) = FTLE_INVALID_FRAME;
-                    *ftle_b_frame_ptr.add(victim) = FTLE_INVALID_FRAME;
-                    *ftle_val_ptr.add(victim) = 0.0;
-                    *track_match_ptr.add(victim) = -2;
-                    if metro_on {
-                        ms.metrology.clear_slot(victim);
+                    if *state_ptr.add(ti) == MICRO_STATE_INACTIVE {
+                        aux.coarse_valid[ti] = 0;
+                        aux.dup_overlap_streak[ti] = 0;
                     }
-                }};
+                    if metro_on {
+                        update_slot_metrology_after_coast_or_retire(
+                            &mut ms.metrology,
+                            *state_ptr.add(ti),
+                            *ambig_ptr.add(ti) != 0,
+                            t_cur_us,
+                            ti,
+                        );
+                    }
+                    *track_match_ptr.add(ti) = -2;
+                } else {
+                    direct_cands += 1;
+                }
+                ord_i += 1;
             }
 
-            let r_merge = 5.25 * q;
-            let r_merge2 = r_merge * r_merge;
-            let dv_lim = 4.0 * q * inv_dt;
-            let dv_lim2 = dv_lim * dv_lim;
-            let vr_merge2 = f32x4_splat(r_merge2);
+            // Prune co-moving duplicate tracks on saturated silhouettes (retire younger track < 3.25*q
+            // with directional velocity alignment and 2-check temporal hysteresis on confirmed slots)
+            // via contiguous 64x36 SIMD cells.
+            if act_n >= 800 && ms.num_peaks >= 1420 && (frame_idx & 1) == 1 {
+                let cell_off_ptr = ms.cell_off.as_mut_ptr();
+                let fine_cell_ptr = ms.csr_peak_idx.as_mut_ptr();
+                let cpx_ptr = ms.cell_px.as_mut_ptr();
+                let cpy_ptr = ms.cell_py.as_mut_ptr();
+                let cidx_ptr = ms.cell_pidx.as_mut_ptr();
+                core::ptr::write_bytes(cell_off_ptr, 0, CSR_CELLS + 2);
+                let inv_fcw = (CSR_CELL_W as f32) / (w as f32);
+                let inv_fch = (CSR_CELL_H as f32) / (h as f32);
+                ord_i = 0;
+                while ord_i < act_n {
+                    let ti = *track_order_ptr.add(ord_i) as usize;
+                    aux.dup_seen_cur[ti] = 0;
+                    if *track_match_ptr.add(ti) >= 0 {
+                        let fcx = cell_coord(*pos_x_ptr.add(ti), inv_fcw, CSR_CELL_W - 1);
+                        let fcy = cell_coord(*pos_y_ptr.add(ti), inv_fch, CSR_CELL_H - 1);
+                        let fcell = fcy * CSR_CELL_W + fcx;
+                        *fine_cell_ptr.add(ti) = fcell as i16;
+                        *cell_off_ptr.add(fcell + 2) += 1;
+                    }
+                    ord_i += 1;
+                }
+                let mut acc = 0u16;
+                let mut fc = 2usize;
+                while fc < CSR_CELLS + 2 {
+                    acc += *cell_off_ptr.add(fc);
+                    *cell_off_ptr.add(fc) = acc;
+                    fc += 1;
+                }
+                ord_i = 0;
+                while ord_i < act_n {
+                    let ti = *track_order_ptr.add(ord_i) as usize;
+                    if *track_match_ptr.add(ti) >= 0 {
+                        let fcell = *fine_cell_ptr.add(ti) as usize;
+                        let dst = *cell_off_ptr.add(fcell + 1) as usize;
+                        *cell_off_ptr.add(fcell + 1) = (dst + 1) as u16;
+                        *cpx_ptr.add(dst) = *pos_x_ptr.add(ti);
+                        *cpy_ptr.add(dst) = *pos_y_ptr.add(ti);
+                        *cidx_ptr.add(dst) = ti as u16;
+                    }
+                    ord_i += 1;
+                }
 
-            ord_i = 0;
-            while ord_i < act_n {
-                let ti = *track_order_ptr.add(ord_i) as usize;
-                if *track_match_ptr.add(ti) >= 0 {
-                    let px = *pos_x_ptr.add(ti);
-                    let py = *pos_y_ptr.add(ti);
-                    let x_lo = cell_coord(px - r_merge, inv_fcw, CSR_CELL_W - 1);
-                    let x_hi = cell_coord(px + r_merge, inv_fcw, CSR_CELL_W - 1);
-                    let y_lo = cell_coord(py - r_merge, inv_fch, CSR_CELL_H - 1);
-                    let y_hi = cell_coord(py + r_merge, inv_fch, CSR_CELL_H - 1);
-                    let (v_px, v_py) = (f32x4_splat(px), f32x4_splat(py));
-                    let mut dup = false;
-                    let mut cy = y_lo;
-                    while cy <= y_hi && !dup {
-                        let row_off = cy * CSR_CELL_W;
-                        let s_seg = *cell_off_ptr.add(row_off + x_lo) as usize;
-                        let e_seg = (*cell_off_ptr.add(row_off + x_hi + 1) as usize).min(MAX_MICRO);
-                        let mut k = s_seg;
+                macro_rules! retire_dup_slot {
+                    ($slot:expr) => {{
+                        let victim = $slot;
+                        unlink_track_cell_raw(
+                            pos_x_ptr,
+                            pos_y_ptr,
+                            cell_head_ptr,
+                            track_next_ptr,
+                            victim,
+                            inv_cw,
+                            inv_ch,
+                        );
+                        *state_ptr.add(victim) = MICRO_STATE_INACTIVE;
+                        *track_id_ptr.add(victim) = 0;
+                        *coasting_ptr.add(victim) = 0;
+                        *ambig_ptr.add(victim) = 0;
+                        *body_id_ptr.add(victim) = 0;
+                        *age_ptr.add(victim) = 0;
+                        *ftle_a_frame_ptr.add(victim) = FTLE_INVALID_FRAME;
+                        *ftle_b_frame_ptr.add(victim) = FTLE_INVALID_FRAME;
+                        *ftle_val_ptr.add(victim) = 0.0;
+                        *track_match_ptr.add(victim) = -2;
+                        aux.dup_overlap_streak[victim] = 0;
+                        aux.coarse_valid[victim] = 0;
+                        if metro_on {
+                            ms.metrology.clear_slot(victim);
+                        }
+                    }};
+                }
 
-                        while k < e_seg {
-                            let dx = f32x4_sub(
-                                core::ptr::read_unaligned(cpx_ptr.add(k) as *const v128),
-                                v_px,
-                            );
-                            let dy = f32x4_sub(
-                                core::ptr::read_unaligned(cpy_ptr.add(k) as *const v128),
-                                v_py,
-                            );
-                            let vd2 = f32x4_add(f32x4_mul(dx, dx), f32x4_mul(dy, dy));
-                            let mut mask = i32x4_bitmask(f32x4_lt(vd2, vr_merge2)) as u32;
-                            let rem = e_seg - k;
-                            if rem < 4 {
-                                mask &= (1u32 << rem) - 1;
-                            }
-                            while mask != 0 {
-                                let lane = mask.trailing_zeros() as usize;
-                                mask &= mask - 1;
-                                let tj = *cidx_ptr.add(k + lane) as usize;
-                                if tj > ti && *state_ptr.add(tj) != MICRO_STATE_INACTIVE {
-                                    let dvx = *vel_x_ptr.add(tj) - *vel_x_ptr.add(ti);
-                                    let dvy = *vel_y_ptr.add(tj) - *vel_y_ptr.add(ti);
-                                    if dvx * dvx + dvy * dvy <= dv_lim2 {
-                                        let age_j = *age_ptr.add(tj);
-                                        let age_i = *age_ptr.add(ti);
-                                        let tid_j = *track_id_ptr.add(tj);
-                                        if age_j > age_i
-                                            || (age_j == age_i && tid_j < *track_id_ptr.add(ti))
-                                        {
-                                            dup = true;
-                                            break;
+                let r_merge = 4.35 * q;
+                let r_merge2 = r_merge * r_merge;
+                let dv_lim = 4.0 * q * inv_dt;
+                let dv_lim2 = dv_lim * dv_lim;
+                let v_min_dir = 1.5 * q * inv_dt;
+                let v_min_dir2 = v_min_dir * v_min_dir;
+                let vr_merge2 = f32x4_splat(r_merge2);
+
+                ord_i = 0;
+                while ord_i < act_n {
+                    let ti = *track_order_ptr.add(ord_i) as usize;
+                    if *track_match_ptr.add(ti) >= 0 {
+                        let px = *pos_x_ptr.add(ti);
+                        let py = *pos_y_ptr.add(ti);
+                        let vx_i = *vel_x_ptr.add(ti);
+                        let vy_i = *vel_y_ptr.add(ti);
+                        let vi2 = vx_i * vx_i + vy_i * vy_i;
+                        let x_lo = cell_coord(px - r_merge, inv_fcw, CSR_CELL_W - 1);
+                        let x_hi = cell_coord(px + r_merge, inv_fcw, CSR_CELL_W - 1);
+                        let y_lo = cell_coord(py - r_merge, inv_fch, CSR_CELL_H - 1);
+                        let y_hi = cell_coord(py + r_merge, inv_fch, CSR_CELL_H - 1);
+                        let (v_px, v_py) = (f32x4_splat(px), f32x4_splat(py));
+                        let mut dup = false;
+                        let mut cy = y_lo;
+                        while cy <= y_hi && !dup {
+                            let row_off = cy * CSR_CELL_W;
+                            let s_seg = *cell_off_ptr.add(row_off + x_lo) as usize;
+                            let e_seg = (*cell_off_ptr.add(row_off + x_hi + 1) as usize).min(MAX_MICRO);
+                            let mut k = s_seg;
+
+                            while k < e_seg {
+                                let dx = f32x4_sub(
+                                    core::ptr::read_unaligned(cpx_ptr.add(k) as *const v128),
+                                    v_px,
+                                );
+                                let dy = f32x4_sub(
+                                    core::ptr::read_unaligned(cpy_ptr.add(k) as *const v128),
+                                    v_py,
+                                );
+                                let vd2 = f32x4_add(f32x4_mul(dx, dx), f32x4_mul(dy, dy));
+                                let mut mask = i32x4_bitmask(f32x4_lt(vd2, vr_merge2)) as u32;
+                                let rem = e_seg - k;
+                                if rem < 4 {
+                                    mask &= (1u32 << rem) - 1;
+                                }
+                                while mask != 0 {
+                                    let lane = mask.trailing_zeros() as usize;
+                                    mask &= mask - 1;
+                                    let tj = *cidx_ptr.add(k + lane) as usize;
+                                    if tj > ti && *state_ptr.add(tj) != MICRO_STATE_INACTIVE {
+                                        let vx_j = *vel_x_ptr.add(tj);
+                                        let vy_j = *vel_y_ptr.add(tj);
+                                        let dvx = vx_j - vx_i;
+                                        let dvy = vy_j - vy_i;
+                                        let vj2 = vx_j * vx_j + vy_j * vy_j;
+                                        let dir_ok = if vi2 > v_min_dir2 && vj2 > v_min_dir2 {
+                                            let v_dot = vx_i * vx_j + vy_i * vy_j;
+                                            v_dot > 0.0 && (v_dot * v_dot) > (0.85 * 0.85) * vi2 * vj2
                                         } else {
-                                            retire_dup_slot!(tj);
+                                            true
+                                        };
+                                        if dir_ok && dvx * dvx + dvy * dvy <= dv_lim2 {
+                                            let age_j = *age_ptr.add(tj);
+                                            let age_i = *age_ptr.add(ti);
+                                            let tid_j = *track_id_ptr.add(tj);
+                                            if age_j > age_i
+                                                || (age_j == age_i && tid_j < *track_id_ptr.add(ti))
+                                            {
+                                                if *state_ptr.add(ti) == MICRO_STATE_CONFIRMED {
+                                                    if aux.dup_seen_cur[ti] == 0 {
+                                                        aux.dup_seen_cur[ti] = 1;
+                                                        aux.dup_overlap_streak[ti] =
+                                                            aux.dup_overlap_streak[ti].saturating_add(1);
+                                                    }
+                                                    if aux.dup_overlap_streak[ti] >= 2 {
+                                                        dup = true;
+                                                        break;
+                                                    }
+                                                } else {
+                                                    dup = true;
+                                                    break;
+                                                }
+                                            } else if *state_ptr.add(tj) == MICRO_STATE_CONFIRMED {
+                                                if aux.dup_seen_cur[tj] == 0 {
+                                                    aux.dup_seen_cur[tj] = 1;
+                                                    aux.dup_overlap_streak[tj] =
+                                                        aux.dup_overlap_streak[tj].saturating_add(1);
+                                                }
+                                                if aux.dup_overlap_streak[tj] >= 2 {
+                                                    retire_dup_slot!(tj);
+                                                }
+                                            } else {
+                                                retire_dup_slot!(tj);
+                                            }
                                         }
                                     }
                                 }
+                                if dup {
+                                    break;
+                                }
+                                k += 4;
                             }
-                            if dup {
-                                break;
-                            }
-                            k += 4;
-                        }
 
-                        cy += 1;
+                            cy += 1;
+                        }
+                        if dup {
+                            retire_dup_slot!(ti);
+                        }
                     }
-                    if dup {
-                        retire_dup_slot!(ti);
-                    }
+                    ord_i += 1;
                 }
-                ord_i += 1;
+                ord_i = 0;
+                while ord_i < act_n {
+                    let ti = *track_order_ptr.add(ord_i) as usize;
+                    if aux.dup_seen_cur[ti] == 0 {
+                        aux.dup_overlap_streak[ti] = 0;
+                    }
+                    ord_i += 1;
+                }
+            }
+        }
+
+        // Pass 2B/2C: cold direct IC-LK path extracted so `update_step2_coast_merge_direct` stays lean
+        if direct_cands > 0 {
+            unsafe {
+                update_step2_direct_locks(
+                    ms, aux, luma, pyr_luma, w, h, q, inv_dt, inv_cw, inv_ch, max_x, max_y, r_dup2,
+                    act_n, res_sum, res_cnt,
+                );
             }
         }
     }
 
-    // Pass 2B/2C: cold direct IC-LK path extracted so `update_step2_coast_merge_direct` stays lean
-    if direct_cands > 0 {
-        unsafe {
-            update_step2_direct_locks(
-                ms, luma, w, h, q, inv_dt, inv_cw, inv_ch, max_x, max_y, r_dup2, act_n, res_sum,
-                res_cnt,
-            );
-        }
-    }
-}
-
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub fn update_step3_seed(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
+    cont_field: &[f32],
+    cont_valid: &[u8],
     w: usize,
     h: usize,
     frame_idx: u32,
 ) -> u32 {
+    let q = (w as f32) * (1.0 / 640.0);
     let inv_cw = (MICRO_CELL_W as f32) / (w as f32);
     let inv_ch = (MICRO_CELL_H as f32) / (h as f32);
     let r_nms = if w > 320 {
@@ -7995,11 +8691,13 @@ pub fn update_step3_seed(
     };
     let act_n = ms.active_count as usize;
 
-    // Step 3: Greedy seed strongest unmatched peaks into free slots (evicting stale >=3f coasters if full)
+    // Step 3: Greedy seed strongest unmatched peaks into free slots (evicting stale tentative >=3f
+    // coasters first, then confirmed >=5f coasters only if no tentative coasters remain)
     let mut births = 0u32;
     let mut free_cursor = 0usize;
-    let mut evict_cursor = 0usize;
-    let dense_q4_seed = ms.swarm_active != 0 && ms.confirmed_count >= 1045 && ms.num_peaks >= 1500;
+    let mut evict_tent_cursor = 0usize;
+    let mut evict_conf_cursor = 0usize;
+    let dense_q4_seed = ms.swarm_active != 0 && ms.confirmed_count >= 1030 && ms.num_peaks >= 1500;
     let r_seed = if dense_q4_seed {
         r_nms + 1.5
     } else if act_n >= 800 && ms.num_peaks >= 1500 {
@@ -8019,6 +8717,12 @@ pub fn update_step3_seed(
     let r_seed2 = r_seed * r_seed;
     let r_seed_lim = r_seed.max(0.0);
     let metro_on = ms.metrology.mode() != METROLOGY_OFF;
+    let have_cont = cont_valid.len() >= crate::continuum_physics::FIELD_CELLS
+        && cont_field.len()
+            >= crate::continuum_physics::FIELD_CELLS * crate::continuum_physics::FIELD_EXPORT_STRIDE;
+    let cont_sx = (crate::continuum_physics::FIELD_GRID_W as f32) / (w as f32);
+    let cont_sy = (crate::continuum_physics::FIELD_GRID_H as f32) / (h as f32);
+    let v_prior_lim = 420.0 * q;
     let mut pi = 0usize;
     unsafe {
         let pm_p = ms.peak_matched.as_ptr();
@@ -8031,23 +8735,44 @@ pub fn update_step3_seed(
         let head_p = ms.track_cell_head.as_ptr();
         let next_p = ms.track_next.as_ptr();
         let n_pks = ms.num_peaks;
+        let seed_cap = if ms.swarm_mode == 1 && dense_q4_seed {
+            1280usize
+        } else if ms.swarm_mode == 1 && ms.active_count >= 1024 {
+            1344usize
+        } else if ms.swarm_mode == 1 {
+            1536usize
+        } else {
+            MAX_MICRO
+        };
         while pi < n_pks {
             if *pm_p.add(pi) == 0 {
-                while free_cursor < MAX_MICRO && *st_p.add(free_cursor) != MICRO_STATE_INACTIVE {
+                while free_cursor < seed_cap && *st_p.add(free_cursor) != MICRO_STATE_INACTIVE {
                     free_cursor += 1;
                 }
-                if free_cursor >= MAX_MICRO {
+                let mut evict_slot: usize = seed_cap;
+                if free_cursor >= seed_cap {
                     if dense_q4_seed && pi >= 1360 {
                         break;
                     }
-                    while evict_cursor < MAX_MICRO
-                        && !(*st_p.add(evict_cursor) != MICRO_STATE_INACTIVE
-                            && *coast_p.add(evict_cursor) >= 3)
+                    while evict_tent_cursor < seed_cap
+                        && !(*st_p.add(evict_tent_cursor) == MICRO_STATE_TENTATIVE
+                            && *coast_p.add(evict_tent_cursor) >= 3)
                     {
-                        evict_cursor += 1;
+                        evict_tent_cursor += 1;
                     }
-                    if evict_cursor >= MAX_MICRO {
-                        break;
+                    if evict_tent_cursor < seed_cap {
+                        evict_slot = evict_tent_cursor;
+                    } else {
+                        while evict_conf_cursor < seed_cap
+                            && !(*st_p.add(evict_conf_cursor) != MICRO_STATE_INACTIVE
+                                && *coast_p.add(evict_conf_cursor) >= 5)
+                        {
+                            evict_conf_cursor += 1;
+                        }
+                        if evict_conf_cursor >= seed_cap {
+                            break;
+                        }
+                        evict_slot = evict_conf_cursor;
                     }
                 }
                 let px = *px_p.add(pi);
@@ -8058,19 +8783,51 @@ pub fn update_step3_seed(
                 );
                 if !near {
                     let mut used_eviction = false;
-                    let ti = if free_cursor < MAX_MICRO {
+                    let ti = if free_cursor < seed_cap {
                         let idx = free_cursor;
                         free_cursor += 1;
                         idx
+                    } else if evict_slot == evict_tent_cursor {
+                        let idx = evict_tent_cursor;
+                        evict_tent_cursor += 1;
+                        used_eviction = true;
+                        idx
                     } else {
-                        let idx = evict_cursor;
-                        evict_cursor += 1;
+                        let idx = evict_conf_cursor;
+                        evict_conf_cursor += 1;
                         used_eviction = true;
                         idx
                     };
                     if used_eviction {
                         unlink_track_cell(ms, ti, inv_cw, inv_ch);
                     }
+                    aux.dup_overlap_streak[ti] = 0;
+                    aux.coarse_valid[ti] = 0;
+
+                    let (svx, svy) = if have_cont {
+                        let cgx = ((px * cont_sx) as usize)
+                            .min(crate::continuum_physics::FIELD_GRID_W - 1);
+                        let cgy = ((py * cont_sy) as usize)
+                            .min(crate::continuum_physics::FIELD_GRID_H - 1);
+                        let cidx = cgy * crate::continuum_physics::FIELD_GRID_W + cgx;
+                        if (cont_valid[cidx] & crate::continuum_physics::CELL_VALID_GRAD) != 0 {
+                            let fbase = cidx * crate::continuum_physics::FIELD_EXPORT_STRIDE;
+                            let u = cont_field[fbase];
+                            let v = cont_field[fbase + 1];
+                            if u.is_finite() && v.is_finite() {
+                                (
+                                    clamp_f32(u, -v_prior_lim, v_prior_lim),
+                                    clamp_f32(v, -v_prior_lim, v_prior_lim),
+                                )
+                            } else {
+                                (0.0, 0.0)
+                            }
+                        } else {
+                            (0.0, 0.0)
+                        }
+                    } else {
+                        (0.0, 0.0)
+                    };
 
                     ms.tracks.track_id[ti] = alloc_micro_track_id(ms);
                     ms.tracks.birth_frame[ti] = frame_idx;
@@ -8090,8 +8847,8 @@ pub fn update_step3_seed(
                     ms.tracks.last_obs_y[ti] = py;
                     ms.tracks.pred_x[ti] = px;
                     ms.tracks.pred_y[ti] = py;
-                    ms.tracks.vel_x[ti] = 0.0;
-                    ms.tracks.vel_y[ti] = 0.0;
+                    ms.tracks.vel_x[ti] = svx;
+                    ms.tracks.vel_y[ti] = svy;
                     ms.tracks.imm_w_cv[ti] = 0.60;
                     ms.tracks.imm_w_bal[ti] = 0.20;
                     ms.tracks.imm_w_osc[ti] = 0.20;
@@ -8190,6 +8947,10 @@ pub fn update_step4_ftle_tallies(
     unsafe {
         let mut ti = 0usize;
         while ti < MAX_MICRO {
+            if (ti & 7) == 0 && core::ptr::read_unaligned(st_p.add(ti) as *const u64) == 0 {
+                ti += 8;
+                continue;
+            }
             let st = *st_p.add(ti);
             if st != MICRO_STATE_INACTIVE {
                 act_cnt += 1;
@@ -8308,6 +9069,16 @@ pub fn pack_export_micro(ms: &mut MicroSwarmState) {
         let mut i = 0usize;
         while i < MAX_MICRO {
             let base = i * MICRO_EXPORT_STRIDE;
+            if (i & 3) == 0 && core::ptr::read_unaligned(state_p.add(i) as *const u32) == 0 {
+                let nz = *(exp_ptr.add(base) as *const u32)
+                    | *(exp_ptr.add(base + MICRO_EXPORT_STRIDE) as *const u32)
+                    | *(exp_ptr.add(base + 2 * MICRO_EXPORT_STRIDE) as *const u32)
+                    | *(exp_ptr.add(base + 3 * MICRO_EXPORT_STRIDE) as *const u32);
+                if nz == 0 {
+                    i += 4;
+                    continue;
+                }
+            }
             let mut st = *state_p.add(i);
             if st != MICRO_STATE_INACTIVE {
                 let px = *px_p.add(i);
@@ -8533,17 +9304,23 @@ pub fn inspect_micro_track_by_id(
 #[allow(clippy::too_many_arguments)]
 pub fn soa_step(
     ms: &mut MicroSwarmState,
+    aux: &mut SwarmAuxScratch,
     luma: &[f32],
     bg_luma: &[f32],
     eca_res: &[f32],
     rgba: &[u8],
     cc_energy: &[f32],
+    pyr_luma: &[f32],
+    cont_field: &[f32],
+    cont_valid: &[u8],
     w: usize,
     h: usize,
     safe_dt: f32,
     frame_idx: u32,
     pan_dx_f: f32,
     pan_dy_f: f32,
+    warp_tier: u8,
+    warp_h: &[f32; 8],
     scene_cut: bool,
 ) -> bool {
     if ms.swarm_mode == 0 {
@@ -8555,6 +9332,7 @@ pub fn soa_step(
             || ms.probe_fail_streak != 0
         {
             ms.reset_active_keep_mode();
+            aux.reset();
             ms.cut_cooldown = 0;
             ms.probe_backoff = 0;
             ms.probe_fail_streak = 0;
@@ -8568,7 +9346,7 @@ pub fn soa_step(
     let valid_inputs = w >= 16
         && h >= 16
         && w <= SCORE_RING_STRIDE
-        && h <= 360
+        && h <= crate::MAX_FRAME_H
         && h * ((w + 63) >> 6) <= NMS_BITMAP_WORDS
         && safe_dt.is_finite()
         && safe_dt > 0.0
@@ -8593,6 +9371,7 @@ pub fn soa_step(
     if ms.swarm_mode == 1 {
         if scene_cut {
             ms.reset_active_keep_mode();
+            aux.reset();
             ms.cut_cooldown = 3;
             ms.probe_backoff = 0;
             ms.probe_fail_streak = 0;
@@ -8678,6 +9457,7 @@ pub fn soa_step(
             // Correspondence passed: enter swarm tracking cleanly
             ms.tracks.state.fill(MICRO_STATE_INACTIVE);
             ms.tracks.track_id.fill(0);
+            aux.reset();
             ms.swarm_active = 1;
             ms.low_density_streak = 0;
             ms.probe_streak = 0;
@@ -8687,11 +9467,13 @@ pub fn soa_step(
         } else {
             extract_micro_peaks_simd128(ms, luma, bg_luma, eca_res, rgba, w, h, pan_mag);
             build_peak_morton_cell_hash(ms, w, h);
-            imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, false);
+            imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, warp_tier, warp_h, false);
             gather_csr_candidates(ms, w, h, safe_dt);
             solve_epsilon_auction(ms);
             ms.begin_obs_tick(safe_dt);
-            update_lifecycle_and_seed(ms, luma, w, h, safe_dt, frame_idx);
+            update_lifecycle_and_seed(
+                ms, aux, luma, pyr_luma, cont_field, cont_valid, w, h, safe_dt, frame_idx,
+            );
             pack_export_micro(ms);
 
             let observed_cnt = ms.confirmed_count.saturating_add(ms.tentative_count);
@@ -8701,6 +9483,7 @@ pub fn soa_step(
                 ms.low_density_streak = ms.low_density_streak.saturating_add(1);
                 if ms.low_density_streak >= 8 || ms.active_count == 0 {
                     ms.reset_active_keep_mode();
+                    aux.reset();
                     ms.swarm_telem[0] = 1.0;
                     return false;
                 }
@@ -8710,6 +9493,7 @@ pub fn soa_step(
     } else {
         if scene_cut {
             ms.reset_active_keep_mode();
+            aux.reset();
         }
         ms.swarm_active = 1;
         ms.low_density_streak = 0;
@@ -8718,11 +9502,13 @@ pub fn soa_step(
     }
 
     build_peak_morton_cell_hash(ms, w, h);
-    imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, false);
+    imm_predict_micro_simd128(ms, w, h, safe_dt, pan_dx_f, pan_dy_f, warp_tier, warp_h, false);
     gather_csr_candidates(ms, w, h, safe_dt);
     solve_epsilon_auction(ms);
     ms.begin_obs_tick(safe_dt);
-    update_lifecycle_and_seed(ms, luma, w, h, safe_dt, frame_idx);
+    update_lifecycle_and_seed(
+        ms, aux, luma, pyr_luma, cont_field, cont_valid, w, h, safe_dt, frame_idx,
+    );
     pack_export_micro(ms);
     true
 }

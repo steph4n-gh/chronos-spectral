@@ -34,9 +34,9 @@ const DEFAULT_WASM = path.join(ROOT, 'web', 'chronos_spectral.wasm');
 const wasmArg = process.argv.slice(2).find((a) => a.startsWith('--wasm='));
 const WASM_PATH = wasmArg ? path.resolve(wasmArg.slice('--wasm='.length)) : DEFAULT_WASM;
 
-const BOS_W = 128;
-const BOS_H = 64;
-const BOS_N = BOS_W * BOS_H; // 8192
+const BOS_W = 256;
+const BOS_H = 128;
+const BOS_N = BOS_W * BOS_H; // 32768
 
 const VALID_DISP = 1 << 0;
 const VALID_PHI = 1 << 1;
@@ -172,11 +172,11 @@ assert(telemU32[2] === STATE_DISTURBED && (telemU32[3] & REASON_NO_GAUGE) !== 0,
 
 assert(exp.chronos_set_bos_gauge_roi(4, 4, 4, 20) === 0, 'Empty x gauge must fail');
 assert(exp.chronos_set_bos_gauge_roi(10, 4, 8, 20) === 0, 'Inverted x gauge must fail');
-assert(exp.chronos_set_bos_gauge_roi(0, 0, 129, 10) === 0, 'Out-of-bounds x1=129 must fail');
-assert(exp.chronos_set_bos_gauge_roi(0, 0, 10, 65) === 0, 'Out-of-bounds y1=65 must fail');
+assert(exp.chronos_set_bos_gauge_roi(0, 0, 257, 10) === 0, 'Out-of-bounds x1=257 must fail');
+assert(exp.chronos_set_bos_gauge_roi(0, 0, 10, 129) === 0, 'Out-of-bounds y1=129 must fail');
 
 const epBefore = telemU32[11];
-assert(exp.chronos_set_bos_gauge_roi(4, 4, 24, 60) === 1, 'Valid gauge ROI must succeed');
+assert(exp.chronos_set_bos_gauge_roi(8, 8, 48, 120) === 1, 'Valid gauge ROI must succeed');
 assert(telemU32[11] > epBefore, 'Changing gauge ROI must increment reference_epoch');
 assert(telemU32[2] === STATE_WARMING, 'Valid mode+gauge must enter WARMING');
 assert((telemU32[3] & REASON_NO_GAUGE) === 0, 'Valid gauge must clear NO_GAUGE');
@@ -198,7 +198,7 @@ function checkLinearRamp(label, resMode, caseId, a, b, gx0, gy0, gx1, gy1, expec
   checkReservedTailZero();
 
   assert(telemU32[9] === expectPath, `${label}: expected solver_path=${expectPath}, got ${telemU32[9]}`);
-  assert(telemU32[8] <= 16, `${label}: pcg_iters=${telemU32[8]} > 16`);
+  assert(telemU32[8] <= 24, `${label}: pcg_iters=${telemU32[8]} > 24`);
   assert(telemF32[16] <= 1e-6, `${label}: true_rel_res=${telemF32[16]} > 1e-6`);
   assert(telemF32[17] < 1e-6 && telemF32[18] < 1e-6, `${label}: curl on uniform shift expected ~0`);
   assert((telemU32[3] & (REASON_NONCONV | REASON_NO_GAUGE)) === 0, `${label}: unexpected reason=${telemU32[3]}`);
@@ -270,16 +270,16 @@ function checkLinearRamp(label, resMode, caseId, a, b, gx0, gy0, gx1, gy1, expec
   return { checked, iters: telemU32[8], res: telemF32[16], relErr };
 }
 
-const r0a = checkLinearRamp('Case0 HD +x', 1, 0, 0.25, 0.0, 0, 0, 128, 64, SOLVER_DIRECT, () => true);
-const r0b = checkLinearRamp('Case0 HD -x', 1, 0, -0.35, 0.0, 4, 4, 24, 24, SOLVER_DIRECT, () => true);
-const r0c = checkLinearRamp('Case0 HD +y', 1, 0, 0.0, 0.3, 10, 10, 30, 30, SOLVER_DIRECT, () => true);
-const r0d = checkLinearRamp('Case0 SD mixed', 0, 0, 0.25, -0.125, 4, 4, 24, 60, SOLVER_DIRECT, () => true);
-const r1 = checkLinearRamp('Case1 Hole', 1, 1, 0.25, -0.125, 4, 4, 24, 60, SOLVER_PCG, (i, j) => !(j >= 24 && j < 40 && i >= 55 && i < 73));
-const r2L = checkLinearRamp('Case2 Split Left Gauge', 1, 2, 0.25, -0.125, 4, 4, 24, 60, SOLVER_PCG, (i) => i < 60);
-const r2Tie = checkLinearRamp('Case2 Equal-Overlap Tie-Break (Lowest Global Node Left Wins)', 1, 2, 0.25, -0.125, 56, 10, 69, 20, SOLVER_PCG, (i) => i < 60);
-const r2R = checkLinearRamp('Case2 Split Full Gauge (Right Wins)', 1, 2, 0.25, -0.125, 0, 0, 128, 64, SOLVER_PCG, (i) => i >= 65);
-assert(telemU32[7] === 63 * 64 && r2Tie.checked === 60 * 64, 'Case2 counts');
-const r3 = checkLinearRamp('Case3 Weighted Hole', 1, 3, 0.25, -0.125, 4, 4, 24, 60, SOLVER_PCG, (i, j) => !(j >= 24 && j < 40 && i >= 55 && i < 73));
+const r0a = checkLinearRamp('Case0 HD +x', 1, 0, 0.25, 0.0, 0, 0, 256, 128, SOLVER_DIRECT, () => true);
+const r0b = checkLinearRamp('Case0 HD -x', 1, 0, -0.35, 0.0, 8, 8, 48, 48, SOLVER_DIRECT, () => true);
+const r0c = checkLinearRamp('Case0 HD +y', 1, 0, 0.0, 0.3, 20, 20, 60, 60, SOLVER_DIRECT, () => true);
+const r0d = checkLinearRamp('Case0 SD mixed', 0, 0, 0.25, -0.125, 8, 8, 48, 120, SOLVER_DIRECT, () => true);
+const r1 = checkLinearRamp('Case1 Hole', 1, 1, 0.25, -0.125, 8, 8, 48, 120, SOLVER_PCG, (i, j) => !(j >= 48 && j < 80 && i >= 110 && i < 146));
+const r2L = checkLinearRamp('Case2 Split Left Gauge', 1, 2, 0.25, -0.125, 8, 8, 48, 120, SOLVER_PCG, (i) => i < 120);
+const r2Tie = checkLinearRamp('Case2 Equal-Overlap Tie-Break (Lowest Global Node Left Wins)', 1, 2, 0.25, -0.125, 112, 20, 138, 40, SOLVER_PCG, (i) => i < 120);
+const r2R = checkLinearRamp('Case2 Split Full Gauge (Right Wins)', 1, 2, 0.25, -0.125, 0, 0, 256, 128, SOLVER_PCG, (i) => i >= 130);
+assert(telemU32[7] === 126 * 128 && r2Tie.checked === 120 * 128, 'Case2 counts');
+const r3 = checkLinearRamp('Case3 Weighted Hole', 1, 3, 0.25, -0.125, 8, 8, 48, 120, SOLVER_PCG, (i, j) => !(j >= 48 && j < 80 && i >= 110 && i < 146));
 
 // Connected-component singleton gauge rejections (< 2 overlap nodes in gauge_roi)
 {
@@ -295,10 +295,10 @@ const r3 = checkLinearRamp('Case3 Weighted Hole', 1, 3, 0.25, -0.125, 4, 4, 24, 
   assert(rgba.every((v, idx) => (idx & 3) !== 3 || v === 0), 'Singleton [0,0,1,1) phi RGBA alpha must be 0');
   exp.chronos_set_bos_overlay_kind(0);
 
-  // Multi-node gauge_roi [54,39,73,40) overlapping 7904-node component at 1 single valid node (54,39)
-  assert(exp.chronos_set_bos_gauge_roi(54, 39, 73, 40) === 1);
+  // Multi-node gauge_roi [109,79,146,80) overlapping component at 1 single valid node (109,79)
+  assert(exp.chronos_set_bos_gauge_roi(109, 79, 146, 80) === 1);
   assert(exp.chronos_bos_solve_manufactured_test(1, 0.25, -0.125) === 1);
-  assert(telemU32[4] === BOS_N - 16 * 18 && telemU32[6] === 1 && telemU32[7] === 0, '1-node overlap on Case1 must report valid_gauge_nodes=0');
+  assert(telemU32[4] === BOS_N - 32 * 36 && telemU32[6] === 1 && telemU32[7] === 0, '1-node overlap on Case1 must report valid_gauge_nodes=0');
   assert((telemU32[3] & REASON_NO_GAUGE) !== 0, '1-node overlap on connected component must flag REASON_NO_GAUGE');
   assert(valid.every((v) => (v & VALID_PHI) === 0), '1-node overlap must clear all VALID_PHI');
 }
@@ -327,7 +327,7 @@ assert(rgba.every((v, idx) => (idx & 3) !== 3 || v === 0), 'Case6 phi RGBA alpha
 exp.chronos_set_bos_overlay_kind(0);
 
 // Case 7: Zero RHS
-assert(exp.chronos_set_bos_gauge_roi(0, 0, 128, 64) === 1);
+assert(exp.chronos_set_bos_gauge_roi(0, 0, 256, 128) === 1);
 assert(exp.chronos_bos_solve_manufactured_test(7, 0.0, 0.0) === 1);
 assert(telemF32[16] === 0.0, 'Case7 zero RHS residual must be 0');
 assert(planeSlice(2).every((v) => v === 0.0), 'Case7 zero RHS phi must be identically 0');
@@ -364,7 +364,7 @@ assert(planeSlice(2).every((v) => v === 0.0), 'Case7 zero RHS phi must be identi
   // Case 8 nonfinite overflow guard (f32::MAX) across HD and SD
   for (const rm of [1, 0]) {
     exp.chronos_set_resolution(rm);
-    assert(exp.chronos_set_bos_gauge_roi(0, 0, 128, 64) === 1);
+    assert(exp.chronos_set_bos_gauge_roi(0, 0, 256, 128) === 1);
     assert(exp.chronos_bos_solve_manufactured_test(8, 3.4028234663852886e+38, 0.0) === 0, `Case8 f32::MAX must reject cleanly (resMode=${rm})`);
     assert((telemU32[3] & REASON_NONCONV) !== 0, 'Case8 f32::MAX must flag REASON_NONCONV');
     assert(valid.every((v) => v === 0), 'Case8 f32::MAX must never mark any valid bits');
@@ -372,9 +372,9 @@ assert(planeSlice(2).every((v) => v === 0.0), 'Case7 zero RHS phi must be identi
     for (let k = 16; k < 24; k++) assert(Number.isFinite(telemF32[k]), `Case8 f32::MAX telemF32[${k}] must stay finite`);
   }
 
-  // SD Case 8 (1e35, 1e35) with 8x8 gauge: f64 Phi exceeds f32::MAX -> must clear ALL VALID_PHI + flag NONCONV
+  // SD Case 8 (1e35, 1e35) with 16x16 gauge: f64 Phi exceeds f32::MAX -> must clear ALL VALID_PHI + flag NONCONV
   exp.chronos_set_resolution(0);
-  assert(exp.chronos_set_bos_gauge_roi(0, 0, 8, 8) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(0, 0, 16, 16) === 1);
   exp.chronos_bos_solve_manufactured_test(8, 1e35, 1e35);
   assert((telemU32[3] & REASON_NONCONV) !== 0, 'SD Case8 (1e35,1e35) must flag REASON_NONCONV on Phi f32 overflow');
   assert(telemU32[7] === 0 && valid.every((v) => (v & VALID_PHI) === 0), 'SD Case8 (1e35,1e35) must publish zero VALID_PHI nodes');
@@ -383,7 +383,7 @@ assert(planeSlice(2).every((v) => v === 0.0), 'Case7 zero RHS phi must be identi
 
   // SD Case 0 (f32::MAX, f32::MAX): rmsDisp = sqrt(2)*f32::MAX overflows f32 -> reject before READY + clear nonfinite telemetry
   exp.chronos_set_resolution(0);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 24, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 48, 120) === 1);
   assert(exp.chronos_bos_solve_manufactured_test(0, 3.4028234663852886e+38, 3.4028234663852886e+38) === 0, 'SD Case0 (f32::MAX,f32::MAX) must reject cleanly');
   assert(telemU32[2] !== STATE_READY && (telemU32[3] & REASON_NONCONV) !== 0, 'SD Case0 (f32::MAX,f32::MAX) must not publish READY and must flag NONCONV');
   assert(valid.every((v) => v === 0) && telemF32[23] === 0.0, 'SD Case0 overflow must clear all valid bits and zero rmsDisp');
@@ -392,17 +392,17 @@ assert(planeSlice(2).every((v) => v === 0.0), 'Case7 zero RHS phi must be identi
 
   // HD Case 0 (3e38, 0): rmsDisp finite while linear Phi overflows f32 -> must clear ALL VALID_PHI + flag NONCONV
   exp.chronos_set_resolution(1);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 24, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 48, 120) === 1);
   exp.chronos_bos_solve_manufactured_test(0, 3e38, 0.0);
   assert((telemU32[3] & REASON_NONCONV) !== 0 && telemU32[7] === 0 && valid.every((v) => (v & VALID_PHI) === 0), 'HD Case0 (3e38,0) Phi overflow must flag NONCONV and clear all VALID_PHI');
   assert(planes.every((v) => Number.isFinite(v)), 'HD Case0 (3e38,0) must leave all planes finite');
   for (let k = 16; k < 24; k++) assert(Number.isFinite(telemF32[k]), `HD Case0 (3e38,0) telemF32[${k}] must stay finite`);
-  assert(exp.chronos_set_bos_gauge_roi(0, 0, 128, 64) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(0, 0, 256, 128) === 1);
 }
 
 // Case 9: Pathological PCG cap failure
 assert(exp.chronos_bos_solve_manufactured_test(9, 0.25, -0.125) === 1);
-assert(telemU32[9] === SOLVER_PCG && telemU32[8] === 16, 'Case9 expected PCG 16 iters');
+assert(telemU32[9] === SOLVER_PCG && telemU32[8] === 24, 'Case9 expected PCG 24 iters');
 assert(telemF32[16] > 1e-6, `Case9 expected true_rel_res > 1e-6, got ${telemF32[16]}`);
 assert((telemU32[3] & REASON_NONCONV) !== 0, 'Case9 expected NONCONV reason');
 assert(telemU32[4] > 0 && telemU32[5] > 0, 'Case9 must preserve measured disp & curl');
@@ -564,7 +564,7 @@ function computeInteriorRmse(dispFn, skipMaskFn = null) {
 exp.chronos_init();
 exp.chronos_set_resolution(1);
 assert(exp.chronos_set_bos_mode(1) === 1);
-assert(exp.chronos_set_bos_gauge_roi(4, 4, 20, 60) === 1);
+assert(exp.chronos_set_bos_gauge_roi(8, 8, 40, 120) === 1);
 let seq = 1;
 for (let f = 0; f < 16; f++) {
   renderBackdropFrame(clearFrame, null, 1.0, 0.0, 0.002, f + 1);
@@ -751,7 +751,7 @@ for (let y = 0; y < H; y++) {
 exp.chronos_init();
 exp.chronos_set_resolution(1);
 assert(exp.chronos_set_bos_mode(1) === 1);
-assert(exp.chronos_set_bos_gauge_roi(4, 4, 24, 60) === 1);
+assert(exp.chronos_set_bos_gauge_roi(8, 8, 48, 120) === 1);
 pushFrame(stripeFrame, 1, 33333);
 assert(telemU32[2] === STATE_DISTURBED && (telemU32[3] & (REASON_ANCHOR_SUPPORT | REASON_LOW_TEX)) !== 0, '1D stripe aperture-only texture must be rejected');
 
@@ -787,24 +787,24 @@ let apertureJ29Rejected = 0;
   exp.chronos_init();
   exp.chronos_set_resolution(1);
   assert(exp.chronos_set_bos_mode(1) === 1);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 20, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 40, 120) === 1);
   for (let f = 0; f < 16; f++) {
     pushFrame(apRef, 1 + f, (1 + f) * 33333);
   }
   pushFrame(apCtrl, 17, 17 * 33333);
   assert(telemU32[2] === STATE_READY, '1D-mask unmasked control must reach READY');
   let ctrlJ29Valid = 0;
-  for (let i = 51; i <= 77; i++) {
-    if ((valid[29 * BOS_W + i] & VALID_DISP) !== 0) ctrlJ29Valid++;
+  for (let i = 102; i <= 154; i++) {
+    if ((valid[58 * BOS_W + i] & VALID_DISP) !== 0) ctrlJ29Valid++;
   }
-  assert(ctrlJ29Valid >= 20, `1D-mask unmasked control expected >=20 valid 2D boundary nodes, got ${ctrlJ29Valid}`);
+  assert(ctrlJ29Valid >= 40, `1D-mask unmasked control expected >=40 valid 2D boundary nodes, got ${ctrlJ29Valid}`);
 
   pushFrame(apCur, 18, 18 * 33333);
   assert(telemU32[2] === STATE_READY, '1D-mask test must stay READY');
   assert(telemU32[9] === SOLVER_PCG && telemF32[16] <= 1e-6, `1D-mask PCG failed res=${telemF32[16]}`);
   let maskedJ29Valid = 0;
-  for (let i = 51; i <= 77; i++) {
-    if ((valid[29 * BOS_W + i] & VALID_DISP) !== 0) maskedJ29Valid++;
+  for (let i = 102; i <= 154; i++) {
+    if ((valid[58 * BOS_W + i] & VALID_DISP) !== 0) maskedJ29Valid++;
   }
   assert(maskedJ29Valid === 0, `1D-mask surviving-subset aperture must be rejected cleanly, got ${maskedJ29Valid} valid`);
   apertureJ29Rejected = ctrlJ29Valid;
@@ -812,8 +812,8 @@ let apertureJ29Rejected = 0;
   const exArr = planeSlice(0);
   const eyArr = planeSlice(1);
   let maxCleanErr = 0;
-  for (let j = 20; j < 40; j++) {
-    for (let i = 35; i < 46; i++) {
+  for (let j = 40; j < 80; j++) {
+    for (let i = 70; i < 92; i++) {
       const u = j * BOS_W + i;
       assert((valid[u] & VALID_DISP) !== 0, `Unmasked 2D node (${i},${j}) must stay valid`);
       maxCleanErr = Math.max(maxCleanErr, Math.hypot(exArr[u] - 0.35, eyArr[u] + 0.25));
@@ -846,15 +846,15 @@ let mode2MedAdaptPx = 0;
     const negEx = [];
     const absEx = [];
     let maxOutEps = 0;
-    for (let j = 6; j < 58; j++) {
-      for (let i = 5; i < 19; i++) {
+    for (let j = 12; j < 116; j++) {
+      for (let i = 10; i < 38; i++) {
         const u = j * BOS_W + i;
         if ((valid[u] & VALID_DISP) !== 0) {
           negEx.push(-exArr[u]);
           absEx.push(Math.abs(exArr[u]));
         }
       }
-      for (let i = 50; i < 120; i++) {
+      for (let i = 100; i < 240; i++) {
         const u = j * BOS_W + i;
         if ((valid[u] & VALID_DISP) !== 0) {
           maxOutEps = Math.max(maxOutEps, Math.hypot(exArr[u], eyArr[u]));
@@ -876,7 +876,7 @@ let mode2MedAdaptPx = 0;
   exp.chronos_init();
   exp.chronos_set_resolution(1);
   assert(exp.chronos_set_bos_mode(1) === 1);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 20, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 40, 120) === 1);
   renderBackdropFrame(clearFrame, null, 1.0, 0.0, 0.0, 1);
   for (let f = 0; f < 16; f++) {
     pushFrame(clearFrame, 1 + f, (1 + f) * 33333);
@@ -893,7 +893,7 @@ let mode2MedAdaptPx = 0;
   exp.chronos_init();
   exp.chronos_set_resolution(1);
   assert(exp.chronos_set_bos_mode(2) === 1);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 20, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 40, 120) === 1);
   for (let f = 0; f < 16; f++) {
     renderBackdropFrame(clearFrame, null, 1.0, 0.0, 0.02, 100 + f);
     pushFrame(clearFrame, f + 1, (f + 1) * 33333);
@@ -920,12 +920,12 @@ let mode2MedAdaptPx = 0;
     pushFrame(shiftPlumeFrame, 134 + f, (134 + f) * 33333);
   }
   assert(telemU32[2] === STATE_READY, 'Mode 2 must remain READY under persistent slow non-gauge plume');
-  // Plume outside gauge (i >= 35) must remain completely uncorrupted
+  // Plume outside gauge (i >= 70) must remain completely uncorrupted
   const exArrM2 = planeSlice(0);
   const eyArrM2 = planeSlice(1);
   let sePlumeM2 = 0, nPlumeM2 = 0;
   for (let j = 2; j < BOS_H - 2; j++) {
-    for (let i = 35; i < BOS_W - 2; i++) {
+    for (let i = 70; i < BOS_W - 2; i++) {
       const u = j * BOS_W + i;
       if ((valid[u] & VALID_DISP) !== 0) {
         nPlumeM2++;
@@ -974,7 +974,7 @@ let mode2MedAdaptPx = 0;
   exp.chronos_init();
   exp.chronos_set_resolution(0);
   assert(exp.chronos_set_bos_mode(1) === 1);
-  assert(exp.chronos_set_bos_gauge_roi(4, 4, 24, 60) === 1);
+  assert(exp.chronos_set_bos_gauge_roi(8, 8, 48, 120) === 1);
   for (let f = 0; f < 16; f++) {
     pushFrame(sdClear, 1 + f, (1 + f) * 33333, 0, SW, SH);
   }
@@ -1003,7 +1003,7 @@ let mode2MedAdaptPx = 0;
 exp.chronos_init();
 exp.chronos_set_resolution(1);
 assert(exp.chronos_set_bos_mode(1) === 1);
-assert(exp.chronos_set_bos_gauge_roi(4, 4, 20, 60) === 1);
+assert(exp.chronos_set_bos_gauge_roi(8, 8, 40, 120) === 1);
 renderBackdropFrame(clearFrame, null, 1.0, 0.0, 0.0, 1);
 for (let f = 0; f < 16; f++) pushFrame(clearFrame, 1 + f, (1 + f) * 33333);
 

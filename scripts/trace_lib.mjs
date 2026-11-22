@@ -243,6 +243,14 @@ const REGION_SPECS = [
   { name: 'hodge_inject', getter: 'chronos_get_hodge_inject_ptr', file: 'hodge.rs', field: 'inject_buf', dir: 'in' },
   { name: 'conservation_telemetry', getter: 'chronos_get_conservation_telemetry_ptr', file: 'physics_id.rs', field: 'telem' },
   { name: 'conservation_input', getter: 'chronos_get_conservation_input_ptr', file: 'physics_id.rs', field: 'input', dir: 'in' },
+  { name: 'fovea_rgba', getter: 'chronos_get_fovea_rgba_ptr', argCount: '1', file: 'lib.rs', field: 'rgba', dir: 'in' },
+  { name: 'fovea_request', getter: 'chronos_get_fovea_request_ptr', file: 'lib.rs', field: 'request_meta' },
+  { name: 'depth_telemetry', getter: 'chronos_get_depth_telemetry_ptr', file: 'depth.rs', field: 'telem' },
+  { name: 'depth_field', getter: 'chronos_get_depth_field_ptr', file: 'depth.rs', field: 'export_field' },
+  { name: 'depth_tracks', getter: 'chronos_get_depth_tracks_ptr', file: 'depth.rs', field: 'export_track_depth' },
+  { name: 'depth_track_flags', getter: 'chronos_get_depth_track_flags_ptr', file: 'depth.rs', field: 'export_track_flags' },
+  { name: 'depth_hero', getter: 'chronos_get_depth_hero_ptr', file: 'depth.rs', field: 'export_hero_depth' },
+  { name: 'depth_ingest', getter: 'chronos_get_depth_ingest_ptr', file: 'depth.rs', field: 'ext_depth', dir: 'in' },
 ];
 
 export const ELEM = { u8: 1, u32: 2, f32: 3 };
@@ -263,7 +271,8 @@ function makeConstEvaluator(files) {
   const re = /^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+([A-Z][A-Z0-9_]*)\s*:\s*(?:usize|u32|u64|i32)\s*=\s*([^;]+);/gm;
   for (const [f, txt] of files) {
     const m = new Map();
-    for (const x of txt.matchAll(re)) {
+    const cleaned = txt.replace(/#\[cfg\(all\(feature\s*=\s*"hires-720p"[^\n]*\)\)\]\s*\n[^\n]*/g, '');
+    for (const x of cleaned.matchAll(re)) {
       m.set(x[1], x[2].trim());
       if (!global.has(x[1])) global.set(x[1], { file: f, expr: x[2].trim() });
     }

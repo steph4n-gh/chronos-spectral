@@ -427,13 +427,17 @@ function runWasmDiagnostics(wasmModule, frames, fps, opts = {}) {
   const bosPtr = hasBosApi ? exp.chronos_get_bos_telemetry_ptr() : 0;
   const bosTelemU32 = hasBosApi && bosPtr > 0 ? new Uint32Array(mem.buffer, bosPtr, 32) : null;
   const bosTelemF32 = hasBosApi && bosPtr > 0 ? new Float32Array(mem.buffer, bosPtr, 32) : null;
-  const bosPlanes = hasBosApi ? new Float32Array(mem.buffer, exp.chronos_get_bos_planes_ptr(), 6 * 8192) : null;
-  const bosValid = hasBosApi ? new Uint8Array(mem.buffer, exp.chronos_get_bos_valid_ptr(), 8192) : null;
+  const BOS_W = 256;
+  const BOS_H = 128;
+  const BOS_N = BOS_W * BOS_H; // 32,768
+  const MAX_MICRO = 3072;
+  const bosPlanes = hasBosApi ? new Float32Array(mem.buffer, exp.chronos_get_bos_planes_ptr(), 6 * BOS_N) : null;
+  const bosValid = hasBosApi ? new Uint8Array(mem.buffer, exp.chronos_get_bos_valid_ptr(), BOS_N) : null;
 
   const hasHeroCandApi = typeof exp.chronos_get_hero_candidates_ptr === 'function';
   const heroCandU32 = hasHeroCandApi ? new Uint32Array(mem.buffer, exp.chronos_get_hero_candidates_ptr(), 4 + 16 * 8) : null;
   const microQualU32 = typeof exp.chronos_get_micro_quality_ptr === 'function'
-    ? new Uint32Array(mem.buffer, exp.chronos_get_micro_quality_ptr(), 1536)
+    ? new Uint32Array(mem.buffer, exp.chronos_get_micro_quality_ptr(), MAX_MICRO)
     : null;
 
   const dtSec = 1.0 / fps;
@@ -485,7 +489,7 @@ function runWasmDiagnostics(wasmModule, frames, fps, opts = {}) {
       if (heroCandU32[2] > maxAutoHeroCount) maxAutoHeroCount = heroCandU32[2];
     }
     if (microQualU32) {
-      for (let i = 0; i < 1536; i++) {
+      for (let i = 0; i < MAX_MICRO; i++) {
         if ((microQualU32[i] & (1 << 18)) !== 0) {
           promoCandFrames++;
           break;
@@ -510,22 +514,22 @@ function runWasmDiagnostics(wasmModule, frames, fps, opts = {}) {
         let centerPhiMax = 0.0;
         let quietSq = 0.0;
         let quietCnt = 0;
-        for (let gy = 0; gy < 64; gy++) {
-          for (let gx = 0; gx < 128; gx++) {
-            const idx = gy * 128 + gx;
+        for (let gy = 0; gy < BOS_H; gy++) {
+          for (let gx = 0; gx < BOS_W; gx++) {
+            const idx = gy * BOS_W + gx;
             if ((bosValid[idx] & 1) === 0) continue;
             validDispCnt++;
             const ex = bosPlanes[idx];
-            const ey = bosPlanes[8192 + idx];
-            const phi = bosPlanes[16384 + idx];
+            const ey = bosPlanes[BOS_N + idx];
+            const phi = bosPlanes[2 * BOS_N + idx];
             assert(Number.isFinite(ex) && Number.isFinite(ey), `Non-finite BOS displacement at (${gx},${gy})`);
             const mag = Math.hypot(ex, ey);
-            if (gx >= 44 && gx <= 84 && gy >= 10 && gy <= 56) {
+            if (gx >= 88 && gx <= 168 && gy >= 20 && gy <= 112) {
               if (mag > centerMaxDisp) centerMaxDisp = mag;
               if ((bosValid[idx] & 2) !== 0 && Math.abs(phi) > centerPhiMax) {
                 centerPhiMax = Math.abs(phi);
               }
-            } else if (gx < 18 || gx >= 110) {
+            } else if (gx < 36 || gx >= 220) {
               quietSq += mag * mag;
               quietCnt++;
             }
@@ -641,7 +645,7 @@ async function main() {
   assert(plumeWasm.bosDisturbedFrames === 0, `bos_thermal_plume.mp4 Wave-1 BOS reported ${plumeWasm.bosDisturbedFrames} disturbed frames`);
   const bs = plumeWasm.bosSample;
   assert(bs.bosState === 2 && bs.reasonMask === 0, `bos_thermal_plume.mp4 f=140 BOS state=${bs.bosState} reason=${bs.reasonMask}`);
-  assert(bs.validDispCnt >= 7500, `bos_thermal_plume.mp4 BOS validDispCnt=${bs.validDispCnt} < 7500`);
+  assert(bs.validDispCnt >= 30000, `bos_thermal_plume.mp4 BOS validDispCnt=${bs.validDispCnt} < 30000`);
   assert(bs.centerMaxDisp >= 0.45, `bos_thermal_plume.mp4 Wasm BOS center max |eps|=${bs.centerMaxDisp} px < 0.45 px`);
   assert(bs.quietRms <= 0.12, `bos_thermal_plume.mp4 Wasm BOS quiet margin RMS=${bs.quietRms} px > 0.12 px`);
   assert(bs.dispSnr >= 8.0, `bos_thermal_plume.mp4 Wasm BOS displacement SNR=${bs.dispSnr} < 8.0`);

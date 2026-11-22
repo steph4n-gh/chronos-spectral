@@ -1,0 +1,24 @@
+[package]
+name = "chronos_capi"
+version = "3.2.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+name = "chronos_capi"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+chronos_spectral_native = { path = ".." }
+
+[features]
+default = []
+hires-720p = ["chronos_spectral_native/hires-720p"]
+
+[profile.release]
+opt-level = 3
+lto = false
+codegen-units = 16
+
+[workspace]

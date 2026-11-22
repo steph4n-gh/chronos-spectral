@@ -70,8 +70,19 @@ pub unsafe fn load_sum4_2x2_f32(ptr: *const f32, stride: usize) -> v128 {
 pub unsafe fn load_pooled4_f32(ptr: *const f32, stride: usize, scale_px: usize) -> v128 {
     if scale_px <= 1 {
         v128_load(ptr as *const v128)
-    } else {
+    } else if scale_px == 2 {
         f32x4_mul(load_sum4_2x2_f32(ptr, stride), f32x4_splat(0.25))
+    } else {
+        // scale_px == 4 (1280x720): exact 4x4 box average of 4 adjacent 4x4 blocks
+        let top_a = load_sum4_2x2_f32(ptr, stride);
+        let top_b = load_sum4_2x2_f32(ptr.add(8), stride);
+        let bot_a = load_sum4_2x2_f32(ptr.add(stride * 2), stride);
+        let bot_b = load_sum4_2x2_f32(ptr.add(stride * 2 + 8), stride);
+        let s_a = f32x4_add(top_a, bot_a);
+        let s_b = f32x4_add(top_b, bot_b);
+        let evens = i32x4_shuffle::<0, 2, 4, 6>(s_a, s_b);
+        let odds = i32x4_shuffle::<1, 3, 5, 7>(s_a, s_b);
+        f32x4_mul(f32x4_add(evens, odds), f32x4_splat(1.0 / 16.0))
     }
 }
 
@@ -13059,7 +13070,7 @@ pub unsafe fn pool_plane_rows_to_160x90_simd128(
                 px += 4;
             }
         }
-    } else {
+    } else if scale_px == 2 {
         // 640x360 -> 160x90 exact 4x4 register-only SIMD128 box downsample
         let q16 = f32x4_splat(1.0 / 16.0);
         for py in py_start..py_end {
@@ -13078,6 +13089,29 @@ pub unsafe fn pool_plane_rows_to_160x90_simd128(
                 let evens = i32x4_shuffle::<0, 2, 4, 6>(s_a, s_b);
                 let odds = i32x4_shuffle::<1, 3, 5, 7>(s_a, s_b);
                 let v = f32x4_mul(f32x4_add(evens, odds), q16);
+                v128_store(dst.add(dst_row + px) as *mut v128, v);
+                px += 4;
+            }
+        }
+    } else {
+        // 1280x720 -> 160x90 exact 8x8 SIMD128 box downsample
+        let q4 = f32x4_splat(0.25);
+        for py in py_start..py_end {
+            let r0 = (py * 8) * 1280;
+            let r4 = (py * 8 + 4) * 1280;
+            let dst_row = py * 160;
+            let mut px = 0usize;
+            while px + 4 <= 160 {
+                let sx = px * 8;
+                let t0 = load_pooled4_f32(src.add(r0 + sx), 1280, 4);
+                let t1 = load_pooled4_f32(src.add(r0 + sx + 16), 1280, 4);
+                let b0 = load_pooled4_f32(src.add(r4 + sx), 1280, 4);
+                let b1 = load_pooled4_f32(src.add(r4 + sx + 16), 1280, 4);
+                let s0 = f32x4_add(t0, b0);
+                let s1 = f32x4_add(t1, b1);
+                let evens = i32x4_shuffle::<0, 2, 4, 6>(s0, s1);
+                let odds = i32x4_shuffle::<1, 3, 5, 7>(s0, s1);
+                let v = f32x4_mul(f32x4_add(evens, odds), q4);
                 v128_store(dst.add(dst_row + px) as *mut v128, v);
                 px += 4;
             }
@@ -14848,6 +14882,7 @@ pub unsafe fn subpx_patch_gain_norm_sad_simd128(
     cur_patch: &[f32; 64],
     cur_mad: f32,
     pl: &[f32],
+    tile_stride: usize,
     scale_px: usize,
     phase_mask: usize,
     off_x_base: usize,
@@ -14857,7 +14892,8 @@ pub unsafe fn subpx_patch_gain_norm_sad_simd128(
     w01: f32,
     w11: f32,
 ) -> f32 {
-    if scale_px <= 1
+    if tile_stride == 18
+        && scale_px <= 1
         && pl.len() >= (7 + off_y_base + 1) * 18 + off_x_base + 9
     {
         let p_ptr = pl.as_ptr();
@@ -14904,7 +14940,8 @@ pub unsafe fn subpx_patch_gain_norm_sad_simd128(
         return hsum_f32x4(sad_v);
     }
 
-    if scale_px == 2
+    if tile_stride == 18
+        && scale_px == 2
         && pl.len() >= (16 + off_y_base) * 18 + off_x_base + 17
     {
         let p_ptr = pl.as_ptr();
@@ -14978,8 +15015,8 @@ pub unsafe fn subpx_patch_gain_norm_sad_simd128(
         for c in 0..8usize {
             let ly = r * scale_px + (c & phase_mask) + off_y_base;
             let lx = c * scale_px + (r & phase_mask) + off_x_base;
-            let r0 = ly * 18 + lx;
-            let r1 = r0 + 18;
+            let r0 = ly * tile_stride + lx;
+            let r1 = r0 + tile_stride;
             prev_b[q] = w00 * pl[r0] + w10 * pl[r0 + 1] + w01 * pl[r1] + w11 * pl[r1 + 1];
             q += 1;
         }
@@ -23508,4 +23545,560 @@ pub unsafe fn subpx_patch_gain_norm_sad_p2_18_simd128(
         sad1 = f32x4_add(sad1, f32x4_abs(f32x4_sub(c1, f32x4_mul(pv[i + 1], g_v))));
     }
     hsum_f32x4(f32x4_add(sad0, sad1))
+}
+
+/// Exact Q16.16 fixed-point 4-DoF similarity `(tx, ty, a = s*cos(theta)-1, b = s*sin(theta))`
+/// background advection (`bg_luma`, `bg_stat_streak`, `bg_eval_mask`), using `scratch` (`eca_res`)
+/// as full-frame staging buffer.
+///
+/// Inverse warp around frame center `(cx, cy)` uses zero transcendental calls:
+///   `det = (1 + a)^2 + b^2`, `ia = (1 + a) / det`, `ib = b / det`
+///   `src_x = cx + ia * (x - tx - cx) + ib * (y - ty - cy)`
+/// Invert centered 3x3 homography `M = [[1+h0, h1, h2], [h3, 1+h4, h5], [h6, h7, 1]]`
+/// (with `h6 = h7 = 0` for 4-DoF similarity & 6-DoF affine) into normalized `inv_m[9]` (`inv_m[8] = 1`).
+#[inline(always)]
+fn invert_centered_warp_f64(h: &[f32; 8]) -> Option<[f64; 9]> {
+    let m00 = 1.0 + (h[0] as f64);
+    let m01 = h[1] as f64;
+    let m02 = h[2] as f64;
+    let m10 = h[3] as f64;
+    let m11 = 1.0 + (h[4] as f64);
+    let m12 = h[5] as f64;
+    let m20 = h[6] as f64;
+    let m21 = h[7] as f64;
+    let m22 = 1.0f64;
+
+    let c00 = m11 * m22 - m12 * m21;
+    let c01 = -(m10 * m22 - m12 * m20);
+    let c02 = m10 * m21 - m11 * m20;
+    let c10 = -(m01 * m22 - m02 * m21);
+    let c11 = m00 * m22 - m02 * m20;
+    let c12 = -(m00 * m21 - m01 * m20);
+    let c20 = m01 * m12 - m02 * m11;
+    let c21 = -(m00 * m12 - m02 * m10);
+    let c22 = m00 * m11 - m01 * m10;
+
+    let det = m00 * c00 + m01 * c01 + m02 * c02;
+    if !det.is_finite() || det < 0.25 || det > 4.0 || !c22.is_finite() || c22.abs() < 0.25 {
+        return None;
+    }
+    let inv_c22 = 1.0 / c22;
+    Some([
+        c00 * inv_c22,
+        c10 * inv_c22,
+        c20 * inv_c22,
+        c01 * inv_c22,
+        c11 * inv_c22,
+        c21 * inv_c22,
+        c02 * inv_c22,
+        c12 * inv_c22,
+        1.0,
+    ])
+}
+
+#[inline(always)]
+fn eval_inv_warp_q16(inv_m: &[f64; 9], cx: f64, cy: f64, x: f64, y: f64) -> (i32, i32) {
+    let xr = x - cx;
+    let yr = y - cy;
+    let denom = inv_m[6] * xr + inv_m[7] * yr + inv_m[8];
+    let inv_d = if denom.abs() > 0.25 { 1.0 / denom } else { 1.0 };
+    let ux = cx + (inv_m[0] * xr + inv_m[1] * yr + inv_m[2]) * inv_d;
+    let vy = cy + (inv_m[3] * xr + inv_m[4] * yr + inv_m[5]) * inv_d;
+    let su = (ux * 65536.0).clamp(-1.0e9, 1.0e9);
+    let sv = (vy * 65536.0).clamp(-1.0e9, 1.0e9);
+    let uq = if su >= 0.0 { (su + 0.5) as i32 } else { (su - 0.5) as i32 };
+    let vq = if sv >= 0.0 { (sv + 0.5) as i32 } else { (sv - 0.5) as i32 };
+    (uq, vq)
+}
+
+/// Vertical-first 4x4 Catmull-Rom SIMD128 sample of `bg_luma` at Q16.16 `(u, v)` with local
+/// 2x2 anti-ringing clamp `[lo2 - 0.015, hi2 + 0.015]` and zero `.rodata` footprint.
+#[inline(always)]
+unsafe fn sample_bg_catmull4x4_simd128(
+    bg_luma: *const f32,
+    w: usize,
+    h: usize,
+    u: i32,
+    v: i32,
+    fallback: f32,
+    g: f32,
+    off: f32,
+) -> f32 {
+    let ix = u >> 16;
+    let iy = v >> 16;
+    let w_lim = (w - 1) as i32;
+    let h_lim = (h - 1) as i32;
+    if ix < 0 || ix >= w_lim || iy < 0 || iy >= h_lim {
+        return fallback;
+    }
+    let inv256 = 1.0f32 / 256.0;
+    let fx = (((u >> 8) & 255) as f32) * inv256;
+    let fy = (((v >> 8) & 255) as f32) * inv256;
+
+    let val = if ix >= 1 && ix < (w as i32) - 2 && iy >= 1 && iy < (h as i32) - 2 {
+        let bx = (ix - 1) as usize;
+        let by = (iy - 1) as usize;
+        let p0 = by * w + bx;
+        let r0 = core::ptr::read_unaligned(bg_luma.add(p0) as *const v128);
+        let r1 = core::ptr::read_unaligned(bg_luma.add(p0 + w) as *const v128);
+        let r2 = core::ptr::read_unaligned(bg_luma.add(p0 + 2 * w) as *const v128);
+        let r3 = core::ptr::read_unaligned(bg_luma.add(p0 + 3 * w) as *const v128);
+
+        let (wy0, wy1, wy2, wy3) = catmull_rom_weights(fy);
+        let (wx0, wx1, wx2, wx3) = catmull_rom_weights(fx);
+
+        let col = f32x4_add(
+            f32x4_add(f32x4_mul(r0, f32x4_splat(wy0)), f32x4_mul(r1, f32x4_splat(wy1))),
+            f32x4_add(f32x4_mul(r2, f32x4_splat(wy2)), f32x4_mul(r3, f32x4_splat(wy3))),
+        );
+        let interp = hsum_f32x4(f32x4_mul(col, f32x4(wx0, wx1, wx2, wx3)));
+
+        // Local 2x2 neighborhood anti-ringing clamp
+        let c00 = f32x4_extract_lane::<1>(r1);
+        let c10 = f32x4_extract_lane::<2>(r1);
+        let c01 = f32x4_extract_lane::<1>(r2);
+        let c11 = f32x4_extract_lane::<2>(r2);
+        let lo2 = c00.min(c10).min(c01.min(c11));
+        let hi2 = c00.max(c10).max(c01.max(c11));
+        interp.clamp((lo2 - 0.015).max(0.0), (hi2 + 0.015).min(1.0))
+    } else {
+        let p = (iy as usize) * w + (ix as usize);
+        let s00 = *bg_luma.add(p);
+        let s10 = *bg_luma.add(p + 1);
+        let s01 = *bg_luma.add(p + w);
+        let s11 = *bg_luma.add(p + w + 1);
+        let top = s00 + fx * (s10 - s00);
+        let bot = s01 + fx * (s11 - s01);
+        top + fy * (bot - top)
+    };
+    (val * g + off).clamp(0.0, 1.0)
+}
+
+/// Sharp vertical-first 4x4 Catmull-Rom Tier-2 warp (4-DoF similarity, 6-DoF affine, or 8-DoF
+/// planar homography) of `bg_luma`, `bg_stat_streak`, and `bg_eval_mask` using Q16.16 DDA (4/6-DoF)
+/// or 8-pixel Q16.16 chord stepping (8-DoF homography). Zero `.rodata` tables; bit-identical across
+/// Wasm SIMD128, NEON, SSE, and scalar backends.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn advect_bg_warp_simd128(
+    bg_luma: *mut f32,
+    scratch: *mut f32,
+    cur_luma: *const f32,
+    bg_stat_streak: *mut u8,
+    bg_eval_mask: *mut u8,
+    w: usize,
+    h: usize,
+    warp_tier: u8,
+    warp_h: &[f32; 8],
+    exp_gain: f32,
+    exp_off: f32,
+) {
+    let n = w * h;
+    if n == 0 || w < 4 || h < 4 || warp_tier == 0 {
+        return;
+    }
+    let Some(inv_m) = invert_centered_warp_f64(warp_h) else {
+        return;
+    };
+    let cx = 0.5 * ((w - 1) as f64);
+    let cy = 0.5 * ((h - 1) as f64);
+    let is_proj = warp_tier >= 3 && (inv_m[6].abs() > 1e-12 || inv_m[7].abs() > 1e-12);
+
+    let g = if exp_gain.is_finite() { exp_gain } else { 1.0 };
+    let off = if exp_off.is_finite() { exp_off } else { 0.0 };
+
+    // Linear Q16.16 DDA increments for 4-DoF / 6-DoF
+    let q16 = |v: f64| -> i32 {
+        let s = (v * 65536.0).clamp(-1.0e9, 1.0e9);
+        if s >= 0.0 { (s + 0.5) as i32 } else { (s - 0.5) as i32 }
+    };
+    let du_dx_lin = q16(inv_m[0]);
+    let dv_dx_lin = q16(inv_m[3]);
+    let du_dy_lin = q16(inv_m[1]);
+    let dv_dy_lin = q16(inv_m[4]);
+    let (u00, v00) = eval_inv_warp_q16(&inv_m, cx, cy, 0.0, 0.0);
+
+    // Pass 1: Vertical-first 4x4 Catmull-Rom + exposure warp of `bg_luma` -> `scratch`
+    for y in 0..h {
+        let row_out = scratch.add(y * w);
+        let row_cur = cur_luma.add(y * w);
+        if !is_proj {
+            let mut u = u00.wrapping_add((y as i32).wrapping_mul(du_dy_lin));
+            let mut v = v00.wrapping_add((y as i32).wrapping_mul(dv_dy_lin));
+            let mut x = 0usize;
+            while x < w {
+                *row_out.add(x) =
+                    sample_bg_catmull4x4_simd128(bg_luma, w, h, u, v, *row_cur.add(x), g, off);
+                u = u.wrapping_add(du_dx_lin);
+                v = v.wrapping_add(dv_dx_lin);
+                x += 1;
+            }
+        } else {
+            let yf = y as f64;
+            let mut x = 0usize;
+            while x < w {
+                let x_end = (x + 8).min(w);
+                let span = x_end - x;
+                let (u_s, v_s) = eval_inv_warp_q16(&inv_m, cx, cy, x as f64, yf);
+                let (u_e, v_e) = eval_inv_warp_q16(&inv_m, cx, cy, x_end as f64, yf);
+                let du = if span == 8 {
+                    u_e.wrapping_sub(u_s) >> 3
+                } else {
+                    u_e.wrapping_sub(u_s) / (span as i32)
+                };
+                let dv = if span == 8 {
+                    v_e.wrapping_sub(v_s) >> 3
+                } else {
+                    v_e.wrapping_sub(v_s) / (span as i32)
+                };
+                let mut u = u_s;
+                let mut v = v_s;
+                let mut k = 0usize;
+                while k < span {
+                    *row_out.add(x + k) = sample_bg_catmull4x4_simd128(
+                        bg_luma,
+                        w,
+                        h,
+                        u,
+                        v,
+                        *row_cur.add(x + k),
+                        g,
+                        off,
+                    );
+                    u = u.wrapping_add(du);
+                    v = v.wrapping_add(dv);
+                    k += 1;
+                }
+                x = x_end;
+            }
+        }
+    }
+    core::ptr::copy_nonoverlapping(scratch, bg_luma, n);
+
+    // Pass 2: Nearest-neighbor warp of `bg_stat_streak` and `bg_eval_mask`
+    let w_lim = (w - 1) as i32;
+    let h_lim = (h - 1) as i32;
+    let s_u8 = scratch as *mut u8;
+    let m_u8 = s_u8.add(n);
+    for y in 0..h {
+        let row_off = y * w;
+        if !is_proj {
+            let mut u = u00.wrapping_add((y as i32).wrapping_mul(du_dy_lin)).wrapping_add(0x8000);
+            let mut v = v00.wrapping_add((y as i32).wrapping_mul(dv_dy_lin)).wrapping_add(0x8000);
+            for x in 0..w {
+                let ix = u >> 16;
+                let iy = v >> 16;
+                if ix >= 0 && ix <= w_lim && iy >= 0 && iy <= h_lim {
+                    let p = (iy as usize) * w + (ix as usize);
+                    *s_u8.add(row_off + x) = *bg_stat_streak.add(p);
+                    *m_u8.add(row_off + x) = *bg_eval_mask.add(p);
+                } else {
+                    *s_u8.add(row_off + x) = 0;
+                    *m_u8.add(row_off + x) = 0;
+                }
+                u = u.wrapping_add(du_dx_lin);
+                v = v.wrapping_add(dv_dx_lin);
+            }
+        } else {
+            let yf = y as f64;
+            let mut x = 0usize;
+            while x < w {
+                let x_end = (x + 8).min(w);
+                let span = x_end - x;
+                let (u_s, v_s) = eval_inv_warp_q16(&inv_m, cx, cy, x as f64, yf);
+                let (u_e, v_e) = eval_inv_warp_q16(&inv_m, cx, cy, x_end as f64, yf);
+                let du = if span == 8 {
+                    u_e.wrapping_sub(u_s) >> 3
+                } else {
+                    u_e.wrapping_sub(u_s) / (span as i32)
+                };
+                let dv = if span == 8 {
+                    v_e.wrapping_sub(v_s) >> 3
+                } else {
+                    v_e.wrapping_sub(v_s) / (span as i32)
+                };
+                let mut u = u_s.wrapping_add(0x8000);
+                let mut v = v_s.wrapping_add(0x8000);
+                let mut k = 0usize;
+                while k < span {
+                    let ix = u >> 16;
+                    let iy = v >> 16;
+                    if ix >= 0 && ix <= w_lim && iy >= 0 && iy <= h_lim {
+                        let p = (iy as usize) * w + (ix as usize);
+                        *s_u8.add(row_off + x + k) = *bg_stat_streak.add(p);
+                        *m_u8.add(row_off + x + k) = *bg_eval_mask.add(p);
+                    } else {
+                        *s_u8.add(row_off + x + k) = 0;
+                        *m_u8.add(row_off + x + k) = 0;
+                    }
+                    u = u.wrapping_add(du);
+                    v = v.wrapping_add(dv);
+                    k += 1;
+                }
+                x = x_end;
+            }
+        }
+    }
+    core::ptr::copy_nonoverlapping(s_u8, bg_stat_streak, n);
+    core::ptr::copy_nonoverlapping(m_u8, bg_eval_mask, n);
+}
+
+/// Warp-aware stationary-clutter streak + Rank-2 ECA + 160x90 `pyr_eca` + `cc_energy` pass.
+/// Dispatched ONLY when `warp_tier >= 1`, keeping Tier-0 and Tier-1 paths 100% bit-identical.
+#[inline(never)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn warp_streak_and_eca_fused_simd128(
+    curr_rgba: *const u8,
+    prev_rgba: *const u8,
+    luma_ptr: *const f32,
+    bg_luma_ptr: *mut f32,
+    stat_streak_ptr: *mut u8,
+    eval_mask_ptr: *mut u8,
+    mask_warm: bool,
+    mask_luma_tol: f32,
+    eca_res_ptr: *mut f32,
+    pyr_eca_ptr: *mut f32,
+    grid_out: *mut f32,
+    frame_w: usize,
+    frame_h: usize,
+    grid_w: usize,
+    grid_h: usize,
+    scale_px: usize,
+    adapt_rate: f32,
+    warp_tier: u8,
+    warp_h: &[f32; 8],
+    exp_gain: f32,
+    exp_off: f32,
+    exp_regime: bool,
+    out_err2: *mut f32,
+    out_sig2: *mut f32,
+    out_eval_count: *mut u32,
+) -> Option<f32> {
+    if warp_tier == 0 || frame_w != grid_w * 16 || frame_h < grid_h * 16 || frame_w < 16 || frame_h < 16 {
+        return None;
+    }
+    let inv_m = invert_centered_warp_f64(warp_h)?;
+    let len = frame_w * frame_h;
+    let cx = 0.5 * ((frame_w - 1) as f64);
+    let cy = 0.5 * ((frame_h - 1) as f64);
+    let is_proj = warp_tier >= 3 && (inv_m[6].abs() > 1e-12 || inv_m[7].abs() > 1e-12);
+    let (exp_active, dg_q15, off_i16) = exposure_q15_params(exp_gain, exp_off);
+    let eff_exp = exp_regime || exp_active;
+    let hard_u8: u8 = if eff_exp { 18 } else { 14 };
+    let mid_u8 = hard_u8 + 2;
+    let soft_u8 = hard_u8 + 6;
+    let w_lim = (frame_w - 1) as i32;
+    let h_lim = (frame_h - 1) as i32;
+
+    let q16 = |v: f64| -> i32 {
+        let s = (v * 65536.0).clamp(-1.0e9, 1.0e9);
+        if s >= 0.0 { (s + 0.5) as i32 } else { (s - 0.5) as i32 }
+    };
+    let du_dx_lin = q16(inv_m[0]);
+    let dv_dx_lin = q16(inv_m[3]);
+    let du_dy_lin = q16(inv_m[1]);
+    let dv_dy_lin = q16(inv_m[4]);
+    let (u00, v00) = eval_inv_warp_q16(&inv_m, cx, cy, 0.0, 0.0);
+
+    // Step 1: Update `stat_streak_ptr` and `eval_mask_ptr` via warped bilinear `prev_rgba` lookup
+    let mut eval_px_cnt = 0u32;
+    for y in 0..frame_h {
+        let row_p = y * frame_w;
+        let yf = y as f64;
+        let mut x = 0usize;
+        while x < frame_w {
+            let (x_end, mut u, mut v, du, dv) = if !is_proj {
+                (
+                    frame_w,
+                    u00.wrapping_add((y as i32).wrapping_mul(du_dy_lin)),
+                    v00.wrapping_add((y as i32).wrapping_mul(dv_dy_lin)),
+                    du_dx_lin,
+                    dv_dx_lin,
+                )
+            } else {
+                let xe = (x + 8).min(frame_w);
+                let sp = xe - x;
+                let (us, vs) = eval_inv_warp_q16(&inv_m, cx, cy, x as f64, yf);
+                let (ue, ve) = eval_inv_warp_q16(&inv_m, cx, cy, xe as f64, yf);
+                let dux = if sp == 8 { ue.wrapping_sub(us) >> 3 } else { ue.wrapping_sub(us) / (sp as i32) };
+                let dvx = if sp == 8 { ve.wrapping_sub(vs) >> 3 } else { ve.wrapping_sub(vs) / (sp as i32) };
+                (xe, us, vs, dux, dvx)
+            };
+            let mut cur_x = x;
+            while cur_x < x_end {
+                let p = row_p + cur_x;
+                let ix = u >> 16;
+                let iy = v >> 16;
+                if ix >= 1 && ix < w_lim - 1 && iy >= 1 && iy < h_lim - 1 {
+                    let fx = ((u >> 8) & 255) as u32;
+                    let fy = ((v >> 8) & 255) as u32;
+                    let w00 = (256 - fx) * (256 - fy);
+                    let w10 = fx * (256 - fy);
+                    let w01 = (256 - fx) * fy;
+                    let w11 = fx * fy;
+                    let p00 = ((iy as usize) * frame_w + (ix as usize)) * 4;
+                    let p10 = p00 + 4;
+                    let p01 = p00 + frame_w * 4;
+                    let p11 = p01 + 4;
+                    let cb = p * 4;
+                    let mut max_d = 0u8;
+                    for ch in 0..3usize {
+                        let pr_i = (w00 * (*prev_rgba.add(p00 + ch) as u32)
+                            + w10 * (*prev_rgba.add(p10 + ch) as u32)
+                            + w01 * (*prev_rgba.add(p01 + ch) as u32)
+                            + w11 * (*prev_rgba.add(p11 + ch) as u32)
+                            + 32768)
+                            >> 16;
+                        let pr_u8 = pr_i.min(255) as u8;
+                        let pv = if exp_active {
+                            apply_exposure_u8_scalar(pr_u8, dg_q15, off_i16)
+                        } else {
+                            pr_u8
+                        };
+                        let d = (*curr_rgba.add(cb + ch)).abs_diff(pv);
+                        if d > max_d {
+                            max_d = d;
+                        }
+                    }
+                    let old_s = *stat_streak_ptr.add(p);
+                    let ns = if max_d <= hard_u8 {
+                        old_s.saturating_add(2).min(20)
+                    } else if max_d <= mid_u8 {
+                        old_s.saturating_sub(1)
+                    } else if max_d <= soft_u8 {
+                        old_s.min(14).saturating_sub(6)
+                    } else {
+                        0
+                    };
+                    *stat_streak_ptr.add(p) = ns;
+                    let ev = if ns >= 12 { 1u8 } else { 0u8 };
+                    *eval_mask_ptr.add(p) = ev;
+                    eval_px_cnt += ev as u32;
+                } else {
+                    *stat_streak_ptr.add(p) = 0;
+                    *eval_mask_ptr.add(p) = 0;
+                }
+                u = u.wrapping_add(du);
+                v = v.wrapping_add(dv);
+                cur_x += 1;
+            }
+            x = x_end;
+        }
+    }
+
+    // Step 2: Fit Rank-2 ECA affine `(alpha, offset_c)` over stationary background pixels
+    let mask_ptr = if mask_warm && eval_px_cnt >= 256 {
+        eval_mask_ptr as *const u8
+    } else {
+        core::ptr::null()
+    };
+    let (alpha, offset_c) = eca_fit_affine_params_simd128(
+        luma_ptr,
+        bg_luma_ptr,
+        mask_ptr,
+        core::ptr::null(),
+        core::ptr::null(),
+        core::ptr::null(),
+        len,
+    )?;
+
+    // Step 3: Evaluate ECA residual, update `bg_luma`, and accumulate clutter error stats
+    let rate = adapt_rate.clamp(0.005, 0.25);
+    let fg_guard = 0.045f32;
+    let mut err2 = 0.0f32;
+    let mut sig2 = 0.0f32;
+    let mut eval_cnt = 0u32;
+    let use_tol = mask_warm && mask_luma_tol > 0.0;
+    for p in 0..len {
+        let yv = *luma_ptr.add(p);
+        let bv = *bg_luma_ptr.add(p);
+        let pred = (alpha * bv + offset_c).clamp(0.0, 1.0);
+        let res = (yv - pred).abs();
+        *eca_res_ptr.add(p) = res;
+        let is_ev = *eval_mask_ptr.add(p) != 0;
+        if is_ev {
+            if use_tol && res > mask_luma_tol {
+                *eval_mask_ptr.add(p) = 0;
+            } else {
+                err2 += res * res;
+                sig2 += yv * yv;
+                eval_cnt += 1;
+            }
+        }
+        let step_r = if res < fg_guard || is_ev { rate } else { rate * 0.15 };
+        *bg_luma_ptr.add(p) = (bv + step_r * (yv - bv)).clamp(0.0, 1.0);
+    }
+
+    // Step 4: Pool `pyr_eca` (160x90) and `cc_energy` (`grid_w x grid_h`) with 4-corner interior warp guard
+    let pyr_w = 160usize;
+    let pyr_h = 90usize;
+    let sx = frame_w / pyr_w;
+    let sy = frame_h / pyr_h;
+    if sx >= 1 && sy >= 1 && sx * pyr_w == frame_w && sy * pyr_h == frame_h {
+        let inv_blk = 1.0 / ((sx * sy) as f32);
+        for py in 0..pyr_h {
+            for px in 0..pyr_w {
+                let mut sum = 0.0f32;
+                for dy in 0..sy {
+                    let row = (py * sy + dy) * frame_w + px * sx;
+                    for dx in 0..sx {
+                        sum += *eca_res_ptr.add(row + dx);
+                    }
+                }
+                *pyr_eca_ptr.add(py * pyr_w + px) = sum * inv_blk;
+            }
+        }
+    }
+
+    let _ = scale_px;
+    let min_x_q = 2i32 << 16;
+    let max_x_q = ((frame_w as i32) - 3) << 16;
+    let min_y_q = 2i32 << 16;
+    let max_y_q = ((frame_h as i32) - 3) << 16;
+    for gy in 0..grid_h {
+        let y0 = gy * 16;
+        let y1 = y0 + 15;
+        for gx in 0..grid_w {
+            let x0 = gx * 16;
+            let x1 = x0 + 15;
+            // Verify all 4 cell corners map strictly inside previous frame to eliminate border triangles
+            let (u0, v0) = eval_inv_warp_q16(&inv_m, cx, cy, x0 as f64, y0 as f64);
+            let (u1, v1) = eval_inv_warp_q16(&inv_m, cx, cy, x1 as f64, y0 as f64);
+            let (u2, v2) = eval_inv_warp_q16(&inv_m, cx, cy, x0 as f64, y1 as f64);
+            let (u3, v3) = eval_inv_warp_q16(&inv_m, cx, cy, x1 as f64, y1 as f64);
+            let cell_inside = u0 >= min_x_q
+                && u0 <= max_x_q
+                && v0 >= min_y_q
+                && v0 <= max_y_q
+                && u1 >= min_x_q
+                && u1 <= max_x_q
+                && v1 >= min_y_q
+                && v1 <= max_y_q
+                && u2 >= min_x_q
+                && u2 <= max_x_q
+                && v2 >= min_y_q
+                && v2 <= max_y_q
+                && u3 >= min_x_q
+                && u3 <= max_x_q
+                && v3 >= min_y_q
+                && v3 <= max_y_q;
+            if !cell_inside {
+                *grid_out.add(gy * grid_w + gx) = 0.0;
+                continue;
+            }
+            let mut sum = 0.0f32;
+            for r in 0..16usize {
+                let row = (y0 + r) * frame_w + x0;
+                for c in 0..16usize {
+                    sum += *eca_res_ptr.add(row + c);
+                }
+            }
+            *grid_out.add(gy * grid_w + gx) = sum;
+        }
+    }
+
+    *out_err2 = err2;
+    *out_sig2 = sig2;
+    *out_eval_count = eval_cnt;
+    Some(if len > 0 { (eval_cnt as f32) / (len as f32) } else { 0.0 })
 }

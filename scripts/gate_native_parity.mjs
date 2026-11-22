@@ -60,6 +60,7 @@ const SCENARIOS = [
   { id: 'hodge', argv: ['scripts/gate_i3_hodge.mjs'], capMiB: 32, minCalls: 150 },
   { id: 'conservation', argv: ['scripts/gate_i5b_conservation.mjs'], capMiB: 32, minCalls: 1000 },
   { id: 'swarm', argv: ['scripts/benchmark_1000.mjs', '--only=Q1'], maxInstances: 1, capMiB: 24, minCalls: 300 },
+  { id: 'depth', argv: ['scripts/gate_i7_depth.mjs', '--parity-lite'], capMiB: 24, minCalls: 80 },
 ];
 
 if (SCENARIO_IDS) {

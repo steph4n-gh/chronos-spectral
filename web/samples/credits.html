@@ -250,6 +250,30 @@
         <div class="clip-meta">Semi-synthetic tripod-shock and handheld-sway BOS failure composition sharing the <a href="https://commons.wikimedia.org/wiki/File:Gray_Gravel_Rock_Texture_by_Photos_Public_Domain.jpg" target="_blank" rel="noopener noreferrer">CC0 1.0 gravel backdrop</a> and Gladstone-Dale plume (steady tripod <code>0.00 s</code> to <code>2.56 s</code>, tripod shock <code>2.56 s</code> to <code>3.36 s</code>, handheld sway with roll/scale breathing and exposure blur <code>3.36 s</code> to <code>5.96 s</code>, displaced post-shock rest <code>5.96 s</code> to <code>8.00 s</code>).</div>
       </li>
     </ul>
+
+    <h2>Synthetic v3.2.0 Physical Mode Demonstrations (8.0 s to 9.0 s)</h2>
+    <ul class="credit-list">
+      <li>
+        <div class="clip-title">depth_parallax_dolly.mp4 (9.0 s, 30 fps, 640×360)</div>
+        <div class="clip-meta">Original in-repo deterministic simulation (<code>scripts/generate_v32_demos.mjs</code>): calibrated <code>0.30 m/s</code> lateral dolly (<code>f = 500 px</code>) past three metric depth strata (<code>4.5 m</code>, <code>9.0 m</code>, <code>16.5 m</code>) with 4 transverse independent movers (<code>0.0 s</code> to <code>6.5 s</code>), followed by pure tripod yaw rotation (<code>6.5 s</code> to <code>9.0 s</code>) demonstrating fail-closed <code>REFUSED_PURE_ROTATION</code>.</div>
+      </li>
+      <li>
+        <div class="clip-title">depth_foe_approach.mp4 (8.5 s, 30 fps, 640×360)</div>
+        <div class="clip-meta">Original in-repo deterministic simulation (<code>scripts/generate_v32_demos.mjs</code>): constant-velocity forward corridor approach (<code>0.8522 m/s</code>, <code>f = 500 px</code>) toward Focus of Expansion <code>(355.3, 171.2) px</code> demonstrating radial <code>MONO_METRIC</code> depth and continuous <code>1/r(t)</code> optical looming Time-to-Contact (<code>TTC</code>).</div>
+      </li>
+      <li>
+        <div class="clip-title">hodge_cylinder_circulation.mp4 (8.0 s, 30 fps, 640×360)</div>
+        <div class="clip-meta">Original in-repo deterministic simulation (<code>scripts/generate_v32_demos.mjs</code>): dense PIV tracer advection around an enclosed circular cylinder combining exact potential inflow, coexact wake vortices, and harmonic circulation (<code>beta_1 &gt;= 1</code>) for live <code>64x36</code> Mesh Hodge 2-Complex decomposition.</div>
+      </li>
+      <li>
+        <div class="clip-title">rs_vibrometry_247hz.mp4 (8.0 s, 30 fps, 640×360)</div>
+        <div class="clip-meta">Original in-repo deterministic simulation (<code>scripts/generate_v32_demos.mjs</code>): static-tripod split plate with <code>40 us/row</code> rolling-shutter readout and <code>200 us</code> exposure; framed left region oscillates at <code>247.5 Hz</code> (<code>0.65 px</code>) against a stationary right reference region.</div>
+      </li>
+      <li>
+        <div class="clip-title">fovea_720p_micro_detail.mp4 (8.0 s, 30 fps, 1280×720)</div>
+        <div class="clip-meta">Original in-repo deterministic simulation (<code>scripts/generate_v32_demos.mjs</code>): native <code>1280x720</code> optical bench with sweeping carriers, micro-orbiting satellite discs, and a <code>1:1</code> line-pair resolution chart for interactive Fovea, PTZ ROI slew, WebCodecs Fast-Pass, and native <code>hires-720p</code> exploration.</div>
+      </li>
+    </ul>
   </main>
 
   <footer class="credits-footer">

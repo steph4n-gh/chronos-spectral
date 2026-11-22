@@ -1304,13 +1304,38 @@
       display: grid;
       grid-template-columns: minmax(0, 1fr);
       align-items: stretch;
-      min-block-size: 8.4rem;
+      min-block-size: 10.6rem;
     }
 
     @media (pointer: coarse) {
       .source-context-well {
-        min-block-size: 8.85rem;
+        min-block-size: 11.4rem;
       }
+    }
+
+    .video-scrub-row {
+      display: flex;
+      align-items: center;
+      gap: 0.42rem;
+      min-inline-size: 0;
+    }
+
+    #videoScrubSlider {
+      flex: 1 1 auto;
+      min-inline-size: 0;
+      block-size: 18px;
+      margin: 0;
+    }
+
+    #btnFastPass {
+      flex: 0 0 auto;
+      padding: 0.24rem 0.5rem;
+      font-size: 0.7rem;
+      white-space: nowrap;
+    }
+
+    #persistenceCanvas {
+      cursor: pointer;
     }
 
     .source-context-well > * {
@@ -2672,6 +2697,8 @@
           <div class="showcase-toolbar-group" role="group" aria-label="Featured real-camera physics scenes">
             <button type="button" id="btnHeroStarlings" class="hero-scene-btn" data-hero-scene="starling_1000" aria-pressed="true">🐦 Starling Swarm (1,400+ Birds)</button>
             <button type="button" id="btnHeroBosPlume" class="hero-scene-btn" data-hero-scene="bos_plume" aria-pressed="false">🔥 Thermal Plume (BOS)</button>
+            <button type="button" id="btnHeroDepthParallax" class="hero-scene-btn" data-hero-scene="depth_parallax" aria-pressed="false">📐 3D Depth &amp; TTC (Zero-ML)</button>
+            <button type="button" id="btnHeroHodgeFlow" class="hero-scene-btn" data-hero-scene="hodge_cylinder" aria-pressed="false">🌊 Hodge Flow (64×36)</button>
             <button type="button" id="btnHeroRockets" class="hero-scene-btn" data-hero-scene="model_rockets" aria-pressed="false">🚀 Model Rockets (Smoke Bridge &amp; Chutes)</button>
             <button type="button" id="btnHeroPendulum" class="hero-scene-btn" data-hero-scene="chaos_pendulum" aria-pressed="false">🧲 Chaotic Pendulum (ODE Discovery)</button>
             <button type="button" id="btnHeroBilliards" class="hero-scene-btn" data-hero-scene="billiards" aria-pressed="false">🎱 Carom Billiards (L1 Impacts)</button>
@@ -3148,20 +3175,21 @@
             </select>
           </div>
           <div class="select-field">
-            <label for="fieldOverlayModeSelect">Field Overlay Layer (40x22 / BOS 128x64)</label>
+            <label for="fieldOverlayModeSelect">Field Overlay Layer (64x36 / BOS 256x128)</label>
             <select id="fieldOverlayModeSelect" name="fieldOverlayMode">
               <option value="0" selected>Micro-Tracks + Rigid Hulls</option>
-              <option value="1">Velocity |v| Field (40x22)</option>
+              <option value="1">Velocity |v| Field (64x36)</option>
               <option value="2">Vorticity Curl v (dv/dx - du/dy)</option>
               <option value="3">FTLE Coherent Ridges (16f)</option>
               <option value="4">Modal Vibration Phase ([-pi, pi])</option>
-              <option value="5">BOS Refraction |eps| (128x64)</option>
-              <option value="6">BOS Neumann Potential Phi (128x64)</option>
+              <option value="5">BOS Refraction |eps| (256x128)</option>
+              <option value="6">BOS Neumann Potential Phi (256x128)</option>
               <option value="7">BOS Curl Check (dv/dx - du/dy)</option>
-              <option value="8">Hodge Exact |grad phi| (40x22)</option>
-              <option value="9">Hodge Coexact |curl* psi| (40x22)</option>
-              <option value="10">Hodge Harmonic |h| (40x22)</option>
-              <option value="11">RS Welch Coherence gamma^2 (40x22)</option>
+              <option value="8">Hodge Exact |grad phi| (64x36)</option>
+              <option value="9">Hodge Coexact |curl* psi| (64x36)</option>
+              <option value="10">Hodge Harmonic |h| (64x36)</option>
+              <option value="11">RS Welch Coherence gamma^2 (64x36)</option>
+              <option value="12">Depth / Parallax / Stereo (64x36 / 256x128)</option>
             </select>
           </div>
         </div>
@@ -3187,11 +3215,11 @@
 
         <div class="continuum-controls-row">
           <div class="select-field">
-            <label for="hodgeModeSelect">Mesh Hodge 2-Complex (40x22)</label>
+            <label for="hodgeModeSelect">Mesh Hodge 2-Complex (64x36)</label>
             <select id="hodgeModeSelect" name="hodgeMode">
               <option value="0" selected>Off (Velocity Only)</option>
-              <option value="1">Mode 1 · Staggered 2f (40x22)</option>
-              <option value="2">Mode 2 · Every Frame (40x22)</option>
+              <option value="1">Mode 1 · Staggered 2f (64x36)</option>
+              <option value="2">Mode 2 · Every Frame (64x36)</option>
             </select>
           </div>
           <div class="select-field">
@@ -3200,6 +3228,19 @@
               <option value="0" selected>Off (No RS Vibro)</option>
               <option value="1">Mode 1 · Calibrated RS Only</option>
               <option value="2">Mode 2 · RS + Welch Audio</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="continuum-controls-row">
+          <div class="select-field">
+            <label for="depthModeSelect">Zero-ML Depth &amp; TTC Engine</label>
+            <select id="depthModeSelect" name="depthMode">
+              <option value="0" selected>Off (Zero Overhead)</option>
+              <option value="1">Mode 1 · Mono Parallax + FoE/TTC</option>
+              <option value="2" disabled>Mode 2 · Stereo BOS 256x128 (SDK / Worker API)</option>
+              <option value="3" disabled>Mode 3 · External Plane LiDAR/Prior (SDK / Worker API)</option>
+              <option value="4" disabled>Mode 4 · Auto-Fused (SDK / Worker API)</option>
             </select>
           </div>
         </div>
@@ -3368,6 +3409,11 @@
           <button type="button" class="showcase-btn" data-showcase="vortex_1200" aria-pressed="false">🌀 Lamb-Oseen Vortex (1,200)</button>
           <button type="button" class="showcase-btn" data-showcase="bos_plume" aria-pressed="false">🔥 Thermal Plume BOS (640×360)</button>
           <button type="button" class="showcase-btn" data-showcase="bos_handheld_failure" aria-pressed="false">⚠ Handheld Tripod Fail (BOS)</button>
+          <button type="button" class="showcase-btn" data-showcase="depth_parallax" aria-pressed="false">📐 Depth Parallax + Yaw Guard (9s)</button>
+          <button type="button" class="showcase-btn" data-showcase="depth_foe_ttc" aria-pressed="false">🎯 Forward FoE &amp; Looming TTC (8.5s)</button>
+          <button type="button" class="showcase-btn" data-showcase="hodge_cylinder" aria-pressed="false">🌊 Hodge 64×36 Cylinder Flow (8s)</button>
+          <button type="button" class="showcase-btn" data-showcase="rs_vibro_247hz" aria-pressed="false">〰️ 247.5 Hz RS Vibrometry (8s)</button>
+          <button type="button" class="showcase-btn" data-showcase="fovea_720p" aria-pressed="false">🔍 720p 1:1 Fovea &amp; PTZ (8s)</button>
         </div>
       </div>
 
@@ -3419,6 +3465,13 @@
               <option value="./samples/bos_handheld_failure.mp4" data-fps="25" data-lab="0" data-swarm="2">Handheld Shock / Sway Failure (640×360 · 25 fps · Tripod Guard)</option>
               <option value="./samples/perspective_flyby_decoy.mp4" data-fps="25" data-lab="0" data-swarm="2">Perspective Flyby + Pan Decoy (640×360 · 25 fps · 3D Loom Gate)</option>
             </optgroup>
+            <optgroup label="v3.2.0 Depth, Hodge 64x36, RS Vibrometry &amp; 720p Fovea">
+              <option value="./samples/depth_parallax_dolly.mp4" data-fps="30" data-lab="0" data-swarm="2">Zero-ML Lateral Depth Parallax + Yaw Guard (9.0s · 30 fps · Metric Depth)</option>
+              <option value="./samples/depth_foe_approach.mp4" data-fps="30" data-lab="0" data-swarm="2">Zero-ML Forward Approach FoE &amp; Looming TTC (8.5s · 30 fps · Radial + TTC)</option>
+              <option value="./samples/hodge_cylinder_circulation.mp4" data-fps="30" data-lab="0" data-swarm="2">Mesh Hodge 64×36 Cylinder Circulation (8.0s · 30 fps · Ex/Co/Ha + β₁)</option>
+              <option value="./samples/rs_vibrometry_247hz.mp4" data-fps="30" data-lab="0" data-swarm="0">Rolling-Shutter 247.5 Hz Sub-Frame Vibrometry (8.0s · 30 fps · 1:1 Scan)</option>
+              <option value="./samples/fovea_720p_micro_detail.mp4" data-fps="30" data-lab="0" data-swarm="1">720p Dual-Resolution 1:1 Fovea &amp; PTZ Slew (8.0s · 1280×720 · 30 fps)</option>
+            </optgroup>
           </select>
         </div>
 
@@ -3463,6 +3516,10 @@
               <span>MP4 FRAME TRANSPORT</span>
               <span id="vidTimeLabel">0.00s / --s</span>
             </div>
+            <div class="video-scrub-row">
+              <input type="range" id="videoScrubSlider" min="0" max="1000" step="1" value="0" aria-label="Video timeline scrub position" />
+              <button type="button" id="btnFastPass" class="action-btn" title="Offline WebCodecs VideoDecoder fast-pass indexing">⚡ Fast-Pass</button>
+            </div>
             <div class="btn-row">
               <button type="button" id="btnVidPlayPause" aria-pressed="true" class="active">⏸ Pause</button>
               <button type="button" id="btnVidStepBack" class="action-btn">⏮ −1f</button>
@@ -3481,6 +3538,14 @@
             <input type="checkbox" id="chkNativeRoi" name="nativeRoi" />
             <span>Native 1:1 Crop (Zero Implicit Rescale)</span>
           </label>
+          <label class="toggle-item" for="chkAutoTrackRoi">
+            <input type="checkbox" id="chkAutoTrackRoi" name="autoTrackRoi" />
+            <span>Auto-Slew ROI on Focus Target (Virtual PTZ)</span>
+          </label>
+          <div class="btn-row">
+            <button type="button" id="btnToolCropRoi" class="action-btn" aria-pressed="false" title="Drag on the viewport to zoom/crop into a region of interest">⌖ Drag Zoom ROI</button>
+            <button type="button" id="btnResetRoiCrop" class="action-btn" title="Reset ROI zoom back to full frame">↺ Full Frame</button>
+          </div>
           <div class="control-group">
             <div class="slider-label-row">
               <label for="rangeRoiX0">ROI Crop Offset X (crop_x0)</label>
@@ -4196,6 +4261,7 @@
       metrologyModeSelect: document.getElementById('metrologyModeSelect'),
       hodgeModeSelect: document.getElementById('hodgeModeSelect'),
       rsVibroModeSelect: document.getElementById('rsVibroModeSelect'),
+      depthModeSelect: document.getElementById('depthModeSelect'),
       inpRsDtRowUs: document.getElementById('inpRsDtRowUs'),
       inpRsExposureUs: document.getElementById('inpRsExposureUs'),
       selRsScanDir: document.getElementById('selRsScanDir'),
@@ -4281,6 +4347,8 @@
       btnFallbackTier2ToTier3: document.getElementById('btnFallbackTier2ToTier3'),
       videoTransportBar: document.getElementById('videoTransportBar'),
       vidTimeLabel: document.getElementById('vidTimeLabel'),
+      videoScrubSlider: document.getElementById('videoScrubSlider'),
+      btnFastPass: document.getElementById('btnFastPass'),
       btnVidPlayPause: document.getElementById('btnVidPlayPause'),
       btnFocusCycle: document.getElementById('btnFocusCycle'),
       btnOpenFullDeck: document.getElementById('btnOpenFullDeck'),
@@ -4304,6 +4372,15 @@
       scSubInspect: document.getElementById('scSubInspect'),
     };
 
+    let videoScrubDragging = false;
+    let latestTimelineEvents = [];
+    let latestTimelineSpanSec = 0.0;
+    let latestTimelineSeq = 0;
+    let activeVideoFile = null;
+    let activeVideoUrl = '';
+    let fastPassRunning = false;
+    let fastPassCancelRequested = false;
+
     function updateVideoTimeLabel() {
       const isVid = activeSourceMode === 'video';
       if (dom.btnShowcasePlayPause) {
@@ -4317,11 +4394,25 @@
           dom.btnShowcasePlayPause.textContent = '⏸ Live';
           dom.btnShowcasePlayPause.removeAttribute('aria-pressed');
         }
+        if (dom.videoScrubSlider) {
+          dom.videoScrubSlider.value = '0';
+          dom.videoScrubSlider.disabled = true;
+        }
         return;
       }
-      const cur = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime.toFixed(2) : '0.00';
-      const dur = Number.isFinite(videoEl.duration) ? videoEl.duration.toFixed(2) : '--';
-      dom.vidTimeLabel.textContent = `${cur}s / ${dur}s`;
+      const curNum = Number.isFinite(videoEl.currentTime) ? videoEl.currentTime : 0;
+      const durNum = Number.isFinite(videoEl.duration) && videoEl.duration > 0 ? videoEl.duration : 0;
+      const cur = curNum.toFixed(2);
+      const dur = durNum > 0 ? durNum.toFixed(2) : '--';
+      if (!fastPassRunning) {
+        dom.vidTimeLabel.textContent = `${cur}s / ${dur}s`;
+      }
+      if (dom.videoScrubSlider) {
+        dom.videoScrubSlider.disabled = durNum <= 0 || fastPassRunning;
+        if (!videoScrubDragging && durNum > 0) {
+          dom.videoScrubSlider.value = String(Math.max(0, Math.min(1000, Math.round((curNum / durNum) * 1000))));
+        }
+      }
       const playing = !videoEl.paused && !videoEl.ended;
       dom.btnVidPlayPause.classList.toggle('active', playing);
       dom.btnVidPlayPause.setAttribute('aria-pressed', String(playing));
@@ -6667,7 +6758,7 @@
 
       if (bos && dom.diagBosState) {
         const bosResTxt = bos.available && bos.state === 2
-          ? `READY · ${bos.validDisp}/8192 · ${bos.pcgIters}it · res ${bos.trueRelRes.toExponential(1)}`
+          ? `READY · ${bos.validDisp}/32768 · ${bos.pcgIters}it · res ${bos.trueRelRes.toExponential(1)}`
           : bos.available && bos.state === 3
           ? `DISTURBED · ${(bos.reasonFlags || []).slice(0, 3).join('+') || 'MOTION'}`
           : bos.available && bos.state === 1
@@ -6724,7 +6815,7 @@
           bannerTxt = `⚠ RS CALIBRATION REQUIRED (${(w2v.reasonFlags || []).slice(0, 2).join('+') || 'BAD_CALIB'})`;
         } else if (bosActive && bos.state === 2) {
           severity = 'ok';
-          bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/8192 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
+          bannerTxt = `◆ BOS SCHLIEREN READY · ${bos.validDisp}/32768 CELLS · CURL RMS ${bos.curlRms.toFixed(3)} · ${roi && roi.native1to1Active ? '1:1 NATIVE' : 'FIT'}`;
         } else if (w2vActive && w2v.state === 3) {
           severity = 'ok';
           const fTxt = Number.isFinite(w2v.domFreqHz) ? w2v.domFreqHz.toFixed(1) : '--';
@@ -6774,8 +6865,13 @@
         if (v && v.available) {
           if (v.state === 3) {
             const fTxt = Number.isFinite(v.domFreqHz) ? v.domFreqHz.toFixed(1) : '--';
-            const gTxt = Number.isFinite(v.maxCohGamma2) ? v.maxCohGamma2.toFixed(2) : '--';
-            rsTxt = `READY · K=${v.welchK || 0} · ${fTxt}Hz · g2=${gTxt}`;
+            if (v.reqMode === 1) {
+              const aTxt = Number.isFinite(v.domAmpPx) ? v.domAmpPx.toFixed(2) : '--';
+              rsTxt = `READY · RS-ONLY · ${fTxt}Hz · ${aTxt}px`;
+            } else {
+              const gTxt = Number.isFinite(v.maxCohGamma2) ? v.maxCohGamma2.toFixed(2) : '--';
+              rsTxt = `READY · K=${v.welchK || 0} · ${fTxt}Hz · g2=${gTxt}`;
+            }
           } else if (v.state === 2) {
             rsTxt = `WARMING · K=${v.welchK || 0}`;
           } else if (v.state === 1) {
@@ -7186,8 +7282,36 @@
         applyCalibrationUiState(m);
       } else if (m.type === 'rec_state') {
         updateRecorderUi(m.recActive, m.recFrames, m.recDurationSec);
+      } else if (m.type === 'timeline_events') {
+        latestTimelineEvents = Array.isArray(m.events) ? m.events : [];
+        latestTimelineSpanSec = typeof m.spanSec === 'number' && Number.isFinite(m.spanSec) ? m.spanSec : 0.0;
+        latestTimelineSeq = typeof m.seq === 'number' && Number.isFinite(m.seq) ? m.seq : 0;
+      } else if (m.type === 'seed_target_ack') {
+        if (m.tid > 0 && dom.showcaseToolbarStatus) {
+          dom.showcaseToolbarStatus.textContent = `Seeded user target T${m.tid} (${Math.round(m.w)}×${Math.round(m.h)} px)`;
+        }
+      } else if (m.type === 'fast_pass_progress') {
+        if (dom.vidTimeLabel) {
+          dom.vidTimeLabel.textContent = `FAST-PASS ${m.processed}/${m.total} · ${m.fps} fps (${m.codec || 'WC'})`;
+        }
+        if (dom.videoScrubSlider && m.total > 0) {
+          dom.videoScrubSlider.value = String(Math.round((m.processed / m.total) * 1000));
+        }
+      } else if (m.type === 'fast_pass_done') {
+        fastPassRunning = false;
+        fastPassCancelRequested = false;
+        if (dom.btnFastPass) {
+          dom.btnFastPass.classList.remove('active');
+          dom.btnFastPass.textContent = '⚡ Fast-Pass';
+        }
+        if (dom.vidTimeLabel) {
+          dom.vidTimeLabel.textContent = m.label || `INDEXED ${m.processed || 0}f`;
+        }
+        if (dom.videoScrubSlider && activeSourceMode === 'video' && Number.isFinite(videoEl.duration) && videoEl.duration > 0) {
+          dom.videoScrubSlider.disabled = false;
+        }
       } else if (m.type === 'telemetry_export_data') {
-        const { format, rows, cols, columns, buffer, meta } = m;
+        const { format, rows, cols, columns, buffer, meta, events, sessionConfig } = m;
         if (rows === 0) {
           dom.recStatusLabel.textContent = 'EMPTY BUFFER (RECORD FIRST)';
           return;
@@ -7209,6 +7333,8 @@
             {
               exportedAt: new Date().toISOString(),
               meta,
+              sessionConfig: sessionConfig || null,
+              events: Array.isArray(events) ? events : latestTimelineEvents,
               frameCount: rows,
               columns,
               frames: records,
@@ -7251,7 +7377,7 @@
 
     if (dom.fieldOverlayModeSelect) {
       dom.fieldOverlayModeSelect.addEventListener('change', () => {
-        const om = Math.max(0, Math.min(11, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
+        const om = Math.max(0, Math.min(12, parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0));
         dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: om });
         if (om >= 5 && om <= 7 && dom.bosModeSelect && dom.bosModeSelect.value === '0') {
           dom.bosModeSelect.value = '1';
@@ -7262,6 +7388,13 @@
         } else if (om === 11 && dom.rsVibroModeSelect && dom.rsVibroModeSelect.value === '0') {
           dom.rsVibroModeSelect.value = '2';
           sendRsControlToWorker(true);
+        } else if (om === 12 && dom.depthModeSelect && dom.depthModeSelect.value === '0') {
+          dom.depthModeSelect.value = '1';
+          if (dom.swarmModeSelect && dom.swarmModeSelect.value === '0') {
+            dom.swarmModeSelect.value = '2';
+            worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
+          }
+          worker.postMessage({ type: 'set_depth_config', depthMode: 1 });
         }
         worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: om, overlaySyncSeq: nextOverlaySyncSeq() });
       });
@@ -7290,6 +7423,17 @@
       dom.hodgeModeSelect.addEventListener('change', () => {
         const hm = Math.max(0, Math.min(2, parseInt(dom.hodgeModeSelect.value || '0', 10) || 0));
         worker.postMessage({ type: 'set_hodge_config', hodgeMode: hm });
+      });
+    }
+
+    if (dom.depthModeSelect) {
+      dom.depthModeSelect.addEventListener('change', () => {
+        const dm = Math.max(0, Math.min(4, parseInt(dom.depthModeSelect.value || '0', 10) || 0));
+        if ((dm === 1 || dm === 4) && dom.swarmModeSelect && dom.swarmModeSelect.value === '0') {
+          dom.swarmModeSelect.value = '2';
+          worker.postMessage({ type: 'set_swarm_mode', swarmMode: 2 });
+        }
+        worker.postMessage({ type: 'set_depth_config', depthMode: dm });
       });
     }
 
@@ -7394,6 +7538,39 @@
     if (dom.chkNativeRoi) {
       dom.chkNativeRoi.addEventListener('change', sendRoiControlToWorker);
     }
+    const chkAutoTrackRoi = document.getElementById('chkAutoTrackRoi');
+    if (chkAutoTrackRoi) {
+      chkAutoTrackRoi.addEventListener('change', () => {
+        worker.postMessage({ type: 'set_auto_track_roi', enabled: Boolean(chkAutoTrackRoi.checked) });
+      });
+    }
+    const btnToolCropRoi = document.getElementById('btnToolCropRoi');
+    const btnResetRoiCrop = document.getElementById('btnResetRoiCrop');
+    function setCropRoiToolActive(on) {
+      dispatchDeckEvent({ type: 'POINTER_TOOL_SET', pointerTool: on ? 'CROP_ROI' : 'INSPECT_TARGET' });
+      if (btnToolCropRoi) {
+        btnToolCropRoi.classList.toggle('active', on);
+        btnToolCropRoi.setAttribute('aria-pressed', String(on));
+      }
+      if (!on) {
+        worker.postMessage({ type: 'roi_box_preview', box: null });
+      }
+    }
+    if (btnToolCropRoi) {
+      btnToolCropRoi.addEventListener('click', () => {
+        setCropRoiToolActive(deckUiState.pointerTool !== 'CROP_ROI');
+      });
+    }
+    if (btnResetRoiCrop) {
+      btnResetRoiCrop.addEventListener('click', () => {
+        setCropRoiToolActive(false);
+        if (dom.chkNativeRoi) dom.chkNativeRoi.checked = false;
+        if (chkAutoTrackRoi) chkAutoTrackRoi.checked = false;
+        worker.postMessage({ type: 'set_auto_track_roi', enabled: false });
+        worker.postMessage({ type: 'set_roi', native1to1: false, normX: 0.5, normY: 0.5 });
+        worker.postMessage({ type: 'set_crop', cropNorm: [0.0, 0.0, 1.0, 1.0] });
+      });
+    }
     if (dom.rangeRoiX0) {
       dom.rangeRoiX0.addEventListener('input', sendRoiControlToWorker);
     }
@@ -7423,7 +7600,105 @@
       }
     }
 
+    let seedDragState = null;
+    let suppressNextHudClick = false;
+    let suppressClickTimer = 0;
+
+    function normHudCoordsFromPointer(ev) {
+      const rect = hudEl.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return null;
+      return {
+        nx: Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width)),
+        ny: Math.max(0, Math.min(1, (ev.clientY - rect.top) / rect.height)),
+      };
+    }
+
+    hudEl.addEventListener('pointerdown', (ev) => {
+      if (ev.button !== 0 || ev.target !== hudEl) return;
+      const ptTool = deckUiState.pointerTool;
+      if (ptTool === 'CAL_RULER_P1' || ptTool === 'CAL_RULER_P2' || ptTool.startsWith('CAL_QUAD_PT')) {
+        return;
+      }
+      const pt = normHudCoordsFromPointer(ev);
+      if (!pt) return;
+      seedDragState = {
+        pointerId: ev.pointerId,
+        mode: ptTool === 'CROP_ROI' ? 'roi' : 'seed',
+        startX: ev.clientX,
+        startY: ev.clientY,
+        nx0: pt.nx,
+        ny0: pt.ny,
+        nx1: pt.nx,
+        ny1: pt.ny,
+        active: false,
+      };
+    });
+
+    hudEl.addEventListener('pointermove', (ev) => {
+      if (!seedDragState || ev.pointerId !== seedDragState.pointerId) return;
+      const dist = Math.hypot(ev.clientX - seedDragState.startX, ev.clientY - seedDragState.startY);
+      if (!seedDragState.active && dist >= 6) {
+        seedDragState.active = true;
+        try { hudEl.setPointerCapture(ev.pointerId); } catch (_err) {}
+      }
+      if (!seedDragState.active) return;
+      const pt = normHudCoordsFromPointer(ev);
+      if (!pt) return;
+      seedDragState.nx1 = pt.nx;
+      seedDragState.ny1 = pt.ny;
+      worker.postMessage({
+        type: seedDragState.mode === 'roi' ? 'roi_box_preview' : 'seed_box_preview',
+        box: {
+          x0: seedDragState.nx0,
+          y0: seedDragState.ny0,
+          x1: seedDragState.nx1,
+          y1: seedDragState.ny1,
+        },
+      });
+    });
+
+    function finishSeedDrag(ev, commit) {
+      if (!seedDragState || ev.pointerId !== seedDragState.pointerId) return;
+      const st = seedDragState;
+      seedDragState = null;
+      if (!st.active) return;
+      try { hudEl.releasePointerCapture(ev.pointerId); } catch (_err) {}
+      if (commit) {
+        const pt = normHudCoordsFromPointer(ev);
+        const nx1 = pt ? pt.nx : st.nx1;
+        const ny1 = pt ? pt.ny : st.ny1;
+        const normX = Math.min(st.nx0, nx1);
+        const normY = Math.min(st.ny0, ny1);
+        const normW = Math.abs(nx1 - st.nx0);
+        const normH = Math.abs(ny1 - st.ny0);
+        if (st.mode === 'roi') {
+          worker.postMessage({ type: 'roi_box_preview', box: null });
+          if (normW >= 0.05 && normH >= 0.05) {
+            worker.postMessage({ type: 'set_crop', cropNorm: [normX, normY, normW, normH] });
+          }
+          setCropRoiToolActive(false);
+        } else if (normW >= 0.006 && normH >= 0.006) {
+          worker.postMessage({ type: 'seed_target', normX, normY, normW, normH });
+        } else {
+          worker.postMessage({ type: 'seed_box_preview', box: null });
+        }
+        suppressNextHudClick = true;
+        clearTimeout(suppressClickTimer);
+        suppressClickTimer = setTimeout(() => { suppressNextHudClick = false; }, 140);
+      } else {
+        worker.postMessage({ type: st.mode === 'roi' ? 'roi_box_preview' : 'seed_box_preview', box: null });
+      }
+    }
+
+    hudEl.addEventListener('pointerup', (ev) => finishSeedDrag(ev, true));
+    hudEl.addEventListener('pointercancel', (ev) => finishSeedDrag(ev, false));
+
     hudEl.addEventListener('click', (ev) => {
+      if (suppressNextHudClick) {
+        suppressNextHudClick = false;
+        clearTimeout(suppressClickTimer);
+        return;
+      }
       const rect = hudEl.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) return;
       const normX = Math.max(0, Math.min(1, (ev.clientX - rect.left) / rect.width));
@@ -8183,7 +8458,7 @@
       if (bos && bos.available && bos.reqMode > 0) {
         const usable = m.metrology ? m.metrology.usableCovCount : 0;
         const heroCands = m.metrology ? m.metrology.promotedCandidates : 0;
-        setTextIfChanged(dom.scValTracks, `BOS ${bos.stateLabel} · ${bos.validDisp}/8192 cells`);
+        setTextIfChanged(dom.scValTracks, `BOS ${bos.stateLabel} · ${bos.validDisp}/32768 cells`);
         setTextIfChanged(dom.scSubTracks, `${usable} 2x2 cov · ${heroCands} hero promo · 1:1 ${m.roi && m.roi.native1to1Active ? 'ON' : 'OFF'}`);
         const bosStat = bos.state === 3
           ? `TRIPOD DISTURBED (${(bos.reasonFlags || []).slice(0, 2).join('+') || 'MOTION'})`
@@ -8199,7 +8474,7 @@
         const hasFtle = Number.isFinite(c1k.maxFtleS1) && c1k.maxFtleS1 > -900.0;
         const vortVal = Number.isFinite(c1k.maxVorticityS1) ? c1k.maxVorticityS1.toFixed(1) : '0.0';
         setTextIfChanged(dom.scValPhysics, `curl ${vortVal} s⁻¹${hasFtle ? ` · FTLE ${c1k.maxFtleS1.toFixed(2)}` : ''}`);
-        setTextIfChanged(dom.scSubPhysics, `40×22 Eulerian flow · ${(c1k.fieldBackend || 'webgl2').toUpperCase()}`);
+        setTextIfChanged(dom.scSubPhysics, `64×36 Eulerian flow · ${(c1k.fieldBackend || 'webgl2').toUpperCase()}`);
         const insp = dom.swarmInspectReadout ? dom.swarmInspectReadout.textContent : '';
         if (insp && !insp.startsWith('CLICK HUD')) {
           setTextIfChanged(dom.scValInspect, insp);
@@ -8288,6 +8563,8 @@
         }
       }
       activeVideoFps = 30.0;
+      activeVideoFile = file;
+      activeVideoUrl = '';
       currentObjectUrl = URL.createObjectURL(file);
       videoEl.src = currentObjectUrl;
       videoEl.loop = true;
@@ -8317,9 +8594,14 @@
       coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
       newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
       starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
-      bos_plume: { url: './samples/bos_thermal_plume.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
-      bos_handheld_failure: { url: './samples/bos_handheld_failure.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [4, 4, 18, 60], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      bos_plume: { url: './samples/bos_thermal_plume.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [8, 8, 36, 120], native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      bos_handheld_failure: { url: './samples/bos_handheld_failure.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [8, 8, 36, 120], native1to1: true, metrologyMode: 2, showCovEllipses: true },
       perspective_flyby_decoy: { url: './samples/perspective_flyby_decoy.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 0, bosMode: 0, native1to1: true, metrologyMode: 2, showCovEllipses: true },
+      depth_parallax: { url: './samples/depth_parallax_dolly.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 12, depthMode: 1, depthCalib: { fPx: 500.0, speedMS: 0.30, baselineM: 0.0, maxDispPx: 32.0, stereoSign: 0 } },
+      depth_foe_ttc: { url: './samples/depth_foe_approach.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 12, depthMode: 1, depthCalib: { fPx: 500.0, speedMS: 0.8522, baselineM: 0.0, maxDispPx: 32.0, stereoSign: 0 } },
+      hodge_cylinder: { url: './samples/hodge_cylinder_circulation.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 10, hodgeMode: 1 },
+      rs_vibro_247hz: { url: './samples/rs_vibrometry_247hz.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 11, rsMode: 1, rsCalib: { dtRowUs: 40.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
+      fovea_720p: { url: './samples/fovea_720p_micro_detail.mp4', cal: 'none', resMode: 1, swarmMode: 1, overlayMode: 0, native1to1: true },
       vortex_1200: { benchScenario: 'vortex_swarm_1200', resMode: 1, swarmMode: 2, overlayMode: 2, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
       juggling: { url: './samples/juggling_ballistic.mp4', cal: 'auto_g' },
       gantry: { url: './samples/roundabout_occlusion.mp4', cal: 'none' },
@@ -8337,10 +8619,19 @@
       const nextNativeRoi = Boolean(cfg && cfg.native1to1);
       const nextHodgeMode = cfg && typeof cfg.hodgeMode === 'number' ? cfg.hodgeMode : 0;
       const nextRsMode = cfg && typeof cfg.rsMode === 'number' ? cfg.rsMode : 0;
+      const nextDepthMode = cfg && typeof cfg.depthMode === 'number' ? cfg.depthMode : 0;
+      const nextRsCalib = cfg && cfg.rsCalib ? cfg.rsCalib : null;
+      const nextDepthCalib = cfg && cfg.depthCalib ? cfg.depthCalib : null;
       if (dom.bosModeSelect) dom.bosModeSelect.value = String(nextBosMode);
       if (dom.metrologyModeSelect) dom.metrologyModeSelect.value = String(nextMetMode);
       if (dom.hodgeModeSelect) dom.hodgeModeSelect.value = String(nextHodgeMode);
       if (dom.rsVibroModeSelect) dom.rsVibroModeSelect.value = String(nextRsMode);
+      if (dom.depthModeSelect) dom.depthModeSelect.value = String(nextDepthMode);
+      if (nextRsCalib) {
+        if (dom.inpRsDtRowUs && typeof nextRsCalib.dtRowUs === 'number') dom.inpRsDtRowUs.value = String(nextRsCalib.dtRowUs);
+        if (dom.inpRsExposureUs && typeof nextRsCalib.exposureUs === 'number') dom.inpRsExposureUs.value = String(nextRsCalib.exposureUs);
+        if (dom.selRsScanDir && typeof nextRsCalib.scanDir === 'number') dom.selRsScanDir.value = String(nextRsCalib.scanDir);
+      }
       if (dom.chkNativeRoi) dom.chkNativeRoi.checked = nextNativeRoi;
       dispatchDeckEvent({ type: 'OVERLAY_SET', showCovEllipses: nextShowCov });
       worker.postMessage({
@@ -8352,15 +8643,42 @@
       });
       worker.postMessage({ type: 'set_metrology_config', metrologyMode: nextMetMode, showCovEllipses: nextShowCov });
       worker.postMessage({ type: 'set_hodge_config', hodgeMode: nextHodgeMode });
-      worker.postMessage({ type: 'set_rs_calib', rsMode: nextRsMode });
+      const depthMsg = { type: 'set_depth_config', depthMode: nextDepthMode };
+      if (nextDepthCalib) {
+        depthMsg.fPx = nextDepthCalib.fPx;
+        depthMsg.speedMS = nextDepthCalib.speedMS;
+        depthMsg.baselineM = nextDepthCalib.baselineM ?? 0.0;
+        depthMsg.maxDispPx = nextDepthCalib.maxDispPx ?? 32.0;
+        depthMsg.stereoSign = nextDepthCalib.stereoSign ?? 0;
+      } else if (nextDepthMode > 0) {
+        depthMsg.fPx = 0.0;
+        depthMsg.speedMS = 0.0;
+        depthMsg.baselineM = 0.0;
+        depthMsg.maxDispPx = 32.0;
+        depthMsg.stereoSign = 0;
+      }
+      worker.postMessage(depthMsg);
+      const rsMsg = { type: 'set_rs_calib', rsMode: nextRsMode };
+      if (nextRsCalib) {
+        rsMsg.dtRowUs = nextRsCalib.dtRowUs;
+        rsMsg.exposureUs = nextRsCalib.exposureUs;
+        rsMsg.audioRateHz = rsAudioCaptureRateHz || 48000.0;
+        rsMsg.maxSkewUs = 500.0;
+      }
+      worker.postMessage(rsMsg);
       syncRsLiveAudioCapture();
-      worker.postMessage({ type: 'set_roi', native1to1: nextNativeRoi });
+      const roiMsg = { type: 'set_roi', native1to1: nextNativeRoi };
+      if (nextRsCalib && typeof nextRsCalib.scanDir === 'number') {
+        roiMsg.scanDir = nextRsCalib.scanDir;
+      }
+      worker.postMessage(roiMsg);
       if (typeof (cfg && cfg.overlayMode) !== 'number' && dom.fieldOverlayModeSelect) {
         const curOm = parseInt(dom.fieldOverlayModeSelect.value || '0', 10) || 0;
         const orphanedBos = curOm >= 5 && curOm <= 7 && nextBosMode === 0;
         const orphanedHodge = curOm >= 8 && curOm <= 10 && nextHodgeMode === 0;
         const orphanedRs = curOm === 11 && nextRsMode === 0;
-        if (orphanedBos || orphanedHodge || orphanedRs) {
+        const orphanedDepth = curOm === 12 && nextDepthMode === 0;
+        if (orphanedBos || orphanedHodge || orphanedRs || orphanedDepth) {
           dom.fieldOverlayModeSelect.value = '0';
           dispatchDeckEvent({ type: 'OVERLAY_SET', fieldOverlayMode: 0 });
           worker.postMessage({ type: 'set_field_overlay_mode', fieldOverlayMode: 0, overlaySyncSeq: nextOverlaySyncSeq() });
@@ -8404,6 +8722,8 @@
         document.getElementById('btnResHd')?.click();
       }
       activeVideoFps = fpsHint;
+      activeVideoFile = null;
+      activeVideoUrl = url;
       videoEl.src = url;
       videoEl.loop = true;
       const playOk = await safePlayVideo();
@@ -8520,7 +8840,14 @@
       setHeroScenePressed(sceneKey);
       const curWipe = dom.showcaseWipeSlider ? (Number(dom.showcaseWipeSlider.value) || 0) : 0;
       const keepWipe = curWipe > 0 && curWipe < 100;
-      if (sceneKey === 'starling_1000' || sceneKey === 'bos_plume') {
+      if (
+        sceneKey === 'starling_1000' ||
+        sceneKey === 'bos_plume' ||
+        sceneKey === 'depth_parallax' ||
+        sceneKey === 'depth_foe_ttc' ||
+        sceneKey === 'hodge_cylinder' ||
+        sceneKey === 'rs_vibro_247hz'
+      ) {
         setShowcaseWipePercent(keepWipe ? curWipe : 28);
         setHeroTargetsVisible(false);
       } else {
@@ -8795,6 +9122,110 @@
       await safePlayVideo();
       updateVideoTimeLabel();
     });
+
+    async function seekVideoToTime(targetSec) {
+      if (activeSourceMode !== 'video' || !Number.isFinite(videoEl.duration) || videoEl.duration <= 0) return;
+      const clamped = Math.max(0.0, Math.min(Math.max(0.0, videoEl.duration - 0.01), targetSec));
+      const wasPaused = videoEl.paused || videoEl.ended;
+      worker.postMessage({ type: 'lab_action', action: 'reset' });
+      await new Promise((resolve) => {
+        videoEl.addEventListener('seeked', () => resolve(), { once: true });
+        videoEl.currentTime = clamped;
+      });
+      lastMediaTime = videoEl.currentTime;
+      updateVideoTimeLabel();
+      if (wasPaused) {
+        const frameStepSec = 1.0 / Math.max(8.0, activeVideoFps);
+        await captureAndSendCurrentVideoFrame(frameStepSec, videoEl.currentTime, sourceEpoch);
+      }
+    }
+
+    if (dom.videoScrubSlider) {
+      dom.videoScrubSlider.addEventListener('pointerdown', () => { videoScrubDragging = true; });
+      dom.videoScrubSlider.addEventListener('input', () => {
+        if (activeSourceMode !== 'video' || !Number.isFinite(videoEl.duration) || videoEl.duration <= 0) return;
+        const frac = Math.max(0, Math.min(1, Number(dom.videoScrubSlider.value) / 1000));
+        const target = frac * videoEl.duration;
+        dom.vidTimeLabel.textContent = `${target.toFixed(2)}s / ${videoEl.duration.toFixed(2)}s`;
+      });
+      dom.videoScrubSlider.addEventListener('change', async () => {
+        videoScrubDragging = false;
+        if (activeSourceMode !== 'video' || !Number.isFinite(videoEl.duration) || videoEl.duration <= 0) return;
+        const frac = Math.max(0, Math.min(1, Number(dom.videoScrubSlider.value) / 1000));
+        await seekVideoToTime(frac * videoEl.duration);
+      });
+      window.addEventListener('pointerup', () => { videoScrubDragging = false; });
+    }
+
+    if (persistenceEl) {
+      persistenceEl.addEventListener('click', async (ev) => {
+        if (activeSourceMode !== 'video' || !Number.isFinite(videoEl.duration) || videoEl.duration <= 0) return;
+        const rect = persistenceEl.getBoundingClientRect();
+        if (rect.width <= 0) return;
+        const canvasX = ((ev.clientX - rect.left) / rect.width) * 420;
+        const frac = Math.max(0, Math.min(1, (canvasX - 10) / 400));
+        let targetSec = frac * videoEl.duration;
+        if (latestTimelineEvents.length > 0) {
+          const denomSeq = Math.max(1, latestTimelineSeq);
+          const denomSpan = Math.max(0.05, latestTimelineSpanSec, videoEl.duration);
+          let bestDist = 0.035;
+          let bestEv = null;
+          for (let i = 0; i < latestTimelineEvents.length; i++) {
+            const e = latestTimelineEvents[i];
+            const ef = e.seq > 0 ? Math.max(0, Math.min(1, e.seq / denomSeq)) : Math.max(0, Math.min(1, e.tSec / denomSpan));
+            const d = Math.abs(ef - frac);
+            if (d < bestDist) {
+              bestDist = d;
+              bestEv = e;
+            }
+          }
+          if (bestEv && Number.isFinite(bestEv.tSec)) {
+            targetSec = bestEv.tSec;
+          }
+        }
+        await seekVideoToTime(targetSec);
+      });
+    }
+
+    // Worker-resident zero-copy WebCodecs VideoDecoder Fast-Pass (H.264 / H.265 / VP9 / AV1 + fMP4)
+    async function runWebCodecsFastPass() {
+      if (fastPassRunning) {
+        fastPassCancelRequested = true;
+        worker.postMessage({ type: 'worker_fast_pass_cancel' });
+        return;
+      }
+      if (activeSourceMode !== 'video' || (!activeVideoFile && !activeVideoUrl)) return;
+      if (typeof VideoDecoder !== 'function' || typeof EncodedVideoChunk !== 'function') {
+        dom.vidTimeLabel.textContent = 'WEBCODECS UNAVAILABLE (USE PLAYBACK)';
+        return;
+      }
+      fastPassRunning = true;
+      fastPassCancelRequested = false;
+      const myEpoch = sourceEpoch;
+      if (dom.btnFastPass) {
+        dom.btnFastPass.classList.add('active');
+        dom.btnFastPass.textContent = '■ Cancel Pass';
+      }
+      videoEl.pause();
+      updateVideoTimeLabel();
+      dom.vidTimeLabel.textContent = 'WORKER WEBCODECS INDEXING...';
+      const resolvedUrl = activeVideoUrl
+        ? new URL(activeVideoUrl, window.location.href).href
+        : null;
+      worker.postMessage({
+        type: 'worker_fast_pass_start',
+        file: activeVideoFile || null,
+        url: activeVideoFile ? null : resolvedUrl,
+        epoch: myEpoch,
+        fps: activeVideoFps,
+      });
+    }
+
+    if (dom.btnFastPass) {
+      dom.btnFastPass.addEventListener('click', () => {
+        runWebCodecsFastPass();
+      });
+    }
 
     // Audio & Reset Buttons
     const btnAudio = document.getElementById('btnAudioToggle');

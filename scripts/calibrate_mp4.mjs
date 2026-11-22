@@ -644,10 +644,10 @@ function validateWasmModuleAndPointers(wasmModule, exp, mem, frameBytes, checkSw
   }
   if (checkSwarm) {
     checkPtr('swarmTelemetry', exp.chronos_get_swarm_telemetry_ptr(), 64 * 4);
-    checkPtr('microTracks', exp.chronos_get_micro_tracks_ptr(), 1536 * 8 * 4);
-    checkPtr('continuumField', exp.chronos_get_continuum_field_ptr(), 880 * 6 * 4);
+    checkPtr('microTracks', exp.chronos_get_micro_tracks_ptr(), 3072 * 8 * 4);
+    checkPtr('continuumField', exp.chronos_get_continuum_field_ptr(), 2304 * 6 * 4);
     checkPtr('rigidBodies', exp.chronos_get_rigid_bodies_ptr(), 32 * 8 * 4);
-    checkPtr('modalField', exp.chronos_get_modal_field_ptr(), 880 * 4);
+    checkPtr('modalField', exp.chronos_get_modal_field_ptr(), 2304 * 4);
   }
   if (typeof exp.chronos_get_wave2_telemetry_ptr === 'function') {
     checkPtr('wave2Telem', exp.chronos_get_wave2_telemetry_ptr(), 64 * 4);
@@ -659,16 +659,16 @@ function validateWasmModuleAndPointers(wasmModule, exp, mem, frameBytes, checkSw
     checkPtr('vibroTelem', exp.chronos_get_vibro_telemetry_ptr(), 32 * 4);
   }
   if (typeof exp.chronos_get_vibro_planes_ptr === 'function') {
-    checkPtr('vibroPlanes', exp.chronos_get_vibro_planes_ptr(), 2704 * 4);
+    checkPtr('vibroPlanes', exp.chronos_get_vibro_planes_ptr(), 7040 * 4);
   }
   if (typeof exp.chronos_get_hodge_telemetry_ptr === 'function') {
     checkPtr('hodgeTelem', exp.chronos_get_hodge_telemetry_ptr(), 32 * 4);
   }
   if (typeof exp.chronos_get_hodge_planes_ptr === 'function') {
-    checkPtr('hodgePlanes', exp.chronos_get_hodge_planes_ptr(), 6160 * 4);
+    checkPtr('hodgePlanes', exp.chronos_get_hodge_planes_ptr(), 16128 * 4);
   }
   if (typeof exp.chronos_get_hodge_inject_ptr === 'function') {
-    checkPtr('hodgeInject', exp.chronos_get_hodge_inject_ptr(), 2640 * 4);
+    checkPtr('hodgeInject', exp.chronos_get_hodge_inject_ptr(), 6912 * 4);
   }
   if (typeof exp.chronos_get_conservation_telemetry_ptr === 'function') {
     checkPtr('consTelem', exp.chronos_get_conservation_telemetry_ptr(), 32 * 4);
@@ -742,317 +742,11 @@ function streamMp4Frames(mp4Path, w, h, onFrame, maxFrames = null) {
   });
 }
 
-/// Exact production EISPACK-tql2 + DGKS Lanczos solver (matches web/worker.js & scripts/benchmark_1000.mjs).
-function createLanczosSolver(exp, laplacian, fiedler) {
-  const activeNodeIdx = new Int32Array(GRAPH_NODES);
-  const subL = new Float64Array(GRAPH_NODES * GRAPH_NODES);
-  const lanczosQ = new Float64Array(MAX_KRYLOV * GRAPH_NODES);
-  const lanczosAlpha = new Float64Array(MAX_KRYLOV);
-  const lanczosBeta = new Float64Array(MAX_KRYLOV);
-  const dDiag = new Float64Array(MAX_KRYLOV);
-  const eSub = new Float64Array(GRAPH_NODES);
-  const lanczosW = new Float64Array(GRAPH_NODES);
-  const zVec = new Float64Array(MAX_KRYLOV * MAX_KRYLOV);
-  const prevFiedlerTrack = new Float64Array(MAX_TARGETS);
-  const eigVecBuf = new Float64Array(GRAPH_NODES);
-  let tqlBestCol = 0;
-  let tqlSecCol = -1;
-  let tqlThetaMax = -1e30;
-  let tqlThetaSecond = -1e30;
-  let lastN = 0;
-  let lastLambda2 = 0.0;
-
-  function findOrthogonalBasisSeed(n, numExisting, outOffset) {
-    for (let cand = 0; cand < n; cand++) {
-      const invN = 1.0 / n;
-      for (let a = 0; a < n; a++) lanczosW[a] = (a === cand ? 1.0 : 0.0) - invN;
-      for (let pass = 0; pass < 2; pass++) {
-        for (let k = 0; k < numExisting; k++) {
-          const kOff = k * GRAPH_NODES;
-          let dot = 0.0;
-          for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-          for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-        }
-        let mean = 0.0;
-        for (let a = 0; a < n; a++) mean += lanczosW[a];
-        mean /= n;
-        for (let a = 0; a < n; a++) lanczosW[a] -= mean;
-      }
-      let norm2 = 0.0;
-      for (let a = 0; a < n; a++) norm2 += lanczosW[a] * lanczosW[a];
-      if (norm2 > 1e-12) {
-        const invNorm = 1.0 / Math.sqrt(norm2);
-        for (let a = 0; a < n; a++) lanczosQ[outOffset + a] = lanczosW[a] * invNorm;
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function solveTridiagTql2(mDim) {
-    for (let i = 0; i < mDim; i++) {
-      dDiag[i] = lanczosAlpha[i];
-      eSub[i] = i + 1 < mDim ? lanczosBeta[i] : 0.0;
-    }
-    zVec.fill(0.0, 0, mDim * mDim);
-    for (let i = 0; i < mDim; i++) zVec[i * mDim + i] = 1.0;
-
-    for (let l = 0; l < mDim; l++) {
-      let iter = 0;
-      while (iter++ < 40) {
-        let m = l;
-        for (; m < mDim - 1; m++) {
-          if (Math.abs(eSub[m]) <= 1e-14 * (Math.abs(dDiag[m]) + Math.abs(dDiag[m + 1])) + 1e-30) break;
-        }
-        if (m === l) break;
-        let g = (dDiag[l + 1] - dDiag[l]) / (2.0 * eSub[l]);
-        const ag = Math.abs(g);
-        let r = ag < 1e100 ? Math.sqrt(g * g + 1.0) : ag;
-        g = dDiag[m] - dDiag[l] + eSub[l] / (g + (g >= 0.0 ? r : -r));
-        let s = 1.0;
-        let c = 1.0;
-        let p = 0.0;
-        for (let i = m - 1; i >= l; i--) {
-          const f = s * eSub[i];
-          const b = c * eSub[i];
-          const r2 = f * f + g * g;
-          r = (r2 > 1e-200 && r2 < 1e200) ? Math.sqrt(r2) : Math.hypot(f, g);
-          eSub[i + 1] = r;
-          if (r < 1e-30) {
-            dDiag[i + 1] -= p;
-            eSub[m] = 0.0;
-            break;
-          }
-          s = f / r;
-          c = g / r;
-          g = dDiag[i + 1] - p;
-          r = (dDiag[i] - g) * s + 2.0 * c * b;
-          p = s * r;
-          dDiag[i + 1] = g + p;
-          g = c * r - b;
-          const rowI = i * mDim;
-          const rowI1 = rowI + mDim;
-          for (let k = 0; k < mDim; k++) {
-            const fz = zVec[rowI1 + k];
-            const zki = zVec[rowI + k];
-            zVec[rowI1 + k] = s * zki + c * fz;
-            zVec[rowI + k] = c * zki - s * fz;
-          }
-        }
-        if (r < 1e-30 && eSub[m] === 0.0) continue;
-        dDiag[l] -= p;
-        eSub[l] = g;
-        eSub[m] = 0.0;
-      }
-    }
-
-    let bestCol = 0;
-    let secCol = -1;
-    let thetaMax = -1e30;
-    let thetaSecond = -1e30;
-    for (let c = 0; c < mDim; c++) {
-      const val = dDiag[c];
-      if (val > thetaMax) {
-        thetaSecond = thetaMax;
-        secCol = bestCol;
-        thetaMax = val;
-        bestCol = c;
-      } else if (val > thetaSecond) {
-        thetaSecond = val;
-        secCol = c;
-      }
-    }
-    tqlBestCol = bestCol;
-    tqlSecCol = secCol;
-    tqlThetaMax = thetaMax;
-    tqlThetaSecond = thetaSecond;
-  }
-
-  const solver = function solveShiftedLanczosFiedler() {
-    if (typeof exp.chronos_solve_fiedler_lanczos === 'function') {
-      return exp.chronos_solve_fiedler_lanczos();
-    }
-    let n = 0;
-    for (let i = 0; i < GRAPH_NODES; i++) {
-      if (laplacian[i * GRAPH_NODES + i] > 1e-6) activeNodeIdx[n++] = i;
-    }
-    fiedler.fill(0.0);
-    if (n < 2) {
-      lastN = 0;
-      lastLambda2 = 0.0;
-      exp.chronos_set_fiedler_spectrum(0.0, 0.0);
-      return 0.0;
-    }
-    for (let a = 0; a < n; a++) {
-      const ia = activeNodeIdx[a] * GRAPH_NODES;
-      const rOff = a * n;
-      subL[rOff + a] = laplacian[ia + activeNodeIdx[a]];
-      for (let b = 0; b < a; b++) {
-        const v = laplacian[ia + activeNodeIdx[b]];
-        subL[rOff + b] = v;
-        subL[b * n + a] = v;
-      }
-    }
-    let mu = 0.0;
-    for (let a = 0; a < n; a++) {
-      const rOff = a * n;
-      let rowSum = subL[rOff + a];
-      for (let b = 0; b < n; b++) {
-        if (a !== b) rowSum += Math.abs(subL[rOff + b]);
-      }
-      if (rowSum > mu) mu = rowSum;
-    }
-    mu += 0.1;
-
-    const mSteps = Math.min(n - 1, MAX_KRYLOV);
-    const invN = 1.0 / n;
-    let mean0 = 0.0;
-    for (let a = 0; a < n; a++) {
-      const val = (a + 1) - 0.5 * (n + 1);
-      lanczosQ[a] = val;
-      mean0 += val;
-    }
-    mean0 *= invN;
-    let norm0 = 0.0;
-    for (let a = 0; a < n; a++) {
-      lanczosQ[a] -= mean0;
-      norm0 += lanczosQ[a] * lanczosQ[a];
-    }
-    const invNorm0 = 1.0 / Math.sqrt(Math.max(norm0, 1e-18));
-    for (let a = 0; a < n; a++) lanczosQ[a] *= invNorm0;
-
-    let actualM = 0;
-    let convergedEarly = false;
-    for (let j = 0; j < mSteps; j++) {
-      const qOff = j * GRAPH_NODES;
-      for (let a = 0; a < n; a++) {
-        const rOff = a * n;
-        let sumL = 0.0;
-        for (let b = 0; b < n; b++) sumL += subL[rOff + b] * lanczosQ[qOff + b];
-        lanczosW[a] = mu * lanczosQ[qOff + a] - sumL;
-      }
-      let wMean = 0.0;
-      for (let a = 0; a < n; a++) wMean += lanczosW[a];
-      wMean *= invN;
-      if (j > 0 && lanczosBeta[j - 1] > 0.0) {
-        const prevOff = (j - 1) * GRAPH_NODES;
-        const betaPrev = lanczosBeta[j - 1];
-        for (let a = 0; a < n; a++) lanczosW[a] = (lanczosW[a] - wMean) - betaPrev * lanczosQ[prevOff + a];
-      } else {
-        for (let a = 0; a < n; a++) lanczosW[a] -= wMean;
-      }
-      let alpha = 0.0;
-      for (let a = 0; a < n; a++) alpha += lanczosQ[qOff + a] * lanczosW[a];
-      lanczosAlpha[j] = alpha;
-      let preNorm2 = 0.0;
-      for (let a = 0; a < n; a++) {
-        const nv = lanczosW[a] - alpha * lanczosQ[qOff + a];
-        lanczosW[a] = nv;
-        preNorm2 += nv * nv;
-      }
-
-      for (let pass = 0; pass < 2; pass++) {
-        for (let k = 0; k <= j; k++) {
-          const kOff = k * GRAPH_NODES;
-          let dot = 0.0;
-          for (let a = 0; a < n; a++) dot += lanczosQ[kOff + a] * lanczosW[a];
-          for (let a = 0; a < n; a++) lanczosW[a] -= dot * lanczosQ[kOff + a];
-        }
-        let wm = 0.0;
-        for (let a = 0; a < n; a++) wm += lanczosW[a];
-        wm *= invN;
-        let post2 = 0.0;
-        for (let a = 0; a < n; a++) {
-          const nv = lanczosW[a] - wm;
-          lanczosW[a] = nv;
-          post2 += nv * nv;
-        }
-        if (pass === 0 && post2 > 0.5 * preNorm2) break;
-      }
-
-      let beta2 = 0.0;
-      for (let a = 0; a < n; a++) beta2 += lanczosW[a] * lanczosW[a];
-      const beta = Math.sqrt(Math.max(0.0, beta2));
-      actualM = j + 1;
-
-      if (j + 1 >= mSteps) {
-        lanczosBeta[j] = 0.0;
-        break;
-      }
-      const nextOff = (j + 1) * GRAPH_NODES;
-      if (beta < 1e-8) {
-        lanczosBeta[j] = 0.0;
-        if (!findOrthogonalBasisSeed(n, j + 1, nextOff)) break;
-      } else {
-        lanczosBeta[j] = beta;
-        if (n > 12 && (j === 9 || j === 15)) {
-          solveTridiagTql2(actualM);
-          const ritzRes1 = beta * Math.abs(zVec[tqlBestCol * actualM + (actualM - 1)]);
-          const ritzRes2 = tqlSecCol >= 0 ? beta * Math.abs(zVec[tqlSecCol * actualM + (actualM - 1)]) : 0.0;
-          if ((mu - tqlThetaMax) > 1e-4 && ritzRes1 < 1e-8 && ritzRes2 < 1e-7) {
-            convergedEarly = true;
-            break;
-          }
-        }
-        const invBeta = 1.0 / beta;
-        for (let a = 0; a < n; a++) lanczosQ[nextOff + a] = lanczosW[a] * invBeta;
-      }
-    }
-
-    if (!convergedEarly) solveTridiagTql2(actualM);
-    const bestCol = tqlBestCol;
-    const thetaMax = tqlThetaMax;
-    const thetaSecond = tqlThetaSecond;
-
-    const lambda2 = Math.max(0.0, mu - thetaMax);
-    const lambda3 = actualM >= 2 ? Math.max(lambda2, mu - thetaSecond) : lambda2;
-    const spectralGap = Math.max(0.0, lambda3 - lambda2);
-
-    let dotPrev = 0.0;
-    const bestZOff = bestCol * actualM;
-    for (let a = 0; a < n; a++) {
-      let comp = 0.0;
-      for (let j = 0; j < actualM; j++) {
-        comp += lanczosQ[j * GRAPH_NODES + a] * zVec[bestZOff + j];
-      }
-      eigVecBuf[a] = comp;
-      const nodeIdx = activeNodeIdx[a];
-      if (nodeIdx < MAX_TARGETS) dotPrev += comp * prevFiedlerTrack[nodeIdx];
-    }
-
-    const signFix = (dotPrev < -1e-4 || (Math.abs(dotPrev) <= 1e-4 && eigVecBuf[0] < 0.0)) ? -1.0 : 1.0;
-    for (let a = 0; a < n; a++) {
-      const nodeIdx = activeNodeIdx[a];
-      const val = eigVecBuf[a] * signFix;
-      fiedler[nodeIdx] = val;
-      if (nodeIdx < MAX_TARGETS) prevFiedlerTrack[nodeIdx] = val;
-    }
-
-    lastN = n;
-    lastLambda2 = lambda2;
-    exp.chronos_set_fiedler_spectrum(lambda2, spectralGap);
-    return lambda2;
-  };
-  solver.computeResNorm = () => {
-    if (typeof exp.chronos_get_fiedler_res_norm === 'function') {
-      return exp.chronos_get_fiedler_res_norm();
-    }
-    if (lastN < 2) return 0.0;
-    let res2 = 0.0;
-    for (let a = 0; a < lastN; a++) {
-      const rOff = a * lastN;
-      let lv = 0.0;
-      for (let b = 0; b < lastN; b++) lv += subL[rOff + b] * eigVecBuf[b];
-      const diff = lv - lastLambda2 * eigVecBuf[a];
-      res2 += diff * diff;
-    }
-    return Math.sqrt(res2);
-  };
-  solver.reset = () => {
-    prevFiedlerTrack.fill(0.0);
-    lastN = 0;
-    lastLambda2 = 0.0;
-  };
+/// Delegates directly to the in-kernel Wasm Shifted Lanczos solver (`src/lanczos.rs`).
+function createLanczosSolver(exp) {
+  const solver = () => exp.chronos_solve_fiedler_lanczos();
+  solver.computeResNorm = () => exp.chronos_get_fiedler_res_norm();
+  solver.reset = () => {};
   return solver;
 }
 
@@ -1224,19 +918,19 @@ function createWasmSession(resMode, swarmModeInt, labMode) {
     ? new Float32Array(mem.buffer, exp.chronos_get_swarm_telemetry_ptr(), 64)
     : null;
   const microTracks = hasSwarmControls
-    ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 1536 * 8)
+    ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 3072 * 8)
     : null;
   const continuumField = hasSwarmControls
-    ? new Float32Array(mem.buffer, exp.chronos_get_continuum_field_ptr(), 880 * 6)
+    ? new Float32Array(mem.buffer, exp.chronos_get_continuum_field_ptr(), 2304 * 6)
     : null;
   const rigidBodies = hasSwarmControls
     ? new Float32Array(mem.buffer, exp.chronos_get_rigid_bodies_ptr(), 32 * 8)
     : null;
   const modalField = hasSwarmControls
-    ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 880)
+    ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 2304)
     : null;
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 24_117_248)) {
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 29_100_000)) {
     ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
   }
   const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
@@ -1268,9 +962,14 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
     const inst = new WebAssembly.Instance(wasmModule, {});
     const exp = inst.exports;
     const mem = exp.memory;
-    const initDataPrefix = new Uint8Array(mem.buffer.slice(0, 65536));
+    const dataPrefixBytes = Math.max(65536, Math.min(
+      exp.chronos_get_ring_slot_ptr(0),
+      exp.chronos_get_telemetry_ptr(),
+      exp.chronos_get_laplacian_ptr()
+    ));
+    const initDataPrefix = new Uint8Array(mem.buffer.slice(0, dataPrefixBytes));
     const memU8 = new Uint8Array(mem.buffer);
-    memU8.fill(0, 65536);
+    memU8.fill(0, dataPrefixBytes);
     const telem = new Float32Array(mem.buffer, exp.chronos_get_telemetry_ptr(), TELEMETRY_LEN);
     const laplacian = new Float32Array(mem.buffer, exp.chronos_get_laplacian_ptr(), 1024);
     const fiedler = new Float32Array(mem.buffer, exp.chronos_get_fiedler_ptr(), 32);
@@ -1278,22 +977,23 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
       ? new Float32Array(mem.buffer, exp.chronos_get_swarm_telemetry_ptr(), 64)
       : null;
     const microTracks = hasSwarmControls
-      ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 1536 * 8)
+      ? new Float32Array(mem.buffer, exp.chronos_get_micro_tracks_ptr(), 3072 * 8)
       : null;
     const continuumField = hasSwarmControls
-      ? new Float32Array(mem.buffer, exp.chronos_get_continuum_field_ptr(), 880 * 6)
+      ? new Float32Array(mem.buffer, exp.chronos_get_continuum_field_ptr(), 2304 * 6)
       : null;
     const rigidBodies = hasSwarmControls
       ? new Float32Array(mem.buffer, exp.chronos_get_rigid_bodies_ptr(), 32 * 8)
       : null;
     const modalField = hasSwarmControls
-      ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 880)
+      ? new Float32Array(mem.buffer, exp.chronos_get_modal_field_ptr(), 2304)
       : null;
     const solveLanczos = createLanczosSolver(exp, laplacian, fiedler);
     sess = {
       exp,
       mem,
       memU8,
+      dataPrefixBytes,
       initDataPrefix,
       w: 0,
       h: 0,
@@ -1314,7 +1014,7 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
   }
 
   sess.memU8.set(sess.initDataPrefix, 0);
-  sess.memU8.fill(0, 65536);
+  sess.memU8.fill(0, sess.dataPrefixBytes);
   sess.solveLanczos.reset();
 
   const { exp, mem, telem } = sess;
@@ -1344,7 +1044,7 @@ function acquirePooledWasmSession(poolIdx, resMode, swarmModeInt, labMode) {
     }
   }
   const arenaBytes = Math.round(telem[20]);
-  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 24_117_248)) {
+  if (hasSwarmControls && (!Number.isFinite(telem[20]) || arenaBytes < 17_000_000 || arenaBytes > 29_100_000)) {
     ptrErrors.push(`invalidWave2ArenaBytes(${telem[20]})`);
   }
   sess.arenaBytes = arenaBytes;
@@ -4115,7 +3815,7 @@ function recordSessionFrame(acc, sess, tickDt, resNorm, f, checkAutoInactivity, 
     if (checkAutoInactivity) {
       let microActive = 0;
       if (microTracks) {
-        for (let i = 0; i < 1536; i++) {
+        for (let i = 0; i < 3072; i++) {
           if (microTracks[i * 8 + 5] !== 0.0) microActive++;
         }
       }
@@ -4141,7 +3841,7 @@ function recordSessionFrame(acc, sess, tickDt, resNorm, f, checkAutoInactivity, 
       acc.swarmSentinelErrors++;
     }
     if (continuumField) {
-      for (let c = 0; c < 880; c++) {
+      for (let c = 0; c < 2304; c++) {
         const fb = c * 6;
         for (let k = 0; k < 6; k++) {
           if (!Number.isFinite(continuumField[fb + k])) acc.nanDetected = true;
@@ -4163,7 +3863,7 @@ function recordSessionFrame(acc, sess, tickDt, resNorm, f, checkAutoInactivity, 
       }
     }
     if (modalField) {
-      for (let c = 0; c < 880; c++) {
+      for (let c = 0; c < 2304; c++) {
         const phi = modalField[c];
         if (!Number.isFinite(phi)) {
           acc.nanDetected = true;
@@ -4180,7 +3880,7 @@ function recordSessionFrame(acc, sess, tickDt, resNorm, f, checkAutoInactivity, 
     if (microTracks) {
       const microObs = [];
       const seenMicroTids = new Set();
-      for (let i = 0; i < 1536; i++) {
+      for (let i = 0; i < 3072; i++) {
         const mb = i * 8;
         for (let k = 0; k < 8; k++) {
           if (!Number.isFinite(microTracks[mb + k])) acc.nanDetected = true;
@@ -4703,7 +4403,7 @@ function auditInactiveSwarmBuffers(sess) {
   let microActive = 0;
   const { continuumField, modalField, rigidBodies, microTracks } = sess;
   if (continuumField) {
-    for (let c = 0; c < 880; c++) {
+    for (let c = 0; c < 2304; c++) {
       const fb = c * 6;
       for (let k = 0; k < 6; k++) {
         if (!Number.isFinite(continuumField[fb + k])) nanDetected = true;
@@ -4721,7 +4421,7 @@ function auditInactiveSwarmBuffers(sess) {
     }
   }
   if (modalField) {
-    for (let c = 0; c < 880; c++) {
+    for (let c = 0; c < 2304; c++) {
       const phi = modalField[c];
       if (!Number.isFinite(phi)) nanDetected = true;
       else if (phi !== 0.0) sentinelErrors++;
@@ -4733,7 +4433,7 @@ function auditInactiveSwarmBuffers(sess) {
     }
   }
   if (microTracks) {
-    for (let i = 0; i < 1536; i++) {
+    for (let i = 0; i < 3072; i++) {
       const mb = i * 8;
       for (let k = 0; k < 8; k++) {
         if (!Number.isFinite(microTracks[mb + k])) nanDetected = true;

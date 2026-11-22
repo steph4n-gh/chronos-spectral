@@ -8,3 +8,5 @@ node_modules/
 docs/*ROADMAP*.md
 
 /native/target/
+/native/capi/target/
+__pycache__/

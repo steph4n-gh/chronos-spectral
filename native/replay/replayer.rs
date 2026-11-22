@@ -176,7 +176,7 @@ impl<'h> Replayer<'h> {
                 bad.push(format!("getter {getter_name} != native {}", n.getter));
             }
             let want_arg = match n.kind {
-                RegionKind::RingSlot(k) => Some(k),
+                RegionKind::RingSlot(k) | RegionKind::Indexed(k) => Some(k),
                 _ => None,
             };
             if (r.has_arg, r.arg) != (want_arg.is_some(), want_arg.unwrap_or(r.arg))
@@ -295,20 +295,21 @@ impl<'h> Replayer<'h> {
 
     /// Resolves region `ri` through its getter now, and checks the address against the native
     /// layout (a fixed region must be its field; an alias must be a ring slot).
-    pub fn resolve(&self, ri: usize) -> Result<usize, String> {
+    pub fn resolve(&self, ri: usize) -> Result<*mut u8, String> {
         let b = &self.regions[ri];
         // SAFETY: getters only compute an address.
         let p = match unsafe { (b.getter)(&b.arg) } {
             Ret::Ptr(p) => p,
             other => return Err(format!("getter for {} returned {other:?}", b.name)),
         };
+        let addr = p.addr();
         let ok = match b.native.kind {
-            RegionKind::Fixed | RegionKind::RingSlot(_) => p == b.native.field_addr,
-            RegionKind::RingAlias => self.ring_slots.contains(&p),
+            RegionKind::Fixed | RegionKind::Indexed(_) | RegionKind::RingSlot(_) => addr == b.native.field_addr,
+            RegionKind::RingAlias => self.ring_slots.contains(&addr),
         };
         if !ok {
             return Err(format!(
-                "getter for {} returned 0x{p:x}, outside its native field",
+                "getter for {} returned 0x{addr:x}, outside its native field",
                 b.name
             ));
         }
@@ -341,7 +342,7 @@ impl<'h> Replayer<'h> {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 data.as_ptr(),
-                (p + offset as usize) as *mut u8,
+                p.add(offset as usize),
                 data.len(),
             )
         };
@@ -403,7 +404,7 @@ impl<'h> Replayer<'h> {
             let len = self.regions[ri].byte_len;
             let p = self.resolve(ri)?;
             // SAFETY: [p, p + len) is the region's native field; no kernel call is in progress.
-            let cur = unsafe { std::slice::from_raw_parts(p as *const u8, len) };
+            let cur = unsafe { std::slice::from_raw_parts(p.cast_const(), len) };
             let d = &mut self.digests[i];
             let hash = if d.valid && d.prev.as_slice() == cur {
                 d.prev_hash
@@ -444,7 +445,7 @@ impl<'h> Replayer<'h> {
         let b = &self.regions[ri];
         let p = self.resolve(ri)?;
         // SAFETY: as in `check_digests`.
-        let cur = unsafe { std::slice::from_raw_parts(p as *const u8, b.byte_len) };
+        let cur = unsafe { std::slice::from_raw_parts(p.cast_const(), b.byte_len) };
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         let file = dir.join(format!("{stem}.c{call}.{}.native.bin", file_safe(&b.name)));
         std::fs::write(&file, cur).map_err(|e| format!("{}: {e}", file.display()))?;

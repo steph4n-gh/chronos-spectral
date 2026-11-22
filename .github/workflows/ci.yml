@@ -226,8 +226,9 @@ jobs:
           HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
           cargo "+$MIRI_TOOLCHAIN" miri test --target "$HOST" --features simd-force-scalar
 
-      - name: Miri, kernel (chronos_init, then two SD frames through chronos_tick)
+      - name: Miri, kernel (chronos_init, two SD frames through chronos_tick, and depth ABI smoke)
         if: ${{ !cancelled() }}
         run: |
           HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
+          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture

@@ -24,9 +24,9 @@ use crate::{
 
 pub const MICRO_KNN_K: usize = 6;
 pub const MAX_RIGID_BODIES: usize = 32;
-pub const FIELD_GRID_W: usize = 40;
-pub const FIELD_GRID_H: usize = 22;
-pub const FIELD_CELLS: usize = FIELD_GRID_W * FIELD_GRID_H; // 880
+pub const FIELD_GRID_W: usize = 64;
+pub const FIELD_GRID_H: usize = 36;
+pub const FIELD_CELLS: usize = FIELD_GRID_W * FIELD_GRID_H; // 2,304
 pub const FIELD_EXPORT_STRIDE: usize = 6;
 pub const BODY_EXPORT_STRIDE: usize = 8;
 
@@ -238,7 +238,7 @@ pub struct ContinuumState {
 }
 
 // Keep ContinuumState <= 284 KiB so 320-page Arena headroom (>2 MiB) stays comfortable.
-const _: () = assert!(core::mem::size_of::<ContinuumState>() <= 290_816);
+const _: () = assert!(core::mem::size_of::<ContinuumState>() <= 620_000);
 
 #[inline(always)]
 fn pack_strain_q15(strain: f32) -> u16 {
@@ -694,13 +694,14 @@ fn reset_slot_knn(cs: &mut ContinuumState, i: usize) {
 }
 
 #[inline(never)]
-fn reset_track_ftle_sentinels(ms: &mut MicroSwarmState) {
+fn reset_track_ftle_sentinels_lim(ms: &mut MicroSwarmState, lim: usize) {
     if ms.swarm_active == 0 {
         ms.tracks.ftle_val.fill(0.0);
         return;
     }
+    let lim = lim.min(MAX_MICRO);
     let mut i = 0usize;
-    while i < MAX_MICRO {
+    while i < lim {
         ms.tracks.ftle_val[i] = if ms.tracks.state[i] == MICRO_STATE_INACTIVE {
             0.0
         } else {
@@ -708,6 +709,11 @@ fn reset_track_ftle_sentinels(ms: &mut MicroSwarmState) {
         };
         i += 1;
     }
+}
+
+#[inline(never)]
+fn reset_track_ftle_sentinels(ms: &mut MicroSwarmState) {
+    reset_track_ftle_sentinels_lim(ms, MAX_MICRO);
 }
 
 /// Cross-state continuity invalidation hook for Wave-2 `lib.rs` on scene cuts, gaps, or seeks.
@@ -1128,9 +1134,14 @@ fn sync_knn_and_build_csr(
     let mut conf_n = 0usize;
     let mut active_max = 0usize;
 
+    let prev_hi = (cs.prev_active_max_slot as usize).min(MAX_MICRO);
     let mut i = 0usize;
     while i < MAX_MICRO {
         let st = ms.tracks.state[i];
+        if st == MICRO_STATE_INACTIVE && i >= prev_hi {
+            i += 1;
+            continue;
+        }
         let tid = ms.tracks.track_id[i];
         if st != MICRO_STATE_INACTIVE {
             active_max = i + 1;
@@ -4241,8 +4252,9 @@ fn reconcile_and_complete_rigid_bodies(
         }
         b += 1;
     }
+    let mem_lim = (cs.active_max_slot.max(cs.prev_active_max_slot) as usize).min(MAX_MICRO);
     let mut i = 0usize;
-    while i < MAX_MICRO {
+    while i < mem_lim {
         if cs.member_mask[i] < 16 {
             cs.member_mask[i] = 0;
             cs.comp_next[i] = -1;
@@ -7699,7 +7711,7 @@ fn try_solve_cell_ftle(
         macro_rules! push_ftle_cand {
             ($ks:expr) => {{
                 let ks = $ks;
-                let p = ((cti[ks] & 0x07FF) as usize).min(MAX_MICRO - 1);
+                let p = ((cti[ks] & 0x0FFF) as usize).min(MAX_MICRO - 1);
                 let dx = gx0[p] - x0_ref;
                 let dy = gy0[p] - y0_ref;
                 let xy_t = gaux[p];
@@ -7729,7 +7741,7 @@ fn try_solve_cell_ftle(
 
         if all_same_age {
             if m == 0 {
-                let p = ((cti[k.min(FIELD_CAND_CAP - 1)] & 0x07FF) as usize).min(MAX_MICRO - 1);
+                let p = ((cti[k.min(FIELD_CAND_CAP - 1)] & 0x0FFF) as usize).min(MAX_MICRO - 1);
                 x0_ref = gx0[p];
                 y0_ref = gy0[p];
                 let xy_t = gaux[p];
@@ -7755,8 +7767,8 @@ fn try_solve_cell_ftle(
                 while k < cand_end {
                     let ks = k.min(FIELD_CAND_CAP - 1);
                     let packed = cti[ks];
-                    if ((packed >> 11) as usize) == best_a {
-                        let p = ((packed & 0x07FF) as usize).min(MAX_MICRO - 1);
+                    if ((packed >> 12) as usize) == best_a {
+                        let p = ((packed & 0x0FFF) as usize).min(MAX_MICRO - 1);
                         x0_ref = gx0[p];
                         y0_ref = gy0[p];
                         let xy_t = gaux[p];
@@ -7777,7 +7789,7 @@ fn try_solve_cell_ftle(
             }
             while k < cand_end && m < FIELD_CAND_CAP {
                 let ks = k.min(FIELD_CAND_CAP - 1);
-                if ((cti[ks] >> 11) as usize) == best_a {
+                if ((cti[ks] >> 12) as usize) == best_a {
                     push_ftle_cand!(ks);
                 }
                 k += 1;
@@ -8621,6 +8633,7 @@ fn gather_3x3_flat_le24(
 #[inline(never)]
 fn gather_wide_le24(
     cs: &mut ContinuumState,
+    row_occ: &[u128; FIELD_GRID_H],
     row: usize,
     col: usize,
     xc: f32,
@@ -8648,55 +8661,89 @@ fn gather_wide_le24(
         let c_ti = &mut cs.cell_cands_ti[..FIELD_CAND_CAP];
         let c_d2 = &mut cs.cell_cands_d2[..FIELD_CAND_CAP];
 
-        let vxc = crate::simd::f32x4_splat(xc);
-
-        let vyc = crate::simd::f32x4_splat(yc);
-
-        let vrmax2 = crate::simd::f32x4_splat(r_max2);
+        let (vxc, vyc, vrmax2) = {
+            use crate::simd::f32x4_splat;
+            (f32x4_splat(xc), f32x4_splat(yc), f32x4_splat(r_max2))
+        };
         while ny <= ny_hi && cand_n < FIELD_CAND_CAP {
-            let dx_c = row_dx[(ny as isize - row_s).unsigned_abs().min(FIELD_GRID_H - 1)] as isize;
-            if dx_c >= 0 {
-                let cx_lo = (col as isize - dx_c).max(0) as usize;
-                let cx_hi = (col as isize + dx_c).min((FIELD_GRID_W - 1) as isize) as usize;
-                let idx_a = (row_off + cx_lo).min(FIELD_CELLS);
-                let idx_b = (row_off + cx_hi + 1).min(FIELD_CELLS);
-                let e = (row_start[idx_b] as usize).min(MAX_MICRO);
-                let s = (row_start[idx_a] as usize).min(e);
-                let mut p = s;
-                let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
-                while p + 4 <= e_lim {
-                    use crate::simd::*;
-                    let ps = p.min(MAX_MICRO - 4);
-                    let vdx = f32x4_sub(f32x4(gx[ps], gx[ps + 1], gx[ps + 2], gx[ps + 3]), vxc);
-                    let vdy = f32x4_sub(f32x4(gy[ps], gy[ps + 1], gy[ps + 2], gy[ps + 3]), vyc);
-                    let vd2 = f32x4_add(f32x4_mul(vdx, vdx), f32x4_mul(vdy, vdy));
-                    let mut mask = i32x4_bitmask(f32x4_le(vd2, vrmax2)) as u32;
-                    while mask != 0 {
-                        let lane = mask.trailing_zeros() as usize;
-                        mask &= mask - 1;
-                        let d_lane = match lane {
-                            0 => f32x4_extract_lane::<0>(vd2),
-                            1 => f32x4_extract_lane::<1>(vd2),
-                            2 => f32x4_extract_lane::<2>(vd2),
-                            _ => f32x4_extract_lane::<3>(vd2),
-                        };
-                        let idx = cand_n.min(FIELD_CAND_CAP - 1);
-                        c_ti[idx] = gti[(ps + lane).min(MAX_MICRO - 1)];
-                        c_d2[idx] = d_lane;
-                        cand_n += 1;
+            let occ_r = row_occ[ny];
+            if occ_r != 0 {
+                let dx_c = row_dx[(ny as isize - row_s).unsigned_abs().min(FIELD_GRID_H - 1)] as isize;
+                if dx_c >= 0 {
+                    let cx_lo = (col as isize - dx_c).max(0) as usize;
+                    let cx_hi = (col as isize + dx_c).min((FIELD_GRID_W - 1) as isize) as usize;
+                    let col_mask = (!0u128 >> (127 - cx_hi)) & (!0u128 << cx_lo);
+                    if (occ_r & col_mask) != 0 {
+                        let idx_a = (row_off + cx_lo).min(FIELD_CELLS);
+                        let idx_b = (row_off + cx_hi + 1).min(FIELD_CELLS);
+                        let e = (row_start[idx_b] as usize).min(MAX_MICRO);
+                        let s = (row_start[idx_a] as usize).min(e);
+                        let mut p = s;
+                        let e_lim = s + (e - s).min(FIELD_CAND_CAP - cand_n);
+                        {
+                            use crate::simd::*;
+                            while p + 4 <= e_lim {
+                                let ps = p.min(MAX_MICRO - 4);
+                                let vdx = f32x4_sub(
+                                    f32x4(gx[ps], gx[ps + 1], gx[ps + 2], gx[ps + 3]),
+                                    vxc,
+                                );
+                                let vdy = f32x4_sub(
+                                    f32x4(gy[ps], gy[ps + 1], gy[ps + 2], gy[ps + 3]),
+                                    vyc,
+                                );
+                                let vd2 = f32x4_add(f32x4_mul(vdx, vdx), f32x4_mul(vdy, vdy));
+                                let m_all = i32x4_bitmask(f32x4_le(vd2, vrmax2)) as u32;
+                                if m_all != 0 {
+                                    let d0 = f32x4_extract_lane::<0>(vd2);
+                                    let d1 = f32x4_extract_lane::<1>(vd2);
+                                    let d2v = f32x4_extract_lane::<2>(vd2);
+                                    let d3 = f32x4_extract_lane::<3>(vd2);
+                                    if m_all == 15 {
+                                        let idx = cand_n.min(FIELD_CAND_CAP - 4);
+                                        c_ti[idx] = gti[ps];
+                                        c_ti[idx + 1] = gti[ps + 1];
+                                        c_ti[idx + 2] = gti[ps + 2];
+                                        c_ti[idx + 3] = gti[ps + 3];
+                                        c_d2[idx] = d0;
+                                        c_d2[idx + 1] = d1;
+                                        c_d2[idx + 2] = d2v;
+                                        c_d2[idx + 3] = d3;
+                                        cand_n += 4;
+                                    } else {
+                                        let idx0 = cand_n.min(FIELD_CAND_CAP - 1);
+                                        c_ti[idx0] = gti[ps];
+                                        c_d2[idx0] = d0;
+                                        cand_n += (m_all & 1) as usize;
+                                        let idx1 = cand_n.min(FIELD_CAND_CAP - 1);
+                                        c_ti[idx1] = gti[ps + 1];
+                                        c_d2[idx1] = d1;
+                                        cand_n += ((m_all >> 1) & 1) as usize;
+                                        let idx2 = cand_n.min(FIELD_CAND_CAP - 1);
+                                        c_ti[idx2] = gti[ps + 2];
+                                        c_d2[idx2] = d2v;
+                                        cand_n += ((m_all >> 2) & 1) as usize;
+                                        let idx3 = cand_n.min(FIELD_CAND_CAP - 1);
+                                        c_ti[idx3] = gti[ps + 3];
+                                        c_d2[idx3] = d3;
+                                        cand_n += ((m_all >> 3) & 1) as usize;
+                                    }
+                                }
+                                p += 4;
+                            }
+                        }
+                        while p < e_lim {
+                            let ps = p.min(MAX_MICRO - 1);
+                            let dx = gx[ps] - xc;
+                            let dy = gy[ps] - yc;
+                            let d2 = dx * dx + dy * dy;
+                            let idx = cand_n.min(FIELD_CAND_CAP - 1);
+                            c_ti[idx] = gti[ps];
+                            c_d2[idx] = d2;
+                            cand_n += (d2 <= r_max2) as usize;
+                            p += 1;
+                        }
                     }
-                    p += 4;
-                }
-                while p < e_lim {
-                    let ps = p.min(MAX_MICRO - 1);
-                    let dx = gx[ps] - xc;
-                    let dy = gy[ps] - yc;
-                    let d2 = dx * dx + dy * dy;
-                    let idx = cand_n.min(FIELD_CAND_CAP - 1);
-                    c_ti[idx] = gti[ps];
-                    c_d2[idx] = d2;
-                    cand_n += (d2 <= r_max2) as usize;
-                    p += 1;
                 }
             }
             row_off += FIELD_GRID_W;
@@ -8723,11 +8770,11 @@ fn gather_wide_le24(
 #[inline(always)]
 fn band3_and_band5_summary(
     row_cnt: &[u16; FIELD_GRID_H],
-    row_occ: &[u64; FIELD_GRID_H],
+    row_occ: &[u128; FIELD_GRID_H],
     row: usize,
     b5_lo: usize,
     b5_hi: usize,
-) -> (usize, usize, usize, u64, usize, u64) {
+) -> (usize, usize, usize, u128, usize, u128) {
     let b3_lo = row.saturating_sub(1);
     let b3_hi = (row + 1).min(FIELD_GRID_H - 1);
     let mut band3_tot = row_cnt[row] as usize;
@@ -8761,7 +8808,7 @@ fn band3_and_band5_summary(
 #[inline(always)]
 fn count_box5_tracks(
     cs: &ContinuumState,
-    row_occ: &[u64; FIELD_GRID_H],
+    row_occ: &[u128; FIELD_GRID_H],
     b5_lo: usize,
     b5_hi: usize,
     col: usize,
@@ -8769,7 +8816,7 @@ fn count_box5_tracks(
 ) -> usize {
     let c5_lo = col.saturating_sub(dx5_max);
     let c5_hi = (col + dx5_max).min(FIELD_GRID_W - 1);
-    let col5_mask = (!0u64 >> (63 - c5_hi)) & (!0u64 << c5_lo);
+    let col5_mask = (!0u128 >> (127 - c5_hi)) & (!0u128 << c5_lo);
     let mut b5c = 0usize;
     let mut ny = b5_lo;
     while ny <= b5_hi {
@@ -8800,8 +8847,8 @@ fn is_split_rigid_boundary(
     let mut k = 0usize;
     while k < lim {
         let raw = cands_ti[k];
-        if !filter_age || ((raw >> 11) as usize) == target_age {
-            let p = ((raw & 0x07FF) as usize).min(MAX_MICRO - 1);
+        if !filter_age || ((raw >> 12) as usize) == target_age {
+            let p = ((raw & 0x0FFF) as usize).min(MAX_MICRO - 1);
             let tk = (src_ti[p] as usize).min(MAX_MICRO - 1);
             let bid = (body_id[tk] as usize).min(16);
             bcnt[bid] = bcnt[bid].saturating_add(1);
@@ -8843,8 +8890,8 @@ fn has_multi_body_boundary(
     let mut k = 0usize;
     while k < lim {
         let raw = cands_ti[k];
-        if !filter_age || ((raw >> 11) as usize) == target_age {
-            let p = ((raw & 0x07FF) as usize).min(MAX_MICRO - 1);
+        if !filter_age || ((raw >> 12) as usize) == target_age {
+            let p = ((raw & 0x0FFF) as usize).min(MAX_MICRO - 1);
             let tk = (src_ti[p] as usize).min(MAX_MICRO - 1);
             let bid = body_id[tk];
             if first_bid == u8::MAX {
@@ -8874,7 +8921,7 @@ fn run_ftle_bank_pass(
     clean_packed_n: usize,
     is_secondary: bool,
     t_sec_by_age: &[(bool, f32); 13],
-    row_occ: &mut [u64; FIELD_GRID_H],
+    row_occ: &mut [u128; FIELD_GRID_H],
     ftle_valid_cnt: &mut u32,
     max_ftle: &mut f32,
 ) {
@@ -8891,6 +8938,9 @@ fn run_ftle_bank_pass(
     let r_thresh = [radii[0] * radii[0], radii[1] * radii[1], r_max2];
     let (dy_cells, row_dx) = compute_row_dx_spans(r_max, cell_w, cell_h);
     let r1_in_3x3 = 1.5 * cell_w >= radii[1] && 1.5 * cell_h >= radii[1];
+    let (dy_r1, row_dx_r1) = compute_row_dx_spans(radii[1], cell_w, cell_h);
+    let r1_in_5x5 = !r1_in_3x3 && dy_r1 <= 2 && row_dx_r1[0] <= 2;
+    let r1_fast = r1_in_3x3 || r1_in_5x5;
     let mut row_dx_3 = [-1i8; FIELD_GRID_H];
     row_dx_3[0] = 1;
     row_dx_3[1] = 1;
@@ -8924,7 +8974,7 @@ fn run_ftle_bank_pass(
                         let ins = inserted.min(MAX_MICRO - 1);
                         cs.field_cell_start[(cell + 1).min(FIELD_CELLS)] += 1;
                         cs.uf_parent[ins] = cell as i16;
-                        cs.comp_next[ins] = (ti as i16) | ((age_idx as i16) << 11);
+                        cs.comp_next[ins] = ((ti as u16) | ((age_idx as u16) << 12)) as i16;
                         seen_ages_mask |= 1u16 << age_idx;
                         single_age = age_idx;
                         inserted += 1;
@@ -8945,7 +8995,7 @@ fn run_ftle_bank_pass(
     while rr < FIELD_GRID_H {
         let row_acc0 = acc;
         let base_c = rr * FIELD_GRID_W;
-        let mut r_mask = 0u64;
+        let mut r_mask = 0u128;
         let mut cc = 0usize;
         while cc < FIELD_GRID_W {
             let c = base_c + cc;
@@ -8954,7 +9004,7 @@ fn run_ftle_bank_pass(
             acc += cnt;
             cs.field_cell_start[c + 1] = acc;
             if cnt != 0 {
-                r_mask |= 1u64 << cc;
+                r_mask |= 1u128 << cc;
             }
             cc += 1;
         }
@@ -8969,8 +9019,8 @@ fn run_ftle_bank_pass(
         let dst = (cs.comp_head[cell] as usize).min(MAX_MICRO - 1);
         cs.comp_head[cell] = (dst + 1) as i16;
         let packed = cs.comp_next[k_ins] as u16;
-        let tk = ((packed & 0x07FF) as usize).min(MAX_MICRO - 1);
-        cs.field_grid_ti[dst] = (dst as u16) | (packed & 0xF800);
+        let tk = ((packed & 0x0FFF) as usize).min(MAX_MICRO - 1);
+        cs.field_grid_ti[dst] = (dst as u16) | (packed & 0xF000);
         cs.field_grid_src_ti[dst] = tk as u16;
         cs.field_grid_x[dst] = x0_slice[tk];
         cs.field_grid_y[dst] = y0_slice[tk];
@@ -8978,19 +9028,19 @@ fn run_ftle_bank_pass(
         k_ins += 1;
     }
 
-    const VALID_COLS_MASK: u64 = (1u64 << FIELD_GRID_W) - 1;
+    const VALID_COLS_MASK: u128 = (1u128 << FIELD_GRID_W) - 1;
     let mut row = 0usize;
     while row < FIELD_GRID_H {
         let row_cell_base = row * FIELD_GRID_W;
-        let mut row_todo: u64 = if !is_secondary {
+        let mut row_todo: u128 = if !is_secondary {
             VALID_COLS_MASK
         } else {
-            let mut m = 0u64;
+            let mut m = 0u128;
             let row_valid = &cs.cell_valid_mask[row_cell_base..row_cell_base + FIELD_GRID_W];
             let mut c = 0usize;
             while c < FIELD_GRID_W {
                 if (row_valid[c] & CELL_VALID_FTLE) == 0 {
-                    m |= 1u64 << c;
+                    m |= 1u128 << c;
                 }
                 c += 1;
             }
@@ -9027,6 +9077,25 @@ fn run_ftle_bank_pass(
             sh += 1;
         }
         row_todo &= has_5x5 & VALID_COLS_MASK;
+        let br1_lo = row.saturating_sub(dy_r1 as usize);
+        let br1_hi = (row + dy_r1 as usize).min(FIELD_GRID_H - 1);
+        let dx_r1 = row_dx_r1[0].max(0) as usize;
+        let mut band_r1_tot = band3_tot;
+        let mut band_r1_occ = band3_occ;
+        if r1_in_5x5 {
+            let mut ny = br1_lo;
+            while ny < b3_lo {
+                band_r1_tot += row_cnt[ny] as usize;
+                band_r1_occ |= row_occ[ny];
+                ny += 1;
+            }
+            ny = b3_hi + 1;
+            while ny <= br1_hi {
+                band_r1_tot += row_cnt[ny] as usize;
+                band_r1_occ |= row_occ[ny];
+                ny += 1;
+            }
+        }
         let yc = (row as f32 + 0.5) * cell_h;
         while row_todo != 0 {
             let col = (row_todo.trailing_zeros() as usize).min(FIELD_GRID_W - 1);
@@ -9034,7 +9103,7 @@ fn run_ftle_bank_pass(
             let cell = row_cell_base + col;
             let c3_lo = col.saturating_sub(1);
             let c3_hi = (col + 1).min(FIELD_GRID_W - 1);
-            let col3_mask = (7u64 << col) >> 1;
+            let col3_mask = (7u128 << col) >> 1;
             let (s0, e0, s1, e1, s2, e2, box3_cnt) = if r1_in_3x3
                 && band3_tot >= MIN_RIGID_MEMBERS
                 && (band3_occ & col3_mask) != 0
@@ -9062,10 +9131,20 @@ fn run_ftle_bank_pass(
                 };
                 let cnt = b0.saturating_sub(a0) + b1.saturating_sub(a1) + b2.saturating_sub(a2);
                 (a0, b0, a1, b1, a2, b2, cnt)
+            } else if r1_in_5x5 && band_r1_tot >= MIN_RIGID_MEMBERS {
+                let c_r1_lo = col.saturating_sub(dx_r1);
+                let c_r1_hi = (col + dx_r1).min(FIELD_GRID_W - 1);
+                let col_r1_mask = (!0u128 >> (127 - c_r1_hi)) & (!0u128 << c_r1_lo);
+                if (band_r1_occ & col_r1_mask) != 0 {
+                    let cnt = count_box5_tracks(cs, row_occ, br1_lo, br1_hi, col, dx_r1);
+                    (0, 0, 0, 0, 0, 0, cnt)
+                } else {
+                    (0, 0, 0, 0, 0, 0, 0)
+                }
             } else {
                 (0, 0, 0, 0, 0, 0, 0)
             };
-            let mut pass = if r1_in_3x3 && box3_cnt >= MIN_RIGID_MEMBERS {
+            let mut pass = if r1_fast && box3_cnt >= MIN_RIGID_MEMBERS {
                 0usize
             } else {
                 1usize
@@ -9096,13 +9175,17 @@ fn run_ftle_bank_pass(
             let mut skip_pass1 = false;
             while !solved && pass < 2 {
                 let (dy_p, rdx_p, r_lim2, ri_start, ri_end, part_mode, box_cnt) =
-                    if pass == 0 && r1_in_3x3 {
+                    if pass == 0 && r1_fast {
                         let (rs0, pm0) = if box3_cnt < 10 {
                             (1usize, 0u8)
                         } else {
                             (0usize, 1u8)
                         };
-                        (1isize, &row_dx_3, r_thresh[1], rs0, 2usize, pm0, box3_cnt)
+                        if r1_in_3x3 {
+                            (1isize, &row_dx_3, r_thresh[1], rs0, 2usize, pm0, box3_cnt)
+                        } else {
+                            (dy_r1, &row_dx_r1, r_thresh[1], rs0, 2usize, pm0, box3_cnt)
+                        }
                     } else {
                         if box5_cnt == usize::MAX {
                             let b5c = count_box5_tracks(cs, row_occ, b5_lo, b5_hi, col, dx5_max);
@@ -9111,7 +9194,7 @@ fn run_ftle_bank_pass(
                             }
                             box5_cnt = b5c;
                         }
-                        let (rs, pm) = if r1_in_3x3 && pass == 1 {
+                        let (rs, pm) = if r1_fast && pass == 1 {
                             (2usize, 0u8)
                         } else {
                             (0usize, 2u8)
@@ -9120,7 +9203,7 @@ fn run_ftle_bank_pass(
                         (dy_cells, &row_dx, r_max2, rs, 3usize, pm, box5_cnt)
                     };
                 let (end0, end1, cand_n) = if box_cnt <= FIELD_CAND_CAP {
-                    let pk = if dy_p == 1 {
+                    let pk = if dy_p == 1 && r1_in_3x3 {
                         if part_mode == 1 {
                             gather_3x3_split_le24(
                                 cs,
@@ -9154,6 +9237,7 @@ fn run_ftle_bank_pass(
                     } else {
                         gather_wide_le24(
                             cs,
+                            row_occ,
                             row,
                             col,
                             xc,
@@ -9207,7 +9291,7 @@ fn run_ftle_bank_pass(
                         while ri_b < ri_end {
                             let eb = end_ri[ri_b].min(FIELD_CAND_CAP);
                             while k < eb {
-                                let a = (cti[k.min(FIELD_CAND_CAP - 1)] >> 11) as usize;
+                                let a = (cti[k.min(FIELD_CAND_CAP - 1)] >> 12) as usize;
                                 if a < 13 {
                                     let c_new = age_cnt[a].saturating_add(1);
                                     age_cnt[a] = c_new;
@@ -9522,42 +9606,51 @@ pub fn solve_eulerian_grad_and_ftle(
 
     cs.diagnostic_validity_mask &= !(VALIDITY_BIT_GRAD | VALIDITY_BIT_FTLE);
     let q = ((frame_w as f32) / 640.0).max(0.25);
-    let mut row_occ = [0u64; FIELD_GRID_H];
+    let mut row_occ = [0u128; FIELD_GRID_H];
     let mut mature_cnt = 0u32;
     let mut bank_a_eligible = 0u32;
     let mut bank_b_eligible = 0u32;
     let mut clean_n = 0usize;
 
+    let active_lim = if use_cached {
+        (cs.active_max_slot.max(cs.prev_active_max_slot) as usize).min(MAX_MICRO)
+    } else {
+        MAX_MICRO
+    };
     if !hold_grad {
         cs.cached_grad_ftle_frame = u32::MAX;
         let mut c = 0usize;
         if hold_ftle {
             while c < FIELD_CELLS {
-                let base = c * FIELD_EXPORT_STRIDE;
-                cs.export_field[base] = 0.0;
-                cs.export_field[base + 1] = 0.0;
-                cs.export_field[base + 2] = 0.0;
-                cs.export_field[base + 3] = 0.0;
-                cs.export_field[base + 5] = 0.0;
-                cs.cell_valid_mask[c] &= !CELL_VALID_GRAD;
+                if (cs.cell_valid_mask[c] & CELL_VALID_GRAD) != 0 {
+                    let base = c * FIELD_EXPORT_STRIDE;
+                    cs.export_field[base] = 0.0;
+                    cs.export_field[base + 1] = 0.0;
+                    cs.export_field[base + 2] = 0.0;
+                    cs.export_field[base + 3] = 0.0;
+                    cs.export_field[base + 5] = 0.0;
+                    cs.cell_valid_mask[c] &= !CELL_VALID_GRAD;
+                }
                 c += 1;
             }
         } else {
             while c < FIELD_CELLS {
-                let base = c * FIELD_EXPORT_STRIDE;
-                cs.export_field[base] = 0.0;
-                cs.export_field[base + 1] = 0.0;
-                cs.export_field[base + 2] = 0.0;
-                cs.export_field[base + 3] = 0.0;
-                cs.export_field[base + 4] = -999.0; // #96 invalid FTLE sentinel
-                cs.export_field[base + 5] = 0.0;
-                cs.cell_valid_mask[c] &= !(CELL_VALID_GRAD | CELL_VALID_FTLE);
+                if (cs.cell_valid_mask[c] & (CELL_VALID_GRAD | CELL_VALID_FTLE)) != 0 {
+                    let base = c * FIELD_EXPORT_STRIDE;
+                    cs.export_field[base] = 0.0;
+                    cs.export_field[base + 1] = 0.0;
+                    cs.export_field[base + 2] = 0.0;
+                    cs.export_field[base + 3] = 0.0;
+                    cs.export_field[base + 4] = -999.0; // #96 invalid FTLE sentinel
+                    cs.export_field[base + 5] = 0.0;
+                    cs.cell_valid_mask[c] &= !(CELL_VALID_GRAD | CELL_VALID_FTLE);
+                }
                 c += 1;
             }
             cs.max_ftle_s1 = 0.0;
             cs.ftle_cells = 0;
             cs.export_field_dirty = 0;
-            reset_track_ftle_sentinels(ms);
+            reset_track_ftle_sentinels_lim(ms, active_lim);
         }
         cs.valid_field_cells = 0;
         cs.max_abs_vorticity_s1 = 0.0;
@@ -9654,7 +9747,7 @@ pub fn solve_eulerian_grad_and_ftle(
     while rr < FIELD_GRID_H {
         let row_acc0 = acc;
         let base_c = rr * FIELD_GRID_W;
-        let mut r_mask = 0u64;
+        let mut r_mask = 0u128;
         let mut cc = 0usize;
         while cc < FIELD_GRID_W {
             let c = base_c + cc;
@@ -9663,7 +9756,7 @@ pub fn solve_eulerian_grad_and_ftle(
             acc += cnt;
             cs.field_cell_start[c + 1] = acc;
             if cnt != 0 {
-                r_mask |= 1u64 << cc;
+                r_mask |= 1u128 << cc;
             }
             cc += 1;
         }
@@ -9692,10 +9785,13 @@ pub fn solve_eulerian_grad_and_ftle(
     let mut max_abs_vort = 0.0f32;
 
     if packed_n >= 4 {
-        const VALID_COLS_MASK: u64 = (1u64 << FIELD_GRID_W) - 1;
+        const VALID_COLS_MASK: u128 = (1u128 << FIELD_GRID_W) - 1;
         let r0_2 = radii[0] * radii[0];
         let r1_2 = radii[1] * radii[1];
         let r1_in_3x3 = 1.5 * cell_w >= radii[1] && 1.5 * cell_h >= radii[1];
+        let (dy_r1, row_dx_r1) = compute_row_dx_spans(radii[1], cell_w, cell_h);
+        let r1_in_5x5 = !r1_in_3x3 && dy_r1 <= 2 && row_dx_r1[0] <= 2;
+        let r1_fast = r1_in_3x3 || r1_in_5x5;
         let mut row_dx_3 = [-1i8; FIELD_GRID_H];
         row_dx_3[0] = 1;
         row_dx_3[1] = 1;
@@ -9716,6 +9812,25 @@ pub fn solve_eulerian_grad_and_ftle(
                 has_5x5 |= (band5_occ << sh) | (band5_occ >> sh);
                 sh += 1;
             }
+            let br1_lo = row.saturating_sub(dy_r1 as usize);
+            let br1_hi = (row + dy_r1 as usize).min(FIELD_GRID_H - 1);
+            let dx_r1 = row_dx_r1[0].max(0) as usize;
+            let mut band_r1_tot = band3_tot;
+            let mut band_r1_occ = band3_occ;
+            if r1_in_5x5 {
+                let mut ny = br1_lo;
+                while ny < b3_lo {
+                    band_r1_tot += row_cnt[ny] as usize;
+                    band_r1_occ |= row_occ[ny];
+                    ny += 1;
+                }
+                ny = b3_hi + 1;
+                while ny <= br1_hi {
+                    band_r1_tot += row_cnt[ny] as usize;
+                    band_r1_occ |= row_occ[ny];
+                    ny += 1;
+                }
+            }
             let mut row_todo = has_5x5 & VALID_COLS_MASK;
             let yc = (row as f32 + 0.5) * cell_h;
             while row_todo != 0 {
@@ -9723,7 +9838,7 @@ pub fn solve_eulerian_grad_and_ftle(
                 row_todo &= row_todo - 1;
                 let c3_lo = col.saturating_sub(1);
                 let c3_hi = (col + 1).min(FIELD_GRID_W - 1);
-                let col3_mask = (7u64 << col) >> 1;
+                let col3_mask = (7u128 << col) >> 1;
                 let (s0, e0, s1, e1, s2, e2, box3_cnt) = if r1_in_3x3
                     && band3_tot >= 4
                     && (band3_occ & col3_mask) != 0
@@ -9752,10 +9867,20 @@ pub fn solve_eulerian_grad_and_ftle(
                     let cnt =
                         b0.saturating_sub(a0) + b1.saturating_sub(a1) + b2.saturating_sub(a2);
                     (a0, b0, a1, b1, a2, b2, cnt)
+                } else if r1_in_5x5 && band_r1_tot >= 4 {
+                    let c_r1_lo = col.saturating_sub(dx_r1);
+                    let c_r1_hi = (col + dx_r1).min(FIELD_GRID_W - 1);
+                    let col_r1_mask = (!0u128 >> (127 - c_r1_hi)) & (!0u128 << c_r1_lo);
+                    if (band_r1_occ & col_r1_mask) != 0 {
+                        let cnt = count_box5_tracks(cs, &row_occ, br1_lo, br1_hi, col, dx_r1);
+                        (0, 0, 0, 0, 0, 0, cnt)
+                    } else {
+                        (0, 0, 0, 0, 0, 0, 0)
+                    }
                 } else {
                     (0, 0, 0, 0, 0, 0, 0)
                 };
-                let mut pass = if r1_in_3x3 && box3_cnt >= 4 {
+                let mut pass = if r1_fast && box3_cnt >= 4 {
                     0usize
                 } else {
                     1usize
@@ -9777,13 +9902,17 @@ pub fn solve_eulerian_grad_and_ftle(
                 let mut skip_pass1 = false;
                 while !solved && pass < 2 {
                     let (dy_p, rdx_p, r_lim2, ri_start, ri_end, part_mode, box_cnt) =
-                        if pass == 0 && r1_in_3x3 {
+                        if pass == 0 && r1_fast {
                             let (rs0, pm0) = if box3_cnt < 6 {
                                 (1usize, 0u8)
                             } else {
                                 (0usize, 1u8)
                             };
-                            (1isize, &row_dx_3, r1_2, rs0, 2usize, pm0, box3_cnt)
+                            if r1_in_3x3 {
+                                (1isize, &row_dx_3, r1_2, rs0, 2usize, pm0, box3_cnt)
+                            } else {
+                                (dy_r1, &row_dx_r1, r1_2, rs0, 2usize, pm0, box3_cnt)
+                            }
                         } else {
                             if box5_cnt == usize::MAX {
                                 let b5c =
@@ -9793,7 +9922,7 @@ pub fn solve_eulerian_grad_and_ftle(
                                 }
                                 box5_cnt = b5c;
                             }
-                            let (rs, pm) = if r1_in_3x3 && pass == 1 {
+                            let (rs, pm) = if r1_fast && pass == 1 {
                                 (2usize, 0u8)
                             } else {
                                 (0usize, 2u8)
@@ -9802,7 +9931,7 @@ pub fn solve_eulerian_grad_and_ftle(
                             (dy_cells, &row_dx, r_max2, rs, 3usize, pm, box5_cnt)
                         };
                     let (end0, end1, cand_n) = if box_cnt <= FIELD_CAND_CAP {
-                        let pk = if dy_p == 1 {
+                        let pk = if dy_p == 1 && r1_in_3x3 {
                             if part_mode == 1 {
                                 gather_3x3_split_le24(
                                     cs, s0, e0, s1, e1, s2, e2, xc, yc, r0_2, r_lim2, 4,
@@ -9815,6 +9944,7 @@ pub fn solve_eulerian_grad_and_ftle(
                         } else {
                             gather_wide_le24(
                                 cs,
+                                &row_occ,
                                 row,
                                 col,
                                 xc,
@@ -9989,13 +10119,15 @@ pub fn solve_eulerian_grad_and_ftle(
 
         let mut c = 0usize;
         while c < FIELD_CELLS {
-            cs.export_field[c * FIELD_EXPORT_STRIDE + 4] = -999.0; // #96 invalid FTLE sentinel
-            cs.cell_valid_mask[c] &= !CELL_VALID_FTLE;
+            if (cs.cell_valid_mask[c] & CELL_VALID_FTLE) != 0 {
+                cs.export_field[c * FIELD_EXPORT_STRIDE + 4] = -999.0; // #96 invalid FTLE sentinel
+                cs.cell_valid_mask[c] &= !CELL_VALID_FTLE;
+            }
             c += 1;
         }
         cs.max_ftle_s1 = 0.0;
         cs.ftle_cells = 0;
-        reset_track_ftle_sentinels(ms);
+        reset_track_ftle_sentinels_lim(ms, active_lim);
 
         let loop_lim = if use_cached {
             (cs.clean_slots_len as usize).min(MAX_MICRO)
@@ -10035,7 +10167,7 @@ pub fn solve_eulerian_grad_and_ftle(
         let mut max_ftle = f32::NEG_INFINITY;
         if !skip_ftle_solve && mature_cnt >= MIN_RIGID_MEMBERS as u32 {
             let grad_ref_cnt = cs.valid_field_cells;
-            cs.member_mask.fill(0);
+            cs.member_mask[..active_lim].fill(0);
             let (primary_bank, secondary_bank) = if bank_a_eligible >= bank_b_eligible {
                 (1u8, 2u8)
             } else {
@@ -10570,10 +10702,11 @@ fn solve_modal_valid_field(
     let ms2 = r2_sin * inv_mv;
     cs.modal_nematic_r2 = finite_or_zero(wasm_sqrt_f64(mc2 * mc2 + ms2 * ms2) as f32);
 
+    let act_lim = (cs.active_max_slot as usize).min(MAX_MICRO);
     let mut edge_coh_sum = 0.0f64;
     let mut edge_coh_cnt = 0u32;
     let mut i = 0usize;
-    while i < MAX_MICRO {
+    while i < act_lim {
         if cs.member_mask[i] != 0 {
             let phi_i = ms.tracks.modal_phase[i];
             let f_i = ms.tracks.modal_freq_hz[i];
@@ -10629,7 +10762,7 @@ fn solve_modal_valid_field(
     let inv_fh = (FIELD_GRID_H as f32) / (frame_h as f32);
     let mut mod_n = 0usize;
     i = 0;
-    while i < MAX_MICRO {
+    while i < act_lim {
         if cs.member_mask[i] != 0 {
             let gx = clamped_grid_coord(ms.tracks.pos_x[i], inv_fw, FIELD_GRID_W - 1);
             let gy = clamped_grid_coord(ms.tracks.pos_y[i], inv_fh, FIELD_GRID_H - 1);
@@ -10641,13 +10774,26 @@ fn solve_modal_valid_field(
         }
         i += 1;
     }
+    let mut row_occ_mod = [0u128; FIELD_GRID_H];
     let mut acc = 0u16;
-    let mut c = 0usize;
-    while c < FIELD_CELLS {
-        cs.comp_head[c] = acc as i16;
-        acc += cs.field_cell_start[c + 1];
-        cs.field_cell_start[c + 1] = acc;
-        c += 1;
+    let mut rr = 0usize;
+    while rr < FIELD_GRID_H {
+        let base_c = rr * FIELD_GRID_W;
+        let mut r_mask = 0u128;
+        let mut cc = 0usize;
+        while cc < FIELD_GRID_W {
+            let c = base_c + cc;
+            let cnt = cs.field_cell_start[c + 1];
+            cs.comp_head[c] = acc as i16;
+            acc += cnt;
+            cs.field_cell_start[c + 1] = acc;
+            if cnt != 0 {
+                r_mask |= 1u128 << cc;
+            }
+            cc += 1;
+        }
+        row_occ_mod[rr] = r_mask;
+        rr += 1;
     }
     let mod_lim = mod_n.min(MAX_MICRO);
     let mut km = 0usize;
@@ -10656,19 +10802,24 @@ fn solve_modal_valid_field(
         let dst = (cs.comp_head[cell] as usize).min(MAX_MICRO - 1);
         cs.comp_head[cell] = (dst + 1) as i16;
         let tk = (cs.comp_next[km] as usize).min(MAX_MICRO - 1);
+        let amp = ms.tracks.modal_amp[tk];
+        let phi = ms.tracks.modal_phase[tk];
         cs.field_grid_ti[dst] = tk as u16;
         cs.field_grid_x[dst] = ms.tracks.pos_x[tk];
         cs.field_grid_y[dst] = ms.tracks.pos_y[tk];
+        cs.field_grid_aux[dst] = [amp * fast_cosf(phi), amp * fast_sinf(phi)];
         km += 1;
     }
 
-    // Fill 40x22 export_modal_field via physical-radius circular phase mean (M6, #96)
+    // Fill 64x36 export_modal_field via physical-radius circular phase mean (M6, #96)
     let cell_w = (frame_w as f32) / (FIELD_GRID_W as f32);
     let cell_h = (frame_h as f32) / (FIELD_GRID_H as f32);
     let r_mod = 24.0 * q;
     let r_mod2 = r_mod * r_mod;
     let inv_rmod2 = 1.0 / r_mod2.max(1e-6);
     let (dy_cells, row_dx) = compute_row_dx_spans(r_mod, cell_w, cell_h);
+    let dx_max = row_dx[0].max(0) as usize;
+    const VALID_MOD_MASK: u128 = (1u128 << FIELD_GRID_W) - 1;
 
     let mut valid_modal_cells = 0u32;
     let mut row = 0usize;
@@ -10676,8 +10827,26 @@ fn solve_modal_valid_field(
         let yc = (row as f32 + 0.5) * cell_h;
         let ry_lo = (row as isize - dy_cells).max(0) as usize;
         let ry_hi = (row as isize + dy_cells).min((FIELD_GRID_H - 1) as isize) as usize;
-        let mut col = 0usize;
-        while col < FIELD_GRID_W {
+        let mut band_occ = 0u128;
+        let mut ny0 = ry_lo;
+        while ny0 <= ry_hi {
+            band_occ |= row_occ_mod[ny0];
+            ny0 += 1;
+        }
+        if band_occ == 0 {
+            row += 1;
+            continue;
+        }
+        let mut row_todo = band_occ;
+        let mut sh = 1usize;
+        while sh <= dx_max {
+            row_todo |= (band_occ << sh) | (band_occ >> sh);
+            sh += 1;
+        }
+        row_todo &= VALID_MOD_MASK;
+        while row_todo != 0 {
+            let col = (row_todo.trailing_zeros() as usize).min(FIELD_GRID_W - 1);
+            row_todo &= row_todo - 1;
             let xc = (col as f32 + 0.5) * cell_w;
 
             let mut sc = 0.0f64;
@@ -10690,32 +10859,35 @@ fn solve_modal_valid_field(
                 if dx_c >= 0 {
                     let cx_lo = (col as isize - dx_c).max(0) as usize;
                     let cx_hi = (col as isize + dx_c).min((FIELD_GRID_W - 1) as isize) as usize;
-                    let row_off = ny.min(FIELD_GRID_H - 1) * FIELD_GRID_W;
-                    let s = (cs.field_cell_start[(row_off + cx_lo).min(FIELD_CELLS)] as usize)
-                        .min(MAX_MICRO);
-                    let e = (cs.field_cell_start[(row_off + cx_hi + 1).min(FIELD_CELLS)] as usize)
-                        .min(MAX_MICRO)
-                        .max(s);
-                    if e > s {
-                        let xs = &cs.field_grid_x[s..e];
-                        let ys = &cs.field_grid_y[s..e];
-                        let tis = &cs.field_grid_ti[s..e];
-                        let len = xs.len().min(ys.len()).min(tis.len());
-                        let mut p = 0usize;
-                        while p < len {
-                            let dx = xs[p] - xc;
-                            let dy = ys[p] - yc;
-                            let d2 = dx * dx + dy * dy;
-                            if d2 <= r_mod2 {
-                                let tk = (tis[p] as usize).min(MAX_MICRO - 1);
-                                let t = 1.0 - d2 * inv_rmod2;
-                                let w = ((t * t).max(1e-4) * ms.tracks.modal_amp[tk]) as f64;
-                                let phi = ms.tracks.modal_phase[tk];
-                                sc += w * (fast_cosf(phi) as f64);
-                                ss += w * (fast_sinf(phi) as f64);
-                                w_tot += w;
+                    let col_mask = (!0u128 >> (127 - cx_hi)) & (!0u128 << cx_lo);
+                    if (row_occ_mod[ny] & col_mask) != 0 {
+                        let row_off = ny.min(FIELD_GRID_H - 1) * FIELD_GRID_W;
+                        let s = (cs.field_cell_start[(row_off + cx_lo).min(FIELD_CELLS)] as usize)
+                            .min(MAX_MICRO);
+                        let e = (cs.field_cell_start[(row_off + cx_hi + 1).min(FIELD_CELLS)] as usize)
+                            .min(MAX_MICRO)
+                            .max(s);
+                        if e > s {
+                            let xs = &cs.field_grid_x[s..e];
+                            let ys = &cs.field_grid_y[s..e];
+                            let auxs = &cs.field_grid_aux[s..e];
+                            let tis = &cs.field_grid_ti[s..e];
+                            let len = xs.len().min(ys.len()).min(auxs.len()).min(tis.len());
+                            let mut p = 0usize;
+                            while p < len {
+                                let dx = xs[p] - xc;
+                                let dy = ys[p] - yc;
+                                let d2 = dx * dx + dy * dy;
+                                if d2 <= r_mod2 {
+                                    let tk = (tis[p] as usize).min(MAX_MICRO - 1);
+                                    let t = 1.0 - d2 * inv_rmod2;
+                                    let wt = (t * t).max(1e-4) as f64;
+                                    sc += wt * (auxs[p][0] as f64);
+                                    ss += wt * (auxs[p][1] as f64);
+                                    w_tot += wt * (ms.tracks.modal_amp[tk] as f64);
+                                }
+                                p += 1;
                             }
-                            p += 1;
                         }
                     }
                 }
@@ -10728,7 +10900,6 @@ fn solve_modal_valid_field(
                 cs.cell_valid_mask[cell] |= CELL_VALID_MODAL;
                 valid_modal_cells += 1;
             }
-            col += 1;
         }
         row += 1;
     }

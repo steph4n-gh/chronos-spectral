@@ -85,6 +85,11 @@ const SCENARIOS = [
     what: 'ingest ring, ROI, worker ABI (gate_i0_i4_ingest.mjs)',
     argv: ['scripts/gate_i0_i4_ingest.mjs'],
   },
+  {
+    id: 'depth',
+    what: 'zero-ML depth sensing: mono parallax, micro/wide stereo BOS, external plane (gate_i7_depth.mjs --parity-lite)',
+    argv: ['scripts/gate_i7_depth.mjs', '--parity-lite'],
+  },
 ];
 
 const args = process.argv.slice(2);

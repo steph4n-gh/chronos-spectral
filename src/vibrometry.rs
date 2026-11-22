@@ -4,23 +4,24 @@
 
 use crate::simd::{
     f32x4_add, f32x4_convert_u32x4, f32x4_extract_lane, f32x4_max, f32x4_min, f32x4_mul,
-    f32x4_splat, f32x4_sub, i16x8_add, i16x8_lt, i16x8_narrow_i32x4, i16x8_splat,
-    i32x4_trunc_sat_f32x4, u32x4_extend_low_u16x8, u64x2, u64x2_extract_lane, v128, v128_or,
+    f32x4_splat, f32x4_sub, f64x2, f64x2_add, f64x2_extract_lane, f64x2_mul, f64x2_splat,
+    i16x8_add, i16x8_lt, i16x8_narrow_i32x4, i16x8_splat, i32x4_trunc_sat_f32x4,
+    u32x4_extend_low_u16x8, u64x2, u64x2_extract_lane, v128, v128_or,
 };
 
-pub const VIBRO_BANDS: usize = 16;
-pub const VIBRO_MAX_ROWS: usize = 360;
-pub const VIBRO_MAX_PIXELS: usize = 640 * 360; // 230,400
+pub const VIBRO_BANDS: usize = 32;
+pub const VIBRO_MAX_ROWS: usize = crate::MAX_FRAME_H;
+pub const VIBRO_MAX_PIXELS: usize = crate::MAX_FRAME_W * crate::MAX_FRAME_H;
 pub const VIBRO_HIST_FRAMES: usize = 32;
-pub const VIBRO_SPEC_BINS: usize = 64;
+pub const VIBRO_SPEC_BINS: usize = 128;
 pub const VIBRO_WELCH_SLOTS: usize = 12;
 pub const AUDIO_STAGING_LEN: usize = 4096;
 pub const AUDIO_RING_LEN: usize = 32768;
 pub const VIBRO_TELEM_LEN: usize = 32;
-pub const VIBRO_CELL_W: usize = 40;
-pub const VIBRO_CELL_H: usize = 22;
-pub const VIBRO_CELLS: usize = VIBRO_CELL_W * VIBRO_CELL_H; // 880
-pub const VIBRO_PLANES_LEN: usize = 3 * VIBRO_CELLS + VIBRO_SPEC_BINS; // 2,704
+pub const VIBRO_CELL_W: usize = 64;
+pub const VIBRO_CELL_H: usize = 36;
+pub const VIBRO_CELLS: usize = VIBRO_CELL_W * VIBRO_CELL_H; // 2,304
+pub const VIBRO_PLANES_LEN: usize = 3 * VIBRO_CELLS + VIBRO_SPEC_BINS; // 7,040
 
 pub const VIBRO_PLANE_AMP: usize = 0;
 pub const VIBRO_PLANE_COHERENCE: usize = VIBRO_CELLS;
@@ -49,10 +50,22 @@ pub const RS_REASON_AUDIO_UNDERRUN: u32 = 1 << 8;
 pub const RS_REASON_AXIS_TRANSPOSED: u32 = 1 << 9;
 pub const RS_REASON_NO_PTS: u32 = 1 << 10;
 
-pub const AUDIO_FFT_N: usize = 1024;
-const AUDIO_HOP: usize = 512;
+pub const AUDIO_FFT_N: usize = 2048;
+const AUDIO_HOP: usize = 1024;
 const MAX_SEG_OBS: usize = 1536;
 const REF_WARM_TARGET: u8 = 16;
+const DISP_Q13_SCALE: f32 = 8192.0;
+const DISP_Q13_INV: f64 = 1.0 / 8192.0;
+
+#[inline(always)]
+fn pack_disp_q13(d: f32) -> i16 {
+    let s = d.clamp(-3.0, 3.0) * DISP_Q13_SCALE;
+    if s >= 0.0 {
+        (s + 0.5) as i16
+    } else {
+        (s - 0.5) as i16
+    }
+}
 
 const PI_32: f32 = 3.14159265358979323846;
 const PI_64: f64 = 3.14159265358979323846;
@@ -279,21 +292,21 @@ fn rotate_disp_to_sensor(u_ex: f32, u_ey: f32, orientation: u32) -> (f32, f32) {
     }
 }
 
-struct Fft1024Tables {
+struct Fft2048Tables {
     bitrev: [u16; AUDIO_FFT_N],
     tw_re: [f64; AUDIO_FFT_N / 2],
     tw_im: [f64; AUDIO_FFT_N / 2],
     hann: [f64; AUDIO_FFT_N],
 }
 
-impl Fft1024Tables {
+impl Fft2048Tables {
     const fn new() -> Self {
         let mut bitrev = [0u16; AUDIO_FFT_N];
         let mut i = 0usize;
         while i < AUDIO_FFT_N {
             let mut r = 0usize;
             let mut b = 0usize;
-            while b < 10 {
+            while b < 11 {
                 r = (r << 1) | ((i >> b) & 1);
                 b += 1;
             }
@@ -327,7 +340,7 @@ impl Fft1024Tables {
     }
 }
 
-static FFT1024_TABLES: Fft1024Tables = Fft1024Tables::new();
+static FFT2048_TABLES: Fft2048Tables = Fft2048Tables::new();
 
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -363,9 +376,9 @@ pub struct VibrometryState {
     pub audio_last_skew_us: f32,
     pub audio_ring_rate_hz: f32,
 
-    // Full-frame stationary reference luma (u16 q16) & row-resolved signed displacement history
+    // Full-frame stationary reference luma (u16 q16) & row-resolved signed displacement history (i16 q13)
     pub ref_luma_q16: [u16; VIBRO_MAX_PIXELS],
-    pub disp_hist: [f32; VIBRO_HIST_FRAMES * VIBRO_BANDS * VIBRO_MAX_ROWS],
+    pub disp_hist: [i16; VIBRO_HIST_FRAMES * VIBRO_BANDS * VIBRO_MAX_ROWS],
     pub t_src_hist_us: [u64; VIBRO_HIST_FRAMES],
     pub frame_rows_hist: [u16; VIBRO_HIST_FRAMES],
     pub hist_cursor: u32,
@@ -375,9 +388,9 @@ pub struct VibrometryState {
     pub fft_re: [f64; AUDIO_FFT_N],
     pub fft_im: [f64; AUDIO_FFT_N],
     pub welch_pxx: [f64; VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
-    pub welch_pyy: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
-    pub welch_pxy_re: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
-    pub welch_pxy_im: [f64; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
+    pub welch_pyy: [f32; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
+    pub welch_pxy_re: [f32; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
+    pub welch_pxy_im: [f32; VIBRO_BANDS * VIBRO_SPEC_BINS * VIBRO_WELCH_SLOTS],
     pub welch_full_pxx: [f32; (AUDIO_FFT_N / 2 + 1) * VIBRO_WELCH_SLOTS],
     pub welch_cursor: u32,
     pub welch_count: u32,
@@ -447,7 +460,8 @@ pub struct VibrometryState {
     pub fresh_solve: u8,
 }
 
-const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 1_780_000);
+#[cfg(not(all(feature = "hires-720p", not(target_arch = "wasm32"))))]
+const _: () = assert!(core::mem::size_of::<VibrometryState>() <= 2_350_000);
 
 impl VibrometryState {
     pub fn reset_all(&mut self) {
@@ -478,7 +492,7 @@ impl VibrometryState {
     #[inline(never)]
     pub fn reset_continuity(&mut self, reason_bits: u32) {
         self.ref_luma_q16.fill(0);
-        self.disp_hist.fill(0.0);
+        self.disp_hist.fill(0);
         self.t_src_hist_us.fill(0);
         self.frame_rows_hist.fill(0);
         self.q_start_hist.fill(0);
@@ -824,7 +838,7 @@ impl VibrometryState {
             return;
         }
         if frame_w < 16
-            || frame_w > 640
+            || frame_w > crate::MAX_FRAME_W
             || frame_h < VIBRO_CELL_H
             || frame_h > VIBRO_MAX_ROWS
             || luma.len() < frame_w * frame_h
@@ -1237,7 +1251,7 @@ impl VibrometryState {
         while b < VIBRO_BANDS {
             let dst_base = slot_base + b * VIBRO_MAX_ROWS;
             if self.band_grad_ok[b] == 0 {
-                self.disp_hist[dst_base..dst_base + scan_len].fill(0.0);
+                self.disp_hist[dst_base..dst_base + scan_len].fill(0);
                 b += 1;
                 continue;
             }
@@ -1417,7 +1431,7 @@ impl VibrometryState {
                 } else {
                     0.0
                 };
-                self.disp_hist[dst_base + s2] = d;
+                self.disp_hist[dst_base + s2] = pack_disp_q13(d);
                 s2 += 1;
             }
             b += 1;
@@ -1425,10 +1439,10 @@ impl VibrometryState {
     }
 
     #[inline(never)]
-    fn fft1024_inplace(&mut self) {
+    fn fft2048_inplace(&mut self) {
         let mut i = 0usize;
         while i < AUDIO_FFT_N {
-            let j = FFT1024_TABLES.bitrev[i] as usize;
+            let j = FFT2048_TABLES.bitrev[i] as usize;
             if i < j {
                 let tr = self.fft_re[i];
                 self.fft_re[i] = self.fft_re[j];
@@ -1449,8 +1463,8 @@ impl VibrometryState {
                 let mut j = 0usize;
                 while j < half {
                     let tw_idx = j * step;
-                    let wr = FFT1024_TABLES.tw_re[tw_idx];
-                    let wi = FFT1024_TABLES.tw_im[tw_idx];
+                    let wr = FFT2048_TABLES.tw_re[tw_idx];
+                    let wi = FFT2048_TABLES.tw_im[tw_idx];
                     let u = base + j;
                     let v = u + half;
                     let vr = self.fft_re[v];
@@ -1488,7 +1502,8 @@ impl VibrometryState {
             let mut b = 0usize;
             while b < VIBRO_BANDS {
                 if self.band_grad_ok[b] != 0 {
-                    let y = self.disp_hist[slot_base + b * VIBRO_MAX_ROWS + ey] as f64;
+                    let y = (self.disp_hist[slot_base + b * VIBRO_MAX_ROWS + ey] as f64)
+                        * DISP_Q13_INV;
                     self.band_mean_y[b] += wj * y;
                 }
                 b += 1;
@@ -1531,10 +1546,29 @@ impl VibrometryState {
             while b < VIBRO_BANDS {
                 if self.band_grad_ok[b] != 0 {
                     let y = (self.disp_hist[slot_base + b * VIBRO_MAX_ROWS + ey] as f64)
+                        * DISP_Q13_INV
                         - self.band_mean_y[b];
                     let wy = wj * y * scale_y;
+                    let wy_v = f64x2_splat(wy);
                     let row_b = b * VIBRO_SPEC_BINS;
                     let mut k2 = 1usize;
+                    while k2 + 2 <= k_end {
+                        let c_v = f64x2(self.tmp_cos[k2], self.tmp_cos[k2 + 1]);
+                        let s_v = f64x2(self.tmp_sin[k2], self.tmp_sin[k2 + 1]);
+                        let re_v = f64x2_add(
+                            f64x2(self.seg_y_re[row_b + k2], self.seg_y_re[row_b + k2 + 1]),
+                            f64x2_mul(wy_v, c_v),
+                        );
+                        let im_v = f64x2_add(
+                            f64x2(self.seg_y_im[row_b + k2], self.seg_y_im[row_b + k2 + 1]),
+                            f64x2_mul(wy_v, s_v),
+                        );
+                        self.seg_y_re[row_b + k2] = f64x2_extract_lane::<0>(re_v);
+                        self.seg_y_re[row_b + k2 + 1] = f64x2_extract_lane::<1>(re_v);
+                        self.seg_y_im[row_b + k2] = f64x2_extract_lane::<0>(im_v);
+                        self.seg_y_im[row_b + k2 + 1] = f64x2_extract_lane::<1>(im_v);
+                        k2 += 2;
+                    }
                     while k2 < k_end {
                         self.seg_y_re[row_b + k2] += wy * self.tmp_cos[k2];
                         self.seg_y_im[row_b + k2] += wy * self.tmp_sin[k2];
@@ -1707,13 +1741,13 @@ impl VibrometryState {
             let mut n = 0usize;
             while n < AUDIO_FFT_N {
                 let idx = ((ring_base + (n as u64)) as usize) & (AUDIO_RING_LEN - 1);
-                self.fft_re[n] = (self.audio_ring[idx] as f64) * FFT1024_TABLES.hann[n];
+                self.fft_re[n] = (self.audio_ring[idx] as f64) * FFT2048_TABLES.hann[n];
                 self.fft_im[n] = 0.0;
                 n += 1;
             }
-            self.fft1024_inplace();
+            self.fft2048_inplace();
 
-            const SCALE_X: f64 = 2.0 / 512.0;
+            const SCALE_X: f64 = 2.0 / 1024.0;
             let w_slot = (self.welch_cursor as usize) % VIBRO_WELCH_SLOTS;
             let pxx_base = w_slot * VIBRO_SPEC_BINS;
             let full_pxx_base = w_slot * (AUDIO_FFT_N / 2 + 1);
@@ -1724,7 +1758,7 @@ impl VibrometryState {
             let mut k = 1usize;
             while k <= AUDIO_FFT_N / 2 {
                 let sc = if k == AUDIO_FFT_N / 2 {
-                    1.0 / 512.0
+                    1.0 / 1024.0
                 } else {
                     SCALE_X
                 };
@@ -1766,9 +1800,9 @@ impl VibrometryState {
                         let pyy = yr * yr + yi * yi;
                         let pxy_r = yr * xr + yi * xi;
                         let pxy_i = yi * xr - yr * xi;
-                        self.welch_pyy[dst_b + k2] = pyy;
-                        self.welch_pxy_re[dst_b + k2] = pxy_r;
-                        self.welch_pxy_im[dst_b + k2] = pxy_i;
+                        self.welch_pyy[dst_b + k2] = pyy as f32;
+                        self.welch_pxy_re[dst_b + k2] = pxy_r as f32;
+                        self.welch_pxy_im[dst_b + k2] = pxy_i as f32;
                         k2 += 1;
                     }
                     if k_end < VIBRO_SPEC_BINS {
@@ -2087,9 +2121,9 @@ impl VibrometryState {
                 let src = (s2 * VIBRO_BANDS + b) * VIBRO_SPEC_BINS;
                 let mut k2 = 1usize;
                 while k2 < k_end {
-                    self.band_mean_pyy[k2] += self.welch_pyy[src + k2];
-                    self.band_mean_pxy_re[k2] += self.welch_pxy_re[src + k2];
-                    self.band_mean_pxy_im[k2] += self.welch_pxy_im[src + k2];
+                    self.band_mean_pyy[k2] += self.welch_pyy[src + k2] as f64;
+                    self.band_mean_pxy_re[k2] += self.welch_pxy_re[src + k2] as f64;
+                    self.band_mean_pxy_im[k2] += self.welch_pxy_im[src + k2] as f64;
                     k2 += 1;
                 }
                 s2 += 1;
@@ -2176,7 +2210,7 @@ impl VibrometryState {
                 let mut sum_p = 0.0f64;
                 let mut s2 = 0usize;
                 while s2 < (k_segs as usize) {
-                    sum_p += self.welch_pyy[(s2 * VIBRO_BANDS + b) * VIBRO_SPEC_BINS + k2];
+                    sum_p += self.welch_pyy[(s2 * VIBRO_BANDS + b) * VIBRO_SPEC_BINS + k2] as f64;
                     s2 += 1;
                 }
                 let mp = sum_p * inv_k;
@@ -2193,9 +2227,9 @@ impl VibrometryState {
             let mut s2 = 0usize;
             while s2 < (k_segs as usize) {
                 let src = (s2 * VIBRO_BANDS + b) * VIBRO_SPEC_BINS + dom_k;
-                sum_pyy_d += self.welch_pyy[src];
-                sum_cr_d += self.welch_pxy_re[src];
-                sum_ci_d += self.welch_pxy_im[src];
+                sum_pyy_d += self.welch_pyy[src] as f64;
+                sum_cr_d += self.welch_pxy_re[src] as f64;
+                sum_ci_d += self.welch_pxy_im[src] as f64;
                 s2 += 1;
             }
             let m_pyy_d = sum_pyy_d * inv_k;
@@ -2287,7 +2321,7 @@ impl VibrometryState {
                     let (_, c_h) = sin_cos_f64(TWO_PI_64 * (ey as f64) / denom);
                     let w = 0.5 * (1.0 - c_h);
                     w_sum += w;
-                    y_wsum += w * (self.disp_hist[slot_base + ey] as f64);
+                    y_wsum += w * ((self.disp_hist[slot_base + ey] as f64) * DISP_Q13_INV);
                     ey += 1;
                 }
                 if w_sum > 0.0 {
@@ -2306,7 +2340,8 @@ impl VibrometryState {
                         let q = (qs + (ey as i64) * qstep) as f64;
                         let t_sec = t_base_sec + (q * dt_row + 0.5 * (self.exposure_us as f64)) * 1.0e-6;
                         let (s, c) = sin_cos_f64(-TWO_PI_64 * freq_hz * t_sec);
-                        let wy = w * ((self.disp_hist[slot_base + ey] as f64) - mean_y);
+                        let wy = w
+                            * ((self.disp_hist[slot_base + ey] as f64) * DISP_Q13_INV - mean_y);
                         re += wy * c;
                         im += wy * s;
                         ey += 1;
@@ -2395,7 +2430,9 @@ impl VibrometryState {
             let mut b = 0usize;
             while b < VIBRO_BANDS {
                 if self.band_grad_ok[b] != 0 {
-                    self.band_mean_y[b] += w * (self.disp_hist[slot_base + b * VIBRO_MAX_ROWS + ey] as f64);
+                    self.band_mean_y[b] += w
+                        * ((self.disp_hist[slot_base + b * VIBRO_MAX_ROWS + ey] as f64)
+                            * DISP_Q13_INV);
                 }
                 b += 1;
             }
@@ -2434,10 +2471,29 @@ impl VibrometryState {
             while b2 < VIBRO_BANDS {
                 if self.band_grad_ok[b2] != 0 {
                     let y = (self.disp_hist[slot_base + b2 * VIBRO_MAX_ROWS + ey] as f64)
+                        * DISP_Q13_INV
                         - self.band_mean_y[b2];
                     let wy = w * y * scale_y;
+                    let wy_v = f64x2_splat(wy);
                     let row_b = b2 * VIBRO_SPEC_BINS;
                     let mut k2 = 1usize;
+                    while k2 + 2 <= VIBRO_SPEC_BINS {
+                        let c_v = f64x2(self.tmp_cos[k2], self.tmp_cos[k2 + 1]);
+                        let s_v = f64x2(self.tmp_sin[k2], self.tmp_sin[k2 + 1]);
+                        let re_v = f64x2_add(
+                            f64x2(self.seg_y_re[row_b + k2], self.seg_y_re[row_b + k2 + 1]),
+                            f64x2_mul(wy_v, c_v),
+                        );
+                        let im_v = f64x2_add(
+                            f64x2(self.seg_y_im[row_b + k2], self.seg_y_im[row_b + k2 + 1]),
+                            f64x2_mul(wy_v, s_v),
+                        );
+                        self.seg_y_re[row_b + k2] = f64x2_extract_lane::<0>(re_v);
+                        self.seg_y_re[row_b + k2 + 1] = f64x2_extract_lane::<1>(re_v);
+                        self.seg_y_im[row_b + k2] = f64x2_extract_lane::<0>(im_v);
+                        self.seg_y_im[row_b + k2 + 1] = f64x2_extract_lane::<1>(im_v);
+                        k2 += 2;
+                    }
                     while k2 < VIBRO_SPEC_BINS {
                         self.seg_y_re[row_b + k2] += wy * self.tmp_cos[k2];
                         self.seg_y_im[row_b + k2] += wy * self.tmp_sin[k2];
@@ -2458,7 +2514,7 @@ impl VibrometryState {
             while k < VIBRO_SPEC_BINS {
                 let yr = self.seg_y_re[src_b + k];
                 let yi = self.seg_y_im[src_b + k];
-                self.welch_pyy[dst_b + k] = yr * yr + yi * yi;
+                self.welch_pyy[dst_b + k] = (yr * yr + yi * yi) as f32;
                 k += 1;
             }
             b += 1;
@@ -2496,7 +2552,7 @@ impl VibrometryState {
                 let mut sum_p = 0.0f64;
                 let mut s = 0usize;
                 while s < n_w {
-                    sum_p += self.welch_pyy[(s * VIBRO_BANDS + b) * VIBRO_SPEC_BINS + k];
+                    sum_p += self.welch_pyy[(s * VIBRO_BANDS + b) * VIBRO_SPEC_BINS + k] as f64;
                     s += 1;
                 }
                 let mp = sum_p * inv_w;
@@ -2566,8 +2622,9 @@ impl VibrometryState {
                     let mut b2 = 0usize;
                     while b2 < VIBRO_BANDS {
                         if self.band_grad_ok[b2] != 0 {
-                            self.band_mean_y[b2] +=
-                                w * (self.disp_hist[s_base + b2 * VIBRO_MAX_ROWS + ey2] as f64);
+                            self.band_mean_y[b2] += w
+                                * ((self.disp_hist[s_base + b2 * VIBRO_MAX_ROWS + ey2] as f64)
+                                    * DISP_Q13_INV);
                         }
                         b2 += 1;
                     }
@@ -2598,6 +2655,7 @@ impl VibrometryState {
                             if self.band_grad_ok[b3] != 0 {
                                 let wy = w
                                     * ((self.disp_hist[s_base + b3 * VIBRO_MAX_ROWS + ey2] as f64)
+                                        * DISP_Q13_INV
                                         - self.band_mean_y[b3]);
                                 self.rs_tmp_re[b3] += wy * c;
                                 self.rs_tmp_im[b3] += wy * s;
@@ -2684,16 +2742,16 @@ impl VibrometryState {
                 let mut ph_im = 0.0f32;
 
                 if self.scan_along_ey != 0 {
-                    let c_x0 = 2 * cx;
-                    let c_x1 = c_x0 + 2;
-                    let b0 = c_x0 / 5;
-                    let b1 = (c_x1 - 1) / 5;
+                    let c_x0 = cx * VIBRO_BANDS;
+                    let c_x1 = (cx + 1) * VIBRO_BANDS;
+                    let b0 = c_x0 / VIBRO_CELL_W;
+                    let b1 = (c_x1 - 1) / VIBRO_CELL_W;
                     let mut b = b0;
                     while b <= b1 {
-                        let b_x0 = 5 * b;
-                        let b_x1 = b_x0 + 5;
-                        let ov_px = c_x1.min(b_x1).saturating_sub(c_x0.max(b_x0));
-                        let ov = (ov_px as f32) * 0.5;
+                        let b_x0 = b * VIBRO_CELL_W;
+                        let b_x1 = b_x0 + VIBRO_CELL_W;
+                        let ov_u = c_x1.min(b_x1).saturating_sub(c_x0.max(b_x0));
+                        let ov = (ov_u as f32) * (1.0 / (VIBRO_BANDS as f32));
                         if ov > 0.0 && self.cell_grad_ok[b * VIBRO_CELL_H + cy] != 0 {
                             w_sum += ov;
                             coh_sum += ov * self.band_coh[b];
@@ -2938,11 +2996,11 @@ fn band_row_sums(
     let quarter = f32x4_splat(0.25);
     let inv = f32x4_splat(REF_INV);
     let dyh = f32x4_splat(dy_half);
-    let mut s_xx = 0.0f32;
-    let mut s_xy = 0.0f32;
-    let mut s_yy = 0.0f32;
-    let mut b_x = 0.0f32;
-    let mut b_y = 0.0f32;
+    let mut v_xx = f32x4_splat(0.0);
+    let mut v_xy = f32x4_splat(0.0);
+    let mut v_yy = f32x4_splat(0.0);
+    let mut v_bx = f32x4_splat(0.0);
+    let mut v_by = f32x4_splat(0.0);
     let mut ex = bx0;
     while ex + 4 <= bx1 {
         let lc: &[f32; 6] = luma[r + ex - 1..r + ex + 5].try_into().unwrap();
@@ -2964,26 +3022,22 @@ fn band_row_sums(
         let ref_dy = f32x4_mul(f32x4_sub(cvt4(qp, 0), cvt4(qm, 0)), inv);
         let gy = f32x4_mul(dyh, f32x4_add(cur_dy, ref_dy));
 
-        let pxx = f32x4_mul(gx, gx);
-        let pxy = f32x4_mul(gx, gy);
-        let pyy = f32x4_mul(gy, gy);
-        let pbx = f32x4_mul(gx, di);
-        let pby = f32x4_mul(gy, di);
-        macro_rules! lane {
-            ($l:literal) => {
-                s_xx += f32x4_extract_lane::<$l>(pxx);
-                s_xy += f32x4_extract_lane::<$l>(pxy);
-                s_yy += f32x4_extract_lane::<$l>(pyy);
-                b_x -= f32x4_extract_lane::<$l>(pbx);
-                b_y -= f32x4_extract_lane::<$l>(pby);
-            };
-        }
-        lane!(0);
-        lane!(1);
-        lane!(2);
-        lane!(3);
+        v_xx = f32x4_add(v_xx, f32x4_mul(gx, gx));
+        v_xy = f32x4_add(v_xy, f32x4_mul(gx, gy));
+        v_yy = f32x4_add(v_yy, f32x4_mul(gy, gy));
+        v_bx = f32x4_sub(v_bx, f32x4_mul(gx, di));
+        v_by = f32x4_sub(v_by, f32x4_mul(gy, di));
         ex += 4;
     }
+    let hsum4 = |v: v128| -> f32 {
+        (f32x4_extract_lane::<0>(v) + f32x4_extract_lane::<1>(v))
+            + (f32x4_extract_lane::<2>(v) + f32x4_extract_lane::<3>(v))
+    };
+    let mut s_xx = hsum4(v_xx);
+    let mut s_xy = hsum4(v_xy);
+    let mut s_yy = hsum4(v_yy);
+    let mut b_x = hsum4(v_bx);
+    let mut b_y = hsum4(v_by);
     while ex < bx1 {
         let cur_c = luma[r + ex];
         let ref_c = (q[r + ex] as f32) * REF_INV;
@@ -3026,8 +3080,34 @@ mod band_row_sums_tests {
         dy_half: f32,
     ) -> (f32, f32, f32, f32, f32) {
         const REF_INV: f32 = 1.0 / ((REF_WARM_TARGET as f32) * 4095.0);
-        let (mut s_xx, mut s_xy, mut s_yy, mut b_x, mut b_y) = (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+        let (mut l_xx, mut l_xy, mut l_yy, mut l_bx, mut l_by) =
+            ([0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4], [0.0f32; 4]);
         let mut ex = bx0;
+        while ex + 4 <= bx1 {
+            for lane in 0..4usize {
+                let c = ex + lane;
+                let cur_c = luma[r + c];
+                let ref_c = (q[r + c] as f32) * REF_INV;
+                let di = cur_c - ref_c;
+                let cur_dx = luma[r + c + 1] - luma[r + c - 1];
+                let ref_dx = ((q[r + c + 1] as f32) - (q[r + c - 1] as f32)) * REF_INV;
+                let gx = 0.25 * (cur_dx + ref_dx);
+                let cur_dy = luma[rp + c] - luma[rm + c];
+                let ref_dy = ((q[rp + c] as f32) - (q[rm + c] as f32)) * REF_INV;
+                let gy = dy_half * (cur_dy + ref_dy);
+                l_xx[lane] += gx * gx;
+                l_xy[lane] += gx * gy;
+                l_yy[lane] += gy * gy;
+                l_bx[lane] -= gx * di;
+                l_by[lane] -= gy * di;
+            }
+            ex += 4;
+        }
+        let mut s_xx = (l_xx[0] + l_xx[1]) + (l_xx[2] + l_xx[3]);
+        let mut s_xy = (l_xy[0] + l_xy[1]) + (l_xy[2] + l_xy[3]);
+        let mut s_yy = (l_yy[0] + l_yy[1]) + (l_yy[2] + l_yy[3]);
+        let mut b_x = (l_bx[0] + l_bx[1]) + (l_bx[2] + l_bx[3]);
+        let mut b_y = (l_by[0] + l_by[1]) + (l_by[2] + l_by[3]);
         while ex < bx1 {
             let cur_c = luma[r + ex];
             let ref_c = (q[r + ex] as f32) * REF_INV;

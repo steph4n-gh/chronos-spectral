@@ -55,11 +55,11 @@ const RS_REASON_AUDIO_UNDERRUN = 1 << 8;
 const RS_REASON_AXIS_TRANSPOSED = 1 << 9;
 const RS_REASON_NO_PTS = 1 << 10;
 
-const VIBRO_CELL_W = 40;
-const VIBRO_CELL_H = 22;
-const VIBRO_CELLS = VIBRO_CELL_W * VIBRO_CELL_H; // 880
-const VIBRO_SPEC_BINS = 64;
-const VIBRO_PLANES_LEN = 3 * VIBRO_CELLS + VIBRO_SPEC_BINS; // 2704
+const VIBRO_CELL_W = 64;
+const VIBRO_CELL_H = 36;
+const VIBRO_CELLS = VIBRO_CELL_W * VIBRO_CELL_H; // 2304
+const VIBRO_SPEC_BINS = 128;
+const VIBRO_PLANES_LEN = 3 * VIBRO_CELLS + VIBRO_SPEC_BINS; // 7040
 const VIBRO_PLANE_AMP = 0;
 const VIBRO_PLANE_COHERENCE = VIBRO_CELLS;
 const VIBRO_PLANE_PHASE = 2 * VIBRO_CELLS;
@@ -240,7 +240,7 @@ function initSession({ mode, dtRowUs, exposureUs, audioRateHz, maxSkewUs }) {
   const ok = exp.chronos_set_rs_calib(mode, dtRowUs, exposureUs, audioRateHz, maxSkewUs);
   assert(ok === 1, `chronos_set_rs_calib failed for mode=${mode}`);
   assert((wave2U32[2] & 1) !== 0, 'wave2_telem[2] bit0 (vibro enabled) must be set');
-  assert(wave2U32[1] <= 24_117_248, `Arena bytes ${wave2U32[1]} exceeds 24117248`);
+  assert(wave2U32[1] <= 29_100_000, `Arena bytes ${wave2U32[1]} exceeds 29100000`);
 }
 
 function splitU64(usBig) {
@@ -666,10 +666,10 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   assert(sawWarmSuppression, 'Expected to observe K < 8 warming gate');
   assert(trap.state === RS_STATE_READY && trap.kSegs >= 8, `Trap final state=${trap.state}, K=${trap.kSegs}`);
   assert(trap.k1Coh > 0.95, `Expected K=1 raw coherence > 0.95, got ${trap.k1Coh}`);
-  const expectedBonfCrit = 1.0 - Math.pow(0.01 / (16 * 63), 1.0 / (0.95 * trap.kSegs - 1.0));
+  const expectedBonfCrit = 1.0 - Math.pow(0.01 / (32 * 127), 1.0 / (0.95 * trap.kSegs - 1.0));
   assert(
     Math.abs(trap.gamma2Crit - expectedBonfCrit) < 1e-5,
-    `Expected Bonferroni gamma2Crit=${expectedBonfCrit.toFixed(6)} for 16x63 tests, got ${trap.gamma2Crit}`
+    `Expected Bonferroni gamma2Crit=${expectedBonfCrit.toFixed(6)} for 32x127 tests, got ${trap.gamma2Crit}`
   );
   assert(trap.maxCoh < trap.gamma2Crit, `Expected averaged coherence ${trap.maxCoh} < gamma2_crit ${trap.gamma2Crit}`);
   assert(trap.validCells === 0 && trap.coupledCells === 0, `Expected 0 coupled/valid cells, got ${trap.validCells}/${trap.coupledCells}`);
@@ -695,8 +695,8 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   });
   assert(loc.state === RS_STATE_READY && loc.stampValid, 'Localized coupling must reach READY with valid wave2 stamp');
   assert(loc.maxCoh > 0.85, `Expected maxCoh > 0.85, got ${loc.maxCoh}`);
-  assert(loc.domBand >= 4 && loc.domBand < 8, `Expected domBand in 4..7, got ${loc.domBand}`);
-  assert(loc.validCells === 220 && loc.coupledCells === 220, `Expected 220 active cells, got valid=${loc.validCells}, coupled=${loc.coupledCells}`);
+  assert(loc.domBand >= 8 && loc.domBand < 16, `Expected domBand in 8..15, got ${loc.domBand}`);
+  assert(loc.validCells === 576 && loc.coupledCells === 576, `Expected 576 active cells, got valid=${loc.validCells}, coupled=${loc.coupledCells}`);
 
   let activeSum = 0.0;
   let activeCount = 0;
@@ -706,7 +706,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
       const idx = cy * VIBRO_CELL_W + cx;
       const coh = planesF32[VIBRO_PLANE_COHERENCE + idx];
       const amp = planesF32[VIBRO_PLANE_AMP + idx];
-      if (cx >= 10 && cx < 20) {
+      if (cx >= 16 && cx < 32) {
         activeSum += coh;
         activeCount++;
         assert(amp > 0.30, `Active cell (${cx},${cy}) expected amp > 0.30, got ${amp}`);
@@ -720,8 +720,8 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   assert(activeMean > 0.85, `Active zone mean coherence expected > 0.85, got ${activeMean}`);
   assert(quietMax < 0.10, `Quiet zone max coherence expected < 0.10, got ${quietMax}`);
   console.log(
-    `  [PASS] Suite 4 (Localized 40x22 Coupling): domBand=${loc.domBand}, activeMeanCoh=${activeMean.toFixed(4)}, ` +
-      `quietMaxCoh=${quietMax.toFixed(4)}, validCells=${loc.validCells}/880`
+    `  [PASS] Suite 4 (Localized 64x36 Coupling): domBand=${loc.domBand}, activeMeanCoh=${activeMean.toFixed(4)}, ` +
+      `quietMaxCoh=${quietMax.toFixed(4)}, validCells=${loc.validCells}/${VIBRO_CELLS}`
   );
 }
 
@@ -956,7 +956,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   }
   const rsOnlyBefore = readTelem();
   const rsOnlyAmpCopy = Float32Array.from(planesF32.subarray(VIBRO_PLANE_AMP, VIBRO_PLANE_AMP + VIBRO_CELLS));
-  assert(rsOnlyBefore.state === RS_STATE_READY && rsOnlyBefore.validCells === 880 && rsOnlyBefore.stampValid, 'Expected READY RS_ONLY before audio stress');
+  assert(rsOnlyBefore.state === RS_STATE_READY && rsOnlyBefore.validCells === VIBRO_CELLS && rsOnlyBefore.stampValid, 'Expected READY RS_ONLY before audio stress');
   pushAudioSamples({ startSampleIdx: 0, numSamples: 1600, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
   pushAudioSamples({ startSampleIdx: 1601, numSamples: 1600, t0Us: t0, sampleRateHz: 48000.0, audioFn: sigAud });
   pushAudioSamples({ startSampleIdx: 3201, numSamples: 1600, t0Us: t0, sampleRateHz: 44100.0, audioFn: sigAud });
@@ -964,10 +964,10 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
   const rsOnlyAfter = readTelem();
   assert(
     rsOnlyAfter.state === RS_STATE_READY &&
-      rsOnlyAfter.validCells === 880 &&
+      rsOnlyAfter.validCells === VIBRO_CELLS &&
       rsOnlyAfter.stampValid &&
       Math.abs(rsOnlyAfter.domFreqHz - rsOnlyBefore.domFreqHz) < 1e-3,
-    `RS_ONLY must stay READY with 880 validCells & valid stamp across audio gap/faults, got ${JSON.stringify(rsOnlyAfter)}`
+    `RS_ONLY must stay READY with ${VIBRO_CELLS} validCells & valid stamp across audio gap/faults, got ${JSON.stringify(rsOnlyAfter)}`
   );
   for (let i = 0; i < VIBRO_CELLS; i++) {
     assert(planesF32[VIBRO_PLANE_AMP + i] === rsOnlyAmpCopy[i], `RS_ONLY amplitude cell ${i} mutated by audio push`);
@@ -1071,10 +1071,10 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     pushFrame({ seq: f, tSrcUs, dtSec: 0.041, dtRowUs: 100.0, exposureUs: 20.0, dispFn: optAlias });
   }
   t = readTelem();
-  const expectedAliasCrit = 1.0 - Math.pow(0.01 / (16 * 51), 1.0 / (0.95 * t.kSegs - 1.0));
+  const expectedAliasCrit = 1.0 - Math.pow(0.01 / (32 * 102), 1.0 / (0.95 * t.kSegs - 1.0));
   assert(
     t.coupledCells === 0 && t.maxCoh < t.gamma2Crit && Math.abs(t.gamma2Crit - expectedAliasCrit) < 1e-5,
-    `Aliased 5625 Hz audio must be excluded above optical Nyquist with 16*51 Bonferroni crit, got coupled=${t.coupledCells} g2=${t.maxCoh} crit=${t.gamma2Crit}`
+    `Aliased 5625 Hz audio must be excluded above optical Nyquist with 32*102 Bonferroni crit, got coupled=${t.coupledCells} g2=${t.maxCoh} crit=${t.gamma2Crit}`
   );
 
   // Off-bin out-of-band spectral leakage guard: 4718.75 Hz optical vs 5281.25 / 4875 / 4820 Hz audio @ 96 kHz
@@ -1112,7 +1112,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const tsExact = readTelem();
     assert(
-      tsExact.state === RS_STATE_READY && tsExact.coupledCells === 880 && tsExact.maxCoh > 0.90,
+      tsExact.state === RS_STATE_READY && tsExact.coupledCells === VIBRO_CELLS && tsExact.maxCoh > 0.90,
       `Exact-cutoff 4800.0 Hz tone (<= 4800.0 Hz) must couple all 880 cells, got state=${tsExact.state} coupled=${tsExact.coupledCells} g2=${tsExact.maxCoh}`
     );
   }
@@ -1150,7 +1150,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const tsAccCut = readTelem();
     assert(
-      tsAccCut.state === RS_STATE_READY && tsAccCut.coupledCells === 880 && tsAccCut.maxCoh > tsAccCut.gamma2Crit && tsAccCut.maxCoh > 0.75,
+      tsAccCut.state === RS_STATE_READY && tsAccCut.coupledCells === VIBRO_CELLS && tsAccCut.maxCoh > tsAccCut.gamma2Crit && tsAccCut.maxCoh > 0.75,
       `Matched 4687.49993 Hz exact cutoff tone must couple all 880 cells, got state=${tsAccCut.state} coupled=${tsAccCut.coupledCells} g2=${tsAccCut.maxCoh}`
     );
 
@@ -1193,7 +1193,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const tsAcc96 = readTelem();
     assert(
-      tsAcc96.state === RS_STATE_READY && tsAcc96.coupledCells === 880 && tsAcc96.maxCoh > 0.90,
+      tsAcc96.state === RS_STATE_READY && tsAcc96.coupledCells === VIBRO_CELLS && tsAcc96.maxCoh > 0.90,
       `96 kHz matched 2625 Hz cutoff tone must couple all 880 cells, got state=${tsAcc96.state} coupled=${tsAcc96.coupledCells} g2=${tsAcc96.maxCoh}`
     );
 
@@ -1234,7 +1234,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const tsAcc192 = readTelem();
     assert(
-      tsAcc192.state === RS_STATE_READY && tsAcc192.coupledCells === 880 && tsAcc192.maxCoh > 0.90,
+      tsAcc192.state === RS_STATE_READY && tsAcc192.coupledCells === VIBRO_CELLS && tsAcc192.maxCoh > 0.90,
       `192 kHz matched 7500 Hz cutoff tone must couple all 880 cells, got state=${tsAcc192.state} coupled=${tsAcc192.coupledCells} g2=${tsAcc192.maxCoh}`
     );
   }
@@ -1254,7 +1254,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const ts = readTelem();
     assert(
-      ts.state === RS_STATE_READY && ts.coupledCells === 880 && ts.maxCoh > 0.90,
+      ts.state === RS_STATE_READY && ts.coupledCells === VIBRO_CELLS && ts.maxCoh > 0.90,
       `Valid 4850 Hz near-cutoff straddle (< 4873.1 Hz) must couple all 880 cells, got state=${ts.state} coupled=${ts.coupledCells} g2=${ts.maxCoh}`
     );
 
@@ -1273,7 +1273,7 @@ console.log('=== Gate I2: Calibrated RS Vibrometry & Multi-Segment Welch Coheren
     }
     const tw = readTelem();
     assert(
-      tw.state === RS_STATE_READY && tw.coupledCells === 880 && tw.maxCoh > 0.90,
+      tw.state === RS_STATE_READY && tw.coupledCells === VIBRO_CELLS && tw.maxCoh > 0.90,
       `Weak in-band 4687.5 Hz + strong 7500 Hz OOB tone must couple all 880 cells, got state=${tw.state} coupled=${tw.coupledCells} g2=${tw.maxCoh}`
     );
   }
