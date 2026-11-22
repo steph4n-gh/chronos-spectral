@@ -6721,13 +6721,22 @@ async function main() {
           })()`
         );
 
+        // Slow virtualized CI runners drop 30fps HD frames under software rendering, which triggers
+        // FRAME_GAP_SEQ -> continuity_epoch bumps and resets Depth/Hodge/RS sliding windows. Match
+        // Step 9's CI pacing (0.25x wall-clock, exact 1/30s mediaTimeSec per frame).
+        const ciPaceJs = process.env.CI
+          ? `(() => { const v = document.getElementById('hiddenVideoSource'); if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; } })()`
+          : '';
+        const v32WaitMs = process.env.CI ? 45000 : 25000;
+
         // 11a. Zero-ML Lateral Depth Parallax showcase
-        await cdp.evalJs(v32Session, `document.querySelector('.showcase-btn[data-showcase="depth_parallax"]')?.click(); true;`);
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="depth_parallax"]')?.click(); ${ciPaceJs}; true;`);
         const dpState = await waitForCondition(
           cdp,
           v32Session,
           'depth_parallax READY_PARALLAX MONO_METRIC',
           `(() => {
+            ${ciPaceJs};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const d = w2 && w2.depth;
             return {
@@ -6737,16 +6746,17 @@ async function main() {
               tracks: d ? d.validTracks : 0,
             };
           })()`,
-          25000
+          v32WaitMs
         );
 
         // 11a2. Zero-ML Forward Approach FoE & Looming TTC showcase
-        await cdp.evalJs(v32Session, `document.querySelector('.showcase-btn[data-showcase="depth_foe_ttc"]')?.click(); true;`);
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="depth_foe_ttc"]')?.click(); ${ciPaceJs}; true;`);
         const foeState = await waitForCondition(
           cdp,
           v32Session,
           'depth_foe_ttc FoE lock + TTC tracks',
           `(() => {
+            ${ciPaceJs};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const d = w2 && w2.depth;
             return {
@@ -6757,16 +6767,17 @@ async function main() {
               r2: d ? d.bestTtcR2 : 0,
             };
           })()`,
-          25000
+          v32WaitMs
         );
 
         // 11b. Mesh Hodge 64x36 Cylinder Circulation showcase
-        await cdp.evalJs(v32Session, `document.querySelector('.showcase-btn[data-showcase="hodge_cylinder"]')?.click(); true;`);
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="hodge_cylinder"]')?.click(); ${ciPaceJs}; true;`);
         const hcState = await waitForCondition(
           cdp,
           v32Session,
           'hodge_cylinder READY with beta1>=1 and Ex/Co/Ha',
           `(() => {
+            ${ciPaceJs};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const h = w2 && w2.hodge;
             return {
@@ -6778,16 +6789,17 @@ async function main() {
               ha: h ? h.harmFrac : 0,
             };
           })()`,
-          25000
+          v32WaitMs
         );
 
         // 11c. 247.5 Hz Rolling-Shutter Vibrometry (RS_ONLY) showcase
-        await cdp.evalJs(v32Session, `document.querySelector('.showcase-btn[data-showcase="rs_vibro_247hz"]')?.click(); true;`);
+        await cdp.evalJs(v32Session, `${ciPaceJs}; document.querySelector('.showcase-btn[data-showcase="rs_vibro_247hz"]')?.click(); ${ciPaceJs}; true;`);
         const rsState = await waitForCondition(
           cdp,
           v32Session,
           'rs_vibro_247hz READY near 247.5 Hz',
           `(() => {
+            ${ciPaceJs};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const v = w2 && w2.vibro;
             return {
@@ -6797,7 +6809,7 @@ async function main() {
               domAmpPx: v ? v.domAmpPx : 0,
             };
           })()`,
-          25000
+          v32WaitMs
         );
 
         // 11d. 720p Dual-Resolution 1:1 Fovea & PTZ showcase
@@ -6889,13 +6901,19 @@ async function main() {
           })()`
         );
 
+        const ciPaceV33Js = process.env.CI
+          ? `(() => { const v = document.getElementById('hiddenVideoSource'); if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; } })()`
+          : '';
+        const v33WaitMs = process.env.CI ? 50000 : 30000;
+
         // 12a. Pocket Wind Tunnel: Lifting Cylinder Cp & Kutta-Joukowski Lift/Drag
-        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]')?.click(); true;`);
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="wind_lifting_cyl"]')?.click(); ${ciPaceV33Js}; true;`);
         const wtState = await waitForCondition(
           cdp,
           v33Session,
           'wind_lifting_cyl READY_LOADS with Cp + Kutta-Joukowski lift',
           `(() => {
+            ${ciPaceV33Js};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const w = w2 && w2.wind;
             const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
@@ -6909,16 +6927,17 @@ async function main() {
               om,
             };
           })()`,
-          30000
+          v33WaitMs
         );
 
         // 12b. kHz Optical Elastography: Hidden Crack Panel (380+860 Hz Kirchhoff Plate)
-        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="elasto_crack"]')?.click(); true;`);
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="elasto_crack"]')?.click(); ${ciPaceV33Js}; true;`);
         const elState = await waitForCondition(
           cdp,
           v33Session,
           'elasto_crack READY KIRCHHOFF_PLATE via muxed 48 kHz audio',
           `(() => {
+            ${ciPaceV33Js};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const e = w2 && w2.elasto;
             const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
@@ -6934,16 +6953,17 @@ async function main() {
               om,
             };
           })()`,
-          30000
+          v33WaitMs
         );
 
         // 12c. Lock-In Acoustic BOS: 1,200 Hz Standing Wave (256x128 |Phi|)
-        await cdp.evalJs(v33Session, `document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]')?.click(); true;`);
+        await cdp.evalJs(v33Session, `${ciPaceV33Js}; document.querySelector('.showcase-btn[data-showcase="acoustic_bos"]')?.click(); ${ciPaceV33Js}; true;`);
         const abosState = await waitForCondition(
           cdp,
           v33Session,
           'acoustic_bos READY 256x128 |Phi| via muxed 48 kHz audio',
           `(() => {
+            ${ciPaceV33Js};
             const w2 = window.__chronosWave2Probe?.getLastWave2();
             const e = w2 && w2.elasto;
             const om = Number(document.getElementById('fieldOverlayModeSelect')?.value || 0);
@@ -6958,7 +6978,7 @@ async function main() {
               om,
             };
           })()`,
-          30000
+          v33WaitMs
         );
 
         const v33Cls = await cdp.evalJs(
