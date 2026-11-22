@@ -816,6 +816,28 @@ impl VibrometryState {
         1
     }
 
+    /// Copy up to `out.len()` most recent contiguous mono PCM samples from the audio ring
+    /// (oldest-to-newest) along with `(copied_count, t_end_us, sample_rate_hz)`.
+    #[inline(never)]
+    pub fn copy_recent_audio(&self, out: &mut [f32]) -> (usize, u64, f32) {
+        if self.audio_has_prev_t == 0
+            || self.audio_total_samples == 0
+            || !self.audio_ring_rate_hz.is_finite()
+            || self.audio_ring_rate_hz < 4000.0
+            || out.is_empty()
+        {
+            return (0, 0, 0.0);
+        }
+        let avail = (self.audio_total_samples.min(AUDIO_RING_LEN as u64) as usize).min(out.len());
+        let start = (self.audio_write_cursor as usize).wrapping_sub(avail);
+        let mut i = 0usize;
+        while i < avail {
+            out[i] = self.audio_ring[(start.wrapping_add(i)) & (AUDIO_RING_LEN - 1)];
+            i += 1;
+        }
+        (avail, self.audio_last_t_end_us, self.audio_ring_rate_hz)
+    }
+
     /// Evaluates the exact Hann-windowed continuous-frequency audio phasor at `freq_hz`,
     /// phase-referenced to `anchor_t_us` (`Re(X/|X|) = cos(2*pi*f*t_anchor + phi0)`,
     /// `Im(X/|X|) = sin(2*pi*f*t_anchor + phi0)`), returning `(unit_re, unit_im, pxx)`.

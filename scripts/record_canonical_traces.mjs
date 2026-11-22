@@ -100,6 +100,11 @@ const SCENARIOS = [
     what: 'kHz optical elastography, structural power flow & lock-in acoustic BOS (gate_i8_elastography.mjs --parity-lite)',
     argv: ['scripts/gate_i8_elastography.mjs', '--parity-lite'],
   },
+  {
+    id: 'dense_audit',
+    what: 'dense optical-flow continuum fallback, wind soundness & audio push (gate_i10_physics_audit.mjs --parity-lite)',
+    argv: ['scripts/gate_i10_physics_audit.mjs', '--parity-lite'],
+  },
 ];
 
 const args = process.argv.slice(2);

@@ -1178,6 +1178,16 @@ fn ref_patch_samples<const WITH_SUM: bool>(
 /// contrast and conditioning checks. Records every value `ref_patch_restore` needs in `e`.
 #[inline(always)]
 fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry) -> bool {
+    ref_patch_reduce_with_lmin(out, sum_t, e, 5e-5)
+}
+
+#[inline(never)]
+fn ref_patch_reduce_with_lmin(
+    out: &mut PatchRefData,
+    sum_t: f64,
+    e: &mut BosRefCacheEntry,
+    lmin_per_px: f64,
+) -> bool {
     if out.m_cnt < 40 {
         return false;
     }
@@ -1342,7 +1352,7 @@ fn ref_patch_reduce(out: &mut PatchRefData, sum_t: f64, e: &mut BosRefCacheEntry
     }
     let disc = sqrt_f64(((h_xx - h_yy) * (h_xx - h_yy) + 4.0 * h_xy * h_xy).max(0.0));
     let lambda_min = 0.5 * (tr - disc);
-    if lambda_min < 5e-5 * (out.m_cnt as f64) {
+    if lambda_min < lmin_per_px * (out.m_cnt as f64) {
         return false;
     }
 
@@ -3132,6 +3142,226 @@ impl BosState {
             j += 1;
         }
         valid_nodes
+    }
+
+    /// Prime `self.ref_luma` with frame 0 for frame-to-frame dense optical-flow auditing (`WIND_MODE_DENSE_AUDIT`).
+    #[inline(never)]
+    pub(crate) fn prime_dense_flow_ref(&mut self, cur_luma: &[f32], need_px: usize) {
+        let n = need_px.min(BOS_MAX_PIXELS).min(cur_luma.len());
+        self.ref_luma[..n].copy_from_slice(&cur_luma[..n]);
+        self.w_x[..2304].fill(0.0);
+        self.w_y[..2304].fill(0.0);
+        self.clear_streak[..2304].fill(0);
+        self.ctrl.ref_gen = self.ctrl.ref_gen.wrapping_add(1).max(1);
+    }
+
+    /// Frame-to-frame `64x36` affine-brightness-invariant 2-iter IC-LK with forward-backward
+    /// consistency verification (`|fwd + bwd| <= 0.5 px`), Hessian conditioning (`kappa <= 30`,
+    /// `lambda_min >= 5e-5 * N`), and post-fit warp RMS gating for unseeded fluid/texture archives.
+    /// Reuses `self.w_x[..2304]`, `self.w_y[..2304]`, and `self.clear_streak[..2304]` (`+0 B` Arena),
+    /// then updates `self.ref_luma` to `cur_luma` for the next frame.
+    #[inline(never)]
+    pub(crate) fn extract_dense_flow_64x36(
+        &mut self,
+        cur_luma: &[f32],
+        frame_w: usize,
+        frame_h: usize,
+        dt_sec: f32,
+    ) -> u32 {
+        const GW: usize = 64;
+        const GH: usize = 36;
+        const CELLS: usize = GW * GH;
+        let need_px = frame_w.saturating_mul(frame_h);
+        if need_px == 0
+            || need_px > BOS_MAX_PIXELS
+            || cur_luma.len() < need_px
+            || !dt_sec.is_finite()
+            || dt_sec < 0.002
+            || dt_sec > 1.0
+        {
+            self.w_x[..CELLS].fill(0.0);
+            self.w_y[..CELLS].fill(0.0);
+            self.clear_streak[..CELLS].fill(0);
+            return 0;
+        }
+
+        let inv_dt = 1.0 / dt_sec;
+        let hx = (frame_w as f32) / (GW as f32);
+        let hy = (frame_h as f32) / (GH as f32);
+        let mut p_ref = PatchRefData::empty();
+        let mut dummy_cache = BosRefCacheEntry {
+            mu_t: 0.0,
+            var_sum_t: 0.0,
+            mean_gx: 0.0,
+            mean_gy: 0.0,
+            a_gx: 0.0,
+            a_gy: 0.0,
+            h_xx: 0.0,
+            h_xy: 0.0,
+            h_yy: 0.0,
+            gen: 0,
+            ok: 0,
+        };
+        let mut cur_buf = [0.0f32; 64];
+        let mut cur_mask = [0u8; 64];
+        let mut valid_cells = 0u32;
+
+        let mut r = 0usize;
+        while r < GH {
+            let cy = ((r as f32) + 0.5) * hy;
+            let mut c = 0usize;
+            while c < GW {
+                let idx = r * GW + c;
+                let cx = ((c as f32) + 0.5) * hx;
+                let mut accepted = false;
+                let mut out_vx = 0.0f32;
+                let mut out_vy = 0.0f32;
+
+                let sum_t = ref_patch_samples::<true>(&self.ref_luma, frame_w, frame_h, cx, cy, &mut p_ref);
+                if ref_patch_reduce_with_lmin(&mut p_ref, sum_t, &mut dummy_cache, 1e-5) {
+                    let mut dx = 0.0f32;
+                    let mut dy = 0.0f32;
+                    let mut fwd_ok = false;
+                    let mut last_rms = 1.0f64;
+                    let ref_sd = sqrt_f64(p_ref.ref_var.max(1e-8));
+                    let mut it = 0usize;
+                    while it < 4 {
+                        if let Some(fit) = eval_cur_patch_8x8(
+                            cur_luma,
+                            frame_w,
+                            frame_h,
+                            cx,
+                            cy,
+                            dx,
+                            dy,
+                            &p_ref,
+                            &mut cur_buf,
+                            &mut cur_mask,
+                        ) {
+                            if fit.det > 1e-12
+                                && fit.gain.is_finite()
+                                && fit.gain >= 0.5
+                                && fit.gain <= 2.0
+                                && fit.cnt >= 45
+                            {
+                                let inv_dg = 1.0 / (fit.det * fit.gain);
+                                let step_x = (-(fit.h_yy * fit.bx - fit.h_xy * fit.by) * inv_dg) as f32;
+                                let step_y = (-(-fit.h_xy * fit.bx + fit.h_xx * fit.by) * inv_dg) as f32;
+                                if step_x.is_finite() && step_y.is_finite() {
+                                    dx += step_x;
+                                    dy += step_y;
+                                    if dx * dx + dy * dy <= 36.0 {
+                                        // Evaluate post-affine warp residual on surviving pixels
+                                        let mut se = 0.0f64;
+                                        let mut sc = 0usize;
+                                        let g_f = fit.gain;
+                                        let off_f = fit.offset;
+                                        let mut k = 0usize;
+                                        while k < 64 {
+                                            if cur_mask[k] != 0 && p_ref.valid_flag[k] != 0 {
+                                                let diff = (cur_buf[k] as f64)
+                                                    - (g_f * (p_ref.t[k] as f64) + off_f);
+                                                se += diff * diff;
+                                                sc += 1;
+                                            }
+                                            k += 1;
+                                        }
+                                        if sc >= 45 {
+                                            last_rms = sqrt_f64(se / (sc as f64));
+                                            fwd_ok = true;
+                                        } else {
+                                            fwd_ok = false;
+                                            break;
+                                        }
+                                        if step_x * step_x + step_y * step_y < 1e-4 {
+                                            break;
+                                        }
+                                    } else {
+                                        fwd_ok = false;
+                                        break;
+                                    }
+                                } else {
+                                    fwd_ok = false;
+                                    break;
+                                }
+                            } else {
+                                fwd_ok = false;
+                                break;
+                            }
+                        } else {
+                            fwd_ok = false;
+                            break;
+                        }
+                        it += 1;
+                    }
+
+                    let rms_lim = (0.35 * ref_sd).max(0.025);
+                    if fwd_ok && last_rms <= rms_lim {
+                        // Reverse forward-backward consistency check at (cx + dx, cy + dy) in cur_luma
+                        let rcx = cx + dx;
+                        let rcy = cy + dy;
+                        let sum_r = ref_patch_samples::<true>(cur_luma, frame_w, frame_h, rcx, rcy, &mut p_ref);
+                        if ref_patch_reduce_with_lmin(&mut p_ref, sum_r, &mut dummy_cache, 1e-5) {
+                            if let Some(bfit) = eval_cur_patch_8x8(
+                                &self.ref_luma,
+                                frame_w,
+                                frame_h,
+                                rcx,
+                                rcy,
+                                -dx,
+                                -dy,
+                                &p_ref,
+                                &mut cur_buf,
+                                &mut cur_mask,
+                            ) {
+                                if bfit.det > 1e-12
+                                    && bfit.gain.is_finite()
+                                    && bfit.gain >= 0.5
+                                    && bfit.gain <= 2.0
+                                    && bfit.cnt >= 45
+                                {
+                                    let inv_dg = 1.0 / (bfit.det * bfit.gain);
+                                    let bstep_x =
+                                        (-(bfit.h_yy * bfit.bx - bfit.h_xy * bfit.by) * inv_dg) as f32;
+                                    let bstep_y =
+                                        (-(-bfit.h_xy * bfit.bx + bfit.h_xx * bfit.by) * inv_dg) as f32;
+                                    // bwd displacement = (-dx + bstep_x, -dy + bstep_y) => fwd + bwd = (bstep_x, bstep_y)
+                                    if bstep_x.is_finite()
+                                        && bstep_y.is_finite()
+                                        && (bstep_x * bstep_x + bstep_y * bstep_y) <= 0.25
+                                    {
+                                        // Displacement of feature from ref -> cur is (-dx, -dy) when I_cur(x+d) ~ I_ref(x),
+                                        // wait: eval_cur_patch_8x8 samples cur at (cx + dx, cy + dy) matching ref(cx, cy),
+                                        // so the feature moved FROM (cx, cy) TO (cx + dx, cy + dy): velocity = (+dx, +dy) / dt!
+                                        out_vx = dx * inv_dt;
+                                        out_vy = dy * inv_dt;
+                                        accepted = out_vx.is_finite() && out_vy.is_finite();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if accepted {
+                    self.w_x[idx] = out_vx;
+                    self.w_y[idx] = out_vy;
+                    self.clear_streak[idx] = 1;
+                    valid_cells += 1;
+                } else {
+                    self.w_x[idx] = 0.0;
+                    self.w_y[idx] = 0.0;
+                    self.clear_streak[idx] = 0;
+                }
+                c += 1;
+            }
+            r += 1;
+        }
+
+        // Advance preceding-frame reference for the next frame
+        self.ref_luma[..need_px].copy_from_slice(&cur_luma[..need_px]);
+        self.ctrl.ref_gen = self.ctrl.ref_gen.wrapping_add(1).max(1);
+        valid_cells
     }
 
     /// Mode 2 selective maintenance: updates each eligible pixel INSIDE `gauge_roi` and OUTSIDE

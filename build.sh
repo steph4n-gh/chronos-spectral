@@ -2996,13 +2996,14 @@ else
 fi
 
 echo ""
-echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation, I7 Depth/FoE/Stereo, I8 Elastography/ABOS, I9 Pocket Wind Tunnel)..."
+echo "[Gate W2] Running Wave-2 Physics & Identifiability Gates (I2 RS+Welch, I3 Mesh Hodge, I5b Occluded Conservation, I7 Depth/FoE/Stereo, I8 Elastography/ABOS, I9 Pocket Wind Tunnel, I10a Dense Physics Audit)..."
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
 node scripts/gate_i7_depth.mjs
 node scripts/gate_i8_elastography.mjs
 node scripts/gate_i9_wind_tunnel.mjs
+node scripts/gate_i10_physics_audit.mjs
 
 echo ""
 echo "[Gate X] Running Adversarial C-ABI Fuzz (random exports with hostile arguments, pixels and staging buffers; 0 traps)..."
@@ -3023,12 +3024,45 @@ env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo test --quiet --config "$DENY_W
 echo "  [PASS] Native host ($(rustc -vV | sed -n 's/^host: //p')) conformance suite & native library link verified with zero warnings"
 
 echo ""
+echo "[Gate I10n] Running Native C-ABI v4 & Python Physics Audit SDK Suite (C11/C++11 header checks, audit_smoke, chronos-audit unittest)..."
+NATIVE_HOST="$(rustc -vV | sed -n 's/^host: //p')"
+env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS cargo build --quiet --release --config "$DENY_WARNINGS" --manifest-path native/capi/Cargo.toml --target "$NATIVE_HOST" --target-dir native/target
+CAPI_DIR="${ROOT_DIR}/native/target/${NATIVE_HOST}/release"
+if [ -f "${CAPI_DIR}/libchronos_capi.dylib" ]; then
+  CAPI_LIB="${CAPI_DIR}/libchronos_capi.dylib"
+elif [ -f "${CAPI_DIR}/libchronos_capi.so" ]; then
+  CAPI_LIB="${CAPI_DIR}/libchronos_capi.so"
+else
+  echo "FAIL: libchronos_capi shared library not found in ${CAPI_DIR}" >&2
+  exit 1
+fi
+C_ABI_H="$(sed -n 's/^#define CHRONOS_ABI_VERSION \([0-9][0-9]*\)u$/\1/p' native/include/chronos.h)"
+C_ABI_RS="$(sed -n 's/^pub const CHRONOS_ABI_VERSION: u32 = \([0-9][0-9]*\);$/\1/p' native/capi/src/audit.rs)"
+C_ABI_PY="$(sed -n 's/^CHRONOS_ABI_VERSION = \([0-9][0-9]*\)$/\1/p' native/python/chronos_spectral.py)"
+if [ -z "$C_ABI_H" ] || [ "$C_ABI_H" != "$C_ABI_RS" ] || [ "$C_ABI_H" != "$C_ABI_PY" ]; then
+  echo "FAIL: ABI version mismatch across header(${C_ABI_H}), Rust(${C_ABI_RS}), Python(${C_ABI_PY})" >&2
+  exit 1
+fi
+SMOKE_BIN="$(mktemp "${TMPDIR:-/tmp}/chronos_audit_smoke.XXXXXX")"
+trap 'rm -f "$SMOKE_BIN"' EXIT
+cc -std=c11 -Wall -Wextra -Werror -pedantic -I native/include native/capi/tests/audit_smoke.c "$CAPI_LIB" -lm -Wl,-rpath,"${CAPI_DIR}" -o "$SMOKE_BIN"
+"$SMOKE_BIN"
+rm -f "$SMOKE_BIN"
+trap - EXIT
+if command -v c++ >/dev/null 2>&1; then
+  c++ -std=c++11 -Wall -Wextra -Werror -fsyntax-only -x c++-header native/include/chronos.h
+  echo "  [PASS] C++11 header syntax & _Static_assert layout verified (ABI=${C_ABI_H})"
+fi
+CHRONOS_CAPI_LIB="$CAPI_LIB" python3 -m unittest discover -s native/python -p 'test_*.py'
+echo "  [PASS] Gate I10n: C-ABI v${C_ABI_H} + Python chronos-audit SDK verified"
+
+echo ""
 echo "[Gate N] Running Native/Wasm Whole-Kernel Parity (fresh CSTRACE recording replayed bit for bit on the native build, negative control)..."
 if [ "${1:-}" = "--native-check" ] && ! command -v ffmpeg >/dev/null 2>&1; then
   # The real-MP4 scenarios (hero_sd, elasto) decode clips with ffmpeg; --native-check also runs
   # on hosts without it (the macOS CI job). --check and --e2e always run every scenario.
   echo "  [SKIP] Gate N scenarios hero_sd,elasto (real MP4): ffmpeg not on PATH (--native-check only)"
-  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm,depth,wind
+  node scripts/gate_native_parity.mjs --scenarios=hodge,conservation,swarm,depth,wind,dense_audit
 else
   node scripts/gate_native_parity.mjs
 fi

@@ -6999,6 +6999,106 @@ async function main() {
       }
     }
 
+    // ------------------------------------------------------------------------
+    // Step 13: v3.4.0 Physics Integrity Audit Card (Lazy Worker, A/B Audit, Zero-CLS)
+    // ------------------------------------------------------------------------
+    {
+      const { targetId: v34TargetId } = await cdp.send('Target.createTarget', {
+        url: new URL('/index.html', appUrl).href,
+      });
+      try {
+        const { sessionId: v34Session } = await cdp.send('Target.attachToTarget', { targetId: v34TargetId, flatten: true });
+        await cdp.send('Page.enable', {}, v34Session);
+        await cdp.send('Runtime.enable', {}, v34Session);
+        await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false }, v34Session);
+
+        await waitForCondition(
+          cdp,
+          v34Session,
+          'v3.4.0 Physics Audit Card mounted (lazy worker idle)',
+          `(() => {
+            const p = window.__chronosAuditProbe;
+            const card = document.getElementById('physicsAuditCard');
+            return { ok: Boolean(p && card && card.getBoundingClientRect().height > 100), ready: p ? p.workerReady() : null };
+          })()`,
+          20000
+        );
+
+        // Verify lazy worker is NOT spawned on initial page load and install CLS observer
+        const preAudit = await cdp.evalJs(
+          v34Session,
+          `(() => {
+            window.__e2eV34Cls = 0;
+            window.__e2eV34ClsPo = new PerformanceObserver((list) => {
+              for (const e of list.getEntries()) {
+                if (!e.hadRecentInput) window.__e2eV34Cls += e.value;
+              }
+            });
+            window.__e2eV34ClsPo.observe({ type: 'layout-shift', buffered: false });
+            return {
+              workerReadyBefore: window.__chronosAuditProbe.workerReady(),
+              cardH: document.getElementById('physicsAuditCard').getBoundingClientRect().height,
+            };
+          })()`
+        );
+        if (preAudit.workerReadyBefore !== false) {
+          throw new Error(`Step 13: Audit worker must be lazy (workerReady() === false before first audit), got ${preAudit.workerReadyBefore}`);
+        }
+
+        // Run Slot A (real juggling MP4 via WebCodecs) and Slot B (synthetic stutter_freeze) in parallel/sequence
+        const auditRes = await cdp.evalJs(
+          v34Session,
+          `(async () => {
+            const a = await window.__chronosAuditProbe.runUrl('A', './samples/juggling_ballistic.mp4', { profile: 'quick', maxFrames: 75 });
+            const b = await window.__chronosAuditProbe.runSynthetic('B', 'stutter_freeze', { profile: 'quick', maxFrames: 48 });
+            const st = window.__chronosAuditProbe.getState();
+            const cvs = document.getElementById('auditTimelineCanvas');
+            const ctx = cvs.getContext('2d');
+            const img = ctx.getImageData(0, 0, cvs.width, cvs.height).data;
+            let paintedPx = 0;
+            for (let i = 0; i < img.length; i += 4) {
+              if (img[i] > 20 || img[i + 1] > 40 || img[i + 2] > 60) paintedPx++;
+            }
+            if (window.__e2eV34ClsPo) window.__e2eV34ClsPo.disconnect();
+            return {
+              workerReadyAfter: st.workerReady,
+              slotA: { grade: a.verdict.grade, integrity: a.verdict.integrity, frames: a.ingest.frames_committed, viol: a.verdict.violations },
+              slotB: { grade: b.verdict.grade, integrity: b.verdict.integrity, frames: b.ingest.frames_committed, viol: b.verdict.violations, codes: b.violations.map((v) => v.code) },
+              pillStates: st.pillStates,
+              paintedPx,
+              cls: window.__e2eV34Cls || 0,
+              cardHAfter: document.getElementById('physicsAuditCard').getBoundingClientRect().height,
+            };
+          })()`,
+          45000
+        );
+
+        if (!auditRes.workerReadyAfter) {
+          throw new Error('Step 13: Audit worker did not report ready after run');
+        }
+        if (auditRes.slotA.frames < 40 || auditRes.slotA.grade === 'FAIL') {
+          throw new Error(`Step 13: Real juggling Slot A unexpected result: ${JSON.stringify(auditRes.slotA)}`);
+        }
+        if (auditRes.slotB.grade !== 'FAIL' || !auditRes.slotB.codes.includes('FROZEN_MID_MOTION')) {
+          throw new Error(`Step 13: Adversarial stutter Slot B expected FAIL + FROZEN_MID_MOTION, got ${JSON.stringify(auditRes.slotB)}`);
+        }
+        if (auditRes.pillStates.temporal_cadence !== 'fail') {
+          throw new Error(`Step 13: Expected temporal_cadence pill data-state="fail", got ${JSON.stringify(auditRes.pillStates)}`);
+        }
+        if (auditRes.paintedPx < 500) {
+          throw new Error(`Step 13: Expected painted audit timeline canvas (>500 px), got ${auditRes.paintedPx}`);
+        }
+        if (auditRes.cls >= 0.000001 || Math.abs(auditRes.cardHAfter - preAudit.cardH) > 0.5) {
+          throw new Error(`Step 13: Expected 0.000000 CLS & locked height (${preAudit.cardH} -> ${auditRes.cardHAfter}), got CLS=${auditRes.cls}`);
+        }
+        console.log(
+          `  [PASS] Step 13 (v3.4.0 Physics Integrity Audit Card): lazyWorker=OK, slotA=(${auditRes.slotA.grade}, I=${auditRes.slotA.integrity}, ${auditRes.slotA.frames}f), slotB=(${auditRes.slotB.grade}, codes=[${auditRes.slotB.codes.join(',')}]), canvasPx=${auditRes.paintedPx}, CLS=${auditRes.cls.toFixed(6)}`
+        );
+      } finally {
+        await cdp.send('Target.closeTarget', { targetId: v34TargetId }).catch(() => {});
+      }
+    }
+
     if (pageErrors.length > 0) {
       throw new Error(`Browser reported ${pageErrors.length} error(s):\n${pageErrors.join('\n')}`);
     }

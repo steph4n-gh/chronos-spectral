@@ -1,6 +1,6 @@
 [package]
 name = "chronos_capi"
-version = "3.2.0"
+version = "3.4.0"
 edition = "2021"
 license = "Apache-2.0"
 publish = false
@@ -15,6 +15,7 @@ chronos_spectral_native = { path = ".." }
 [features]
 default = []
 hires-720p = ["chronos_spectral_native/hires-720p"]
+simd-force-scalar = ["chronos_spectral_native/simd-force-scalar"]
 
 [profile.release]
 opt-level = 3

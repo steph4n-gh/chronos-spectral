@@ -514,6 +514,30 @@ mod engine {
         pub ode_r2: f32,
     }
 
+    /// Caller-supplied ingest metadata matching the 20-argument Wasm `chronos_set_ingest_meta` contract.
+    #[derive(Clone, Copy, Debug)]
+    pub struct NativeIngestMeta {
+        pub epoch: u32,
+        pub seq: u32,
+        pub pts_us: u64,
+        pub age_ms: f32,
+        pub flags: u32,
+        pub src_w: u32,
+        pub src_h: u32,
+        pub crop_x: u32,
+        pub crop_y: u32,
+        pub crop_w: u32,
+        pub crop_h: u32,
+        pub orientation: u32,
+        pub scan_dir: u32,
+        pub dst_x: u32,
+        pub dst_y: u32,
+        pub dst_w: u32,
+        pub dst_h: u32,
+        pub gap_mask: u32,
+        pub native_1to1: u32,
+    }
+
     /// Heap-allocated, multi-instance native CHRONOS-SPECTRAL engine (~23.3 MB `Arena`).
     ///
     /// Every instance owns its own `Arena` with zero shared mutable globals, so multiple
@@ -544,6 +568,19 @@ mod engine {
                 arena,
                 ingest_seq: 0,
             }
+        }
+
+        /// Reset this engine in place to a state bit-identical to a fresh `ChronosEngine::new()`.
+        pub fn reset(&mut self) {
+            unsafe {
+                core::ptr::write_bytes(
+                    (&mut *self.arena) as *mut Arena as *mut u8,
+                    0,
+                    core::mem::size_of::<Arena>(),
+                );
+                crate::init_on(&mut self.arena);
+            }
+            self.ingest_seq = 0;
         }
 
         pub fn set_resolution(&mut self, hd: bool) {
@@ -732,6 +769,81 @@ mod engine {
             Ok(())
         }
 
+        /// Zero-copy writable slice to the 4,096-sample mono `f32` audio staging buffer.
+        pub fn audio_staging_mut(&mut self) -> &mut [f32; crate::vibrometry::AUDIO_STAGING_LEN] {
+            &mut self.arena.vibro.audio_staging
+        }
+
+        /// Commit `num_samples` (`1..=4096`) already staged in `audio_staging_mut()`, with
+        /// `t_end_us` denoting the exclusive end timestamp of the block on the video clock.
+        pub fn push_audio_block(
+            &mut self,
+            num_samples: u32,
+            t_end_us: u64,
+            sample_rate_hz: f32,
+            est_skew_us: f32,
+        ) -> u32 {
+            crate::push_audio_block_on(
+                &mut self.arena,
+                num_samples,
+                t_end_us,
+                sample_rate_hz,
+                est_skew_us,
+            )
+        }
+
+        /// Copy up to `out.len()` most recent contiguous mono PCM samples from the audio ring.
+        pub fn copy_recent_audio(&self, out: &mut [f32]) -> (usize, u64, f32) {
+            self.arena.vibro.copy_recent_audio(out)
+        }
+
+        /// Stage full ingest metadata (PTS, crop/letterbox dst rect, D4 orientation, rolling-shutter
+        /// scan direction, native 1:1 flag) for the next `step(dt)` call.
+        pub fn set_ingest_meta(&mut self, meta: NativeIngestMeta) -> u32 {
+            let seq = if meta.seq != 0 {
+                self.ingest_seq = meta.seq;
+                meta.seq
+            } else {
+                self.ingest_seq = self.ingest_seq.wrapping_add(1).max(1);
+                self.ingest_seq
+            };
+            let t_lo = meta.pts_us as u32;
+            let t_hi = (meta.pts_us >> 32) as u32;
+            crate::set_ingest_meta_on(
+                &mut self.arena,
+                meta.epoch,
+                seq,
+                t_lo,
+                t_hi,
+                meta.age_ms,
+                meta.flags,
+                meta.src_w,
+                meta.src_h,
+                meta.crop_x,
+                meta.crop_y,
+                meta.crop_w,
+                meta.crop_h,
+                meta.orientation,
+                meta.scan_dir,
+                meta.dst_x,
+                meta.dst_y,
+                meta.dst_w,
+                meta.dst_h,
+                meta.gap_mask,
+                meta.native_1to1,
+            )
+        }
+
+        /// Read-only view of the active 64x36 dense optical-flow planar buffers `(u, v, valid)`.
+        pub fn dense_flow_planes(&self) -> (&[f32], &[f32], &[u8]) {
+            const N: usize = crate::wind_tunnel::WIND_V;
+            (
+                &self.arena.bos.w_x[..N],
+                &self.arena.bos.w_y[..N],
+                &self.arena.bos.clear_streak[..N],
+            )
+        }
+
         pub fn step(&mut self, dt_sec: f32) -> u32 {
             unsafe { crate::tick_on(&mut self.arena, dt_sec) }
         }
@@ -748,32 +860,30 @@ mod engine {
             };
             let t_lo = t_us as u32;
             let t_hi = (t_us >> 32) as u32;
-            unsafe {
-                let _ = crate::set_ingest_meta_on(
-                    &mut self.arena,
-                    1,
-                    self.ingest_seq,
-                    t_lo,
-                    t_hi,
-                    -1.0,
-                    INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_GEOM_KNOWN,
-                    ew,
-                    eh,
-                    0,
-                    0,
-                    ew,
-                    eh,
-                    0,
-                    u32::MAX,
-                    0,
-                    0,
-                    ew,
-                    eh,
-                    0,
-                    1,
-                );
-                crate::tick_on(&mut self.arena, dt_sec)
-            }
+            let _ = crate::set_ingest_meta_on(
+                &mut self.arena,
+                1,
+                self.ingest_seq,
+                t_lo,
+                t_hi,
+                -1.0,
+                INGEST_FLAG_PTS_KNOWN | INGEST_FLAG_GEOM_KNOWN,
+                ew,
+                eh,
+                0,
+                0,
+                ew,
+                eh,
+                0,
+                u32::MAX,
+                0,
+                0,
+                ew,
+                eh,
+                0,
+                1,
+            );
+            unsafe { crate::tick_on(&mut self.arena, dt_sec) }
         }
 
         pub fn telemetry(&self) -> &[f32; TELEMETRY_LEN] {
@@ -1191,4 +1301,4 @@ mod engine {
 }
 
 #[cfg(any(test, feature = "native-lib"))]
-pub use engine::{ChronosEngine, FieldViewDesc, TrackSnapshot};
+pub use engine::{ChronosEngine, FieldViewDesc, NativeIngestMeta, TrackSnapshot};

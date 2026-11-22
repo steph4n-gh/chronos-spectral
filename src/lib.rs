@@ -4418,6 +4418,7 @@ pub(crate) fn transition_bos_scratch_owner(a: &mut Arena, desired: u8) {
         a.wind.slow_head = 0;
         a.wind.box_frames = 0;
         a.wind.box_t_sum = 0.0;
+        a.wind.dense_ref_valid = 0;
     }
     if (prev == BOS_OWNER_ELASTO_SURFACE || prev == BOS_OWNER_ELASTO_ACOUSTIC_BOS)
         && prev != desired
@@ -5052,7 +5053,7 @@ pub unsafe extern "C" fn chronos_get_fovea_request_ptr() -> *const u32 {
 }
 
 #[inline(always)]
-pub(crate) unsafe fn set_ingest_meta_on(
+pub(crate) fn set_ingest_meta_on(
     a: &mut Arena,
     epoch: u32,
     seq: u32,
@@ -5547,16 +5548,14 @@ pub unsafe extern "C" fn chronos_get_audio_staging_ptr() -> *mut f32 {
     arena_mut().vibro.audio_staging_mut_ptr()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn chronos_push_audio_block(
+#[inline(always)]
+pub(crate) fn push_audio_block_on(
+    a: &mut Arena,
     num_samples: u32,
-    t_end_us_lo: u32,
-    t_end_us_hi: u32,
+    t_end_us: u64,
     sample_rate_hz: f32,
     est_skew_us: f32,
 ) -> u32 {
-    let t_end_us = ((t_end_us_hi as u64) << 32) | (t_end_us_lo as u64);
-    let a = arena_mut();
     let ok = a
         .vibro
         .push_audio_block(num_samples, t_end_us, sample_rate_hz, est_skew_us);
@@ -5569,6 +5568,18 @@ pub unsafe extern "C" fn chronos_push_audio_block(
         );
     }
     ok
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn chronos_push_audio_block(
+    num_samples: u32,
+    t_end_us_lo: u32,
+    t_end_us_hi: u32,
+    sample_rate_hz: f32,
+    est_skew_us: f32,
+) -> u32 {
+    let t_end_us = ((t_end_us_hi as u64) << 32) | (t_end_us_lo as u64);
+    push_audio_block_on(arena_mut(), num_samples, t_end_us, sample_rate_hz, est_skew_us)
 }
 
 #[no_mangle]
@@ -5700,7 +5711,7 @@ pub unsafe extern "C" fn chronos_wind_solve_injected(
         cont_ep,
         f_idx,
         has_scratch,
-        false,
+        wind_tunnel::WindInputSource::Injected,
     );
     if ok {
         1
@@ -7142,6 +7153,7 @@ pub(crate) unsafe fn pre_tick_on(a: &mut Arena, dt_sec: f32) {
             0
         });
         a.hodge.reset_keep_mode();
+        a.wind.dense_ref_valid = 0;
         a.elasto.reset_keep_config();
         a.collision_state.conservation.reset_continuity();
     }
@@ -15028,63 +15040,140 @@ fn run_wave2_post_tick(
     let _ = (grid_w, grid_h);
     let gdx = (frame_w as f32) / (hodge::HODGE_W as f32);
     let gdy = (frame_h as f32) / (hodge::HODGE_H as f32);
-    let hodge_ran = if swarm_active && a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
-        if grad_valid && !grad_held {
-            a.hodge.solve_from_continuum(
-                &a.continuum.export_field,
-                &a.continuum.cell_valid_mask,
-                gdx,
-                gdy,
-                f_idx,
-            )
-        } else if !grad_valid {
-            a.hodge.reset_keep_mode();
-            false
-        } else {
-            false
-        }
-    } else {
-        if a.hodge.get_mode() != hodge::HODGE_MODE_OFF && !swarm_active {
-            a.hodge.reset_keep_mode();
-        }
-        false
-    };
+    let dense_audit_mode = a.wind.get_mode() == wind_tunnel::WIND_MODE_DENSE_AUDIT;
+    let mut hodge_ran = false;
+    let mut wind_ran = false;
 
-    let wind_ran = if a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF {
+    if dense_audit_mode {
+        // Explicit dense optical-flow fallback (`WIND_MODE_DENSE_AUDIT = 3`) for unseeded fluid/texture
+        // archives: strictly isolated from modes 0..=2, requires exclusive BOS scratch + static camera,
+        // reuses `bos.w_x`/`w_y`/`clear_streak` (`+0 B` Arena), and is capped at `READY_FIELD_ONLY`.
         let has_scratch = a.bos_scratch_owner == BOS_OWNER_WIND_TUNNEL;
         let cont_ep = meta.continuity_epoch;
         let frame_t_sec = a.hist_t_sec[(f_idx as usize) & HIST_MASK];
+        let cam_moving = a.cam_motion_state != 0 || a.roi_slew_active != 0;
+        let geom_changed = (a.wind.last_dx > 0.0
+            && ((gdx as f64) - a.wind.last_dx).abs() > 1e-6)
+            || (a.wind.last_dy > 0.0 && ((gdy as f64) - a.wind.last_dy).abs() > 1e-6);
         if !has_scratch {
+            a.wind.dense_ref_valid = 0;
             a.wind.fail_refused(wind_tunnel::WIND_REASON_MUTEX_CONFLICT, true);
-            false
-        } else if !swarm_active || !grad_valid {
+        } else if cam_moving {
+            a.wind.dense_ref_valid = 0;
             a.wind.fail_refused(wind_tunnel::WIND_REASON_NO_CONTINUUM, true);
-            false
-        } else if a.hodge.get_mode() == hodge::HODGE_MODE_OFF
-            || a.hodge.get_state() != hodge::HODGE_STATE_READY
+        } else if a.wind.dense_ref_valid == 0
+            || geom_changed
+            || (a.wind.fast_count > 0 && cont_ep != a.wind.last_continuity_epoch)
         {
-            a.wind.fail_refused(wind_tunnel::WIND_REASON_HODGE_UNCONV, true);
-            false
-        } else if hodge_ran {
-            a.wind.step(
-                &mut a.hodge,
-                &mut a.bos,
-                &a.continuum.export_field,
-                &a.continuum.export_bodies,
-                gdx as f64,
-                gdy as f64,
-                frame_t_sec,
-                cont_ep,
-                f_idx,
-                has_scratch,
-                true,
-            )
+            a.bos.prime_dense_flow_ref(&a.luma[..need_px], need_px);
+            a.wind.dense_ref_valid = 1;
+            a.wind.last_dx = gdx as f64;
+            a.wind.last_dy = gdy as f64;
+            a.wind.last_continuity_epoch = cont_ep;
+            a.wind.telem[wind_tunnel::WIND_TELEM_STATE] = wind_tunnel::WIND_STATE_WARMING;
+            a.wind.telem[wind_tunnel::WIND_TELEM_MODE] = wind_tunnel::WIND_MODE_DENSE_AUDIT;
+            a.wind.live_ready = 0;
         } else {
-            false
+            let prev_t_sec = a.hist_t_sec[(f_idx.wrapping_sub(1) as usize) & HIST_MASK];
+            let dt_dense = (frame_t_sec - prev_t_sec) as f32;
+            let valid_cells = a.bos.extract_dense_flow_64x36(
+                &a.luma[..need_px],
+                frame_w,
+                frame_h,
+                dt_dense,
+            );
+            if valid_cells < 64 {
+                a.wind.fail_refused(
+                    wind_tunnel::WIND_REASON_NO_CONTINUUM | wind_tunnel::WIND_REASON_LOW_SUPPORT,
+                    false,
+                );
+            } else {
+                hodge_ran = a.hodge.solve_from_dense_planar(
+                    &a.bos.w_x[..hodge::HODGE_V],
+                    &a.bos.w_y[..hodge::HODGE_V],
+                    &a.bos.clear_streak[..hodge::HODGE_V],
+                    gdx,
+                    gdy,
+                    f_idx,
+                );
+                if hodge_ran {
+                    wind_ran = a.wind.step(
+                        &mut a.hodge,
+                        &mut a.bos,
+                        &a.continuum.export_field,
+                        &a.continuum.export_bodies,
+                        gdx as f64,
+                        gdy as f64,
+                        frame_t_sec,
+                        cont_ep,
+                        f_idx,
+                        has_scratch,
+                        wind_tunnel::WindInputSource::DenseLive,
+                    );
+                } else {
+                    a.wind.fail_refused(wind_tunnel::WIND_REASON_HODGE_UNCONV, false);
+                }
+            }
         }
     } else {
-        false
-    };
+        hodge_ran = if swarm_active && a.hodge.get_mode() != hodge::HODGE_MODE_OFF {
+            if grad_valid && !grad_held {
+                a.hodge.solve_from_continuum(
+                    &a.continuum.export_field,
+                    &a.continuum.cell_valid_mask,
+                    gdx,
+                    gdy,
+                    f_idx,
+                )
+            } else if !grad_valid {
+                a.hodge.reset_keep_mode();
+                false
+            } else {
+                false
+            }
+        } else {
+            if a.hodge.get_mode() != hodge::HODGE_MODE_OFF && !swarm_active {
+                a.hodge.reset_keep_mode();
+            }
+            false
+        };
+
+        wind_ran = if a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF {
+            let has_scratch = a.bos_scratch_owner == BOS_OWNER_WIND_TUNNEL;
+            let cont_ep = meta.continuity_epoch;
+            let frame_t_sec = a.hist_t_sec[(f_idx as usize) & HIST_MASK];
+            if !has_scratch {
+                a.wind.fail_refused(wind_tunnel::WIND_REASON_MUTEX_CONFLICT, true);
+                false
+            } else if !swarm_active || !grad_valid {
+                a.wind.fail_refused(wind_tunnel::WIND_REASON_NO_CONTINUUM, true);
+                false
+            } else if a.hodge.get_mode() == hodge::HODGE_MODE_OFF
+                || a.hodge.get_state() != hodge::HODGE_STATE_READY
+            {
+                a.wind.fail_refused(wind_tunnel::WIND_REASON_HODGE_UNCONV, true);
+                false
+            } else if hodge_ran {
+                a.wind.step(
+                    &mut a.hodge,
+                    &mut a.bos,
+                    &a.continuum.export_field,
+                    &a.continuum.export_bodies,
+                    gdx as f64,
+                    gdy as f64,
+                    frame_t_sec,
+                    cont_ep,
+                    f_idx,
+                    has_scratch,
+                    wind_tunnel::WindInputSource::SparseLive,
+                )
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+    }
 
     let elasto_ran = if a.elasto.get_mode() != elastography::ELASTO_MODE_OFF {
         let need_owner = if a.elasto.get_mode() == elastography::ELASTO_MODE_ACOUSTIC_BOS {
@@ -15146,17 +15235,18 @@ fn finalize_wave2_stamps(
         set_stamp_invalid(&mut a.wave2_telem, vibro_base);
     }
 
-    // 1 (word 24): 40x22 Hodge Decomposition (live_ready only; never spoofed by injected test solves)
+    // 1 (word 24): 64x36 Hodge Decomposition (live_ready only; never spoofed by injected test solves)
     let hodge_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_HODGE * STAMP_STRIDE;
     let (grad_valid, _, _) = a.continuum.grad_product_status();
-    if swarm_active
-        && a.hodge.get_mode() != hodge::HODGE_MODE_OFF
+    let dense_audit_active = a.wind.get_mode() == wind_tunnel::WIND_MODE_DENSE_AUDIT;
+    if (swarm_active || dense_audit_active)
+        && (dense_audit_active || a.hodge.get_mode() != hodge::HODGE_MODE_OFF)
         && a.hodge.live_ready != 0
         && a.hodge.get_state() == hodge::HODGE_STATE_READY
     {
-        if hodge_ran && !hodge_grad_held {
+        if hodge_ran && (dense_audit_active || !hodge_grad_held) {
             set_stamp_fresh(&mut a.wave2_telem, hodge_base, &meta);
-        } else if grad_valid {
+        } else if grad_valid && !dense_audit_active {
             if (a.wave2_telem[hodge_base] & STAMP_VALID) != 0
                 && a.wave2_telem[hodge_base + 1] == cont_ep
             {
@@ -15207,7 +15297,7 @@ fn finalize_wave2_stamps(
     // 4 (word 48): Pocket Wind Tunnel freshness stamp (live_ready only; never spoofed by injected solves)
     let wind_base = WAVE2_PRODUCT_STAMPS_START + PROD_W2_WIND * STAMP_STRIDE;
     let wind_st = a.wind.get_state();
-    if swarm_active
+    if (swarm_active || dense_audit_active)
         && a.wind.get_mode() != wind_tunnel::WIND_MODE_OFF
         && a.wind.live_ready != 0
         && (wind_st == wind_tunnel::WIND_STATE_READY_FIELD_ONLY

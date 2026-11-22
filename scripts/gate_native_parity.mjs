@@ -63,6 +63,7 @@ const SCENARIOS = [
   { id: 'depth', argv: ['scripts/gate_i7_depth.mjs', '--parity-lite'], capMiB: 24, minCalls: 80 },
   { id: 'wind', argv: ['scripts/gate_i9_wind_tunnel.mjs', '--parity-lite'], capMiB: 24, minCalls: 60 },
   { id: 'elasto', argv: ['scripts/gate_i8_elastography.mjs', '--parity-lite'], capMiB: 24, minCalls: 60 },
+  { id: 'dense_audit', argv: ['scripts/gate_i10_physics_audit.mjs', '--parity-lite'], capMiB: 24, minCalls: 50 },
 ];
 
 if (SCENARIO_IDS) {

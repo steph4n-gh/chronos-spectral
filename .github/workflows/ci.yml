@@ -123,7 +123,7 @@ jobs:
           path: |
             target/
             native/target/
-          key: native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**') }}
+          key: native-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**', 'native/capi/**') }}
 
       - name: Mark sources older than the cached artifacts (exact cache hit only)
         if: steps.build-cache.outputs.cache-hit == 'true'
@@ -145,7 +145,7 @@ jobs:
           DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
           cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
           cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
-          node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm,depth,wind
+          node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm,depth,wind,dense_audit
 
   native-scalar-linux-x86_64:
     name: Scalar reference backend at kernel level on Linux x86_64 (every Gate N scenario)
@@ -178,7 +178,7 @@ jobs:
           path: |
             target/
             native/target/
-          key: native-scalar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**') }}
+          key: native-scalar-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', 'native/Cargo.lock', 'Cargo.toml', 'native/Cargo.toml', '.cargo/config.toml', 'src/**', 'native/replay/**', 'native/tests/**', 'native/capi/**') }}
 
       - name: Mark sources older than the cached artifacts (exact cache hit only)
         if: steps.build-cache.outputs.cache-hit == 'true'
@@ -234,3 +234,4 @@ jobs:
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_wind_tunnel -- --nocapture
           cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_elastography -- --nocapture
+          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_audit -- --nocapture

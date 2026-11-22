@@ -434,6 +434,58 @@ impl HodgeState {
         }
     }
 
+    /// Solve live Hodge decomposition directly from planar `64x36` dense optical-flow velocity
+    /// buffers (`u[..2304]`, `vy[..2304]`, `valid[..2304]`) when `WIND_MODE_DENSE_AUDIT` is active.
+    #[inline(never)]
+    pub fn solve_from_dense_planar(
+        &mut self,
+        u_plane: &[f32],
+        v_plane: &[f32],
+        valid_plane: &[u8],
+        grid_dx: f32,
+        grid_dy: f32,
+        frame_idx: u32,
+    ) -> bool {
+        if !grid_dx.is_finite()
+            || !grid_dy.is_finite()
+            || grid_dx <= 0.0
+            || grid_dy <= 0.0
+            || u_plane.len() < HODGE_V
+            || v_plane.len() < HODGE_V
+            || valid_plane.len() < HODGE_V
+        {
+            self.fail_unconverged(false);
+            return false;
+        }
+        let mut v = 0usize;
+        while v < HODGE_V {
+            if valid_plane[v] != 0 {
+                let u = u_plane[v];
+                let vy = v_plane[v];
+                if !u.is_finite() || !vy.is_finite() {
+                    self.fail_unconverged(false);
+                    return false;
+                }
+                self.v_act[v] = 1;
+                self.cg_r[v] = u as f64;
+                self.cg_z[v] = vy as f64;
+            } else {
+                self.v_act[v] = 0;
+                self.cg_r[v] = 0.0;
+                self.cg_z[v] = 0.0;
+            }
+            v += 1;
+        }
+        if self.solve_core(grid_dx as f64, grid_dy as f64) {
+            self.last_solve_frame = frame_idx;
+            self.live_ready = 1;
+            true
+        } else {
+            self.live_ready = 0;
+            false
+        }
+    }
+
     #[inline(never)]
     pub fn solve_injected(&mut self, grid_dx: f32, grid_dy: f32) -> u32 {
         self.live_ready = 0;
