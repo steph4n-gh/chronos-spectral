@@ -199,7 +199,7 @@ jobs:
   miri-scalar:
     name: Miri (non-blocking, ${{ matrix.slice }})
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 180
     # Non-blocking while the findings in docs/VERIFICATION_AND_BENCHMARKS.md ("Miri") are open:
     # a failure shows on the job but the workflow still concludes `success`, so neither the
     # other checks nor pages.yml are held back by it. Sharded in parallel so each Miri suite

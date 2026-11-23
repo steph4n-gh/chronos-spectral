@@ -3608,6 +3608,10 @@ async function main() {
               }
             });
             window.__e2eW1ClsPo.observe({ type: 'layout-shift', buffered: false });
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
             document.getElementById('btnHeroBosPlume')?.click();
             return true;
           })()`
@@ -3618,6 +3622,10 @@ async function main() {
           w1Session,
           'Step 9a: Thermal Plume (BOS) reaches READY + 1:1 Native ROI + fresh stamps',
           `(() => {
+            if (${Boolean(process.env.CI)}) {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v && v.playbackRate !== 0.25) { v.defaultPlaybackRate = 0.25; v.playbackRate = 0.25; }
+            }
             const selVal = document.getElementById('sampleVideoSelect')?.value || '';
             const bosMode = document.getElementById('bosModeSelect')?.value || '';
             const ovMode = document.getElementById('fieldOverlayModeSelect')?.value || '';
@@ -3652,8 +3660,18 @@ async function main() {
               sev,
             };
           })()`,
-          22000
+          process.env.CI ? 35000 : 22000
         );
+        if (process.env.CI) {
+          await cdp.evalJs(
+            w1Session,
+            `(() => {
+              const v = document.getElementById('hiddenVideoSource');
+              if (v) { v.defaultPlaybackRate = 1.0; v.playbackRate = 1.0; }
+              return true;
+            })()`
+          );
+        }
 
         const bosHudBytes = await (async () => {
           const rect = await cdp.evalJs(

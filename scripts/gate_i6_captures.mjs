@@ -276,41 +276,83 @@ async function verifyChromiumVideoDecode(fixtureList) {
           v.muted = true;
           v.playsInline = true;
           v.preload = 'auto';
-          v.src = './${fx.file}';
-          await new Promise((resolve, reject) => {
-            const to = setTimeout(() => reject(new Error('video load timeout for ${fx.file}')), 10000);
-            v.addEventListener('loadeddata', () => { clearTimeout(to); resolve(); }, { once: true });
-            v.addEventListener('error', () => { clearTimeout(to); reject(new Error('video error code ' + (v.error ? v.error.code : 'unknown'))); }, { once: true });
-          });
-          const targetT = Math.min(v.duration * 0.5, 4.0);
-          v.currentTime = targetT;
-          await new Promise((resolve, reject) => {
-            const to = setTimeout(() => reject(new Error('video seek timeout for ${fx.file}')), 8000);
-            v.addEventListener('seeked', () => { clearTimeout(to); resolve(); }, { once: true });
-          });
-          const c = document.createElement('canvas');
-          c.width = v.videoWidth;
-          c.height = v.videoHeight;
-          const ctx = c.getContext('2d');
-          ctx.drawImage(v, 0, 0);
-          const px = ctx.getImageData(0, 0, 64, 64).data;
-          let sum = 0, sumSq = 0;
-          for (let i = 0; i < px.length; i += 4) {
-            const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-            sum += luma;
-            sumSq += luma * luma;
+          v.style.cssText = 'position:fixed;left:-9999px;top:0;width:64px;height:36px;opacity:0.01;pointer-events:none;';
+          document.body.appendChild(v);
+          try {
+            v.src = './${fx.file}';
+            await new Promise((resolve, reject) => {
+              const to = setTimeout(() => reject(new Error('video load timeout for ${fx.file}')), 10000);
+              v.addEventListener('loadeddata', () => { clearTimeout(to); resolve(); }, { once: true });
+              v.addEventListener('error', () => { clearTimeout(to); reject(new Error('video error code ' + (v.error ? v.error.code : 'unknown'))); }, { once: true });
+            });
+            const targetT = Math.min(v.duration * 0.5, 4.0);
+            v.currentTime = targetT;
+            await new Promise((resolve, reject) => {
+              const to = setTimeout(() => reject(new Error('video seek timeout for ${fx.file}')), 8000);
+              v.addEventListener('seeked', () => { clearTimeout(to); resolve(); }, { once: true });
+            });
+            const c = document.createElement('canvas');
+            c.width = v.videoWidth;
+            c.height = v.videoHeight;
+            const ctx = c.getContext('2d', { willReadFrequently: true });
+            const measureStd = async () => {
+              let drawn = false;
+              if (typeof createImageBitmap === 'function') {
+                try {
+                  const bmp = await createImageBitmap(v);
+                  ctx.drawImage(bmp, 0, 0);
+                  bmp.close();
+                  drawn = true;
+                } catch {}
+              }
+              if (!drawn) ctx.drawImage(v, 0, 0);
+              const px = ctx.getImageData(0, 0, 64, 64).data;
+              let sum = 0, sumSq = 0;
+              for (let i = 0; i < px.length; i += 4) {
+                const luma = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
+                sum += luma;
+                sumSq += luma * luma;
+              }
+              const n = px.length / 4;
+              const mean = sum / n;
+              return Math.sqrt(Math.max(0, sumSq / n - mean * mean));
+            };
+            let std = await measureStd();
+            if (!(std > 5.0)) {
+              // Headless software H.264 decoders on Linux can fire 'seeked' before flushing
+              // the decoded frame bitmap; nudge one presented video frame and re-measure.
+              try {
+                await v.play();
+                if (typeof v.requestVideoFrameCallback === 'function') {
+                  await new Promise((resolve) => {
+                    const to = setTimeout(resolve, 2500);
+                    v.requestVideoFrameCallback(() => { clearTimeout(to); resolve(); });
+                  });
+                } else {
+                  await new Promise((resolve) => setTimeout(resolve, 250));
+                }
+                v.pause();
+              } catch {}
+              for (let attempt = 0; attempt < 10 && !(std > 5.0); attempt++) {
+                std = await measureStd();
+                if (std > 5.0) break;
+                await new Promise((resolve) => setTimeout(resolve, 100));
+              }
+            }
+            return {
+              width: v.videoWidth,
+              height: v.videoHeight,
+              duration: v.duration,
+              readyState: v.readyState,
+              currentTime: v.currentTime,
+              lumaStd: Number(std.toFixed(3)),
+            };
+          } finally {
+            v.pause();
+            v.removeAttribute('src');
+            v.load();
+            v.remove();
           }
-          const n = px.length / 4;
-          const mean = sum / n;
-          const std = Math.sqrt(Math.max(0, sumSq / n - mean * mean));
-          return {
-            width: v.videoWidth,
-            height: v.videoHeight,
-            duration: v.duration,
-            readyState: v.readyState,
-            currentTime: v.currentTime,
-            lumaStd: Number(std.toFixed(3)),
-          };
         })()`
       );
       assert(out.width === 640 && out.height === 360, `Chrome <video> ${fx.file}: expected 640x360, got ${out.width}x${out.height}`);
