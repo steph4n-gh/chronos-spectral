@@ -13,6 +13,14 @@ use chronos_spectral::{
     chronos_set_rs_calib, chronos_tick,
 };
 
+#[inline]
+unsafe fn read_elasto_telem() -> [u32; 32] {
+    let mut out = [0u32; 32];
+    let s = core::slice::from_raw_parts(chronos_get_elasto_telemetry_ptr(), 32);
+    out.copy_from_slice(s);
+    out
+}
+
 #[test]
 fn miri_elastography_mutex_and_config() {
     unsafe {
@@ -24,26 +32,33 @@ fn miri_elastography_mutex_and_config() {
         assert_eq!(chronos_set_elasto_lock_freqs(2, 860.0, 380.0, 0.0, 0.0), 1);
         assert_eq!(chronos_set_rs_calib(2, 35.0, 200.0, 48000.0, 5000.0), 1);
 
-        let telem = core::slice::from_raw_parts(chronos_get_elasto_telemetry_ptr(), 32);
-        let planes = core::slice::from_raw_parts(chronos_get_elasto_planes_ptr(), 6 * 2304);
-        let valid = core::slice::from_raw_parts(chronos_get_elasto_valid_ptr(), 2304);
+        let telem = read_elasto_telem();
         assert_eq!(telem[1], 1);
-        assert!(planes[0].is_finite());
-        assert_eq!(valid[0], 0);
+        {
+            let planes = core::slice::from_raw_parts(chronos_get_elasto_planes_ptr(), 6 * 2304);
+            assert!(planes[0].is_finite());
+        }
+        {
+            let valid = core::slice::from_raw_parts(chronos_get_elasto_valid_ptr(), 2304);
+            assert_eq!(valid[0], 0);
+        }
 
         // Enabling BOS while Elastography is active must refuse Elastography with MUTEX_CONFLICT (1 << 19)
         assert_eq!(chronos_set_bos_mode(1), 1);
         let _ = chronos_tick(1.0 / 30.0);
+        let telem = read_elasto_telem();
         assert_eq!(telem[0], 4); // ELASTO_STATE_REFUSED
         assert_ne!(telem[2] & (1 << 19), 0); // ELASTO_REASON_MUTEX_CONFLICT
 
         // Releasing BOS recovers cleanly to warming/uncalibrated without UB
         assert_eq!(chronos_set_bos_mode(0), 1);
         let _ = chronos_tick(1.0 / 30.0);
+        let telem = read_elasto_telem();
         assert_eq!(telem[2] & (1 << 19), 0);
 
         // Switching to Acoustic BOS (mode 4) updates grid dims cleanly
         assert_eq!(chronos_set_elasto_mode(4), 1);
+        let telem = read_elasto_telem();
         assert_eq!(telem[28], 256);
         assert_eq!(telem[29], 128);
         assert_eq!(chronos_set_elasto_mode(0), 1);
