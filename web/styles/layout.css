@@ -1,0 +1,769 @@
+/* ============================================================================
+ * CHRONOS-SPECTRAL v3.5 // Fixed-Geometry Zero-CLS Laboratory Bench Shell
+ *
+ * Geometry is strictly a function of window size (zero app-state reflow).
+ * 1440x900 primary bench:
+ *   Top Rail:   36px
+ *   Left Rack:  308px (4 tabs: ENGINES | ACQUIRE | CALIBRATE | RECORD)
+ *   Upper Area: Center Optical Stage (minmax(0,1fr)) + Right 16-Ch Roster (272px)
+ *   Lower Area: 5-Meter Scope Bay (276px, stacked via visibility + inert)
+ * ============================================================================ */
+
+body {
+  overflow: hidden;
+  block-size: 100dvh;
+  inline-size: 100vw;
+}
+
+#hiddenVideoSource {
+  position: fixed;
+  inset: 0;
+  inline-size: 1px;
+  block-size: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.bench-shell {
+  display: grid;
+  grid-template-rows: var(--rail-h) minmax(0, 1fr);
+  block-size: 100dvh;
+  inline-size: 100%;
+  gap: var(--gap);
+  padding: var(--gap);
+  overflow: hidden;
+}
+
+/* ---- Top Status Rail (36px fixed, fits 100% cleanly at 1440px with 0 overflow) ---- */
+.bench-rail {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  block-size: var(--rail-h);
+  padding: 0 6px;
+  background-color: var(--bench-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  contain: layout style paint;
+  overflow: hidden;
+}
+
+.rail-left,
+.rail-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.rail-mid {
+  display: grid;
+  grid-template-columns: minmax(108px, 1fr) 78px 118px 70px 222px 170px 148px;
+  align-items: center;
+  gap: 4px;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-num);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--ink-1);
+  white-space: nowrap;
+}
+
+.brand-mark svg {
+  inline-size: 14px;
+  block-size: 14px;
+  color: var(--sig-lock);
+  flex-shrink: 0;
+}
+
+.rail-cell {
+  display: block;
+  block-size: 24px;
+  line-height: 22px;
+  padding: 0 5px;
+  border-radius: var(--radius);
+  border: 1px solid var(--rule);
+  background-color: var(--bench-2);
+  font-family: var(--font-num);
+  font-size: 9.5px;
+  font-variant-numeric: tabular-nums slashed-zero;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-inline-size: 0;
+}
+
+.rail-cell[data-signal="lock"] {
+  border-color: var(--sig-lock);
+  background-color: var(--sig-lock-bg);
+  color: var(--sig-lock);
+}
+.rail-cell[data-signal="pass"] {
+  border-color: var(--sig-pass);
+  background-color: var(--sig-pass-bg);
+  color: var(--sig-pass);
+}
+.rail-cell[data-signal="warn"] {
+  border-color: var(--sig-warn);
+  background-color: var(--sig-warn-bg);
+  color: var(--sig-warn);
+}
+.rail-cell[data-signal="fault"] {
+  border-color: var(--sig-fault);
+  background-color: var(--sig-fault-bg);
+  color: var(--sig-fault);
+}
+
+#btnRailRec {
+  inline-size: 76px;
+  flex-shrink: 0;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+#btnRailRec[aria-pressed="true"] {
+  border-color: var(--sig-fault);
+  background-color: var(--sig-fault-bg);
+  color: var(--sig-fault);
+}
+#btnVisibilityPolicy { inline-size: 102px; flex-shrink: 0; }
+
+/* ---- Main Bench Workspace ---- */
+.bench-main {
+  display: grid;
+  grid-template-columns: var(--rack-w) minmax(0, 1fr);
+  gap: var(--gap);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+/* ---- Left Instrument Rack (308px fixed width, 4 tabs) ---- */
+.bench-rack {
+  display: grid;
+  grid-template-rows: 30px minmax(0, 1fr);
+  background-color: var(--bench-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  min-block-size: 0;
+  overflow: hidden;
+  contain: layout style paint;
+}
+
+.rack-tabbar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-0);
+}
+
+.rack-tab {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  block-size: 30px;
+  border: 0;
+  border-inline-end: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rack-tab:last-child {
+  border-inline-end: 0;
+}
+.rack-tab:hover {
+  background-color: var(--bench-2);
+  color: var(--ink-1);
+}
+.rack-tab[aria-selected="true"] {
+  background-color: var(--bench-1);
+  color: var(--ink-1);
+  box-shadow: inset 0 -2px 0 var(--ink-1);
+}
+
+.rack-pages {
+  display: grid;
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+/* Stacked rack pages via visibility + inert inside a single fixed grid cell (zero CLS) */
+.rack-page {
+  grid-area: 1 / 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-block-size: 0;
+}
+.rack-page[data-active="false"] {
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.rack-page[data-active="true"] {
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+/* ---- Right Side: Upper Stage+Roster + Lower 5-Meter Scope Bay ---- */
+.bench-right {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) var(--bay-h);
+  gap: var(--gap);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+.bench-upper {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--roster-w);
+  gap: var(--gap);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+/* ---- Center Optical Stage ---- */
+#hudDockSlot {
+  display: grid;
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+
+.hud-panel {
+  display: grid;
+  grid-template-rows: 32px 26px minmax(0, 1fr) 36px 22px;
+  background-color: var(--bench-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  contain: layout style paint;
+}
+
+.hud-panel[data-drop-active="true"] {
+  border-color: var(--focus);
+  box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.35);
+}
+
+.hud-panel.hud-maximized,
+.hud-panel:fullscreen {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  border-radius: 0;
+  border: 0;
+  background-color: var(--optical-black);
+  inline-size: 100vw;
+  block-size: 100dvh;
+}
+
+.viewport-toolstrip {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  block-size: 32px;
+  padding: 0 6px;
+  background-color: var(--bench-1);
+  border-block-end: 1px solid var(--rule);
+  overflow: hidden;
+}
+
+.tool-radio-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.tool-right-group {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) 74px 108px 72px;
+  align-items: center;
+  gap: 4px;
+  min-inline-size: 0;
+}
+
+.viewport-options-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  block-size: 26px;
+  padding: 0 8px;
+  background-color: var(--bench-2);
+  border-block-end: 1px solid var(--rule);
+  font-family: var(--font-num);
+  font-size: 11px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+}
+#toolOptionsHint {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hud-canvas-stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--optical-black);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  container-type: size;
+}
+
+/* Exact 16:9 canvas frame so #hudWipeTrack 0..100% aligns 0.00px with #hudCanvas at every aspect ratio */
+.hud-canvas-frame {
+  position: relative;
+  inline-size: min(100cqi, calc(100cqb * 16 / 9));
+  block-size: min(100cqb, calc(100cqi * 9 / 16));
+  flex-shrink: 0;
+}
+
+#hudCanvas {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  background-color: var(--optical-black);
+  image-rendering: auto;
+  cursor: crosshair;
+}
+
+.hud-panel.hud-maximized .hud-canvas-frame,
+.hud-panel:fullscreen .hud-canvas-frame {
+  inline-size: min(100vw, calc((100dvh - 116px) * 16 / 9));
+  block-size: min(calc(100dvh - 116px), calc(100vw * 9 / 16));
+}
+
+/* Split-Wipe Track & Handle over HUD Canvas */
+.hud-wipe-track {
+  position: absolute;
+  inset: 0;
+  overflow: clip;
+  pointer-events: none;
+  z-index: 4;
+}
+.hud-wipe-track[hidden] {
+  display: none !important;
+}
+#hudCanvasStage:has(#welcomeOverlay:not([hidden])) #hudWipeTrack {
+  display: none;
+}
+.hud-wipe-rail {
+  position: relative;
+  inline-size: 100%;
+  block-size: 100%;
+  pointer-events: none;
+  will-change: transform;
+  transform: translate3d(clamp(1.85rem, calc(var(--wipe-pct, 0) * 1%), calc(100% - 1.85rem)), 0, 0);
+}
+.hud-wipe-handle {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  transform: translateX(-50%);
+  inline-size: 32px;
+  block-size: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+.hud-wipe-handle.dragging {
+  cursor: grabbing;
+}
+.hud-wipe-grip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  inline-size: 46px;
+  block-size: 20px;
+  border-radius: var(--radius);
+  border: 1px solid var(--focus);
+  background-color: rgba(10, 11, 13, 0.92);
+  color: var(--ink-1);
+  font-family: var(--font-num);
+  font-size: 10px;
+  font-weight: 700;
+  pointer-events: none;
+}
+
+/* Source Transport Slot (36px fixed, stacked rows via visibility/hidden inside fixed cell) */
+.viewport-transport-slot {
+  display: grid;
+  block-size: 36px;
+  background-color: var(--bench-1);
+  border-block-start: 1px solid var(--rule);
+  padding: 0 8px;
+  overflow: hidden;
+  align-items: center;
+}
+
+.transport-row {
+  grid-area: 1 / 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  block-size: 34px;
+  min-inline-size: 0;
+  overflow: hidden;
+}
+#videoTransportBar {
+  display: grid;
+  grid-template-columns: 64px 32px 32px 52px minmax(0, 1fr) 108px 78px;
+  align-items: center;
+  gap: 5px;
+}
+#liveStreamBar {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr) 130px 76px 48px;
+  align-items: center;
+  gap: 5px;
+}
+.transport-row[hidden] {
+  display: none !important;
+}
+
+/* Acquisition Status Footer Strip (22px fixed) */
+.viewport-status-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  block-size: 22px;
+  padding: 0 8px;
+  background-color: var(--bench-0);
+  border-block-start: 1px solid var(--rule);
+  overflow: hidden;
+}
+
+.acq-status-banner {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink-2);
+}
+.acq-status-banner[data-severity="ok"] { color: var(--sig-lock); }
+.acq-status-banner[data-severity="warn"] { color: var(--sig-warn); }
+.acq-status-banner[data-severity="danger"] { color: var(--sig-fault); }
+
+.proof-inline {
+  display: grid;
+  grid-template-columns: 112px 124px 104px 120px;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--ink-3);
+  white-space: nowrap;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+.proof-inline > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.proof-inline strong {
+  color: var(--ink-1);
+  font-weight: 600;
+}
+#activeRecipeBadge {
+  inline-size: 132px;
+  text-align: left;
+  flex-shrink: 0;
+}
+#showcaseWipeReadout {
+  inline-size: 174px;
+  flex-shrink: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- Right 16-Channel Live Target Roster (272px fixed) ---- */
+.bench-roster {
+  display: grid;
+  grid-template-rows: 28px minmax(0, 1fr) 22px;
+  background-color: var(--bench-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  min-block-size: 0;
+  min-inline-size: 0;
+  overflow: hidden;
+  contain: strict;
+}
+
+.roster-head {
+  display: grid;
+  grid-template-columns: auto 44px 112px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 0 6px;
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-0);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  overflow: hidden;
+}
+.roster-head > span:first-child {
+  white-space: nowrap;
+}
+
+#rosterScrollWell {
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  min-block-size: 0;
+}
+
+#rosterGrid {
+  display: grid;
+  grid-template-columns: 1fr;
+}
+
+.roster-foot {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 44px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border-block-start: 1px solid var(--rule);
+  background-color: var(--bench-0);
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--ink-3);
+  overflow: hidden;
+}
+
+/* ---- Bottom 5-Meter Scope Bay (276px fixed, 1:1 native 420x210 scopes) ---- */
+.bench-bay {
+  display: grid;
+  grid-template-rows: 28px minmax(0, 1fr);
+  background-color: var(--bench-1);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  block-size: var(--bay-h);
+  min-inline-size: 0;
+  overflow: hidden;
+  contain: layout style paint;
+}
+
+.bay-tabbar {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-0);
+}
+
+.bay-tab {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  block-size: 28px;
+  padding: 0 10px;
+  border: 0;
+  border-inline-end: 1px solid var(--rule);
+  background: transparent;
+  color: var(--ink-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-align: left;
+}
+.bay-tab:last-child {
+  border-inline-end: 0;
+}
+.bay-tab:hover {
+  background-color: var(--bench-2);
+  color: var(--ink-1);
+}
+.bay-tab[aria-selected="true"] {
+  background-color: var(--bench-1);
+  color: var(--ink-1);
+  box-shadow: inset 0 -2px 0 var(--ink-1);
+}
+
+.bay-tab-meter {
+  font-family: var(--font-num);
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ink-2);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bay-pages {
+  display: grid;
+  min-block-size: 0;
+  overflow: hidden;
+}
+
+/* Stacked bay pages: NEVER display:none (preserves OffscreenCanvas boxes + 0 CLS!) */
+.bay-page {
+  grid-area: 1 / 1;
+  padding: 8px;
+  overflow: hidden;
+  min-block-size: 0;
+  min-inline-size: 0;
+}
+.bay-page[data-active="false"] {
+  visibility: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+.bay-page[data-active="true"] {
+  visibility: visible;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+/* Responsive breakpoints (window-size only, zero runtime reflow) */
+@media (max-width: 1360px) {
+  :root {
+    --rack-w: 284px;
+    --roster-w: 244px;
+  }
+  .rail-mid {
+    grid-template-columns: minmax(90px, 1fr) 76px 110px 64px 196px 140px;
+  }
+  #pillArena {
+    display: none;
+  }
+  .tool-radio-group .tool-btn {
+    padding: 0 5px;
+    font-size: 10px;
+  }
+  .tool-radio-group .tool-btn .kbd {
+    display: none;
+  }
+  .tool-right-group {
+    grid-template-columns: minmax(72px, 1fr) 44px 100px 68px;
+  }
+  #btnHudHeroToggle {
+    inline-size: 100px;
+    font-size: 10px;
+  }
+  #btnHudFullscreen {
+    inline-size: 68px;
+    font-size: 10px;
+  }
+}
+
+@media (max-height: 760px) {
+  :root {
+    --bay-h: 232px;
+  }
+  .bay-page {
+    padding: 5px 8px;
+  }
+  #pipCanvas,
+  #persistenceCanvas,
+  #hilbertCanvas,
+  #spectralCanvas,
+  #physicsPhaseCanvas {
+    block-size: 162px !important;
+  }
+  .audit-bench {
+    grid-template-rows: 44px 62px 34px 18px !important;
+    gap: 4px !important;
+  }
+  .audit-slot-box {
+    block-size: 42px !important;
+  }
+  #auditTimelineCanvas {
+    block-size: 32px !important;
+  }
+}
+
+@media (max-width: 1040px) {
+  body {
+    overflow: auto;
+    block-size: auto;
+  }
+  .bench-shell {
+    block-size: auto;
+    overflow: visible;
+    grid-template-rows: auto auto;
+  }
+  .bench-rail {
+    block-size: auto;
+    grid-template-columns: 1fr auto;
+    padding: 4px 6px;
+  }
+  .rail-mid {
+    display: none;
+  }
+  .bench-main {
+    grid-template-columns: 1fr;
+  }
+  .bench-right {
+    order: -1;
+  }
+  .bench-upper {
+    grid-template-columns: 1fr;
+  }
+  .hud-canvas-stage {
+    aspect-ratio: 16 / 9;
+    min-block-size: 280px;
+  }
+  .bench-rack {
+    block-size: 460px;
+  }
+  .bench-roster {
+    block-size: 280px;
+  }
+}

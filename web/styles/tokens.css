@@ -1,0 +1,106 @@
+/* ============================================================================
+ * CHRONOS-SPECTRAL v3.5 // Precision Laboratory Design Tokens
+ * Rule: Colour is kernel truth. Neutral graphite surfaces; zero neon glows;
+ * system fonts only (zero webfont layout shift); tabular-nums everywhere.
+ * ============================================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* Neutral laboratory graphite surfaces */
+  --bench-0: #0a0b0d;         /* application shell */
+  --bench-1: #111316;         /* primary instrument panels */
+  --bench-2: #181b1f;         /* recessed wells, rows, inputs */
+  --bench-3: #23272d;         /* hover, active neutral segment */
+  --optical-black: #000000;   /* HUD viewport and scope canvases only */
+
+  /* Precision hairlines */
+  --rule: #2a2f36;
+  --ctl-rule: #3a424d;
+  --rule-strong: #485260;
+
+  /* Calibrated neutral ink */
+  --ink-1: #e8eaed;
+  --ink-2: #aeb5bf;
+  --ink-3: #8d96a4;
+
+  /* Kernel signal palette (reserved strictly for physical / instrument states) */
+  --sig-lock: #3fc8e4;        /* instrument locked / measurement valid */
+  --sig-lock-bg: #0e2a32;
+  --sig-pass: #3ecf8e;        /* physical law satisfied (audit PASS) */
+  --sig-pass-bg: #0e2b1f;
+  --sig-warn: #f2b23e;        /* warming, assumed, fixable constraint, FIELD ONLY */
+  --sig-warn-bg: #33260c;
+  --sig-fault: #f0506a;       /* kernel refused, disturbed, violated, mutex-blocked */
+  --sig-fault-bg: #35131b;
+  --sig-idle: #5f6875;        /* idle, off, N/A */
+  --focus: #ffffff;           /* UI selection and keyboard focus */
+
+  /* Typography (system stacks only: zero FOUT/FOIT shift) */
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-num: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+
+  /* Fixed geometry tokens */
+  --gap: 6px;
+  --rail-h: 36px;
+  --rack-w: 308px;
+  --roster-w: 272px;
+  --bay-h: 276px;
+  --ctl-h: 26px;
+  --radius: 2px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bench-0);
+  color: var(--ink-1);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  line-height: 16px;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+select {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+}
+
+button:focus-visible,
+select:focus-visible,
+input:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.num,
+.kpi-value,
+.mono {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.visually-hidden {
+  position: fixed;
+  inset-block-start: 0;
+  inset-inline-start: 0;
+  inline-size: 1px;
+  block-size: 1px;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

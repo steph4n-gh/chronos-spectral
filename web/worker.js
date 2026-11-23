@@ -897,6 +897,7 @@ let showAllOverlays = false;
 let lastOverlaySyncSeq = 0;
 let rawWipeRatio = 0.0;
 let showcaseMinimalScopes = false;
+let scopeVisibilityMask = 0x0f; // bit0=Track(PiP+Persist), bit1=Phase(Hilbert+Spectral), bit2=Physics, bit3=Roster
 let strobeEnabled = true;
 const cropNorm = new Float64Array([0.0, 0.0, 1.0, 1.0]); // [x, y, w, h] in [0..1]
 
@@ -9542,12 +9543,20 @@ function configureResolutionViews(mode, forceReset = false) {
 }
 
 function renderSecondaryScopes(slotFast, fullHist) {
-  renderEulerianPip();
-  renderAllSlotPips(slotFast);
-  renderHilbertScope();
-  renderSpectralAndRingScope();
-  renderPersistenceTimeline(fullHist);
-  renderPhysicsPhaseCanvas(fullHist);
+  if ((scopeVisibilityMask & 0x01) !== 0) {
+    renderEulerianPip();
+    renderPersistenceTimeline(fullHist);
+  }
+  if ((scopeVisibilityMask & 0x08) !== 0) {
+    renderAllSlotPips(slotFast);
+  }
+  if ((scopeVisibilityMask & 0x02) !== 0) {
+    renderHilbertScope();
+    renderSpectralAndRingScope();
+  }
+  if ((scopeVisibilityMask & 0x04) !== 0) {
+    renderPhysicsPhaseCanvas(fullHist);
+  }
 }
 
 function cancelPendingHudRender() {
@@ -10351,6 +10360,9 @@ self.onmessage = async (ev) => {
       if (typeof msg.showcaseMinimalScopes === 'boolean') {
         showcaseMinimalScopes = msg.showcaseMinimalScopes;
       }
+      if (typeof msg.scopeVisibilityMask === 'number' && Number.isFinite(msg.scopeVisibilityMask)) {
+        scopeVisibilityMask = msg.scopeVisibilityMask & 0x0f;
+      }
       if (typeof msg.rawWipeRatio === 'number' && Number.isFinite(msg.rawWipeRatio)) {
         rawWipeRatio = Math.max(0.0, Math.min(1.0, msg.rawWipeRatio));
       }
@@ -10358,8 +10370,17 @@ self.onmessage = async (ev) => {
         showHeroTargets = msg.showHeroTargets;
       }
       configureResolutionViews(msg.resMode || 0, true);
-      applySceneCalibrationPreset('testbench');
-      running = true;
+      if (msg.startIdle === true) {
+        sourceMode = 'idle';
+        running = false;
+        if (hudCtx && hudCanvas) {
+          hudCtx.fillStyle = '#000000';
+          hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+        }
+      } else {
+        applySceneCalibrationPreset('testbench');
+        running = true;
+      }
       self.postMessage({
         type: 'ready',
         memoryBytes: wasmMemory.buffer.byteLength,
@@ -10371,7 +10392,9 @@ self.onmessage = async (ev) => {
         showHeroTargets,
         overlaySyncSeq: lastOverlaySyncSeq,
       });
-      scheduleNextWorkerTick();
+      if (running) {
+        scheduleNextWorkerTick();
+      }
     } catch (initErr) {
       running = false;
       self.postMessage({
@@ -11007,7 +11030,7 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'set_wind_config') {
     if (typeof msg.windMode === 'number' && Number.isFinite(msg.windMode)) {
-      windReqMode = Math.max(0, Math.min(2, Math.round(msg.windMode)));
+      windReqMode = Math.max(0, Math.min(3, Math.round(msg.windMode)));
       if (windAbiValid && typeof wasmExports.chronos_set_wind_mode === 'function') {
         wasmExports.chronos_set_wind_mode(windReqMode);
       }
@@ -11169,10 +11192,20 @@ self.onmessage = async (ev) => {
       wasmExports.chronos_reset_tracks();
     }
     resetTestbenchState();
-    if (sourceMode === 'testbench') {
+    if (sourceMode === 'idle') {
+      running = false;
+      cancelWorkerTickLoop();
+      if (hudCtx && hudCanvas) {
+        hudCtx.fillStyle = '#000000';
+        hudCtx.fillRect(0, 0, hudCanvas.width, hudCanvas.height);
+      }
+      emitTelemetrySnapshot();
+    } else if (sourceMode === 'testbench') {
+      running = true;
       applySceneCalibrationPreset('testbench');
       scheduleNextWorkerTick();
     } else {
+      running = true;
       cancelWorkerTickLoop();
     }
   } else if (msg.type === 'video_frame') {
@@ -11675,6 +11708,234 @@ self.onmessage = async (ev) => {
     }
   } else if (msg.type === 'audit_cancel') {
     auditCancelSeq++;
+  } else if (msg.type === 'set_scope_visibility') {
+    const nextMask = typeof msg.mask === 'number' && Number.isFinite(msg.mask) ? (msg.mask & 0x0f) : 0x0f;
+    const newlyRevealed = nextMask & ~scopeVisibilityMask;
+    scopeVisibilityMask = nextMask;
+    if (newlyRevealed !== 0 && wasmExports && telemView && hasAnyRenderedFrame()) {
+      renderSecondaryScopes(false, true);
+    }
+  } else if (msg.type === 'apply_instrument_config') {
+    // Atomic single-transaction instrument configuration apply (v3.5 FSM invariant:
+    // release old BOS scratch owners before enabling new prerequisites/owners so no
+    // intermediate tick can observe a transient MUTEX_CONFLICT).
+    const cfg = msg.completeConfig || {};
+    const org = cfg.organs || {};
+    const ov = cfg.overlays || {};
+    if (!wasmExports) {
+      self.postMessage({
+        type: 'config_ack',
+        txId: msg.txId ?? null,
+        applied: false,
+        appliedRevision: 0,
+        sourceEpoch: msg.sourceEpoch,
+        workerEpoch: msg.workerEpoch,
+        bosOwner: 'NONE',
+      });
+      return;
+    }
+    if (wasmExports) {
+      // 1. Release any BOS scratch owner that is turning OFF first
+      const nextDepth = typeof org.depth === 'number' ? Math.max(0, Math.min(4, Math.round(org.depth))) : depthReqMode;
+      const nextBos = typeof org.bos === 'number' ? Math.max(0, Math.min(2, Math.round(org.bos))) : bosReqMode;
+      const nextWind = typeof org.wind === 'number' ? Math.max(0, Math.min(3, Math.round(org.wind))) : windReqMode;
+      const nextElasto = typeof org.elasto === 'number' ? Math.max(0, Math.min(4, Math.round(org.elasto))) : elastoReqMode;
+
+      if (nextDepth === 0 && depthReqMode !== 0 && depthAbiValid && typeof wasmExports.chronos_set_depth_mode === 'function') {
+        depthReqMode = 0;
+        wasmExports.chronos_set_depth_mode(0);
+        depthRingValid.fill(0);
+        invalidateWave2RingStamp(24);
+      }
+      if (nextBos === 0 && bosReqMode !== 0 && wave1BosAbiValid && typeof wasmExports.chronos_set_bos_mode === 'function') {
+        bosReqMode = 0;
+        wasmExports.chronos_set_bos_mode(0);
+        bosRingValid.fill(0);
+      }
+      if (nextWind === 0 && windReqMode !== 0 && windAbiValid && typeof wasmExports.chronos_set_wind_mode === 'function') {
+        windReqMode = 0;
+        wasmExports.chronos_set_wind_mode(0);
+        windRingValid.fill(0);
+        invalidateWave2RingStamp(32);
+      }
+      if (nextElasto === 0 && elastoReqMode !== 0 && elastoAbiValid && typeof wasmExports.chronos_set_elasto_mode === 'function') {
+        elastoReqMode = 0;
+        wasmExports.chronos_set_elasto_mode(0);
+        elastoRingValid.fill(0);
+        invalidateWave2RingStamp(40);
+      }
+
+      // 2. Apply resolution & upstream prerequisites (Swarm, Hodge, Metrology, RS); only call setters on change
+      if (typeof cfg.resMode === 'number' && (cfg.resMode === 0 || cfg.resMode === 1) && cfg.resMode !== resMode) {
+        configureResolutionViews(cfg.resMode, false);
+      }
+      if (typeof org.swarm === 'number' && Number.isFinite(org.swarm)) {
+        const sm = Math.max(0, Math.min(2, Math.round(org.swarm)));
+        if (sm !== swarmMode || sm !== userSwarmMode) {
+          userSwarmMode = sm;
+          denseSwarmOverrideActive = false;
+          swarmMode = sm;
+          if (hasChronos1000Exports()) wasmExports.chronos_set_swarm_mode(sm);
+        }
+      }
+      if (typeof org.hodge === 'number' && Number.isFinite(org.hodge)) {
+        const nextHodge = Math.max(0, Math.min(2, Math.round(org.hodge)));
+        if (nextHodge !== hodgeReqMode) {
+          hodgeReqMode = nextHodge;
+          if (wave2HodgeAbiValid && typeof wasmExports.chronos_set_hodge_mode === 'function') {
+            wasmExports.chronos_set_hodge_mode(hodgeReqMode);
+          }
+          if (hodgeReqMode === 0) {
+            hodgeRingValid.fill(0);
+            invalidateWave2RingStamp(8);
+          }
+        }
+      }
+      if (typeof org.metrology === 'number' && Number.isFinite(org.metrology)) {
+        const nextMet = Math.max(0, Math.min(2, Math.round(org.metrology)));
+        if (nextMet !== microMetrologyMode) {
+          microMetrologyMode = nextMet;
+          if (wave1MetrologyAbiValid && typeof wasmExports.chronos_set_micro_metrology_mode === 'function') {
+            wasmExports.chronos_set_micro_metrology_mode(microMetrologyMode);
+          }
+          if (microMetrologyMode === 0) covRingValid.fill(0);
+        }
+      }
+      if (typeof org.rs === 'number' && Number.isFinite(org.rs)) {
+        const nextRsMode = Math.max(0, Math.min(2, Math.round(org.rs)));
+        const nextRowUs = org.rsCal && typeof org.rsCal.rowUs === 'number' ? org.rsCal.rowUs : rsCalibConfig.dtRowUs;
+        const nextExpUs = org.rsCal && typeof org.rsCal.exposureUs === 'number' ? org.rsCal.exposureUs : rsCalibConfig.exposureUs;
+        const nextRateHz = org.rsCal && typeof org.rsCal.rateHz === 'number' ? org.rsCal.rateHz : rsCalibConfig.audioRateHz;
+        const nextSkewUs = org.rsCal && typeof org.rsCal.maxSkewUs === 'number' ? org.rsCal.maxSkewUs : rsCalibConfig.maxSkewUs;
+        const rsChanged =
+          nextRsMode !== rsCalibConfig.mode ||
+          nextRowUs !== rsCalibConfig.dtRowUs ||
+          nextExpUs !== rsCalibConfig.exposureUs ||
+          nextRateHz !== rsCalibConfig.audioRateHz ||
+          nextSkewUs !== rsCalibConfig.maxSkewUs;
+        if (rsChanged) {
+          rsCalibConfig.mode = nextRsMode;
+          rsCalibConfig.dtRowUs = nextRowUs;
+          rsCalibConfig.exposureUs = nextExpUs;
+          rsCalibConfig.audioRateHz = nextRateHz;
+          rsCalibConfig.maxSkewUs = nextSkewUs;
+          if (wave2VibroAbiValid && typeof wasmExports.chronos_set_rs_calib === 'function') {
+            wasmExports.chronos_set_rs_calib(
+              rsCalibConfig.mode,
+              rsCalibConfig.dtRowUs,
+              rsCalibConfig.exposureUs,
+              rsCalibConfig.audioRateHz,
+              rsCalibConfig.maxSkewUs
+            );
+          }
+          if (rsCalibConfig.mode === 0) {
+            vibroRingValid.fill(0);
+            invalidateWave2RingStamp(0);
+          }
+        }
+      }
+
+      // 3. Apply BOS scratch owner (at most one active after Step 1)
+      if (nextDepth !== depthReqMode && depthAbiValid && typeof wasmExports.chronos_set_depth_mode === 'function') {
+        depthReqMode = nextDepth;
+        wasmExports.chronos_set_depth_mode(depthReqMode);
+      }
+      if (org.depthCal && depthAbiValid && typeof wasmExports.chronos_set_depth_calib === 'function') {
+        wasmExports.chronos_set_depth_calib(
+          Number(org.depthCal.fPx || 0),
+          Number(org.depthCal.speedMS || 0),
+          Number(org.depthCal.baselineM || 0),
+          Number(org.depthCal.maxDispPx || 32),
+          (org.depthCal.stereoSign | 0) || 0
+        );
+      }
+      if (nextBos !== bosReqMode && wave1BosAbiValid && typeof wasmExports.chronos_set_bos_mode === 'function') {
+        bosReqMode = nextBos;
+        wasmExports.chronos_set_bos_mode(bosReqMode);
+      }
+      if (cfg.resetBosRef === true && bosReqMode > 0 && wave1BosAbiValid && typeof wasmExports.chronos_reset_bos_ref === 'function') {
+        wasmExports.chronos_reset_bos_ref();
+      }
+      if (Array.isArray(org.bosGauge) && org.bosGauge.length === 4 && wave1BosAbiValid && typeof wasmExports.chronos_set_bos_gauge_roi === 'function') {
+        bosGaugeRoi = [org.bosGauge[0] | 0, org.bosGauge[1] | 0, org.bosGauge[2] | 0, org.bosGauge[3] | 0];
+        wasmExports.chronos_set_bos_gauge_roi(bosGaugeRoi[0], bosGaugeRoi[1], bosGaugeRoi[2], bosGaugeRoi[3]);
+      }
+      if (nextWind !== windReqMode && windAbiValid && typeof wasmExports.chronos_set_wind_mode === 'function') {
+        windReqMode = nextWind;
+        wasmExports.chronos_set_wind_mode(windReqMode);
+      }
+      if (typeof org.fluidDensity === 'number' && org.fluidDensity >= 0 && windAbiValid && typeof wasmExports.chronos_set_wind_fluid_density === 'function') {
+        windFluidDensity = org.fluidDensity;
+        wasmExports.chronos_set_wind_fluid_density(windFluidDensity);
+      }
+      if (nextElasto !== elastoReqMode && elastoAbiValid && typeof wasmExports.chronos_set_elasto_mode === 'function') {
+        elastoReqMode = nextElasto;
+        wasmExports.chronos_set_elasto_mode(elastoReqMode);
+      }
+      if (Array.isArray(org.lockHz) && elastoAbiValid && typeof wasmExports.chronos_set_elasto_lock_freqs === 'function') {
+        const nextLockFreqs = org.lockHz.map(Number).filter((v) => Number.isFinite(v) && v > 0.1 && v <= 50000).slice(0, 4);
+        const lockFreqsChanged = nextLockFreqs.length !== elastoLockFreqs.length ||
+          nextLockFreqs.some((v, idx) => Math.abs(v - elastoLockFreqs[idx]) > 1e-6);
+        if (lockFreqsChanged) {
+          elastoLockFreqs = nextLockFreqs;
+          wasmExports.chronos_set_elasto_lock_freqs(
+            elastoLockFreqs.length,
+            elastoLockFreqs[0] || 0,
+            elastoLockFreqs[1] || 0,
+            elastoLockFreqs[2] || 0,
+            elastoLockFreqs[3] || 0
+          );
+        }
+      }
+
+      // 4. Apply lookahead, labMode, overlays & sync ring bits
+      if (typeof org.lookahead === 'number') lookaheadK = Math.max(0, Math.min(11, Math.round(org.lookahead)));
+      if (typeof org.ecaRate === 'number') ecaAdaptRate = org.ecaRate;
+      if (typeof org.fistaLambda === 'number') fistaLambda = org.fistaLambda;
+      if (typeof org.eulerianGain === 'number') eulerianGain = org.eulerianGain;
+      if (typeof cfg.labMode === 'number') labMode = Math.max(0, Math.min(2, Math.round(cfg.labMode)));
+      wasmExports.chronos_set_params(lookaheadK, ecaAdaptRate, fistaLambda, eulerianGain, phaseOffsetRad, labMode);
+
+      if (typeof ov.field === 'number') {
+        fieldOverlayMode = Math.max(0, Math.min(15, Math.round(ov.field)));
+        if (fieldOverlayMode >= 5 && fieldOverlayMode <= 7) {
+          bosOverlayKind = fieldOverlayMode - 5;
+          if (wave1BosAbiValid && typeof wasmExports.chronos_set_bos_overlay_kind === 'function') {
+            wasmExports.chronos_set_bos_overlay_kind(bosOverlayKind);
+          }
+        }
+      }
+      if (typeof ov.hero === 'boolean') showHeroTargets = ov.hero;
+      if (typeof ov.kalman === 'boolean') showKalmanBaseline = ov.kalman;
+      if (typeof ov.allCallouts === 'boolean') showAllOverlays = ov.allCallouts;
+      if (typeof ov.eca === 'boolean') showEcaOverlay = ov.eca;
+      if (typeof ov.covEllipses === 'boolean') showCovEllipses = ov.covEllipses;
+      if (typeof ov.strobe === 'boolean') strobeEnabled = ov.strobe;
+      if (typeof ov.wipePct === 'number') rawWipeRatio = Math.max(0, Math.min(1, ov.wipePct / 100));
+      if (typeof cfg.overlaySyncSeq === 'number' && cfg.overlaySyncSeq > lastOverlaySyncSeq) {
+        lastOverlaySyncSeq = cfg.overlaySyncSeq;
+      }
+
+      syncWave2RingEnabledBits();
+      syncSwarmConfigToMain(benchScenario);
+      redrawPausedHudIfReady();
+      emitTelemetrySnapshot();
+    }
+    const autoFusedStereoActive = depthReqMode === 4 && depthAbiValid && depthTelemView && (depthTelemView[0] >>> 0) === 6;
+    const ackOwner = (depthReqMode === 2 || autoFusedStereoActive) ? 'DEPTH_STEREO'
+      : (bosReqMode > 0 ? 'BOS_THERMAL'
+      : (windReqMode > 0 ? 'WIND_TUNNEL'
+      : (elastoReqMode === 4 ? 'ELASTO_ACOUSTIC_BOS'
+      : (elastoReqMode > 0 ? 'ELASTO_SURFACE' : 'NONE'))));
+    self.postMessage({
+      type: 'config_ack',
+      txId: msg.txId ?? null,
+      applied: true,
+      appliedRevision: msg.nextRevision ?? 0,
+      sourceEpoch: msg.sourceEpoch,
+      workerEpoch: msg.workerEpoch,
+      bosOwner: ackOwner,
+    });
   } else if (msg.type === 'audit_run') {
     await runWorkerPhysicsAudit(msg);
   }
@@ -11783,9 +12044,10 @@ function makeAuditSyntheticFrames(kind, nFrames = 48, w = 320, h = 180) {
 
 async function runWorkerPhysicsAudit(msg) {
   const slot = msg.slot === 'B' ? 'B' : 'A';
+  const jobId = msg.jobId ?? null;
   const mySeq = ++auditCancelSeq;
   if (!wasmExports || !wasmMemory) {
-    self.postMessage({ type: 'audit_error', slot, message: 'Audit Wasm engine not initialized' });
+    self.postMessage({ type: 'audit_error', slot, jobId, message: 'Audit Wasm engine not initialized' });
     return;
   }
 
@@ -12084,7 +12346,7 @@ async function runWorkerPhysicsAudit(msg) {
         if (auditCancelSeq !== mySeq) return;
         stepOne(syn.frames[i], dtSec, Math.round(i * dtSec * 1_000_000), i + 1, ew, eh, [0, 0, ew, eh]);
         if ((i % 10) === 0 || i + 1 === syn.frames.length) {
-          self.postMessage({ type: 'audit_progress', slot, frame: i + 1, total: syn.frames.length });
+          self.postMessage({ type: 'audit_progress', slot, jobId, frame: i + 1, total: syn.frames.length });
         }
       }
     } else {
@@ -12154,7 +12416,7 @@ async function runWorkerPhysicsAudit(msg) {
               const px = simCtx.getImageData(0, 0, ew, eh).data;
               stepOne(px, dtSec, ptsUs, seq, srcW, srcH, lbRect);
               if ((seq % 10) === 0 || seq === sampleCount) {
-                self.postMessage({ type: 'audit_progress', slot, frame: seq, total: sampleCount });
+                self.postMessage({ type: 'audit_progress', slot, jobId, frame: seq, total: sampleCount });
               }
             } finally {
               vf.close();
@@ -12306,9 +12568,9 @@ async function runWorkerPhysicsAudit(msg) {
       perf: { wall_s: Number(((performance.now() - tStartMs) / 1000).toFixed(3)) },
       timeline,
     };
-    self.postMessage({ type: 'audit_done', slot, record });
+    self.postMessage({ type: 'audit_done', slot, jobId, record });
   } catch (err) {
-    self.postMessage({ type: 'audit_error', slot, message: String(err && err.message ? err.message : err) });
+    self.postMessage({ type: 'audit_error', slot, jobId, message: String(err && err.message ? err.message : err) });
   }
 }
 

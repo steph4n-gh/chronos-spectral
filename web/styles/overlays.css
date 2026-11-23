@@ -1,0 +1,273 @@
+/* ============================================================================
+ * CHRONOS-SPECTRAL v3.5 // Top-Layer Overlays, Presets Drawer, First-Run Card,
+ * Live Stream Modal & Keyboard Shortcuts Sheet (Zero Layout Shift by Construction)
+ * ============================================================================ */
+
+/* ---- In-Viewport Instrument-First Welcome / Drop Overlay (abs-pos inside stage) ---- */
+.viewport-welcome {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(10, 11, 13, 0.88);
+}
+.viewport-welcome[hidden] {
+  display: none;
+}
+
+.welcome-card {
+  width: min(560px, 94%);
+  padding: 18px 20px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background-color: var(--bench-1);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.welcome-title {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--ink-1);
+}
+
+.welcome-sub {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+
+.welcome-primary-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.welcome-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.welcome-divider::before,
+.welcome-divider::after {
+  content: "";
+  flex: 1;
+  block-size: 1px;
+  background-color: var(--rule);
+}
+
+.welcome-presets-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.welcome-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--ink-3);
+}
+
+/* ---- Top-Layer Bench Presets Drawer ---- */
+.overlay-drawer {
+  position: fixed;
+  inset-block: var(--rail-h) 0;
+  inset-inline-start: 0;
+  inline-size: min(620px, 96vw);
+  z-index: 800;
+  background-color: var(--bench-1);
+  border-inline-end: 1px solid var(--rule-strong);
+  border-block: 1px solid var(--rule-strong);
+  display: grid;
+  grid-template-rows: 40px 36px minmax(0, 1fr);
+  box-shadow: 12px 0 36px rgba(0, 0, 0, 0.72);
+}
+.overlay-drawer[hidden] {
+  display: none;
+}
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-0);
+}
+.drawer-head h2 {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.drawer-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 12px;
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-2);
+}
+.drawer-search input {
+  flex: 1;
+}
+
+.drawer-list {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recipe-domain-title {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  padding-block-end: 3px;
+  border-block-end: 1px solid var(--rule);
+  margin-block-end: 4px;
+}
+
+.recipe-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 7px;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background-color: var(--bench-2);
+  margin-block-end: 4px;
+}
+.recipe-row[data-active="true"] {
+  border-color: var(--sig-lock);
+  background-color: var(--sig-lock-bg);
+}
+.recipe-row-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-1);
+}
+.recipe-row-meta {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-num);
+  font-size: 10px;
+  color: var(--ink-3);
+  margin-block-start: 2px;
+}
+.recipe-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ---- Native <dialog> Modals (Live Stream & Keyboard Shortcuts) ---- */
+dialog.bench-dialog {
+  padding: 0;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background-color: var(--bench-1);
+  color: var(--ink-1);
+  width: min(680px, 94vw);
+  max-height: 86dvh;
+  overflow: auto;
+}
+dialog.bench-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.72);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-block-end: 1px solid var(--rule);
+  background-color: var(--bench-0);
+}
+.dialog-head h2 {
+  margin: 0;
+  font-family: var(--font-num);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.dialog-body {
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.live-tier-card {
+  border: 1px solid var(--rule);
+  border-radius: var(--radius);
+  background-color: var(--bench-2);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.live-tier-card h3 {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--ink-1);
+}
+.live-tier-card p {
+  margin: 0;
+  font-size: 11px;
+  color: var(--ink-2);
+}
+
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px 14px;
+  font-family: var(--font-num);
+  font-size: 11px;
+}
+.shortcut-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--rule);
+}
+.shortcut-key {
+  padding: 1px 5px;
+  border: 1px solid var(--rule-strong);
+  border-radius: var(--radius);
+  background-color: var(--bench-2);
+  color: var(--ink-1);
+  font-weight: 700;
+}
+
+/* ---- Static Host Tier-3 Notice (explicit label, not mysterious dashed border) ---- */
+body[data-static-host="true"] [data-local-server-only="true"] {
+  border-style: dashed;
+}
