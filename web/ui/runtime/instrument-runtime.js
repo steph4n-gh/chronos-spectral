@@ -4866,7 +4866,7 @@ export function initInstrumentRuntime() {
 
     setSourceButtons(btnLiveStream);
     setActiveShowcaseChip(cfg.showcaseId || '');
-    syncContextualSourceUi('live', { kind: 'LIVE_MSE' });
+    syncContextualSourceUi('live', { kind: 'LIVE_MSE', originPreset: cfg.showcaseId || null });
     dom.liveTierBadge.textContent = 'TIER 3 · FFmpeg fMP4 MSE';
     dom.liveStreamMeta.textContent = 'CONNECTING LIVE HLS...';
     dom.hudSourceLabel.textContent = `SOURCE: LIVE fMP4 MSE (${cfg.label.toUpperCase()})`;
@@ -5817,6 +5817,7 @@ export function initInstrumentRuntime() {
       sourceMsg.swarmOverride = reqSwarm;
     }
     worker.postMessage(sourceMsg);
+    postAtomicConfigToWorker(instrumentState, { resetBosRef: instrumentState.organ_config.bos > 0 });
     if (queuedCal === 'preset') {
       document.getElementById('btnCalPreset')?.click();
     } else if (queuedCal === 'auto_g') {
@@ -5944,11 +5945,11 @@ export function initInstrumentRuntime() {
       strobe: Boolean(rec.overlays.strobe),
     };
 
-    commitAtomicPlan(
+    const applyPlanNow = (recordUndo = true) => commitAtomicPlan(
       { organs: cleanOrg, overlays: nextOv, lab_mode: rec.labMode ?? 0 },
       {
         resolution_roi: { native1to1: Boolean(rec.native1to1) },
-        recordUndo: true,
+        recordUndo,
         undoLabel: settingsOnly ? `Before ${rec.key} settings` : `Before ${rec.key}`,
         markPresetModified: false,
         originPreset: settingsOnly ? instrumentState.source.originPreset : rec.key,
@@ -5966,6 +5967,7 @@ export function initInstrumentRuntime() {
     }
 
     if (settingsOnly) {
+      applyPlanNow(true);
       if (rec.cal === 'auto_g') document.getElementById('btnCalAutoG')?.click();
       else if (rec.cal === 'preset' && activeVideoUrl) document.getElementById('btnCalPreset')?.click();
       // If applied settings need 48 kHz muxed audio on an already-loaded local MP4/sample, decode it now!
@@ -5981,11 +5983,13 @@ export function initInstrumentRuntime() {
 
     dispatchInstrument({ type: 'DISMISS_WELCOME' }, true);
     if (rec.source.kind === 'webcam') {
+      applyPlanNow(true);
       activateLiveSoundProbeWebcam();
       return true;
     }
     if (rec.source.kind === 'live_mse') {
       activateShowcaseEntry('live_i80');
+      applyPlanNow(true);
       return true;
     }
     if (rec.source.kind === 'bench') {
@@ -5999,9 +6003,11 @@ export function initInstrumentRuntime() {
       dom.hudSourceLabel.textContent = `SOURCE: SIGNAL GEN (${rec.source.scenario.toUpperCase()})`;
       worker.postMessage({ type: 'set_source', sourceMode: 'testbench' });
       worker.postMessage({ type: 'set_scenario', scenario: rec.source.scenario });
+      applyPlanNow(true);
       return true;
     }
     if (rec.source.kind === 'sample') {
+      applyPlanNow(true);
       stopProbeExciter(false);
       setActiveShowcaseChip(rec.key);
       pendingShowcaseCal = rec.cal || 'none';
@@ -6011,6 +6017,7 @@ export function initInstrumentRuntime() {
       sampleVideoSelect.dispatchEvent(new Event('change', { bubbles: true }));
       return true;
     }
+    applyPlanNow(true);
     return false;
   }
 
