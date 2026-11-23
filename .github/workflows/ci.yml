@@ -197,13 +197,30 @@ jobs:
           node scripts/gate_native_parity.mjs --features=simd-force-scalar
 
   miri-scalar:
-    name: Miri (non-blocking) over the SIMD layer tests and a short kernel run, scalar backend
+    name: Miri (non-blocking, ${{ matrix.slice }})
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 90
     # Non-blocking while the findings in docs/VERIFICATION_AND_BENCHMARKS.md ("Miri") are open:
     # a failure shows on the job but the workflow still concludes `success`, so neither the
-    # other checks nor pages.yml are held back by it.
+    # other checks nor pages.yml are held back by it. Sharded in parallel so each Miri suite
+    # finishes well within its timeout instead of serializing ~150+ minutes in one runner.
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slice: simd-layer
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --target "$HOST" --features simd-force-scalar
+          - slice: kernel-ticks
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
+          - slice: depth-abi
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture
+          - slice: wind-tunnel
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_wind_tunnel -- --nocapture
+          - slice: elastography
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_elastography -- --nocapture
+          - slice: audit
+            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_audit -- --nocapture
     env:
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: "0"
@@ -221,17 +238,7 @@ jobs:
           cargo "+$MIRI_TOOLCHAIN" miri --version
           cargo "+$MIRI_TOOLCHAIN" miri setup
 
-      - name: Miri, SIMD layer tests (scalar backend; conformance, scalar math, negative controls)
+      - name: Run Miri (${{ matrix.slice }})
         run: |
           HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
-          cargo "+$MIRI_TOOLCHAIN" miri test --target "$HOST" --features simd-force-scalar
-
-      - name: Miri, kernel (chronos_init, two SD frames through chronos_tick, and depth ABI smoke)
-        if: ${{ !cancelled() }}
-        run: |
-          HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
-          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
-          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture
-          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_wind_tunnel -- --nocapture
-          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_elastography -- --nocapture
-          cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_audit -- --nocapture
+          ${{ matrix.cmd }}
