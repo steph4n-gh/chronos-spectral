@@ -56,6 +56,7 @@ export function createBenchShell({
   const btnShortcuts = document.getElementById('btnShortcuts');
   const shortcutsDialog = document.getElementById('shortcutsDialog');
   const welcomeOverlay = document.getElementById('welcomeOverlay');
+  const hudWipeTrack = document.getElementById('hudWipeTrack');
   const btnRailRec = document.getElementById('btnRailRec');
   const btnExportRecipe = document.getElementById('btnExportRecipe');
 
@@ -471,6 +472,7 @@ export function createBenchShell({
     if (welcomeOverlay) {
       const showWelcome = wl.welcomeVisible;
       if (welcomeOverlay.hidden !== !showWelcome) welcomeOverlay.hidden = !showWelcome;
+      if (hudWipeTrack && hudWipeTrack.hidden !== showWelcome) hudWipeTrack.hidden = showWelcome;
     }
 
     // 4. Visibility policy rail toggle

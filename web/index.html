@@ -631,7 +631,7 @@
                   <div class="welcome-card">
                     <div>
                       <h1 class="welcome-title">CHRONOS-SPECTRAL // OPTICAL PHYSICS INSTRUMENT</h1>
-                      <p class="welcome-sub">Client-side Rust Wasm32 SIMD128 (2.13 MiB, 0 neural weights, 0 bytes uploaded). Drop any MP4/WebM onto the viewport or pick an input below.</p>
+                      <p class="welcome-sub">Client-side Rust Wasm32 SIMD128 (2.79 MiB, 0 neural weights, 0 bytes uploaded). Drop any MP4/WebM onto the viewport or pick an input below.</p>
                     </div>
                     <div class="welcome-primary-row">
                       <button type="button" id="btnWelcomeOpenVideo" class="ctl-btn">Open / Drop Video [O]</button>
@@ -955,11 +955,11 @@
                     <div id="auditMetaB" class="audit-slot-meta">Drop MP4 or click Stutter Test (B)</div>
                   </div>
 
-                  <div style="display:flex;flex-wrap:wrap;gap:4px;max-inline-size:235px;">
+                  <div class="audit-actions">
                     <button type="button" id="btnAuditSampleRef" data-ctl="btnAuditSampleRef" class="ctl-btn sm">Real Ref (A)</button>
                     <button type="button" id="btnAuditSampleStutter" data-ctl="btnAuditSampleStutter" class="ctl-btn sm">Stutter (B)</button>
-                    <button type="button" id="btnAuditCurrent" data-ctl="btnAuditCurrent" class="ctl-btn sm" title="Audit currently loaded video clip in Slot A">Audit Loaded -&gt; A</button>
                     <button type="button" id="btnAuditLiveToggle" data-ctl="btnAuditLiveToggle" class="ctl-btn sm" aria-pressed="false">Live: OFF</button>
+                    <button type="button" id="btnAuditCurrent" data-ctl="btnAuditCurrent" class="ctl-btn sm" title="Audit currently loaded video clip in Slot A" style="grid-column:span 2;">Audit Loaded -&gt; A</button>
                     <button type="button" id="btnAuditExportJson" data-ctl="btnAuditExportJson" class="ctl-btn sm">Export JSON</button>
                   </div>
                 </div>

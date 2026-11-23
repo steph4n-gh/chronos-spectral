@@ -59,7 +59,7 @@ body {
 
 .rail-mid {
   display: grid;
-  grid-template-columns: minmax(110px, 1fr) 92px 104px 52px 198px 158px 156px;
+  grid-template-columns: minmax(108px, 1fr) 78px 118px 70px 222px 170px 148px;
   align-items: center;
   gap: 4px;
   min-inline-size: 0;
@@ -322,6 +322,12 @@ body {
   white-space: nowrap;
   overflow: hidden;
 }
+#toolOptionsHint {
+  min-inline-size: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .hud-canvas-stage {
   position: relative;
@@ -368,6 +374,9 @@ body {
 }
 .hud-wipe-track[hidden] {
   display: none !important;
+}
+#hudCanvasStage:has(#welcomeOverlay:not([hidden])) #hudWipeTrack {
+  display: none;
 }
 .hud-wipe-rail {
   position: relative;
@@ -527,18 +536,22 @@ body {
 
 .roster-head {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 56px 114px;
+  grid-template-columns: auto 44px 112px;
   align-items: center;
+  justify-content: space-between;
   gap: 4px;
   padding: 0 6px;
   border-block-end: 1px solid var(--rule);
   background-color: var(--bench-0);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--ink-2);
   overflow: hidden;
+}
+.roster-head > span:first-child {
+  white-space: nowrap;
 }
 
 #rosterScrollWell {
@@ -662,13 +675,31 @@ body {
 @media (max-width: 1360px) {
   :root {
     --rack-w: 284px;
-    --roster-w: 236px;
+    --roster-w: 244px;
   }
   .rail-mid {
-    grid-template-columns: minmax(90px, 1fr) 86px 96px 48px 176px 136px;
+    grid-template-columns: minmax(90px, 1fr) 76px 110px 64px 196px 140px;
   }
   #pillArena {
     display: none;
+  }
+  .tool-radio-group .tool-btn {
+    padding: 0 5px;
+    font-size: 10px;
+  }
+  .tool-radio-group .tool-btn .kbd {
+    display: none;
+  }
+  .tool-right-group {
+    grid-template-columns: minmax(72px, 1fr) 44px 100px 68px;
+  }
+  #btnHudHeroToggle {
+    inline-size: 100px;
+    font-size: 10px;
+  }
+  #btnHudFullscreen {
+    inline-size: 68px;
+    font-size: 10px;
   }
 }
 
@@ -718,6 +749,9 @@ body {
   }
   .bench-main {
     grid-template-columns: 1fr;
+  }
+  .bench-right {
+    order: -1;
   }
   .bench-upper {
     grid-template-columns: 1fr;

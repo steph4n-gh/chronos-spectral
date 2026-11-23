@@ -11873,14 +11873,19 @@ self.onmessage = async (ev) => {
         wasmExports.chronos_set_elasto_mode(elastoReqMode);
       }
       if (Array.isArray(org.lockHz) && elastoAbiValid && typeof wasmExports.chronos_set_elasto_lock_freqs === 'function') {
-        elastoLockFreqs = org.lockHz.map(Number).filter((v) => Number.isFinite(v) && v > 0.1 && v <= 50000).slice(0, 4);
-        wasmExports.chronos_set_elasto_lock_freqs(
-          elastoLockFreqs.length,
-          elastoLockFreqs[0] || 0,
-          elastoLockFreqs[1] || 0,
-          elastoLockFreqs[2] || 0,
-          elastoLockFreqs[3] || 0
-        );
+        const nextLockFreqs = org.lockHz.map(Number).filter((v) => Number.isFinite(v) && v > 0.1 && v <= 50000).slice(0, 4);
+        const lockFreqsChanged = nextLockFreqs.length !== elastoLockFreqs.length ||
+          nextLockFreqs.some((v, idx) => Math.abs(v - elastoLockFreqs[idx]) > 1e-6);
+        if (lockFreqsChanged) {
+          elastoLockFreqs = nextLockFreqs;
+          wasmExports.chronos_set_elasto_lock_freqs(
+            elastoLockFreqs.length,
+            elastoLockFreqs[0] || 0,
+            elastoLockFreqs[1] || 0,
+            elastoLockFreqs[2] || 0,
+            elastoLockFreqs[3] || 0
+          );
+        }
       }
 
       // 4. Apply lookahead, labMode, overlays & sync ring bits

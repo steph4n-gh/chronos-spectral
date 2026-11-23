@@ -5597,6 +5597,29 @@ export function initInstrumentRuntime() {
     syncRsLiveAudioCapture();
   }
 
+  function syncLabAndLookaheadControls(st) {
+    if (st.lab_mode !== currentLabMode) {
+      currentLabMode = st.lab_mode;
+      const copy = LAB_COPY[currentLabMode] || LAB_COPY[0];
+      if (dom.labBadge) dom.labBadge.textContent = copy.badge;
+      if (dom.labDescription) dom.labDescription.innerHTML = copy.html;
+      document.querySelectorAll('.lab-btn').forEach((b) => {
+        const on = Number(b.dataset.lab) === currentLabMode;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-pressed', String(on));
+      });
+      syncStimulusButtonAvailability();
+    }
+    if (sliderK && Number(sliderK.value) !== st.organ_config.lookahead) {
+      sliderK.value = String(st.organ_config.lookahead);
+      const effRate = (activeSourceMode === 'video' || activeSourceMode === 'live') ? activeVideoFps : 60.0;
+      const vk = document.getElementById('valK');
+      if (vk) vk.textContent = `${st.organ_config.lookahead} frames (${Math.round((st.organ_config.lookahead * 1000) / effRate)} ms)`;
+    }
+    const chkStr = document.getElementById('chkStrobe');
+    if (chkStr) chkStr.checked = Boolean(st.overlays.strobe);
+  }
+
   function commitAtomicPlan(plan, opts = {}) {
     const prevBos = instrumentState.organ_config.bos;
     const st = dispatchInstrument({
@@ -5623,26 +5646,7 @@ export function initInstrumentRuntime() {
       showCovEllipses: st.overlays.covEllipses,
       fieldOverlayMode: st.overlays.field,
     });
-    if (st.lab_mode !== currentLabMode) {
-      currentLabMode = st.lab_mode;
-      const copy = LAB_COPY[currentLabMode] || LAB_COPY[0];
-      if (dom.labBadge) dom.labBadge.textContent = copy.badge;
-      if (dom.labDescription) dom.labDescription.innerHTML = copy.html;
-      document.querySelectorAll('.lab-btn').forEach((b) => {
-        const on = Number(b.dataset.lab) === currentLabMode;
-        b.classList.toggle('active', on);
-        b.setAttribute('aria-pressed', String(on));
-      });
-      syncStimulusButtonAvailability();
-    }
-    if (sliderK && Number(sliderK.value) !== st.organ_config.lookahead) {
-      sliderK.value = String(st.organ_config.lookahead);
-      const effRate = (activeSourceMode === 'video' || activeSourceMode === 'live') ? activeVideoFps : 60.0;
-      const vk = document.getElementById('valK');
-      if (vk) vk.textContent = `${st.organ_config.lookahead} frames (${Math.round((st.organ_config.lookahead * 1000) / effRate)} ms)`;
-    }
-    const chkStr = document.getElementById('chkStrobe');
-    if (chkStr) chkStr.checked = Boolean(st.overlays.strobe);
+    syncLabAndLookaheadControls(st);
     const shouldResetBosRef = opts.resetBosRef !== undefined
       ? Boolean(opts.resetBosRef)
       : (prevBos === 0 && st.organ_config.bos > 0);
@@ -7007,6 +7011,7 @@ export function initInstrumentRuntime() {
       showCovEllipses: st.overlays.covEllipses,
       fieldOverlayMode: st.overlays.field,
     });
+    syncLabAndLookaheadControls(st);
     postAtomicConfigToWorker(st, { resetBosRef: prevBos === 0 && st.organ_config.bos > 0 });
     return true;
   }
