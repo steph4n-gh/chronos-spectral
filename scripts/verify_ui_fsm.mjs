@@ -12,7 +12,7 @@
 //      metrology 3 x bos 3 x depth 5 x rs 3 x elasto 5 x audio 2 x K>=7 2 x
 //      camMotion 2): every `planIntent` produces a legal exclusive config,
 //      idempotent repair, and zero NaN/undefined states.
-//   3. All 47 declarative recipes in `web/ui/recipes/registry.js`: zero BOS
+//   3. All 53 declarative recipes in `web/ui/recipes/registry.js`: zero BOS
 //      scratch conflicts, valid overlays/organs, zero missing dependencies.
 //   4. All 6 async / invariance release witnesses:
 //      (a) Late stereo reference under auto-fused depth

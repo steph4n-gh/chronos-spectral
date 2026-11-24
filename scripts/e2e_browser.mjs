@@ -1310,14 +1310,29 @@ async function main() {
       sessionId,
       `(() => {
         const sel = document.getElementById('sampleVideoSelect');
+        const optVals = new Set(sel ? Array.from(sel.querySelectorAll('option')).map((o) => o.value).filter(Boolean) : []);
+        const recipes = window.__chronosUi?.recipes || [];
+        const sampleRecipes = recipes.filter((r) => r?.source?.kind === 'sample');
+        const missingRecipes = sampleRecipes
+          .filter((r) => !optVals.has(r.source.url))
+          .map((r) => ({ key: r.key, url: r.source.url }));
         return {
           optgroups: sel ? sel.querySelectorAll('optgroup').length : 0,
           options: sel ? sel.querySelectorAll('option').length : 0,
+          recipeCount: recipes.length,
+          sampleRecipeCount: sampleRecipes.length,
+          missingRecipes,
         };
       })()`
     );
-    if (selectMeta.optgroups !== 7 || selectMeta.options !== 36) {
-      throw new Error(`Expected 7 <optgroup> and 36 <option> elements in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
+    if (
+      selectMeta.optgroups !== 7 ||
+      selectMeta.options !== 42 ||
+      selectMeta.recipeCount !== 53 ||
+      selectMeta.sampleRecipeCount < 41 ||
+      selectMeta.missingRecipes.length > 0
+    ) {
+      throw new Error(`Expected 7 <optgroup>, 42 <option>, 53 recipes, and 0 missing recipe mappings in #sampleVideoSelect, got ${JSON.stringify(selectMeta)}`);
     }
 
     await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click(); true;`);

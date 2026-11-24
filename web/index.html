@@ -37,7 +37,7 @@
           </svg>
           CHRONOS
         </span>
-        <button type="button" id="btnOpenPresets" data-ctl="btnOpenPresets" class="ctl-btn sm" aria-pressed="false" title="Open 47 built-in benchmark presets (P)">Presets [P]</button>
+        <button type="button" id="btnOpenPresets" data-ctl="btnOpenPresets" class="ctl-btn sm" aria-pressed="false" title="Open 53 built-in benchmark presets (P)">Presets [P]</button>
         <button type="button" id="btnVisibilityPolicy" data-ctl="btnVisibilityPolicy" class="ctl-btn sm" aria-pressed="false" title="Toggle between All Controls and Applicable-Only focus">View: All</button>
       </div>
 
@@ -331,10 +331,14 @@
                 <label for="sampleVideoSelect"><span>Built-In Calibration &amp; Physics MP4s</span></label>
                 <select id="sampleVideoSelect" data-ctl="sampleVideoSelect" class="ctl-select" name="sampleVideo">
                   <option value="">Select real-camera MP4 clip...</option>
-                  <optgroup label="Extended HD Showcases (29s to 80s)">
+                  <optgroup label="Extended HD Showcases (25s to 80s)">
                     <option value="./samples/model_rocket_full_flights.mp4" data-fps="25" data-lab="0">Model Rockets Full Flights &amp; Parachutes (31s · 25 fps)</option>
                     <option value="./samples/rocket_vtvl_full_flight.mp4" data-fps="30" data-lab="0">VTVL Rocket Pad-to-Pad Full Flight (80s · 30 fps)</option>
                     <option value="./samples/water_rocket_parachute_flights.mp4" data-fps="25" data-lab="0">Water Rocket Parachute Recovery (30s · 25 fps)</option>
+                    <option value="./samples/nasa_ingenuity_mars_flight54.mp4" data-fps="25" data-lab="0">NASA Ingenuity Mars Helicopter Flight 54 (28s · 25 fps)</option>
+                    <option value="./samples/nasa_wb57_ir_reentry.mp4" data-fps="25" data-lab="0">NASA WB-57 IR Booster Reentry MWIR (55s · 25 fps)</option>
+                    <option value="./samples/nasa_falcon9_night_landing.mp4" data-fps="30" data-lab="0">NASA Falcon 9 Night Retro-Burn Landing (30s · 30 fps)</option>
+                    <option value="./samples/fireworks_mamaroneck_salvo.mp4" data-fps="30" data-lab="0">Night-Sky Fireworks Shells Ballistic Auto-g (25s · 30 fps)</option>
                     <option value="./samples/cologne_motorway_occlusion.mp4" data-fps="30" data-lab="0">A4 Cologne Motorway Occlusion (45s · 30 fps)</option>
                     <option value="./samples/rally_ego_pan_tracking.mp4" data-fps="30" data-lab="0">Ceredigion Rally Car Ego-Pan (29s · 30 fps)</option>
                     <option value="./samples/chaotic_magnetic_pendulum.mp4" data-fps="25" data-lab="0">Chaotic Magnetic Pendulum (50s · 25 fps)</option>
@@ -350,6 +354,7 @@
                   </optgroup>
                   <optgroup label="High-Density Continuum Swarms (1,000+ Targets)">
                     <option value="./samples/starling_murmuration_1000.mp4" data-fps="30" data-lab="0" data-swarm="2">Starling Murmuration (13s · 1,353 extrema)</option>
+                    <option value="./samples/fireworks_summer_bursts.mp4" data-fps="30" data-lab="0" data-swarm="2">Multi-Shell Fireworks Radial Swarm (25s · 2,150+ sparks)</option>
                   </optgroup>
                   <optgroup label="Wave-1 BOS &amp; Failure Validation (640x360)">
                     <option value="./samples/bos_thermal_plume.mp4" data-fps="25" data-lab="0" data-swarm="2">Thermal Plume BOS (640x360 · Tripod)</option>
@@ -369,6 +374,7 @@
                     <option value="./samples/real_daphnia_laser_piv.mp4" data-fps="15" data-lab="0" data-swarm="2">Real Lab Laser-Sheet PIV 32mm Wake (14s)</option>
                     <option value="./samples/real_smoke_airfoil_cambridge.mp4" data-fps="25" data-lab="0" data-swarm="2">Real Cambridge Smoke Airfoil Stall (40s)</option>
                     <option value="./samples/real_karman_mri_cylinder.mp4" data-fps="25" data-lab="0" data-swarm="0">Real MRI Water Channel Karman Vortex (Dense Audit)</option>
+                    <option value="./samples/nasa_wstf_schlieren_mixing.mp4" data-fps="30" data-lab="0" data-swarm="2">NASA 5,000 fps Schlieren Fluid Mixing (30s · 2,900+ tracks)</option>
                   </optgroup>
                   <optgroup label="kHz Optical Elastography &amp; Lock-In Acoustic BOS">
                     <option value="./samples/elasto_hidden_crack_panel.mp4" data-fps="30" data-lab="0" data-swarm="0">kHz Kirchhoff Plate Crack Sink (9s · 48 kHz)</option>
@@ -651,7 +657,7 @@
                       <span>Zero unsolicited autoplay · Controls stay live across all inputs</span>
                       <div style="display:flex;gap:5px;">
                         <button type="button" id="btnWelcomeSignalGen" class="ctl-btn sm">Signal Generator</button>
-                        <button type="button" id="btnWelcomeAllPresets" class="ctl-btn sm">All 47 Presets [P]</button>
+                        <button type="button" id="btnWelcomeAllPresets" class="ctl-btn sm">All 53 Presets [P]</button>
                       </div>
                     </div>
                   </div>
@@ -699,7 +705,7 @@
                 </div>
 
                 <div class="transport-row" id="idleTransportRow">
-                  <span class="num" style="font-size:10.5px;color:var(--ink-3);">STANDBY · Drop any MP4/WebM onto the optical stage, press [O] to open a file, or press [P] for 47 benchmark presets.</span>
+                  <span class="num" style="font-size:10.5px;color:var(--ink-3);">STANDBY · Drop any MP4/WebM onto the optical stage, press [O] to open a file, or press [P] for 53 benchmark presets.</span>
                 </div>
               </div>
 
@@ -1012,7 +1018,7 @@
        ==================================================================== -->
   <aside id="presetsDrawer" class="overlay-drawer" hidden aria-label="Bench presets and recipes library">
     <div class="drawer-head">
-      <h2>Bench Presets &amp; Physics Recipes (47)</h2>
+      <h2>Bench Presets &amp; Physics Recipes (53)</h2>
       <button type="button" id="btnClosePresets" class="ctl-btn sm">Close [Esc]</button>
     </div>
     <div class="drawer-search">

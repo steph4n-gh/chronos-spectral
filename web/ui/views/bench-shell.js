@@ -71,7 +71,7 @@ export function createBenchShell({
   const toolHintEl = document.getElementById('toolOptionsHint');
   const activeRecipeBadge = document.getElementById('activeRecipeBadge');
 
-  // ---- Populate Presets Drawer (all 47 declarative recipes, Load + Settings Only) ----
+  // ---- Populate Presets Drawer (all 53 declarative recipes, Load + Settings Only) ----
   const recipeRowRefs = new Map();
   function buildPresetsDrawer() {
     if (!presetsList) return;

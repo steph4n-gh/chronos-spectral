@@ -5504,12 +5504,17 @@ export function initInstrumentRuntime() {
     model_rockets: { url: './samples/model_rocket_full_flights.mp4', cal: 'preset' },
     rocket_vtvl: { url: './samples/rocket_vtvl_full_flight.mp4', cal: 'preset' },
     water_rockets: { url: './samples/water_rocket_parachute_flights.mp4', cal: 'preset' },
+    nasa_ingenuity_mars: { url: './samples/nasa_ingenuity_mars_flight54.mp4', cal: 'none' },
+    nasa_wb57_ir: { url: './samples/nasa_wb57_ir_reentry.mp4', cal: 'none' },
+    nasa_falcon9_night: { url: './samples/nasa_falcon9_night_landing.mp4', cal: 'none' },
+    fireworks_mamaroneck: { url: './samples/fireworks_mamaroneck_salvo.mp4', cal: 'auto_g' },
     cologne_motorway: { url: './samples/cologne_motorway_occlusion.mp4', cal: 'preset' },
     rally_pan: { url: './samples/rally_ego_pan_tracking.mp4', cal: 'none' },
     chaos_pendulum: { url: './samples/chaotic_magnetic_pendulum.mp4', cal: 'preset' },
     coupled_metronomes: { url: './samples/coupled_metronomes_sync.mp4', cal: 'preset' },
     newtons_cradle: { url: './samples/newtons_cradle_impulses.mp4', cal: 'preset' },
     starling_1000: { url: './samples/starling_murmuration_1000.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 1, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
+    fireworks_swarm: { url: './samples/fireworks_summer_bursts.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 8, hodgeMode: 1, bosMode: 0, metrologyMode: 0, showCovEllipses: false },
     bos_plume: { url: './samples/bos_thermal_plume.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [8, 8, 36, 120], native1to1: true, metrologyMode: 2, showCovEllipses: true },
     bos_handheld_failure: { url: './samples/bos_handheld_failure.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 5, bosMode: 1, bosGauge: [8, 8, 36, 120], native1to1: true, metrologyMode: 2, showCovEllipses: true },
     perspective_flyby_decoy: { url: './samples/perspective_flyby_decoy.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 0, bosMode: 0, native1to1: true, metrologyMode: 2, showCovEllipses: true },
@@ -5523,6 +5528,7 @@ export function initInstrumentRuntime() {
     wind_daphnia_piv: { url: './samples/real_daphnia_laser_piv.mp4', cal: 'preset', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
     wind_smoke_wing: { url: './samples/real_smoke_airfoil_cambridge.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 13, hodgeMode: 1, windMode: 1 },
     wind_karman_mri: { url: './samples/real_karman_mri_cylinder.mp4', cal: 'none', resMode: 0, swarmMode: 0, overlayMode: 13, hodgeMode: 0, windMode: 3 },
+    nasa_wstf_schlieren: { url: './samples/nasa_wstf_schlieren_mixing.mp4', cal: 'none', resMode: 1, swarmMode: 2, overlayMode: 2, hodgeMode: 1 },
     elasto_crack: { url: './samples/elasto_hidden_crack_panel.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [380, 860], rsCalib: { dtRowUs: 35.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
     elasto_guitar: { url: './samples/elasto_guitar_soundboard.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [247.5, 495], rsCalib: { dtRowUs: 35.0, exposureUs: 200.0, scanDir: 0 }, native1to1: true },
     elasto_gelatin: { url: './samples/elasto_gelatin_phantom.mp4', cal: 'none', resMode: 1, swarmMode: 0, overlayMode: 14, rsMode: 2, elastoMode: 1, elastoLockFreqs: [110, 220], rsCalib: { dtRowUs: 35.0, exposureUs: 250.0, scanDir: 0 }, native1to1: true },
@@ -5746,10 +5752,25 @@ export function initInstrumentRuntime() {
     if (!pendingShowcaseEntryActive && url) {
       initialPresetBooted = true;
       const matchedEntry = Object.values(showcaseClipMap).find((c) => c && c.url === url) || {};
-      if (typeof matchedEntry.overlayMode === 'number') {
-        syncSwarmControlsForConfig(matchedEntry.resMode ?? 1, matchedEntry.swarmMode ?? reqSwarm, matchedEntry.overlayMode, false);
-      }
-      applyWave1PresetToUiAndWorker(matchedEntry);
+      const matchedRecipe = RECIPE_BY_URL[url] || null;
+      const targetSwarm = Number.isFinite(reqSwarm)
+        ? reqSwarm
+        : (typeof matchedEntry.swarmMode === 'number'
+          ? matchedEntry.swarmMode
+          : (matchedRecipe?.organs?.swarm ?? 0));
+      const targetField = typeof matchedEntry.overlayMode === 'number'
+        ? matchedEntry.overlayMode
+        : (matchedRecipe?.overlays?.field ?? 0);
+      const targetHero = typeof matchedEntry.hero === 'boolean'
+        ? matchedEntry.hero
+        : (typeof matchedRecipe?.overlays?.hero === 'boolean' ? matchedRecipe.overlays.hero : true);
+      syncSwarmControlsForConfig(matchedEntry.resMode ?? 1, targetSwarm, targetField, false);
+      applyWave1PresetToUiAndWorker({
+        ...matchedEntry,
+        swarmMode: targetSwarm,
+        overlayMode: targetField,
+        hero: targetHero,
+      });
     }
     pendingShowcaseEntryActive = false;
     const queuedCal = pendingShowcaseCal;

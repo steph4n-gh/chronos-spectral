@@ -125,6 +125,40 @@ fn run_fista_2d_dual_stage(
     dual_gap
 }
 
+#[inline(always)]
+fn clamp_hermite_tangent(
+    vx: f32,
+    vy: f32,
+    chord_x: f32,
+    chord_y: f32,
+    dt: f32,
+    scale_f: f32,
+    grav_ay_frame: f32,
+    is_ballistic: u8,
+) -> (f32, f32) {
+    let chord_len = wasm_sqrtf(chord_x * chord_x + chord_y * chord_y);
+    let safe_dt = dt.max(1.0);
+    // Max |h10(tau)| = |h11(tau)| = 4/27 (~0.148) on [0, 1]. Bounding the lever arm `dt * ||v||`
+    // keeps cubic Hermite overshoot bounded on long/zero-chord gaps while preserving parabolic
+    // apex bridges (where true endpoint lever reaches ~0.5 * |g| * dt^2 even when chord_y == 0).
+    let grav_lever = if is_ballistic != 0 {
+        0.55 * grav_ay_frame.abs() * safe_dt * safe_dt
+    } else {
+        0.0
+    };
+    let max_lever = (3.0 * chord_len)
+        .max(chord_len + 24.0 * scale_f + grav_lever)
+        .max(18.0 * scale_f * safe_dt.min(5.0));
+    let max_v = max_lever / safe_dt;
+    let v2 = vx * vx + vy * vy;
+    if v2 > max_v * max_v {
+        let inv = max_v / wasm_sqrtf(v2);
+        (vx * inv, vy * inv)
+    } else {
+        (vx, vy)
+    }
+}
+
 #[inline(never)]
 pub(crate) fn solve_noncausal_fista_target(
     t: &mut TargetTrack,
@@ -245,6 +279,15 @@ pub(crate) fn solve_noncausal_fista_target(
                         }
                     };
 
+                    let chord_x = yx[u1] - yx[u0];
+                    let chord_y = yy[u1] - yy[u0];
+                    let (v0x, v0y) = clamp_hermite_tangent(
+                        v0x, v0y, chord_x, chord_y, dt, scale_f, t.grav_ay_frame, t.is_ballistic,
+                    );
+                    let (v1x, v1y) = clamp_hermite_tangent(
+                        v1x, v1y, chord_x, chord_y, dt, scale_f, t.grav_ay_frame, t.is_ballistic,
+                    );
+
                     for k in gap_start..gap_end {
                         let tau = ((k - u0) as f32) / dt;
                         let tau2 = tau * tau;
@@ -255,24 +298,68 @@ pub(crate) fn solve_noncausal_fista_target(
                         let h01 = -2.0 * tau3 + 3.0 * tau2;
                         let h11 = tau3 - tau2;
 
-                        yx[k] = h00 * yx[u0] + h10 * (dt * v0x) + h01 * yx[u1] + h11 * (dt * v1x);
-                        yy[k] = h00 * yy[u0] + h10 * (dt * v0y) + h01 * yy[u1] + h11 * (dt * v1y);
+                        yx[k] = (h00 * yx[u0] + h10 * (dt * v0x) + h01 * yx[u1] + h11 * (dt * v1x))
+                            .clamp(tail_margin, (frame_w as f32) - tail_margin);
+                        yy[k] = (h00 * yy[u0] + h10 * (dt * v0y) + h01 * yy[u1] + h11 * (dt * v1y))
+                            .clamp(tail_margin, (frame_h as f32) - tail_margin);
                         weff[k] = 0.90;
                     }
                 } else if gap_start > 0 {
                     let u0 = gap_start - 1;
-                    let v_tail_x = if u0 >= 1 && vis[u0 - 1] != 0 {
-                        yx[u0] - yx[u0 - 1]
+                    let mut confirmed_3pt = false;
+                    let (mut v_tail_x, mut v_tail_y) = if u0 >= 1 && vis[u0 - 1] != 0 {
+                        let v01x = yx[u0] - yx[u0 - 1];
+                        let v01y = yy[u0] - yy[u0 - 1];
+                        if u0 >= 2 && vis[u0 - 2] != 0 {
+                            let vpx = yx[u0 - 1] - yx[u0 - 2];
+                            let vpy = yy[u0 - 1] - yy[u0 - 2];
+                            let m01 = wasm_sqrtf(v01x * v01x + v01y * v01y);
+                            let mp = wasm_sqrtf(vpx * vpx + vpy * vpy);
+                            if m01 > 2.2 * mp + 26.0 * scale_f {
+                                (vpx, vpy)
+                            } else {
+                                confirmed_3pt = true;
+                                (v01x, v01y)
+                            }
+                        } else {
+                            let svx = vx[u0 - 1];
+                            let svy = vy[u0 - 1];
+                            let m01 = wasm_sqrtf(v01x * v01x + v01y * v01y);
+                            let ms = wasm_sqrtf(svx * svx + svy * svy);
+                            if m01 > 2.5 * ms + 26.0 * scale_f {
+                                (svx, svy)
+                            } else {
+                                (v01x, v01y)
+                            }
+                        }
                     } else {
-                        vx[u0]
+                        (vx[u0], vy[u0])
                     };
-                    let v_tail_y = if u0 >= 1 && vis[u0 - 1] != 0 {
-                        yy[u0] - yy[u0 - 1]
+                    let tail_cap = if confirmed_3pt {
+                        40.0 * scale_f
                     } else {
-                        vy[u0]
+                        22.0 * scale_f
                     };
+                    let vt_mag = wasm_sqrtf(v_tail_x * v_tail_x + v_tail_y * v_tail_y);
+                    if vt_mag > tail_cap {
+                        let inv = tail_cap / vt_mag;
+                        v_tail_x *= inv;
+                        v_tail_y *= inv;
+                    }
+                    let damp_tail = !confirmed_3pt
+                        && t.is_ballistic == 0
+                        && t.entry_omega_f.abs() <= 0.02
+                        && vt_mag > 16.0 * scale_f;
+                    let mut dt_eff = 0.0f32;
+                    let mut step_decay = 1.0f32;
                     for k in gap_start..RING_LEN {
-                        let dt = (k - u0) as f32;
+                        let dt = if damp_tail {
+                            dt_eff += step_decay;
+                            step_decay *= 0.50;
+                            dt_eff
+                        } else {
+                            (k - u0) as f32
+                        };
                         let (cx_k, cy_k, _, _) = predict_curved_step(
                             yx[u0],
                             yy[u0],
@@ -316,6 +403,14 @@ pub(crate) fn solve_noncausal_fista_target(
                                 (sec_vx, sec_vy)
                             }
                         };
+                        let chord_x = yx[u1] - entry_x_disp;
+                        let chord_y = yy[u1] - entry_y_disp;
+                        let (v0x, v0y) = clamp_hermite_tangent(
+                            v0x, v0y, chord_x, chord_y, dt, scale_f, t.grav_ay_frame, t.is_ballistic,
+                        );
+                        let (v1x, v1y) = clamp_hermite_tangent(
+                            v1x, v1y, chord_x, chord_y, dt, scale_f, t.grav_ay_frame, t.is_ballistic,
+                        );
                         for k in 0..gap_end {
                             if frame_idx >= (RING_LEN - 1 - k) as u32 {
                                 let f_k = (frame_idx - (RING_LEN - 1 - k) as u32) as usize;
@@ -341,13 +436,59 @@ pub(crate) fn solve_noncausal_fista_target(
                             weff[k] = 0.65;
                         }
                     } else {
-                        let (v_lead_x, v_lead_y) = if gap_end + 1 < RING_LEN && vis[gap_end + 1] != 0 {
-                            (yx[gap_end + 1] - yx[gap_end], yy[gap_end + 1] - yy[gap_end])
+                        let mut confirmed_3pt = false;
+                        let (mut v_lead_x, mut v_lead_y) = if gap_end + 1 < RING_LEN && vis[gap_end + 1] != 0 {
+                            let v01x = yx[gap_end + 1] - yx[gap_end];
+                            let v01y = yy[gap_end + 1] - yy[gap_end];
+                            if gap_end + 2 < RING_LEN && vis[gap_end + 2] != 0 {
+                                let v12x = yx[gap_end + 2] - yx[gap_end + 1];
+                                let v12y = yy[gap_end + 2] - yy[gap_end + 1];
+                                let m01 = wasm_sqrtf(v01x * v01x + v01y * v01y);
+                                let m12 = wasm_sqrtf(v12x * v12x + v12y * v12y);
+                                if m01 > 2.2 * m12 + 26.0 * scale_f {
+                                    (v12x, v12y)
+                                } else {
+                                    confirmed_3pt = true;
+                                    (v01x, v01y)
+                                }
+                            } else {
+                                let svx = vx[gap_end];
+                                let svy = vy[gap_end];
+                                let m01 = wasm_sqrtf(v01x * v01x + v01y * v01y);
+                                let ms = wasm_sqrtf(svx * svx + svy * svy);
+                                if m01 > 2.5 * ms + 26.0 * scale_f {
+                                    (svx, svy)
+                                } else {
+                                    (v01x, v01y)
+                                }
+                            }
                         } else {
                             (vx[gap_end], vy[gap_end])
                         };
-                        for k in 0..gap_end {
-                            let dt = (gap_end - k) as f32;
+                        let lead_cap = if confirmed_3pt {
+                            40.0 * scale_f
+                        } else {
+                            22.0 * scale_f
+                        };
+                        let vl_mag = wasm_sqrtf(v_lead_x * v_lead_x + v_lead_y * v_lead_y);
+                        if vl_mag > lead_cap {
+                            let inv = lead_cap / vl_mag;
+                            v_lead_x *= inv;
+                            v_lead_y *= inv;
+                        }
+                        let damp_lead = !confirmed_3pt && vl_mag > 16.0 * scale_f;
+                        let mut dt_eff = 0.0f32;
+                        let mut step_decay = 1.0f32;
+                        let mut k = gap_end;
+                        while k > 0 {
+                            k -= 1;
+                            let dt = if damp_lead {
+                                dt_eff += step_decay;
+                                step_decay *= 0.50;
+                                dt_eff
+                            } else {
+                                (gap_end - k) as f32
+                            };
                             yx[k] = (yx[gap_end] - dt * v_lead_x).clamp(tail_margin, (frame_w as f32) - tail_margin);
                             yy[k] = (yy[gap_end] - dt * v_lead_y).clamp(tail_margin, (frame_h as f32) - tail_margin);
                             weff[k] = 0.65;
@@ -1057,5 +1198,161 @@ pub(crate) fn solve_noncausal_fista_target(
         }
     }
     (consumed_stimulus, pooled_ay_phys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hermite_tangent_clamp_preserves_parabola_and_bounds_spike() {
+        // Normal parabolic chord: dx = 40 px over dt = 4 frames (secant = 10 px/f), v = 18 px/f
+        let (vx, vy) = clamp_hermite_tangent(18.0, 0.0, 40.0, 0.0, 4.0, 2.0, 0.0, 0);
+        assert!((vx - 18.0).abs() < 1e-5 && vy == 0.0);
+
+        // Extreme corrupted spike tangent: v = -200 px/f on a 10 px chord over 4 frames
+        let (svx, svy) = clamp_hermite_tangent(-200.0, 0.0, 10.0, 0.0, 4.0, 2.0, 0.0, 0);
+        assert!(svx.abs() <= 37.0, "expected spike tangent bounded, got {svx}");
+        assert!(svx < 0.0 && svy == 0.0);
+
+        // Long 28-frame gap with zero chord: lever arm dt*|v| stays bounded so max (4/27) overshoot <= 27 px
+        let (lvx, _) = clamp_hermite_tangent(-42.0, 0.0, 0.0, 0.0, 28.0, 2.0, 0.0, 0);
+        assert!((28.0 * lvx).abs() <= 181.0, "expected 28f lever arm <= 180 px, got {}", 28.0 * lvx);
+    }
+
+    #[test]
+    fn unanchored_lead_in_jump_does_not_slam_into_border() {
+        let hist_t = [0.0f64; HIST_RING_LEN];
+        let hist_cam = [0.0f32; HIST_RING_LEN];
+        for &(x11, svx) in &[(324.0f32, 3.0f32), (364.0f32, 0.0f32)] {
+            let mut t = unsafe { core::mem::zeroed::<TargetTrack>() };
+            let head_slot = 11usize;
+            for u in 0..RING_LEN {
+                let s = (head_slot + 1 + u) % RING_LEN;
+                t.ring_raw_x[s] = 420.0;
+                t.ring_raw_y[s] = 178.0;
+                t.ring_vx[s] = svx;
+                t.ring_vis[s] = 0;
+            }
+            let s10 = (head_slot + 1 + 10) % RING_LEN;
+            let s11 = (head_slot + 1 + 11) % RING_LEN;
+            t.ring_raw_x[s10] = 424.0;
+            t.ring_raw_y[s10] = 178.0;
+            t.ring_vx[s10] = svx;
+            t.ring_vis[s10] = 1;
+            t.ring_raw_x[s11] = x11;
+            t.ring_raw_y[s11] = 167.0;
+            t.ring_vx[s11] = x11 - 424.0;
+            t.ring_vy[s11] = -11.0;
+            t.ring_vis[s11] = 1;
+
+            solve_noncausal_fista_target(
+                &mut t, head_slot, 3, 1.45, 30.0, 112, 0, 0, 640, 360, 2.0,
+                true, 0.0, 0.0, &hist_t, &hist_cam, &hist_cam, 0,
+            );
+            for u in 0..10 {
+                assert!(
+                    t.fista_x[u] < 540.0 && t.fista_x[u] > 280.0,
+                    "unanchored lead-in exploded (x11={x11}, svx={svx}) at u={u}: fista_x={}",
+                    t.fista_x[u]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn entry_hermite_bridge_zero_chord_does_not_slam_into_border() {
+        let mut t = unsafe { core::mem::zeroed::<TargetTrack>() };
+        let head_slot = 11usize;
+        t.has_entry = 1;
+        t.entry_frame = 83; // 28-frame gap to u1=10 (f_re = 111)
+        t.entry_x = 424.0;
+        t.entry_y = 178.0;
+        t.entry_vx = 0.0;
+        t.entry_vy = 0.0;
+        for u in 0..RING_LEN {
+            let s = (head_slot + 1 + u) % RING_LEN;
+            t.ring_raw_x[s] = 424.0;
+            t.ring_raw_y[s] = 178.0;
+            t.ring_vis[s] = 0;
+        }
+        let s10 = (head_slot + 1 + 10) % RING_LEN;
+        let s11 = (head_slot + 1 + 11) % RING_LEN;
+        t.ring_raw_x[s10] = 424.0;
+        t.ring_raw_y[s10] = 178.0;
+        t.ring_vis[s10] = 1;
+        t.ring_raw_x[s11] = 382.0;
+        t.ring_raw_y[s11] = 178.0;
+        t.ring_vis[s11] = 1;
+
+        let hist_t = [0.0f64; HIST_RING_LEN];
+        let hist_cam = [0.0f32; HIST_RING_LEN];
+        solve_noncausal_fista_target(
+            &mut t, head_slot, 3, 1.45, 30.0, 112, 0, 0, 640, 360, 2.0,
+            true, 0.0, 0.0, &hist_t, &hist_cam, &hist_cam, 0,
+        );
+        for u in 0..10 {
+            assert!(
+                t.fista_x[u] < 480.0 && t.fista_x[u] > 350.0,
+                "28f zero-chord Hermite bridge overshot at u={u}: fista_x={}",
+                t.fista_x[u]
+            );
+        }
+    }
+
+    #[test]
+    fn tail_coast_jump_does_not_slam_into_border() {
+        let hist_t = [0.0f64; HIST_RING_LEN];
+        let hist_cam = [0.0f32; HIST_RING_LEN];
+
+        // Case 1: 2 visible samples (ring_vis = 110000000000) with -100 px jump 424 -> 324
+        let mut t1 = unsafe { core::mem::zeroed::<TargetTrack>() };
+        let head_slot = 11usize;
+        for u in 0..RING_LEN {
+            let s = (head_slot + 1 + u) % RING_LEN;
+            t1.ring_raw_x[s] = 324.0;
+            t1.ring_raw_y[s] = 178.0;
+        }
+        let s0 = (head_slot + 1) % RING_LEN;
+        let s1 = (head_slot + 2) % RING_LEN;
+        t1.ring_raw_x[s0] = 424.0;
+        t1.ring_vx[s0] = 3.0;
+        t1.ring_vis[s0] = 1;
+        t1.ring_raw_x[s1] = 324.0;
+        t1.ring_vx[s1] = -100.0;
+        t1.ring_vis[s1] = 1;
+        solve_noncausal_fista_target(
+            &mut t1, head_slot, 3, 1.45, 30.0, 112, 0, 0, 640, 360, 2.0,
+            true, 0.0, 0.0, &hist_t, &hist_cam, &hist_cam, 0,
+        );
+        for u in 2..RING_LEN {
+            assert!(
+                t1.fista_x[u] > 200.0 && t1.fista_x[u] < 460.0,
+                "tail coast (2-pt jump) exploded at u={u}: fista_x={}",
+                t1.fista_x[u]
+            );
+        }
+
+        // Case 2: 4 visible samples (ring_vis = 111100000000): steady x=493 then 68 px jump to 425
+        let mut t2 = unsafe { core::mem::zeroed::<TargetTrack>() };
+        let xs = [493.3f32, 493.1, 492.6, 425.3];
+        for u in 0..RING_LEN {
+            let s = (head_slot + 1 + u) % RING_LEN;
+            t2.ring_raw_x[s] = if u < 4 { xs[u] } else { 425.3 };
+            t2.ring_raw_y[s] = 180.0;
+            t2.ring_vis[s] = if u < 4 { 1 } else { 0 };
+        }
+        solve_noncausal_fista_target(
+            &mut t2, head_slot, 3, 1.45, 30.0, 610, 0, 0, 640, 360, 2.0,
+            true, 0.0, 0.0, &hist_t, &hist_cam, &hist_cam, 0,
+        );
+        for u in 4..RING_LEN {
+            assert!(
+                t2.fista_x[u] > 360.0 && t2.fista_x[u] < 520.0,
+                "tail coast (4-pt jump) exploded at u={u}: fista_x={}",
+                t2.fista_x[u]
+            );
+        }
+    }
 }
 
