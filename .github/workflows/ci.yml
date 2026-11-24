@@ -16,10 +16,8 @@ permissions:
 #                                Gates S and N) on the NEON backend, then scalar at kernel level.
 #   native-scalar-linux-x86_64   Linux x86_64: the scalar reference backend at kernel level, the
 #                                full Gate N scenario set included.
-#   miri-scalar                  Miri over the SIMD layer tests and a short kernel run, scalar
-#                                backend. Non-blocking (continue-on-error).
-# pages.yml deploys only when this whole workflow concludes `success`, i.e. when every blocking
-# job above passed.
+# Non-blocking Miri shards run in their own workflow (.github/workflows/miri.yml) so their
+# runtime does not delay pages.yml, which deploys as soon as this workflow concludes `success`.
 #
 # Native jobs never set RUSTFLAGS: it replaces `target.*.rustflags` from .cargo/config.toml and
 # would silently drop the x86_64 SSSE3/SSE4.1 flags (build.sh Gate S uses `cargo --config`).
@@ -195,50 +193,3 @@ jobs:
           cargo test --quiet --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
           cargo test --quiet --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
           node scripts/gate_native_parity.mjs --features=simd-force-scalar
-
-  miri-scalar:
-    name: Miri (non-blocking, ${{ matrix.slice }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 180
-    # Non-blocking while the findings in docs/VERIFICATION_AND_BENCHMARKS.md ("Miri") are open:
-    # a failure shows on the job but the workflow still concludes `success`, so neither the
-    # other checks nor pages.yml are held back by it. Sharded in parallel so each Miri suite
-    # finishes well within its timeout instead of serializing ~150+ minutes in one runner.
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - slice: simd-layer
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --target "$HOST" --features simd-force-scalar
-          - slice: kernel-ticks
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test kernel_ticks -- --nocapture
-          - slice: depth-abi
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_depth miri_depth_abi_smoke -- --nocapture
-          - slice: wind-tunnel
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_wind_tunnel -- --nocapture
-          - slice: elastography
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_elastography -- --nocapture
-          - slice: audit
-            cmd: cargo "+$MIRI_TOOLCHAIN" miri test --manifest-path native/Cargo.toml --target "$HOST" --features simd-force-scalar --test miri_audit -- --nocapture
-    env:
-      CARGO_TERM_COLOR: always
-      CARGO_INCREMENTAL: "0"
-      MIRI_TOOLCHAIN: nightly-2026-10-19
-      # Stacked Borrows (Miri's default aliasing model, the stricter of the two). Nothing else.
-      MIRIFLAGS: ""
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Install the pinned nightly with Miri (Miri only; everything else uses rust-toolchain.toml)
-        run: |
-          rustup toolchain install "$MIRI_TOOLCHAIN" --profile minimal --component miri,rust-src --no-self-update
-          cargo "+$MIRI_TOOLCHAIN" miri --version
-          cargo "+$MIRI_TOOLCHAIN" miri setup
-
-      - name: Run Miri (${{ matrix.slice }})
-        run: |
-          HOST="$(rustc "+$MIRI_TOOLCHAIN" -vV | sed -n 's/^host: //p')"
-          ${{ matrix.cmd }}
