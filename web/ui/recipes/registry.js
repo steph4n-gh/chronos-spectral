@@ -1,5 +1,5 @@
 // ============================================================================
-// CHRONOS-SPECTRAL v3.5 // Unified Declarative Recipe Registry (~48 Recipes)
+// CHRONOS-SPECTRAL v3.5 // Unified Declarative Recipe Registry (53 Recipes)
 // Every demo is plain data over clean defaults: zero leaked state between demos,
 // supports both `Load` (source + settings) and `Settings Only` (apply to user video).
 // ============================================================================

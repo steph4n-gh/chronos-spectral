@@ -1,4 +1,4 @@
-//! Multi-instance C ABI (`ChronosEngine*`) for the native CHRONOS-SPECTRAL kernel (v3.4.0, ABI 4).
+//! Multi-instance C ABI (`ChronosEngine*`) for the native CHRONOS-SPECTRAL kernel (v3.5.0, ABI 4).
 //!
 //! Kept in its own crate (`native/capi/`) so the core `#![no_std]` Wasm module stays zero-import
 //! and `native/replay/kernel.rs`'s export census over `src/*.rs` stays untouched.
@@ -94,7 +94,7 @@ pub struct ChronosIngestMeta {
 
 const _: () = assert!(core::mem::size_of::<ChronosIngestMeta>() == 96);
 
-const VERSION_STR: &[u8] = concat!("3.4.0\0").as_bytes();
+const VERSION_STR: &[u8] = concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes();
 
 #[no_mangle]
 pub extern "C" fn chronos_abi_version() -> u32 {

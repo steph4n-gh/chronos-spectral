@@ -1,4 +1,4 @@
-/* C11 strict ABI & layout smoke test for CHRONOS-SPECTRAL v3.4.0 (ABI 4). */
+/* C11 strict ABI & layout smoke test for CHRONOS-SPECTRAL v3.5.0 (ABI 4). */
 #include "chronos.h"
 #include <assert.h>
 #include <math.h>
@@ -9,7 +9,7 @@
 int main(void) {
     assert(chronos_abi_version() == CHRONOS_ABI_VERSION);
     const char* ver = chronos_version_string();
-    assert(ver != NULL && strncmp(ver, "3.4.0", 5) == 0);
+    assert(ver != NULL && strncmp(ver, "3.5.0", 5) == 0);
     assert(chronos_field_layout(CHRONOS_FIELD_BOS_PLANES) == CHRONOS_LAYOUT_PLANES);
     assert(chronos_field_layout(CHRONOS_FIELD_CONTINUUM) == CHRONOS_LAYOUT_INTERLEAVED);
     assert(chronos_field_layout(CHRONOS_FIELD_TELEMETRY) == CHRONOS_LAYOUT_FLAT);

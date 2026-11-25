@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CHRONOS-SPECTRAL v3.4.0 Deterministic Physics Integrity Auditor (SDK & Streaming CLI).
+"""CHRONOS-SPECTRAL v3.5.0 Deterministic Physics Integrity Auditor (SDK & Streaming CLI).
 
 Zero hard third-party dependencies (standard library + native `libchronos_capi`).
 Optional `pyarrow` enables Parquet export; external `ffmpeg`/`ffprobe` enable MP4/MOV/WebM streaming.
@@ -1352,7 +1352,7 @@ def run_selftest(*, lib_path: Optional[str] = None) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="chronos-audit", description="CHRONOS-SPECTRAL v3.4.0 Physics Integrity Auditor")
+    parser = argparse.ArgumentParser(prog="chronos-audit", description="CHRONOS-SPECTRAL v3.5.0 Physics Integrity Auditor")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     p_scan = sub.add_parser("scan", help="Audit one or more video files or directories")

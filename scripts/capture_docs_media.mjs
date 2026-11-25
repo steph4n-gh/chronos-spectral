@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 // ============================================================================
-// CHRONOS-SPECTRAL // Deterministic Headless Chrome CDP Documentation Media Capture
+// CHRONOS-SPECTRAL v3.5.0 // Deterministic Headless Chrome CDP Documentation Media Capture
 // Generates:
-//   - docs/assets/demos/demo_starling_swarm.gif   (Starling murmuration, Hero 16 HIDDEN)
-//   - docs/assets/demos/demo_model_rockets.gif    (Model rockets launch, separation & chutes)
-//   - docs/assets/demos/demo_bos_thermal_plume.gif (BOS thermal plume refraction, Hero 16 HIDDEN)
-//   - docs/assets/demos/demo_hodge_vortex.gif     (40x22 Hodge coexact curl* psi on vortex swarm)
-//   - docs/assets/panels/01..15.png               (2x Retina screenshots of every Command Deck panel)
+//   - docs/assets/demos/demo_starling_swarm.gif    (Starling murmuration, Hero 16 HIDDEN)
+//   - docs/assets/demos/demo_model_rockets.gif     (Model rockets launch, separation & chutes)
+//   - docs/assets/demos/demo_bos_thermal_plume.gif (256x128 BOS thermal plume refraction)
+//   - docs/assets/demos/demo_hodge_vortex.gif      (64x36 Hodge coexact curl* psi on vortex swarm)
+//   - docs/assets/panels/01..17.png                (2x Retina screenshots of the v3.5.0 Instrument)
 // ============================================================================
 
 import fs from 'node:fs';
@@ -22,8 +22,8 @@ const WEB_DIR = path.join(ROOT_DIR, 'web');
 const DEMOS_DIR = path.join(ROOT_DIR, 'docs', 'assets', 'demos');
 const PANELS_DIR = path.join(ROOT_DIR, 'docs', 'assets', 'panels');
 
-const VIEWPORT_W = 1720;
-const VIEWPORT_H = 1080;
+const VIEWPORT_W = 1440;
+const VIEWPORT_H = 900;
 const DPR = 2;
 const PANELS_ONLY = process.argv.includes('--panels-only');
 
@@ -155,7 +155,7 @@ class CdpClient {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs = 20000) {
+async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs = 22000) {
   const deadline = Date.now() + timeoutMs;
   let lastVal = null;
   while (Date.now() < deadline) {
@@ -166,47 +166,24 @@ async function waitForCondition(cdp, sessionId, description, jsExpr, timeoutMs =
   throw new Error(`Timeout waiting for [${description}]. Last state: ${JSON.stringify(lastVal)}`);
 }
 
-async function setViewportHeight(cdp, sessionId, height, dpr = DPR) {
+async function setViewportSize(cdp, sessionId, width = VIEWPORT_W, height = VIEWPORT_H, dpr = DPR) {
   await cdp.send(
     'Emulation.setDeviceMetricsOverride',
-    { width: VIEWPORT_W, height, deviceScaleFactor: dpr, mobile: false },
+    { width, height, deviceScaleFactor: dpr, mobile: false },
     sessionId
   );
 }
 
 async function captureBoundingSelectors(cdp, sessionId, selectors, outPath, options = {}) {
-  const { pad = 8, dpr = DPR, waitMs = 240 } = options;
+  const { pad = 6, dpr = DPR, waitMs = 220 } = options;
   const list = Array.isArray(selectors) ? selectors : [selectors];
 
-  const meta = await cdp.evalJs(
+  const clip = await cdp.evalJs(
     sessionId,
     `(() => {
       const sels = ${JSON.stringify(list)};
       const els = sels.map((s) => document.querySelector(s)).filter(Boolean);
       if (!els.length) return null;
-      const isFixed = getComputedStyle(els[0]).position === 'fixed';
-      const maxDocBottom = isFixed
-        ? Math.ceil(Math.max(...els.map((e) => e.getBoundingClientRect().bottom)))
-        : Math.ceil(Math.max(
-            document.documentElement.scrollHeight,
-            ...els.map((e) => e.getBoundingClientRect().bottom + window.scrollY)
-          ));
-      return { isFixed, maxDocBottom };
-    })()`
-  );
-  if (!meta) {
-    throw new Error(`Missing selector group: ${list.join(', ')}`);
-  }
-
-  const targetVpH = meta.isFixed ? VIEWPORT_H : Math.max(VIEWPORT_H, meta.maxDocBottom + 120);
-  await setViewportHeight(cdp, sessionId, targetVpH, dpr);
-
-  const clip = await cdp.evalJs(
-    sessionId,
-    `(() => {
-      if (!${meta.isFixed}) window.scrollTo(0, 0);
-      const sels = ${JSON.stringify(list)};
-      const els = sels.map((s) => document.querySelector(s)).filter(Boolean);
       return new Promise((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => {
           setTimeout(() => {
@@ -220,14 +197,17 @@ async function captureBoundingSelectors(cdp, sessionId, selectors, outPath, opti
             }
             const x = Math.max(0, Math.floor(x0 - ${pad}));
             const y = Math.max(0, Math.floor(y0 - ${pad}));
-            const w = Math.min(${VIEWPORT_W} - x, Math.ceil(x1 - x0 + ${pad * 2}));
-            const h = Math.min(${targetVpH} - y, Math.ceil(y1 - y0 + ${pad * 2}));
+            const w = Math.min(window.innerWidth - x, Math.ceil(x1 - x0 + ${pad * 2}));
+            const h = Math.min(window.innerHeight - y, Math.ceil(y1 - y0 + ${pad * 2}));
             resolve({ x, y, width: w, height: h, scale: 1 });
           }, ${waitMs});
         }));
       });
     })()`
   );
+  if (!clip || clip.width <= 0 || clip.height <= 0) {
+    throw new Error(`Missing or empty selector group: ${list.join(', ')}`);
+  }
 
   const shot = await cdp.send(
     'Page.captureScreenshot',
@@ -236,9 +216,6 @@ async function captureBoundingSelectors(cdp, sessionId, selectors, outPath, opti
   );
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
   fs.writeFileSync(outPath, Buffer.from(shot.data, 'base64'));
-  if (targetVpH !== VIEWPORT_H) {
-    await setViewportHeight(cdp, sessionId, VIEWPORT_H, dpr);
-  }
   const bytes = fs.statSync(outPath).size;
   console.log(`  [PNG] ${path.relative(ROOT_DIR, outPath)} (${clip.width}x${clip.height} @${dpr}x, ${(bytes / 1024).toFixed(1)} KiB)`);
 }
@@ -263,7 +240,7 @@ async function setHeroToggle(cdp, sessionId, visible) {
   await cdp.evalJs(
     sessionId,
     `(() => {
-      const cur = window.__chronosUiState?.overlays?.showHeroTargets;
+      const cur = window.__chronosUi?.getState()?.overlays?.hero;
       if (Boolean(cur) !== ${Boolean(visible)}) {
         document.getElementById('btnHudHeroToggle')?.click();
       }
@@ -275,9 +252,42 @@ async function setHeroToggle(cdp, sessionId, visible) {
     sessionId,
     `Hero toggle -> ${visible}`,
     `(() => ({
-      ok: Boolean(window.__chronosUiState?.overlays?.showHeroTargets) === ${Boolean(visible)},
-      cur: window.__chronosUiState?.overlays?.showHeroTargets
+      ok: Boolean(window.__chronosUi?.getState()?.overlays?.hero) === ${Boolean(visible)},
+      cur: window.__chronosUi?.getState()?.overlays?.hero
     }))()`
+  );
+}
+
+async function setWipePct(cdp, sessionId, pct) {
+  await cdp.evalJs(
+    sessionId,
+    `(() => {
+      const sl = document.getElementById('showcaseWipeSlider');
+      if (sl) {
+        sl.value = String(${pct});
+        sl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      return true;
+    })()`
+  );
+  await sleep(120);
+}
+
+async function pauseVideo(cdp, sessionId) {
+  await cdp.evalJs(
+    sessionId,
+    `(() => {
+      const v = document.getElementById('hiddenVideoSource');
+      if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click();
+      return true;
+    })()`
+  );
+  await waitForCondition(
+    cdp,
+    sessionId,
+    'video paused',
+    `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`,
+    8000
   );
 }
 
@@ -314,70 +324,47 @@ async function stepForwardNFrames(cdp, sessionId, count) {
   await sleep(65);
 }
 
-async function captureHudSequenceGif(cdp, sessionId, ffmpegBin, cfg) {
-  const { frameDir, outGifPath, showcase, startTimeSec, totalGifFrames, strideFrames, gifFps, scaleWidth, heroVisible, beforePauseCheck, onMidFrameCapture } = cfg;
-  fs.mkdirSync(frameDir, { recursive: true });
-
-  await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
-  await cdp.evalJs(
+async function getHudStageClip(cdp, sessionId) {
+  return cdp.evalJs(
     sessionId,
     `(() => {
-      document.querySelector(${JSON.stringify(`.showcase-btn[data-showcase="${showcase}"]`)})?.click();
-      return true;
-    })()`
-  );
-  await setHeroToggle(cdp, sessionId, heroVisible);
-
-  if (beforePauseCheck) {
-    await waitForCondition(cdp, sessionId, `${showcase} pre-capture condition`, beforePauseCheck, 22000);
-  }
-
-  // Pause video deterministically and optionally replay/seek cleanly
-  await cdp.evalJs(
-    sessionId,
-    `(() => {
-      const v = document.getElementById('hiddenVideoSource');
-      if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click();
-      return true;
-    })()`
-  );
-  await waitForCondition(
-    cdp,
-    sessionId,
-    `${showcase} paused`,
-    `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`
-  );
-
-  if (typeof startTimeSec === 'number') {
-    if (startTimeSec <= 0.05) {
-      await cdp.evalJs(sessionId, `document.getElementById('btnVidReplay').click(); true;`);
-      await sleep(180);
-      await cdp.evalJs(sessionId, `(() => { const v = document.getElementById('hiddenVideoSource'); if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click(); return true; })()`);
-      await waitForCondition(cdp, sessionId, `${showcase} replayed & paused`, `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`);
-    }
-  }
-
-  const clip = await cdp.evalJs(
-    sessionId,
-    `(() => {
-      const hud = document.getElementById('hudPanel');
-      hud.scrollIntoView({ block: 'start', inline: 'nearest' });
-      window.scrollTo(0, Math.max(0, Math.floor(hud.getBoundingClientRect().top + window.scrollY - 8)));
+      const stage = document.getElementById('hudCanvasStage');
       return new Promise((resolve) => {
         requestAnimationFrame(() => requestAnimationFrame(() => {
-          const r = hud.getBoundingClientRect();
+          const r = stage.getBoundingClientRect();
           resolve({
-            x: Math.max(0, Math.floor(r.left - 4)),
-            y: Math.max(0, Math.floor(r.top - 4)),
-            width: Math.ceil(r.width + 8),
-            height: Math.ceil(r.height + 8),
+            x: Math.max(0, Math.floor(r.left)),
+            y: Math.max(0, Math.floor(r.top)),
+            width: Math.ceil(r.width),
+            height: Math.ceil(r.height),
             scale: 1,
           });
         }));
       });
     })()`
   );
+}
 
+async function captureHudSequenceGif(cdp, sessionId, ffmpegBin, cfg) {
+  const { frameDir, outGifPath, recipeKey, startTimeSec, totalGifFrames, strideFrames, gifFps, scaleWidth, heroVisible, wipePct = 0, beforePauseCheck, onMidFrameCapture } = cfg;
+  fs.mkdirSync(frameDir, { recursive: true });
+
+  await cdp.evalJs(sessionId, `window.__chronosUi.loadRecipe(${JSON.stringify(recipeKey)}); true;`);
+  await setHeroToggle(cdp, sessionId, heroVisible);
+  await setWipePct(cdp, sessionId, wipePct);
+
+  if (beforePauseCheck) {
+    await waitForCondition(cdp, sessionId, `${recipeKey} pre-capture condition`, beforePauseCheck, 24000);
+  }
+
+  await pauseVideo(cdp, sessionId);
+  if (typeof startTimeSec === 'number' && startTimeSec <= 0.05) {
+    await cdp.evalJs(sessionId, `document.getElementById('btnVidReplay').click(); true;`);
+    await sleep(180);
+    await pauseVideo(cdp, sessionId);
+  }
+
+  const clip = await getHudStageClip(cdp, sessionId);
   for (let i = 0; i < totalGifFrames; i++) {
     await stepForwardNFrames(cdp, sessionId, strideFrames);
     await cdp.evalJs(sessionId, `new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`);
@@ -386,20 +373,18 @@ async function captureHudSequenceGif(cdp, sessionId, ffmpegBin, cfg) {
       { format: 'png', captureBeyondViewport: false, clip },
       sessionId
     );
-    const frameFile = path.join(frameDir, `frame_${String(i).padStart(4, '0')}.png`);
-    fs.writeFileSync(frameFile, Buffer.from(shot.data, 'base64'));
+    fs.writeFileSync(path.join(frameDir, `frame_${String(i).padStart(4, '0')}.png`), Buffer.from(shot.data, 'base64'));
     if (onMidFrameCapture) {
       await onMidFrameCapture(i, totalGifFrames);
     }
   }
 
   await encodeGifFromFrames(ffmpegBin, frameDir, outGifPath, gifFps, scaleWidth);
-  await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
 }
 
 async function main() {
   console.log('========================================================================');
-  console.log(' CHRONOS-SPECTRAL // Documentation Media Capture (GIFs + Panel PNGs)');
+  console.log(' CHRONOS-SPECTRAL v3.5.0 // Documentation Media Capture');
   console.log('========================================================================');
 
   const chromeBin = findChromeBinary();
@@ -409,7 +394,7 @@ async function main() {
   fs.mkdirSync(chromeUserDir, { recursive: true });
 
   const srv = await startChronosServer({ rootDir: WEB_DIR, port: 0, host: '127.0.0.1' });
-  const appUrl = `http://127.0.0.1:${srv.port}/index.html?view=deck`;
+  const appUrl = `http://127.0.0.1:${srv.port}/index.html`;
   let chromeProc = null;
   let cdp = null;
 
@@ -423,267 +408,93 @@ async function main() {
     const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
-    await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+    await setViewportSize(cdp, sessionId, VIEWPORT_W, VIEWPORT_H, DPR);
 
     await waitForCondition(
       cdp,
       sessionId,
       'Wasm boot ready',
-      `(() => ({ ok: (document.getElementById('pillKernel')?.textContent || '').includes('0 HEAP ALLOC') }))()`
+      `(() => ({ ok: Boolean(window.__chronosUi) && (document.getElementById('pillKernel')?.textContent || '').includes('0 HEAP ALLOC') }))()`
     );
 
     if (!PANELS_ONLY) {
-      // ------------------------------------------------------------------------
-      // Phase 1: Demo GIF #1 — Starling Murmuration Swarm WITHOUT Hero-16 Trackers
-      // ------------------------------------------------------------------------
       console.log('\n[Phase 1] Capturing Starling Murmuration GIF (Hero 16 HIDDEN)...');
-      let starlingHudStillCaptured = false;
       await captureHudSequenceGif(cdp, sessionId, ffmpegBin, {
         frameDir: path.join(tmpDir, 'gif_starling'),
         outGifPath: path.join(DEMOS_DIR, 'demo_starling_swarm.gif'),
-        showcase: 'starling_1000',
+        recipeKey: 'starling_1000',
         totalGifFrames: 75,
         strideFrames: 1,
         gifFps: 18,
         scaleWidth: 640,
         heroVisible: false,
+        wipePct: 0,
         beforePauseCheck: `(() => {
           const v = document.getElementById('hiddenVideoSource');
           const conf = parseInt(((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0] || '0').replace(/,/g, ''), 10);
-          const hiddenText = (document.getElementById('btnHudHeroToggle')?.textContent || '').toUpperCase();
-          return {
-            ok: v && v.currentTime >= 2.0 && conf >= 1150 && hiddenText.includes('HIDDEN') && window.__chronosUiState?.overlays?.showHeroTargets === false,
-            t: v?.currentTime || 0,
-            conf,
-          };
+          return { ok: Boolean(v && v.currentTime >= 2.0 && conf >= 1050), t: v?.currentTime || 0, conf };
         })()`,
-        onMidFrameCapture: async (i, total) => {
-          if (!starlingHudStillCaptured && i === Math.floor(total * 0.45)) {
-            starlingHudStillCaptured = true;
-            await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '03_hud_starling_swarm.png'));
-          }
-        },
       });
-      await setHeroToggle(cdp, sessionId, true);
 
-      // ------------------------------------------------------------------------
-      // Phase 2: Demo GIF #2 — Model Rockets Launch, Stage Sep & Parachute Recovery
-      // ------------------------------------------------------------------------
       console.log('\n[Phase 2] Capturing Model Rockets Full-Flight GIF (Hero 16 ON)...');
-      let capturedRocketDeckAndPanels = false;
       await captureHudSequenceGif(cdp, sessionId, ffmpegBin, {
         frameDir: path.join(tmpDir, 'gif_rockets'),
         outGifPath: path.join(DEMOS_DIR, 'demo_model_rockets.gif'),
-        showcase: 'model_rockets',
+        recipeKey: 'model_rockets',
         startTimeSec: 0.0,
         totalGifFrames: 92,
-        strideFrames: 4, // Advances deterministic 25fps frame-by-frame across 0.0s .. 14.7s (boost, sep, apogee, twin chutes)
+        strideFrames: 4,
         gifFps: 14,
         scaleWidth: 640,
         heroVisible: true,
+        wipePct: 0,
         beforePauseCheck: `(() => {
           const v = document.getElementById('hiddenVideoSource');
-          const btn = document.querySelector('.showcase-btn[data-showcase="model_rockets"]');
-          return { ok: Boolean(btn?.getAttribute('aria-pressed') === 'true' && v && v.readyState >= 2) };
+          return { ok: Boolean(v && v.readyState >= 2) };
         })()`,
-        onMidFrameCapture: async (i, total) => {
-          if (!capturedRocketDeckAndPanels && i >= 22) {
-            const active = await cdp.evalJs(
-              sessionId,
-              `parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0`
-            );
-            if (active >= 1 || i === Math.floor(total * 0.3)) {
-              capturedRocketDeckAndPanels = true;
-              await captureBoundingSelectors(cdp, sessionId, 'header.deck-header', path.join(PANELS_DIR, '02_header_telemetry.png'));
-              await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '04_hud_model_rockets.png'));
-            }
-          }
-        },
       });
 
-      // ------------------------------------------------------------------------
-      // Phase 2b: Demo GIF #3 — BOS Thermal Plume Schlieren (Hero 16 HIDDEN)
-      // ------------------------------------------------------------------------
-      console.log('\n[Phase 2b] Capturing BOS Thermal Plume GIF (Hero 16 HIDDEN)...');
-      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+      console.log('\n[Phase 2b] Capturing 256x128 BOS Thermal Plume GIF...');
+      await captureHudSequenceGif(cdp, sessionId, ffmpegBin, {
+        frameDir: path.join(tmpDir, 'gif_bos_plume'),
+        outGifPath: path.join(DEMOS_DIR, 'demo_bos_thermal_plume.gif'),
+        recipeKey: 'bos_plume',
+        totalGifFrames: 64,
+        strideFrames: 2,
+        gifFps: 16,
+        scaleWidth: 640,
+        heroVisible: false,
+        wipePct: 0,
+        beforePauseCheck: `(() => {
+          const v = document.getElementById('hiddenVideoSource');
+          const bos = window.__chronosWave1Probe?.getLastWave1()?.bos;
+          return { ok: Boolean(v && v.currentTime >= 1.1 && bos && bos.state === 2), t: v?.currentTime, state: bos?.state };
+        })()`,
+      });
+
+      console.log('\n[Phase 2c] Capturing 64x36 Mesh Hodge Coexact Vortex GIF...');
+      await cdp.evalJs(sessionId, `window.__chronosUi.loadRecipe('vortex_1200'); true;`);
+      await setHeroToggle(cdp, sessionId, false);
+      await setWipePct(cdp, sessionId, 0);
       await cdp.evalJs(
         sessionId,
         `(() => {
-          document.querySelector('.showcase-btn[data-showcase="bos_plume"]')?.click();
+          window.__chronosUi.applyIntent({ kind: 'SET_HODGE', mode: 2 });
+          window.__chronosUi.applyIntent({ kind: 'SET_OVERLAY', field: 9 });
           return true;
         })()`
       );
-      await setHeroToggle(cdp, sessionId, false);
       await waitForCondition(
         cdp,
         sessionId,
-        'bos_plume playing and BOS READY after 16f reference lock',
+        '64x36 Mesh Hodge converged on vortex_1200',
         `(() => {
-          const v = document.getElementById('hiddenVideoSource');
-          const btn = document.querySelector('.showcase-btn[data-showcase="bos_plume"]');
-          const bos = window.__chronosWave1Probe?.getLastWave1()?.bos;
-          const diag = document.getElementById('diagBosState')?.textContent || '';
-          return {
-            ok: Boolean(
-              btn?.getAttribute('aria-pressed') === 'true' &&
-              v &&
-              v.readyState >= 2 &&
-              !v.paused &&
-              v.currentTime >= 1.1 &&
-              v.currentTime <= 3.5 &&
-              bos &&
-              bos.state === 2 &&
-              diag.startsWith('READY · ')
-            ),
-            t: v?.currentTime,
-            state: bos?.state,
-            diag,
-          };
+          const h = window.__chronosWave2Probe?.getLastWave2()?.hodge;
+          return { ok: Boolean(h && h.state === 2 && h.converged === true && h.coexactFrac > 0.85), state: h?.state, co: h?.coexactFrac };
         })()`,
         22000
       );
-      await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const v = document.getElementById('hiddenVideoSource');
-          if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click();
-          return true;
-        })()`
-      );
-      await waitForCondition(cdp, sessionId, 'bos_plume paused', `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`);
-
-      const bosClip = await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const hud = document.getElementById('hudPanel');
-          hud.scrollIntoView({ block: 'start', inline: 'nearest' });
-          window.scrollTo(0, Math.max(0, Math.floor(hud.getBoundingClientRect().top + window.scrollY - 8)));
-          return new Promise((resolve) => {
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              const r = hud.getBoundingClientRect();
-              resolve({
-                x: Math.max(0, Math.floor(r.left - 4)),
-                y: Math.max(0, Math.floor(r.top - 4)),
-                width: Math.ceil(r.width + 8),
-                height: Math.ceil(r.height + 8),
-                scale: 1,
-              });
-            }));
-          });
-        })()`
-      );
-      const bosFrameDir = path.join(tmpDir, 'gif_bos_plume');
-      fs.mkdirSync(bosFrameDir, { recursive: true });
-      for (let i = 0; i < 64; i++) {
-        await stepForwardNFrames(cdp, sessionId, 2);
-        await cdp.evalJs(sessionId, `new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))`);
-        const shot = await cdp.send(
-          'Page.captureScreenshot',
-          { format: 'png', captureBeyondViewport: false, clip: bosClip },
-          sessionId
-        );
-        fs.writeFileSync(path.join(bosFrameDir, `frame_${String(i).padStart(4, '0')}.png`), Buffer.from(shot.data, 'base64'));
-      }
-      await encodeGifFromFrames(ffmpegBin, bosFrameDir, path.join(DEMOS_DIR, 'demo_bos_thermal_plume.gif'), 16, 640);
-      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
-      await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const resetSel = (id, val) => {
-            const el = document.getElementById(id);
-            if (el && el.value !== val) {
-              el.value = val;
-              el.dispatchEvent(new Event('change', { bubbles: true }));
-            }
-          };
-          resetSel('bosModeSelect', '0');
-          resetSel('metrologyModeSelect', '0');
-          resetSel('fieldOverlayModeSelect', '0');
-          const chkNative = document.getElementById('chkNativeRoi');
-          if (chkNative && chkNative.checked) {
-            chkNative.checked = false;
-            chkNative.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-          return true;
-        })()`
-      );
-      await setHeroToggle(cdp, sessionId, true);
-
-      // ------------------------------------------------------------------------
-      // Phase 2c: Demo GIF #4 — 40x22 Mesh Hodge Coexact Vortex Decomposition
-      // ------------------------------------------------------------------------
-      console.log('\n[Phase 2c] Capturing 40x22 Mesh Hodge Vortex GIF (Hero 16 HIDDEN)...');
-      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
-      await cdp.evalJs(
-        sessionId,
-        `(() => {
-          document.querySelector('.showcase-btn[data-showcase="vortex_1200"]')?.click();
-          return true;
-        })()`
-      );
-      await setHeroToggle(cdp, sessionId, false);
-      await waitForCondition(
-        cdp,
-        sessionId,
-        'vortex_1200 showcase active and swarm ready',
-        `(() => {
-          const btn = document.querySelector('.showcase-btn[data-showcase="vortex_1200"]');
-          const meta = document.getElementById('continuumSummaryMeta')?.textContent || '';
-          return {
-            ok: Boolean(btn?.getAttribute('aria-pressed') === 'true' && meta.startsWith('SWARM: ACTIVE')),
-            meta,
-          };
-        })()`,
-        20000
-      );
-      await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const hm = document.getElementById('hodgeModeSelect');
-          if (hm) { hm.value = '2'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
-          const ov = document.getElementById('fieldOverlayModeSelect');
-          if (ov) { ov.value = '9'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
-          return true;
-        })()`
-      );
-      await waitForCondition(
-        cdp,
-        sessionId,
-        '40x22 Mesh Hodge converged on vortex_1200 (state=2, coexactFrac > 0.85)',
-        `(() => {
-          const h = window.__chronosWave2Probe?.getLastWave2()?.hodge;
-          const diag = document.getElementById('diagHodge2Complex')?.textContent || '';
-          return {
-            ok: Boolean(h && h.state === 2 && h.converged === true && h.coexactFrac > 0.85 && diag.startsWith('READY · ')),
-            state: h?.state,
-            converged: h?.converged,
-            coexactFrac: h?.coexactFrac,
-            diag,
-          };
-        })()`,
-        20000
-      );
-
-      const hodgeClip = await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const hud = document.getElementById('hudPanel');
-          hud.scrollIntoView({ block: 'start', inline: 'nearest' });
-          window.scrollTo(0, Math.max(0, Math.floor(hud.getBoundingClientRect().top + window.scrollY - 8)));
-          return new Promise((resolve) => {
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              const r = hud.getBoundingClientRect();
-              resolve({
-                x: Math.max(0, Math.floor(r.left - 4)),
-                y: Math.max(0, Math.floor(r.top - 4)),
-                width: Math.ceil(r.width + 8),
-                height: Math.ceil(r.height + 8),
-                scale: 1,
-              });
-            }));
-          });
-        })()`
-      );
+      const hodgeClip = await getHudStageClip(cdp, sessionId);
       const hodgeFrameDir = path.join(tmpDir, 'gif_hodge_vortex');
       fs.mkdirSync(hodgeFrameDir, { recursive: true });
       for (let i = 0; i < 56; i++) {
@@ -697,243 +508,230 @@ async function main() {
         fs.writeFileSync(path.join(hodgeFrameDir, `frame_${String(i).padStart(4, '0')}.png`), Buffer.from(shot.data, 'base64'));
       }
       await encodeGifFromFrames(ffmpegBin, hodgeFrameDir, path.join(DEMOS_DIR, 'demo_hodge_vortex.gif'), 16, 640);
-      await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
-      await cdp.evalJs(
-        sessionId,
-        `(() => {
-          const hm = document.getElementById('hodgeModeSelect');
-          if (hm) { hm.value = '0'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
-          const ov = document.getElementById('fieldOverlayModeSelect');
-          if (ov) { ov.value = '0'; ov.dispatchEvent(new Event('change', { bubbles: true })); }
-          return true;
-        })()`
-      );
-      await setHeroToggle(cdp, sessionId, true);
-    } else {
-      // Panels-only refresh: capture 03_hud_starling_swarm.png cleanly with Hero 16 HIDDEN
-      console.log('\n[Panels-Only] Capturing 03_hud_starling_swarm.png (Hero 16 HIDDEN)...');
-      await cdp.evalJs(sessionId, `document.querySelector('.showcase-btn[data-showcase="starling_1000"]')?.click(); true;`);
-      await setHeroToggle(cdp, sessionId, false);
-      await waitForCondition(
-        cdp,
-        sessionId,
-        'Starling 1,150+ confirmed for panel 03',
-        `(() => {
-          const v = document.getElementById('hiddenVideoSource');
-          const conf = parseInt(((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0] || '0').replace(/,/g, ''), 10);
-          return { ok: Boolean(v && v.currentTime >= 2.2 && conf >= 1150 && window.__chronosUiState?.overlays?.showHeroTargets === false) };
-        })()`,
-        20000
-      );
-      await cdp.evalJs(sessionId, `(() => { const v = document.getElementById('hiddenVideoSource'); if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click(); return true; })()`);
-      await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '03_hud_starling_swarm.png'));
-      await setHeroToggle(cdp, sessionId, true);
     }
 
-    console.log('\n[Phase 3] Capturing Individual Command Deck Panels...');
-    // Load Model Rockets cleanly from t=0, record during ascent/boost so overview/header/PiP/matrix/recorder all populate cleanly
+    console.log('\n[Phase 3] Capturing v3.5.0 Optical Physics Instrument Panels (01..17)...');
+
+    // 03: Starling Murmuration HUD (Hero 16 OFF, 64x36 Velocity field)
+    await cdp.evalJs(sessionId, `window.__chronosUi.loadRecipe('starling_1000'); true;`);
+    await setHeroToggle(cdp, sessionId, false);
+    await setWipePct(cdp, sessionId, 0);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Starling swarm >= 1,000 confirmed',
+      `(() => {
+        const v = document.getElementById('hiddenVideoSource');
+        const conf = parseInt(((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0] || '0').replace(/,/g, ''), 10);
+        return { ok: Boolean(v && v.currentTime >= 2.2 && conf >= 1000), t: v?.currentTime, conf };
+      })()`,
+      24000
+    );
+    await pauseVideo(cdp, sessionId);
+    await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '03_hud_starling_swarm.png'));
+
+    // 01, 02, 04, 05, 13, 14, 10: Model Rockets full instrument overview + rail + HUD + Track bay + Rack tabs
     await cdp.evalJs(
       sessionId,
       `(() => {
-        document.querySelector('.showcase-btn[data-showcase="model_rockets"]')?.click();
+        window.__chronosUi.loadRecipe('model_rockets');
+        window.__chronosUi.setRackTab('engines');
+        window.__chronosUi.setBayTab('track');
         return true;
       })()`
     );
+    await setHeroToggle(cdp, sessionId, true);
     await waitForCondition(
       cdp,
       sessionId,
-      'Model rockets started & ready',
+      'Model rockets playing',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
-        const btn = document.querySelector('.showcase-btn[data-showcase="model_rockets"]');
-        return { ok: Boolean(btn?.getAttribute('aria-pressed') === 'true' && v && v.readyState >= 2 && !v.paused) };
+        return { ok: Boolean(v && v.readyState >= 2 && !v.paused) };
       })()`,
       12000
     );
-    await cdp.evalJs(sessionId, `document.getElementById('btnRecToggle')?.click(); true;`);
+    await cdp.evalJs(sessionId, `document.getElementById('btnRailRec')?.click(); true;`);
     await waitForCondition(
       cdp,
       sessionId,
-      'Model rockets active flight for Deck Overview, Header, HUD, PiP & Variational Matrix',
+      'Model rockets active flight with targets & speed',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
         const t = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
         const speed = document.getElementById('kpiKinSpeed')?.textContent || '';
-        const odeR2 = parseFloat((document.getElementById('kpiPhysicsR2')?.textContent || '0').trim()) || 0;
-        const eq = document.getElementById('physicsOdeEq')?.textContent || '';
         return {
-          ok: Boolean(v && v.currentTime >= 2.0 && t >= 1 && (speed.endsWith('m/s') || speed.endsWith('px/s')) && odeR2 >= 0.35 && !eq.startsWith("x'' = 0, y'' = 0")),
-          cur: v?.currentTime, t, speed, odeR2, eq
+          ok: Boolean(v && v.currentTime >= 2.1 && t >= 1 && (speed.endsWith('m/s') || speed.endsWith('px/s'))),
+          cur: v?.currentTime, t, speed
         };
       })()`,
-      16000
+      18000
     );
+    await cdp.evalJs(sessionId, `document.getElementById('btnRailRec')?.click(); true;`);
+    await pauseVideo(cdp, sessionId);
+    await sleep(240);
 
-    await cdp.evalJs(sessionId, `(() => { document.getElementById('btnRecToggle')?.click(); const v = document.getElementById('hiddenVideoSource'); if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click(); return true; })()`);
-    await waitForCondition(cdp, sessionId, 'paused', `(() => ({ ok: document.getElementById('hiddenVideoSource')?.paused === true }))()`).catch(() => {});
-    await sleep(220);
-
-    // Ensure metric m/s readout if preset cal stayed clean
-    if (PANELS_ONLY) {
-      await captureBoundingSelectors(cdp, sessionId, 'header.deck-header', path.join(PANELS_DIR, '02_header_telemetry.png'));
-      await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '04_hud_model_rockets.png'));
-    }
-
-    // Full deck overview (01_deck_overview.png)
-    await cdp.evalJs(sessionId, `window.scrollTo(0, 0); true;`);
-    await sleep(220);
-    await setViewportHeight(cdp, sessionId, 1020, DPR);
+    // 01: Full Instrument overview (1440x900 @2x, showcasing live split-wipe at 24%)
     const fullShot = await cdp.send(
       'Page.captureScreenshot',
-      { format: 'png', captureBeyondViewport: false, clip: { x: 0, y: 0, width: VIEWPORT_W, height: 1020, scale: 1 } },
+      { format: 'png', captureBeyondViewport: false, clip: { x: 0, y: 0, width: VIEWPORT_W, height: VIEWPORT_H, scale: 1 } },
       sessionId
     );
     fs.mkdirSync(PANELS_DIR, { recursive: true });
     fs.writeFileSync(path.join(PANELS_DIR, '01_deck_overview.png'), Buffer.from(fullShot.data, 'base64'));
-    console.log(`  [PNG] docs/assets/panels/01_deck_overview.png (${VIEWPORT_W}x1020 @${DPR}x)`);
-    await setViewportHeight(cdp, sessionId, VIEWPORT_H, DPR);
+    console.log(`  [PNG] docs/assets/panels/01_deck_overview.png (${VIEWPORT_W}x${VIEWPORT_H} @${DPR}x)`);
 
-    // Capture full Split PiP panel (parent of #pipCanvas), Variational & Kinematic Matrix (parent of #fistaGapMeta), and Right Column Panels 13 & 14
+    // 02: Top 36px Status Rail
+    await captureBoundingSelectors(cdp, sessionId, 'header.bench-rail', path.join(PANELS_DIR, '02_header_telemetry.png'), { pad: 2 });
+    // 04: Model Rockets HUD
+    await captureBoundingSelectors(cdp, sessionId, '#hudPanel', path.join(PANELS_DIR, '04_hud_model_rockets.png'));
+    // 05: Scope Bay Track tab (Split PiP + 12 KPIs + Custody Timeline)
+    await captureBoundingSelectors(cdp, sessionId, '.bench-bay', path.join(PANELS_DIR, '05_split_pip_and_primary_kpis.png'), { pad: 2 });
+    // 13: Left Rack Engines tab (Scratch Bus P1..P5 + Lab Mode + Continuum Substrate + Optical Organs)
+    await captureBoundingSelectors(cdp, sessionId, 'aside.bench-rack', path.join(PANELS_DIR, '13_showcases_input_and_modes.png'), { pad: 2 });
+
+    // 14: Left Rack Calibrate tab (with Surveyed Coordinates expanded)
     await cdp.evalJs(
       sessionId,
       `(() => {
-        document.getElementById('pipCanvas')?.closest('.panel')?.setAttribute('id', 'panelPipAudit');
-        document.getElementById('fistaGapMeta')?.closest('.panel')?.setAttribute('id', 'panelVariationalMatrix');
-        document.getElementById('hilbertCanvas')?.closest('.panel')?.setAttribute('id', 'panelHilbertScope');
-        document.getElementById('spectralCanvas')?.closest('.panel')?.setAttribute('id', 'panelSpectralScope');
-        document.getElementById('inputResMeta')?.closest('.panel')?.setAttribute('id', 'panelInputSource');
-        document.getElementById('labBadge')?.closest('.panel')?.setAttribute('id', 'panelLabMode');
-        document.getElementById('calBadge')?.closest('.panel')?.setAttribute('id', 'panelCalibration');
-        document.getElementById('phaseOffsetLabel')?.closest('.panel')?.setAttribute('id', 'panelPhaseStrobe');
-        document.getElementById('sliderK')?.closest('.panel')?.setAttribute('id', 'panelHyperparams');
-        document.getElementById('recStatusLabel')?.closest('.panel')?.setAttribute('id', 'panelRecorder');
+        window.__chronosUi.setRackTab('calibrate');
+        const d = document.getElementById('calKeyboardDisclosure');
+        if (d) d.open = true;
         return true;
       })()`
     );
+    await captureBoundingSelectors(cdp, sessionId, 'aside.bench-rack', path.join(PANELS_DIR, '14_calibration_hyperparams_recorder.png'), { pad: 2 });
+    await cdp.evalJs(sessionId, `(() => { const d = document.getElementById('calKeyboardDisclosure'); if (d) d.open = false; return true; })()`);
 
-    await captureBoundingSelectors(cdp, sessionId, '#panelPipAudit', path.join(PANELS_DIR, '05_split_pip_and_primary_kpis.png'));
-    await captureBoundingSelectors(cdp, sessionId, '#panelVariationalMatrix', path.join(PANELS_DIR, '10_variational_kinematic_matrix.png'));
-    await captureBoundingSelectors(cdp, sessionId, ['.showcase-strip', '#panelInputSource', '#panelLabMode'], path.join(PANELS_DIR, '13_showcases_input_and_modes.png'));
+    // 10: Left Rack Record & Variational Tuning tab
+    await cdp.evalJs(sessionId, `window.__chronosUi.setRackTab('record'); true;`);
+    await captureBoundingSelectors(cdp, sessionId, 'aside.bench-rack', path.join(PANELS_DIR, '10_variational_kinematic_matrix.png'), { pad: 2 });
+    await cdp.evalJs(sessionId, `window.__chronosUi.setRackTab('engines'); true;`);
 
-    // Expand hyperparams tuning disclosure so 14 captures full hyperparameter controls
-    await cdp.evalJs(sessionId, `(() => { const d = document.querySelector('#panelHyperparams details.tuning-disclosure'); if (d) d.open = true; return true; })()`);
-    await captureBoundingSelectors(cdp, sessionId, ['#panelCalibration', '#panelPhaseStrobe', '#panelHyperparams', '#panelRecorder'], path.join(PANELS_DIR, '14_calibration_hyperparams_recorder.png'));
-    await cdp.evalJs(sessionId, `(() => { const d = document.querySelector('#panelHyperparams details.tuning-disclosure'); if (d) d.open = false; return true; })()`);
+    // 17: Presets Drawer (53 recipes)
+    await cdp.evalJs(sessionId, `window.__chronosUi.openPresets(true); true;`);
+    await sleep(220);
+    await captureBoundingSelectors(cdp, sessionId, '#presetsDrawer', path.join(PANELS_DIR, '17_presets_drawer.png'), { pad: 4 });
+    await cdp.evalJs(sessionId, `window.__chronosUi.openPresets(false); true;`);
 
-    // Region 3D Physics ID: galileo_pendulum_peg.mp4 yields Pendulum_Harmonic (R5), Elliptic T(theta0), Curvature, and phase portrait
+    // 11: Scope Bay Physics ODE tab on Galileo Pendulum
     await cdp.evalJs(
       sessionId,
       `(() => {
-        const sel = document.getElementById('sampleVideoSelect');
-        sel.value = './samples/galileo_pendulum_peg.mp4';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        window.__chronosUi.loadRecipe('galileo');
+        window.__chronosUi.setBayTab('physics');
         return true;
       })()`
     );
     await waitForCondition(
       cdp,
       sessionId,
-      'Galileo pendulum Physics ID with strong ODE R2 + Elliptic T + Pivot',
+      'Galileo pendulum Physics ODE fit',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
         const r2 = parseFloat((document.getElementById('kpiPhysicsR2')?.textContent || '0').trim()) || 0;
-        const ell = document.getElementById('kpiPhysicsEllipticT')?.textContent || '-- s';
+        const ell = document.getElementById('kpiPhysicsEllipticT')?.textContent || '--';
         const reg = document.getElementById('physRegimeBadge')?.textContent || '';
-        return { ok: Boolean(v && v.currentTime >= 2.2 && r2 >= 0.70 && !ell.startsWith('--') && !reg.startsWith('R0')), cur: v?.currentTime, r2, ell, reg };
+        return { ok: Boolean(v && v.currentTime >= 2.2 && r2 >= 0.70 && !ell.startsWith('--') && !reg.startsWith('R0') && reg !== 'STANDBY'), cur: v?.currentTime, r2, ell, reg };
       })()`,
-      16000
+      20000
     );
-    await sleep(600);
-    await cdp.evalJs(sessionId, `(() => { const v = document.getElementById('hiddenVideoSource'); if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click(); return true; })()`);
-    await captureBoundingSelectors(cdp, sessionId, '#physicsIdPanel', path.join(PANELS_DIR, '11_physics_id_and_phase_portrait.png'));
+    await sleep(500);
+    await pauseVideo(cdp, sessionId);
+    await captureBoundingSelectors(cdp, sessionId, '.bench-bay', path.join(PANELS_DIR, '11_physics_id_and_phase_portrait.png'), { pad: 2 });
 
-    // Region 3A Hilbert Quadrature Scope: harmonic_metronome_phase.mp4 locked at 0.80 Hz
+    // 08: Scope Bay Phase tab on Nikko Metronome 0.80 Hz
     await cdp.evalJs(
       sessionId,
       `(() => {
-        const sel = document.getElementById('sampleVideoSelect');
-        sel.value = './samples/harmonic_metronome_phase.mp4';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
+        window.__chronosUi.loadRecipe('metronome');
+        window.__chronosUi.setBayTab('phase');
         return true;
       })()`
     );
     await waitForCondition(
       cdp,
       sessionId,
-      'Metronome 0.80 Hz Hilbert Quadrature lock + clean orbit',
+      'Metronome 0.80 Hz Hilbert quadrature lock',
       `(() => {
         const v = document.getElementById('hiddenVideoSource');
         const meta = document.getElementById('hilbertMeta')?.textContent || '';
         const hz = parseFloat(document.getElementById('kpiTremorHz')?.textContent || '0') || 0;
-        return { ok: v && v.currentTime >= 3.2 && meta.includes('COH') && hz >= 0.70 && hz <= 0.92, meta, hz };
+        return { ok: Boolean(v && v.currentTime >= 3.2 && meta.includes('COH') && hz >= 0.65 && hz <= 0.95), meta, hz };
       })()`,
-      16000
+      18000
     );
-    await cdp.evalJs(sessionId, `(() => { const v = document.getElementById('hiddenVideoSource'); if (v && !v.paused) document.getElementById('btnVidPlayPause')?.click(); return true; })()`);
-    await captureBoundingSelectors(cdp, sessionId, '#panelHilbertScope', path.join(PANELS_DIR, '08_hilbert_quadrature_scope.png'));
+    await pauseVideo(cdp, sessionId);
+    await captureBoundingSelectors(cdp, sessionId, '.bench-bay', path.join(PANELS_DIR, '08_hilbert_quadrature_scope.png'), { pad: 2 });
 
-    // Region 2C Target Roster, 3B Lanczos Fiedler & Timeline, and Persistence Swimlanes: multi_target_swarm (12 discs) in HD
+    // 06, 07, 09: 16-Channel Roster, Custody Timeline, and Lanczos Spectral scope on 12-target dense swarm
     await cdp.evalJs(
       sessionId,
       `(() => {
-        document.getElementById('btnSrcTestbench').click();
-        const sel = document.getElementById('benchScenarioSelect');
-        sel.value = 'multi_target_swarm';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        document.getElementById('btnResHd').click();
+        window.__chronosUi.loadRecipe('bench_multi_target_swarm');
+        document.getElementById('btnResHd')?.click();
+        window.__chronosUi.setBayTab('track');
         return true;
       })()`
     );
     await waitForCondition(
       cdp,
       sessionId,
-      '12-target multi_target_swarm active slots + persistence swimlanes + Fiedler spectrum',
+      '12-target swarm locks & custody',
       `(() => {
         const t = parseInt((document.getElementById('kpiTargets')?.textContent || '0').split('/')[0], 10) || 0;
-        const spec = document.getElementById('spectralMeta')?.textContent || '';
         const uniq = parseInt(document.getElementById('kpiPersistUnique')?.textContent || '0', 10) || 0;
-        const m = spec.match(/λ₂ = ([-\\d.]+)/);
-        const l2 = m ? parseFloat(m[1]) : 0;
-        return { ok: t >= 8 && uniq >= 8 && l2 > 0.05, t, uniq, l2 };
+        return { ok: t >= 8 && uniq >= 8, t, uniq };
       })()`,
       16000
     );
-    await sleep(1800); // Let custody swimlanes build 3+ seconds of timeline bars & Fiedler sparkline
-    await captureBoundingSelectors(cdp, sessionId, '.roster-panel', path.join(PANELS_DIR, '06_target_roster_16slot.png'));
-    await captureBoundingSelectors(cdp, sessionId, '#persistencePanel', path.join(PANELS_DIR, '07_session_persistence.png'));
-    await captureBoundingSelectors(cdp, sessionId, '#panelSpectralScope', path.join(PANELS_DIR, '09_lanczos_fiedler_timeline.png'));
+    await sleep(1600);
+    await captureBoundingSelectors(cdp, sessionId, 'aside.bench-roster', path.join(PANELS_DIR, '06_target_roster_16slot.png'), { pad: 2 });
+    await captureBoundingSelectors(cdp, sessionId, '#persistencePanel', path.join(PANELS_DIR, '07_session_persistence.png'), { pad: 4 });
 
-    // Region 3E Continuum & Swarm Field Panel (murmuration_1200 + click-to-inspect + Expert Drawer OPEN)
+    await cdp.evalJs(sessionId, `window.__chronosUi.setBayTab('phase'); true;`);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Lanczos Fiedler lambda2 active',
+      `(() => {
+        const spec = document.getElementById('spectralMeta')?.textContent || '';
+        const m = spec.match(/= ([-\\d.]+)/);
+        const l2 = m ? parseFloat(m[1]) : 0;
+        return { ok: l2 > 0.05, spec, l2 };
+      })()`,
+      12000
+    );
+    await sleep(600);
+    await cdp.evalJs(sessionId, `document.getElementById('spectralCanvas')?.closest('.scope-frame')?.setAttribute('id', 'captureSpectralFrame'); true;`);
+    await captureBoundingSelectors(cdp, sessionId, '#captureSpectralFrame', path.join(PANELS_DIR, '09_lanczos_fiedler_timeline.png'), { pad: 4 });
+
+    // 12: Scope Bay Field & Diag tab (murmuration_1200 + 64x36 Hodge + click-to-inspect + Expert Drawer open)
     await cdp.evalJs(
       sessionId,
       `(() => {
-        const sel = document.getElementById('benchScenarioSelect');
-        sel.value = 'murmuration_1200';
-        sel.dispatchEvent(new Event('change', { bubbles: true }));
-        const hm = document.getElementById('hodgeModeSelect');
-        if (hm && hm.value !== '2') {
-          hm.value = '2';
-          hm.dispatchEvent(new Event('change', { bubbles: true }));
-        }
+        window.__chronosUi.loadRecipe('bench_murmuration_1200');
+        window.__chronosUi.applyIntent({ kind: 'SET_HODGE', mode: 2 });
+        window.__chronosUi.setBayTab('field');
+        document.getElementById('expertDiagnosticsDrawer').open = true;
         return true;
       })()`
     );
     await waitForCondition(
       cdp,
       sessionId,
-      'murmuration_1200 active >= 1100 confirmed + rigid SE(2) bodies + FTLE',
+      'murmuration_1200 >= 1,100 confirmed + SE(2) bodies + FTLE',
       `(() => {
         const conf = parseInt(((document.getElementById('kpiSwarmConfirmed')?.textContent || '0').split('/')[0] || '0').replace(/,/g, ''), 10);
         const rigid = document.getElementById('kpiRigidBodies')?.textContent || '';
         const ftle = document.getElementById('kpiContinuumFtle')?.textContent || '';
         return {
-          ok: conf >= 1100 && /^[1-9]\\d*\\s*\\|/.test(rigid) && !ftle.startsWith('WARM') && !ftle.startsWith('--'),
+          ok: conf >= 1100 && /^[1-9]\\d*/.test(rigid) && !ftle.startsWith('WARM') && !ftle.startsWith('--'),
           conf, rigid, ftle
         };
       })()`,
-      18000
+      20000
     );
-    // Probe coordinates on #hudCanvas until #swarmInspectReadout populates with INSP μT...
     for (const [nx, ny] of [[0.35, 0.42], [0.50, 0.50], [0.65, 0.58], [0.30, 0.55], [0.62, 0.40]]) {
       await cdp.evalJs(
         sessionId,
@@ -941,38 +739,64 @@ async function main() {
           const hud = document.getElementById('hudCanvas');
           const r = hud.getBoundingClientRect();
           hud.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: r.left + r.width * ${nx}, clientY: r.top + r.height * ${ny} }));
-          const hm = document.getElementById('hodgeModeSelect');
-          if (hm && hm.value !== '2') {
-            hm.value = '2';
-            hm.dispatchEvent(new Event('change', { bubbles: true }));
-          }
-          document.getElementById('expertDiagnosticsDrawer').open = true;
           return true;
         })()`
       );
-      await sleep(280);
+      await sleep(250);
       const txt = await cdp.evalJs(sessionId, `(document.getElementById('swarmInspectReadout')?.textContent || '').trim()`);
       if (txt.startsWith('INSP ')) break;
     }
-    await sleep(320);
-    await captureBoundingSelectors(cdp, sessionId, '#continuumFieldPanel', path.join(PANELS_DIR, '12_continuum_swarm_panel.png'));
+    await sleep(300);
+    await captureBoundingSelectors(cdp, sessionId, '.bench-bay', path.join(PANELS_DIR, '12_continuum_swarm_panel.png'), { pad: 2 });
+    await cdp.evalJs(sessionId, `document.getElementById('expertDiagnosticsDrawer').open = false; true;`);
+
+    // 16: Scope Bay Audit A/B tab (Slot A Real Ref PASS + Slot B Stutter FAIL)
     await cdp.evalJs(
       sessionId,
       `(() => {
-        const hm = document.getElementById('hodgeModeSelect');
-        if (hm) { hm.value = '0'; hm.dispatchEvent(new Event('change', { bubbles: true })); }
-        document.getElementById('expertDiagnosticsDrawer').open = false;
+        window.__chronosUi.setBayTab('audit');
+        document.getElementById('btnAuditSampleRef')?.click();
         return true;
       })()`
     );
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Audit Slot A complete',
+      `(() => {
+        const txt = document.getElementById('auditGradeA')?.textContent || '';
+        return { ok: txt.includes('PASS') || txt.includes('WARN') || txt.includes('FAIL'), txt };
+      })()`,
+      30000
+    );
+    await cdp.evalJs(sessionId, `document.getElementById('btnAuditSampleStutter')?.click(); true;`);
+    await waitForCondition(
+      cdp,
+      sessionId,
+      'Audit Slot B complete',
+      `(() => {
+        const txt = document.getElementById('auditGradeB')?.textContent || '';
+        return { ok: txt.includes('FAIL') || txt.includes('WARN'), txt };
+      })()`,
+      30000
+    );
+    await sleep(250);
+    await captureBoundingSelectors(cdp, sessionId, '.bench-bay', path.join(PANELS_DIR, '16_audit_ab_bench.png'), { pad: 2 });
 
-    // Region 5 Live Stream Suite modal
-    await cdp.evalJs(sessionId, `document.getElementById('btnSrcLiveStream').click(); true;`);
+    // 15: Live Stream 3-Tier Modal
+    await cdp.evalJs(
+      sessionId,
+      `(() => {
+        window.__chronosUi.setRackTab('acquire');
+        document.getElementById('btnSrcLiveStream')?.click();
+        return true;
+      })()`
+    );
     await waitForCondition(cdp, sessionId, 'Live Stream Modal Open', `(() => ({ ok: document.getElementById('liveStreamDialog')?.open === true }))()`);
     await captureBoundingSelectors(cdp, sessionId, '#liveStreamDialog', path.join(PANELS_DIR, '15_live_stream_modal.png'));
     await cdp.evalJs(sessionId, `document.getElementById('liveStreamDialog').close(); true;`);
 
-    console.log('\n[DONE] All documentation GIFs and panel screenshots generated cleanly.');
+    console.log('\n[DONE] All v3.5.0 documentation media captured cleanly.');
   } finally {
     if (cdp) cdp.close();
     if (chromeProc) chromeProc.kill('SIGKILL');
