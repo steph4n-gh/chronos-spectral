@@ -1,4 +1,4 @@
-"""Zero-dependency unittest suite for CHRONOS-SPECTRAL v3.4.0 Native C ABI + chronos-audit SDK.
+"""Zero-dependency unittest suite for CHRONOS-SPECTRAL v3.5.0 Native C ABI + chronos-audit SDK.
 
 Runs cleanly on machines with or without NumPy / ffmpeg / pyarrow (ffmpeg-dependent tests
 explicitly report `[SKIP]` when ffmpeg is absent, matching Gate N's macOS convention).
@@ -114,7 +114,7 @@ class TestChronosAuditV34(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(cs.ChronosAuditSummary), 416)
         with cs.ChronosEngine() as eng:
             self.assertEqual(eng.abi_version, cs.CHRONOS_ABI_VERSION)
-            self.assertTrue(eng.version_string.startswith("3.4.0"))
+            self.assertTrue(eng.version_string.startswith("3.5.0"))
 
     def test_reset_and_multi_handle_isolation(self) -> None:
         frames = _make_moving_ball_frames(20, 320, 180)

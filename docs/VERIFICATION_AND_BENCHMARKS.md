@@ -12,17 +12,19 @@ Ensure Rust (`wasm32-unknown-unknown`), Node.js (`v22+`), and `python3` are inst
 ./build.sh --check
 ```
 
-Runs ten sequential offline stages:
-1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`).
-2. `wasm-objdump` binary audit (`76` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `13,776 B` max call-graph shadow stack below `16,384 B`, `101,655` SIMD128 ops, `8` `i32.clz` ops).
+Runs thirteen sequential offline stages:
+1. Release compile of `chronos_spectral.wasm` (`opt-level = 3`, fat LTO, `codegen-units = 1`, `panic = "abort"`, `+simd128`) plus source hygiene check (`6` `unsafe` tokens in `src/continuum_physics.rs`, `0` `MaybeUninit` across `src/*.rs`).
+2. `wasm-objdump` binary audit (`101` exports, `0` host imports, fixed `initial=448 max=448` linear memory, `0` `memory.grow` opcodes, `0` `call_indirect`, `0` call cycles, `0` allocator symbols, `.rodata` end locked at `88,000 B`, `13,536 B` max call-graph shadow stack below `16,384 B`, `107,869` SIMD128 ops, `8` `i32.clz` ops, `75` `f32.copysign` ops).
 3. Mathematical counterexample gates (`Gates A-P`, including `N1` and `N2`).
 4. `5x2` interleaved `320x180` SD vs `640x360` HD Blind Pixel Pillar benchmark.
-5. `Gate Q` high-density `1,000+` target swarm and continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
-6. Wave-1 gates (`gate_i0_i4_ingest.mjs`, `gate_i1_cov_residual.mjs`, `gate_i5_bos.mjs`).
-7. Wave-2 gates (`gate_i2_rs_welch.mjs`, `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs`).
-8. `Gate X` adversarial C-ABI fuzz (`scripts/gate_abi_fuzz.mjs`): random export calls with hostile arguments, pixels and staging buffers, `0` traps required (see [Adversarial C-ABI fuzz](#adversarial-c-abi-fuzz-gate-x)).
-9. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): every op of the `src/simd/` layer (`125` ops, `206` entries including every const-generic instantiation the kernel uses) run as real Wasm SIMD128 in V8 against the portable `simd::scalar` reference over edge-value and seeded random lanes (`0` mismatches required, `9` deliberately broken negative controls must each be detected), then the same suite natively (`cargo test --target host-tuple`) and the native library link (`native/Cargo.toml`), both with zero warnings.
-10. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `104 MB` trace set from the wasm (real-MP4 sparse tracking, Hodge, conservation, the first `24 MiB` of the `1,200`-target swarm; `3,088` calls) and replays it on the native build with overflow checks on: every return value and every region digest must match bit for bit, and a corrupted copy of one trace must be rejected at the right call (see [Native replay driver](#native-replay-driver-nativereplay)).
+5. `Gate Q` high-density `1,000+` target swarm and `64x36` continuum physics suite (`scripts/benchmark_1000.mjs --gate`, `21/21` checks).
+6. Wave-1 gates (`gate_i0_i4_ingest.mjs`, `gate_i5_bos.mjs`, `gate_i1_cov_residual.mjs`, and `gate_i6_captures.mjs --no-chrome`).
+7. Wave-2 and v3.2-v3.4 physics gates (`gate_i2_rs_welch.mjs`, `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs`, `gate_i7_depth.mjs`, `gate_i8_elastography.mjs`, `gate_i9_wind_tunnel.mjs`, and `gate_i10_physics_audit.mjs`).
+8. `Gate X` adversarial C-ABI fuzz (`scripts/gate_abi_fuzz.mjs`): random export calls across all `100` exported functions with hostile arguments, pixels, and staging buffers (`0` traps required; see [Adversarial C-ABI fuzz](#adversarial-c-abi-fuzz-gate-x)).
+9. `Gate S` SIMD layer conformance (`scripts/gate_simd_conformance.mjs`): all `125` ops (`206` entries, `2,077,443` vectors) run as Wasm SIMD128 in V8 against `simd::scalar` (`0` mismatches, `9/9` negative controls detected), followed by `cargo test --target host-tuple` and `cargo test --manifest-path native/Cargo.toml --target host-tuple` with `-D warnings`.
+10. `Gate I10n` Native C ABI v4 and Python Physics Audit SDK (`native/capi`, `native/include/chronos.h`, `native/capi/tests/audit_smoke.c`, `native/python/test_chronos_audit.py`): strict `-std=c11 -Wall -Wextra -Werror -pedantic` smoke binary, `-std=c++11` header static-assert check, ABI version parity check (`4`), and all `8` zero-dependency Python `chronos-audit` tests.
+11. `Gate N` native/wasm whole-kernel parity (`scripts/gate_native_parity.mjs`): records a fresh `140.0 MB` trace set (`19` traces across `8` scenarios: `hero_sd`, `hodge`, `conservation`, `swarm`, `depth`, `wind`, `elasto`, `dense_audit`; `3,674` calls, `150,248` region digests) and replays it on the native `checked` build with overflow checks enabled (`0` mismatches, plus single-byte corruption negative control).
+12. `Gate UI` v3.5.0 Instrument FSM and static DOM contract (`scripts/verify_ui_fsm.mjs`, `scripts/check_ui_contract.mjs`): proves all `300` BOS scratch tuples (`32` exclusive, `30/30` directed handoffs), all `194,400` state combinations (`24,296` repair+idempotence checks, `0` violations), all `53` recipes, all `6` async release witnesses, and zero duplicate IDs or em dashes across the `15` v3.5.0 UI files.
 
 ### Full end-to-end pipeline (CI entrypoint)
 
@@ -30,7 +32,7 @@ Runs ten sequential offline stages:
 ./build.sh --e2e
 ```
 
-Runs everything in `--check`, plus Gate `I6` physical capture fixtures (`scripts/gate_i6_captures.mjs`), SD and HD H.264 MP4 calibration gates (`scripts/calibrate_mp4.mjs`), and headless Chromium CDP full-stack UI and audio/video verification (`scripts/e2e_browser.mjs` Steps `1-10e`).
+Runs everything in `--check`, upgrades Gate `I6` to include headless Chromium `<video>` decode checks (`scripts/gate_i6_captures.mjs`), runs SD and HD H.264 MP4 calibration gates (`scripts/calibrate_mp4.mjs`), and executes headless Chromium CDP full-stack UI, audio/video, WebCodecs, organ, and Audit A/B verification (`scripts/e2e_browser.mjs` Steps `1-14`).
 
 ### Native backends only (`--native-check`)
 
@@ -38,7 +40,7 @@ Runs everything in `--check`, plus Gate `I6` physical capture fixtures (`scripts
 ./build.sh --native-check
 ```
 
-Runs stages 1, 2, 9 and 10 of `--check`: the release build, the `wasm-objdump` audit, `Gate S` and `Gate N`. It skips the Wasm-only suites (stages 3 to 8). This is what the macOS arm64 CI job runs to prove the NEON backend. It needs no Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenario (`hero_sd`) and says so; `--check` and `--e2e` always run every scenario.
+Runs the release build, the `wasm-objdump` static audit, `Gate S`, `Gate I10n`, `Gate N`, and `Gate UI`, skipping the Wasm-only suites (`Gates A-P`, `Q`, `I0-I10a`, `X`). This is what the macOS arm64 CI job runs to prove the native NEON backend without requiring Chrome. Without `ffmpeg` on `PATH` it skips Gate N's real-MP4 scenarios (`hero_sd`, `elasto`) and logs the skip; `--check` and `--e2e` always run all `8` Gate N scenarios.
 
 The scalar reference backend at kernel level (what CI runs with `simd-force-scalar`; drop `--scenarios` when `ffmpeg` is installed):
 
@@ -46,10 +48,10 @@ The scalar reference backend at kernel level (what CI runs with `simd-force-scal
 DENY_WARNINGS="target.'cfg(all())'.rustflags = ['-D', 'warnings']"
 cargo test --config "$DENY_WARNINGS" --target host-tuple --features simd-force-scalar
 cargo test --config "$DENY_WARNINGS" --manifest-path native/Cargo.toml --target host-tuple --features simd-force-scalar
-node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm
+node scripts/gate_native_parity.mjs --features=simd-force-scalar --scenarios=hodge,conservation,swarm,depth,wind,dense_audit
 ```
 
-### Standalone calibration, Wave-1/2 gates, ablation, and media regeneration
+### Standalone calibration, organ gates, ablation, and media regeneration
 
 ```bash
 # Core 5 ground-truth physics/occlusion clips (SD + HD)
@@ -67,7 +69,7 @@ node scripts/calibrate_mp4.mjs --starling --hd --gate
 # Full Gate Q suite plus 6-tier association & Spatial-CSR ablation table
 node scripts/benchmark_1000.mjs --gate --ablation
 
-# Standalone Wave-1 & Wave-2 metrology gates
+# Standalone metrology, depth, elastography, wind-tunnel, and dense-audit gates
 node scripts/gate_i0_i4_ingest.mjs
 node scripts/gate_i1_cov_residual.mjs
 node scripts/gate_i5_bos.mjs
@@ -75,11 +77,15 @@ node scripts/gate_i6_captures.mjs
 node scripts/gate_i2_rs_welch.mjs
 node scripts/gate_i3_hodge.mjs
 node scripts/gate_i5b_conservation.mjs
+node scripts/gate_i7_depth.mjs
+node scripts/gate_i8_elastography.mjs
+node scripts/gate_i9_wind_tunnel.mjs
+node scripts/gate_i10_physics_audit.mjs
 
 # Adversarial C-ABI fuzz (Gate X); --trials, --frames, --timeout, --wasm
 node scripts/gate_abi_fuzz.mjs
 
-# SIMD layer conformance: Wasm SIMD128 (V8) vs simd::scalar, then the native host suite
+# SIMD layer conformance (Gate S) and native suites
 node scripts/gate_simd_conformance.mjs
 cargo test --target host-tuple
 cargo test --manifest-path native/Cargo.toml --target host-tuple
@@ -88,7 +94,11 @@ cargo test --manifest-path native/Cargo.toml --target host-tuple
 node scripts/gate_native_parity.mjs
 cargo run --release --manifest-path native/Cargo.toml --target host-tuple --bin chronos_replay -- <trace|dir>...
 
-# Regenerate all Command Deck screenshots (docs/assets/panels/) and 4 demo GIFs (docs/assets/demos/)
+# v3.5.0 Instrument UI FSM (194,400 states) & static DOM contract lint (Gate UI)
+node scripts/verify_ui_fsm.mjs
+node scripts/check_ui_contract.mjs
+
+# Regenerate all v3.5.0 Instrument screenshots (docs/assets/panels/01..17.png) and 4 demo GIFs
 node scripts/capture_docs_media.mjs
 # Refresh PNG panel screenshots only (skips GIF re-encoding):
 node scripts/capture_docs_media.mjs --panels-only
@@ -98,17 +108,17 @@ For slower shared cloud virtual machines, set `CHRONOS_CI_BUDGET_SCALE=3.5` (mat
 
 ## Static binary and safety invariants
 
-Measured directly on `web/chronos_spectral.wasm` (`2,479,630 B`, v3.1.1):
+Measured directly on `web/chronos_spectral.wasm` (`2,927,068 B` / `2.79 MiB`, sha256 `8621e9122b4157d63969ba9be516f896b4b8a1fcc19be8a0ef2a9776bbd4a61f`, v3.5.0):
 
 | Property | Measured value | Gate threshold |
 | :--- | :--- | :--- |
-| Export count & host imports | `76` exports (`memory` and `75` functions, one of them the test hook `chronos_test_hook_set_frame_counters`), `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
-| Wasm linear memory | `initial=448 max=448` (`29,360,128 B`) | `448` fixed pages, `0` `memory.grow` |
-| Arena size | `23,300,224 B` (v3.1.0: `22,644,848 B`; v3.1.1 appends the `655,376 B` BOS reference-patch cache, `bos::BosRefCache`, after every region) | `<= 24,117,248 B` (`Arena` static bound) |
-| Static `.rodata` end | `59,216 B` | Exactly `59,216 B` (`build.sh`): `ARENA` is the only `.bss` symbol and starts there, so every region getter keeps its v3.0.0 address. `RODATA_PAD_BYTES` in [src/lib.rs](../src/lib.rs) absorbs kernel changes that add or remove panic locations, and `build.sh` prints the value to set |
-| Static data end (`dualStaticEnd`) | `23,359,440 B` | `<= 24,248,320 B` |
-| Max DFS shadow stack | `13,776 B` (`0` call cycles, `0` `call_indirect`) | `<= 14,336 B` soft bound, `<= 16,384 B` hardware bound |
-| Emitted vector / bitwise ops | `101,901` SIMD128 ops, `8` `i32.clz` ops | Non-zero SIMD128 & hardware CLZ |
+| Export count & host imports | `101` exports (`memory` and `100` functions, including test hook `chronos_test_hook_set_frame_counters`), `0` imports (`0 env`, `0 malloc/free`) | Strictly `0` host imports |
+| Wasm linear memory | `initial=448 max=448` (`29,360,128 B` / `28.00 MiB`) | `448` fixed pages, `0` `memory.grow` |
+| Arena size | `29,080,704 B` on `wasm32` (`29,086,992 B` on native `aarch64`) | `<= 29,100,000 B` (`Gate P1` bound) |
+| Static `.rodata` end | `88,000 B` | Exactly `88,000 B` (`build.sh`): `ARENA` is the only `.bss` symbol and starts there, so every region getter keeps its ABI-v2 address. `RODATA_PAD_BYTES` in [src/lib.rs](../src/lib.rs) absorbs kernel changes, and `build.sh` prints the adjustment if it drifts |
+| Static data end (`dualStaticEnd`) | `29,168,704 B` | `<= 29,294,592 B` (`>= 64 KiB` top reserve) |
+| Max DFS shadow stack | `13,536 B` (`734` analyzed funcs, `0` call cycles, `0` `call_indirect`) | `<= 14,336 B` soft bound, `<= 16,384 B` hardware bound |
+| Emitted vector / bitwise ops | `107,869` SIMD128 ops, `8` `i32.clz` ops, `75` `f32.copysign` ops | Non-zero SIMD128, hardware CLZ, and copysign |
 | Source memory hygiene | `0` `MaybeUninit` blocks across `src/*.rs`; exactly `6` `unsafe` tokens in [src/continuum_physics.rs](../src/continuum_physics.rs) (one SIMD128 `k`-NN scan) | Enforced by the `build.sh` source hygiene gate |
 
 ## Mathematical counterexample gates (`Gates A-P`)
@@ -135,12 +145,12 @@ Measured directly on `web/chronos_spectral.wasm` (`2,479,630 B`, v3.1.1):
 
 ## Blind Pixel Pillar `5x2` SD/HD benchmark
 
-Interleaved `5x` alternating runs (`320x180` SD and `640x360` HD) on the pixel-isolated dual-pillar crossing bench verify resolution-scaling determinism:
+Interleaved `5x` alternating runs (`320x180` SD and `640x360` HD) on the pixel-isolated dual-pillar crossing bench verify resolution-scaling determinism (v3.5.0 on Apple M4 Pro, `CHRONOS_CI_BUDGET_SCALE = 1.00`):
 
-| Resolution | Static ECA clutter attenuation | Oracle ID swaps | Mean kernel time (`ChronosCI = 1.00`) | Budget |
+| Resolution | Static ECA clutter attenuation | Oracle ID swaps | Median-of-means kernel time | Budget |
 | :--- | :--- | :--- | :--- | :--- |
-| `320x180` SD | `> 64 dB` | `0` | `0.121 ms` | `< 0.35 ms` |
-| `640x360` HD | `> 64 dB` | `0` | `0.324 ms` | `< 1.00 ms` |
+| `320x180` SD | `64.61 dB` (`> 60 dB`) | `0` | `0.1206 ms` | `< 0.35 ms` |
+| `640x360` HD | `64.78 dB` (`> 60 dB`) | `0` | `0.3107 ms` | `< 1.00 ms` |
 
 ## Real-camera MP4 ground-truth & extended physics suites
 
@@ -177,16 +187,16 @@ Evaluates paired interleaved runs comparing `Swarm: Off` (`swarmMode = 0`) again
 
 ## High-density continuum and swarm benchmark (`Gate Q`)
 
-Evaluated headless in `640x360` HD via `scripts/benchmark_1000.mjs --gate` (`21/21` checks passing on Apple M4 Pro, `CHRONOS_CI_BUDGET_SCALE = 1.00`):
+Evaluated headless in `640x360` HD via `scripts/benchmark_1000.mjs --gate` (`21/21` checks passing on Apple M4 Pro, `v3.5.0` binary, `CHRONOS_CI_BUDGET_SCALE = 1.00`, `64x36` continuum grid):
 
 | Scenario | Peak / P10 Confirmed | Ground-truth MOT / Physics agreement | Mean / p50 Kernel | p95 Kernel |
 | :--- | :--- | :--- | :--- | :--- |
-| `Q1: vortex_swarm_1200` | `1,207` / `1,200` | `HOTA 99.9%`, `IDSW 0`, vorticity `r = 0.9957`, `ftleCells = 657` | `1.56 ms` / `1.48 ms` | `2.02 ms` |
-| `Q2: murmuration_1200` | `1,219` / `1,208` | `HOTA 99.8%`, `IDSW 0`, `3/3` `SE(2)` bodies (`joint 100/96/94%`) | `1.61 ms` / `1.65 ms` | `1.97 ms` |
-| `Q3: modal_beam_1152` | `1,143` / `1,135` | `3.000 Hz` (`med 2.999 Hz`), coh `0.977`, `R_2 = 0.953`, phase err `0.039` rad | `1.42 ms` / `1.44 ms` | `1.64 ms` |
-| `Q4: starling_murmuration_1000.mp4` | `1,453` / `1,032` | `movingDarkFeat1to1Prec = 70.3%`, `parityErr = 0`, `dupTid = 0` | `1.76 ms` / `1.72 ms` | `2.12 ms` |
+| `Q1: vortex_swarm_1200` | `1,209` / `1,200` | `HOTA 99.9%`, `IDSW 1`, vorticity `r = 0.9953`, `ftleCells = 1,910` | `1.53 ms` / `1.50 ms` | `1.82 ms` |
+| `Q2: murmuration_1200` | `1,219` / `1,208` | `HOTA 99.8%`, `IDSW 0`, `3/3` `SE(2)` bodies (`joint 100/96/97%`) | `1.80 ms` / `1.84 ms` | `2.17 ms` |
+| `Q3: modal_beam_1152` | `1,145` / `1,140` | `3.000 Hz` (`med 2.999 Hz`), coh `0.977`, `R_2 = 0.951`, phase err `0.039` rad | `1.65 ms` / `1.71 ms` | `1.90 ms` |
+| `Q4: starling_murmuration_1000.mp4` | `1,452` / `1,127` | `movingDarkFeat1to1Prec = 67.0%`, `parityErr = 0`, `dupTid = 0` | `1.88 ms` / `1.89 ms` | `2.25 ms` |
 | `ANALYTIC` (13 cases) | Flow & rigid checks | Uniform translation, pure rotation (`omega`), strain/shear, saddle FTLE, modal split | Per-case analytic gate | `< 2.00 ms` |
-| `SWEEP` (`N = 512, 1000, 1200, 1536`) | up to `1,536` / `1,473` | At `N = 1,536`: `Recall 100.0%`, `MOTA 100.0%`, `RMSE 0.059 px`, `HOTA 100.0%` | `1.45 ms` / `1.48 ms` at `1,536` | `1.81 ms` |
+| `SWEEP` (`N = 512, 1000, 1200, 1536`) | up to `1,536` / `1,474` | At `N = 1,536`: `Recall 100.0%`, `MOTA 100.0%`, `RMSE 0.059 px`, `HOTA 100.0%` | `1.43 ms` / `1.40 ms` at `1,536` | `1.88 ms` |
 
 ### `Q2 (murmuration_1200)` component ablation
 
@@ -206,41 +216,51 @@ Key measured deltas:
 - **Spatial-CSR Speedup (`13.631 ms -> 0.621 ms`):** **`21.94x` faster** association from 16-bit Morton Z-order sorting + `3x3` sparse CSR neighborhood indexing.
 - **Full Production Kernel vs Baseline:** Reduces RMSE by `4.56x` (`0.178 px -> 0.039 px`), cuts identity swaps from `121` to `0`, eliminates `99.9%` of fragmentations (`2,992 -> 3`), and reaches `99.8%` HOTA across `1,208` birds and `3` rotating rigid bodies in `1.703 ms` median compute.
 
-## Wave-1 & Wave-2 metrology gates (`Gates I0-I6`)
+## Metrology, depth, fluid, elastography, and audit gates (`Gates I0-I10n`, `UI`)
 
 | Gate | Script | Verified mathematical, physical, and refusal invariants |
 | :--- | :--- | :--- |
 | `I0` | [scripts/gate_i0_i4_ingest.mjs](../scripts/gate_i0_i4_ingest.mjs) | `1,000/1,000` frame-ring commits prior to throttled solves, `D4` ROI orientation propagation, determinism, and invalid-ingest refusal. |
-| `I4` | [scripts/gate_i0_i4_ingest.mjs](../scripts/gate_i0_i4_ingest.mjs) | `1,000`-frame `640x360` HD `K=0` textured BOS PCG + dense swarm budget compliance (`scale = 1.00`) and standby isolation. |
-| `I1` | [scripts/gate_i1_cov_residual.mjs](../scripts/gate_i1_cov_residual.mjs) | `2x2` inverse-Hessian track covariance, LOO flow residual calibration, pinhole looming suppression, and Auto-Hero candidate promotion. |
-| `I5` | [scripts/gate_i5_bos.mjs](../scripts/gate_i5_bos.mjs) | `128x64` manufactured BOS inhomogeneous Neumann Poisson accuracy, curl consistency check, gauge-ROI offset invariance, and shock refusal. |
-| `I6` | [scripts/gate_i6_captures.mjs](../scripts/gate_i6_captures.mjs) | `bos_thermal_plume.mp4` (`12.55x` SNR over `0.0530 px` quiet floor), `perspective_flyby_decoy.mp4` (`0` false maneuvering alarms), and `bos_handheld_failure.mp4` tripod-shock detection. |
-| `I2` | [scripts/gate_i2_rs_welch.mjs](../scripts/gate_i2_rs_welch.mjs) | Rolling-shutter `D4` scan inversion, sinc exposure equalization and `EXPOSURE_NULL` (`0x40`) guard, optical Nyquist aliasing guard, `K = 1` vs `K >= 8` Bonferroni Welch trap, and fail-closed `CLOCK_SKEW` / `NO_PTS` / `NO_SCAN_DIR` / `NOT_NATIVE_1TO1` / `AXIS_TRANSPOSED` refusals. |
-| `I3` | [scripts/gate_i3_hodge.mjs](../scripts/gate_i3_hodge.mjs) | `40x22` mesh Hodge `2`-complex (`(880, 1698, 819)`), orthogonal exact/coexact/harmonic solves (`orthEcRel < 1e-6`), enclosed-hole `beta_1` vs open-port flooding, and `UNCONV` non-convergence gating. |
+| `I4` | [scripts/gate_i0_i4_ingest.mjs](../scripts/gate_i0_i4_ingest.mjs) | `1,000`-frame `640x360` HD `K=0` textured `256x128` BOS PCG + dense swarm budget compliance (`984/984` converged PCG frames, `~1,134` mean confirmed micro-tracks). |
+| `I1` | [scripts/gate_i1_cov_residual.mjs](../scripts/gate_i1_cov_residual.mjs) | `2x2` inverse-Hessian track covariance, LOO flow residual calibration, pinhole looming suppression (`0/300` decoy episodes promoted), and Auto-Hero hysteresis. |
+| `I5` | [scripts/gate_i5_bos.mjs](../scripts/gate_i5_bos.mjs) | `256x128` manufactured BOS inhomogeneous Neumann Poisson accuracy (Cases `0..9`), curl consistency check, gauge-ROI offset invariance, and shock refusal (`plumeRMSE = 0.0116 px`). |
+| `I6` | [scripts/gate_i6_captures.mjs](../scripts/gate_i6_captures.mjs) | `bos_thermal_plume.mp4` (`14.03x` SNR: `0.7699 px` peak vs `0.0549 px` quiet floor, `max |phi| = 7.836`), `perspective_flyby_decoy.mp4` (`0` false maneuvering alarms), `bos_handheld_failure.mp4` tripod-shock detection, and headless Chromium H.264 decode verification. |
+| `I2` | [scripts/gate_i2_rs_welch.mjs](../scripts/gate_i2_rs_welch.mjs) | `64x36` rolling-shutter `D4` scan inversion, `2,048`-pt Welch FFT, sinc exposure equalization and `EXPOSURE_NULL` (`0x40`) guard, optical Nyquist aliasing guard, `K = 1` vs `K >= 8` Bonferroni Welch trap, and fail-closed `CLOCK_SKEW` / `NO_PTS` / `NO_SCAN_DIR` / `NOT_NATIVE_1TO1` / `AXIS_TRANSPOSED` refusals. |
+| `I3` | [scripts/gate_i3_hodge.mjs](../scripts/gate_i3_hodge.mjs) | `64x36` mesh Hodge `2`-complex (`(2304, 4508, 2205)`), SSOR-PCG orthogonal exact/coexact/harmonic solves (`orth = 2.0e-17`), enclosed-hole `beta_1` vs open-port flooding, and `UNCONV` gating. |
 | `I5b` | [scripts/gate_i5b_conservation.mjs](../scripts/gate_i5b_conservation.mjs) | Non-circular four-branch (`H0_KEEP`, `H0_SWAP`, `H1_KEEP`, `H1_SWAP`) occluded pair conservation distinguishing `UNIQUE`, `AMBIGUOUS`, and `VIOLATED`. |
+| `I7` | [scripts/gate_i7_depth.mjs](../scripts/gate_i7_depth.mjs) | `10` depth suites: micro/wide-baseline `256x128` calibrated stereo (`AbsRel 0.26-1.32%`, `delta1 = 100%`, `epiRms <= 0.018 px`), monocular parallax (`AbsRel 2.82%`, `r = 0.9822`, `3/3` movers rejected), pure-yaw/no-baseline refusals, real H.264 FoE/TTC (`R^2 = 0.9999`), external depth provenance firewall, adversarial regressions, and Worker `K=8` + WebCodecs fMP4 harness. |
+| `I8` | [scripts/gate_i8_elastography.mjs](../scripts/gate_i8_elastography.mjs) | Kirchhoff crack panel (`380+860 Hz`, `alpha = 0.57`, rib contrast `1.31x`, source/sink), anisotropic guitar soundboard (`beta_1 = 1`, `aniso = 1.52`), gelatin shear-wave phantom (`alpha = 0.986`, inclusion `2.14x`), `1,200 Hz` Lock-In Acoustic BOS (`256x128`, `rFull = 0.9556`), negative controls (`MUTEX_CONFLICT`, `EXPOSURE_NULL`, `WAVELENGTH_TOO_LONG`), and 4 real-camera Mode 3 checks. |
+| `I9` | [scripts/gate_i9_wind_tunnel.mjs](../scripts/gate_i9_wind_tunnel.mjs) | Analytical and H.264 PIV Lamb-Oseen viscosity (`nu` within `1.3-1.95%`, pressure well `r = 0.9983`), lifting cylinder (`beta_1 = 1`, `Cp r = 0.9804`, `C_L` within `1.7-2.9%` vs Kutta-Joukowski), compressible/non-conservative refusals (`HIGH_DIV`, `HIGH_NS_RESIDUAL`), BOS/Wind mutex isolation, and real lab laser PIV + Cambridge smoke airfoil checks. |
+| `I10a` | [scripts/gate_i10_physics_audit.mjs](../scripts/gate_i10_physics_audit.mjs) | Dense-LK continuum fallback (`WIND_MODE_DENSE_AUDIT = 3`) on uniform advection, rotating vortex, and unseeded `real_karman_mri_cylinder.mp4` (`READY_FIELD_ONLY`, `max |Cp| = 0`), static/flicker/zero-flow fail-closed refusals, and `> 2^32 us` audio timestamps. |
+| `I10n` | [build.sh](../build.sh), [audit_smoke.c](../native/capi/tests/audit_smoke.c), [test_chronos_audit.py](../native/python/test_chronos_audit.py) | Native `libchronos_capi` C11 `-Wall -Wextra -Werror -pedantic` + C++11 header static asserts (`ABI = 4`, struct sizes `96/40/40/64/416`, static-decoy `reward_milli = -1000`) and `8/8` zero-dependency Python `chronos-audit` tests. |
+| `UI` | [scripts/verify_ui_fsm.mjs](../scripts/verify_ui_fsm.mjs), [scripts/check_ui_contract.mjs](../scripts/check_ui_contract.mjs) | Exhaustive `300`-tuple BOS scratch bus proof (`32` exclusive, `30/30` handoffs), `194,400`-combination constraint sweep (`24,296` repair+idempotence checks, `0` violations), `53` recipes, `6` async witnesses, `104` controls, `360` unique DOM IDs, `23` static canvases, and `0` em dashes. |
 
 ## Adversarial C-ABI fuzz (`Gate X`)
 
-[scripts/gate_abi_fuzz.mjs](../scripts/gate_abi_fuzz.mjs) drives `web/chronos_spectral.wasm` the way a careless or hostile host could. Each trial is a fresh instance: `chronos_init`, SD or HD, then 48 frames. Every frame writes pixels into the ingest slot (random noise, black, white, a black/white strobe, alpha-0 stripes, or moving discs on texture), then on a random fraction of frames calls 1 to 4 random exports (every function except the four tick/init exports and the pointer getters, the test hook included) with arguments drawn from a hostile pool (`0`, `-1`, `2^31 - 1`, `2^31`, `2^32 - 1`, frame sizes and slot counts `+-1`, `NaN`, `+-Infinity`, `+-1e-38`, `1e-45`, `+-1e38`, `3.4e38`, audio rates, ...), after filling a random staging buffer (audio, Hodge injection, conservation input, Laplacian or Fiedler vector) with `NaN`, `+-1e30` noise or pool values. It then ticks with `chronos_tick`, `pre_tick` + `post_tick`, the two out of order, or all three, mostly at `1/30 s` and otherwise at a hostile step (`0`, negative, `NaN`, `+-Infinity`, `1e-40`, `1e9`), and finally calls every pointer getter (`chronos_get_ring_slot_ptr` with a pool argument) and reads the `f32` views `telemetry`, `swarm_telemetry`, `conservation_telemetry` and `slot_meta`.
+[scripts/gate_abi_fuzz.mjs](../scripts/gate_abi_fuzz.mjs) drives `web/chronos_spectral.wasm` the way a careless or hostile host could. Each trial is a fresh instance: `chronos_init`, SD or HD, then 48 frames. Every frame writes pixels into the ingest slot (random noise, black, white, a black/white strobe, alpha-0 stripes, or moving discs on texture), then on a random fraction of frames calls 1 to 4 random exports (every function except the four tick/init exports and the pointer getters, the test hook included) with arguments drawn from a hostile pool (`0`, `-1`, `2^31 - 1`, `2^31`, `2^32 - 1`, frame sizes and slot counts `+-1`, `NaN`, `+-Infinity`, `+-1e-38`, `1e-45`, `+-1e38`, `3.4e38`, audio rates, ...), after filling a random staging buffer (audio, Hodge injection, conservation input, external depth, Laplacian or Fiedler vector) with `NaN`, `+-1e30` noise or pool values. It then ticks with `chronos_tick`, `pre_tick` + `post_tick`, the two out of order, or all three, mostly at `1/30 s` and otherwise at a hostile step (`0`, negative, `NaN`, `+-Infinity`, `1e-40`, `1e9`), and finally calls every pointer getter (`chronos_get_ring_slot_ptr` with a pool argument) and reads the `f32` views `telemetry`, `swarm_telemetry`, `conservation_telemetry` and `slot_meta`.
 
 - **Gate:** `0` traps, and every trial ticks all of its frames. A trap is a wasm trap or JS exception thrown by any export call (the frame-size and pointer getters, and the typed-array views over the pointers they return, included), or a change of the fixed `448`-page memory size. Each one is printed with its trial and the 12 calls before it.
 - **Reported, not gated:** every non-finite value in those views, by slot, with its first occurrence.
 - **Deterministic and bounded:** trial `k` draws everything from its own seeded PRNG, so a given wasm makes the same calls on every run. The default `300` trials x `48` frames run in a worker thread under a `300 s` watchdog, so a call that never returns fails the gate, naming the trial and call count reached.
 
-Measured on the v3.1.0 wasm (Apple M4 Pro): `14,400` frames ticked, `37,202` export calls, `0` traps, `0` non-finite values, about `13 s`. The v3.0.0 wasm gives the same result (it lacks the test hook, so `37,101` calls).
+Measured on the `v3.5.0` wasm (Apple M4 Pro, across `100` exported functions): `14,400` frames ticked, `37,121` export calls, `0` traps, `0` non-finite telemetry slots, `19.9 s`.
 
 ## Headless Chrome CDP full-stack E2E (`scripts/e2e_browser.mjs`)
 
-Exercises the full browser application against `scripts/dev_server.mjs` over DevTools Protocol (`Steps 1-10e`, enforcing zero page/worker exceptions and `CLS = 0.000000` at every transition):
+Exercises the full v3.5.0 browser application against `scripts/dev_server.mjs` over DevTools Protocol (`Steps 1-14`, enforcing zero page/worker exceptions and `CLS = 0.000000` at every transition):
 
-- **Steps 1-2:** Boot (`0 HEAP ALLOC / 0 IMPORTS`, `448 PAGES / 28.00 MB`), `320x180` SD <-> `640x360` HD live resolution switch, `16`-slot Split-PiP Roster activation, click-to-pin target lock, and zero layout shift on pin/unpin/mode toggles.
-- **Step 3:** Real H.264 MP4 calibration (`juggling_ballistic.mp4` exact `+1f` step + paused Auto-`g`, `roundabout_occlusion.mp4` Hermite bridges, `harmonic_metronome_phase.mp4` `~0.80 Hz` lock, `galileo_pendulum_peg.mp4` pivot lock, `carom_billiards_impulses.mp4` strikes).
-- **Step 4:** Accessible metric calibration provenance (`ASSUMED` vs `SURVEYED`), `Esc` atomic cancel preserving prior calibration, zero-horizon singular homography guard, and `56`-column CSV / `v1.5.0` JSON export validation.
-- **Steps 5-6:** Live Tier-3 FFmpeg fMP4 MSE streaming across a synthetic hard camera cut (`sim_live_cut_demo` auto-reset proof), Mode B stimulus latency, Mode C strikes, dense `vortex_1200` + `starling_1000` swarm HUD inspection (`inspect_point` `inspectSeq` correlation), `DeckUiFsm` Hero-16 toggle (`H`), `16:9` fullscreen viewport (`F`), and keyboard shortcut isolation.
-- **Step 7:** Relay security and resource hardening (zero leaked file descriptors, multi-hop DNS rebinding / RFC1918 SSRF blocks returning `403`, rate limit / process cap checks, and bounded `<= 3` MSE reconnect retries).
-- **Step 8:** Default Split-Wipe Showcase surface (`starling_1000`, `model_rockets`, `bos_plume` presets), drag handle interaction, Showcase <-> Deck switching, and `CLS = 0.000000`.
-- **Step 9:** Wave-1 Deck controls (`1:1` Native ROI crop/orientation, `bosModeSelect` + `bos_thermal_plume.mp4` READY refraction overlay, `bos_handheld_failure.mp4` tripod-motion warning) and `CLS = 0.000000`.
-- **Steps 10 & 10e:** Wave-2 `40x22` Mesh Hodge (`vortex_1200`, `coexactFrac > 0.85`, `orthEcRel < 1e-6`), RS + Welch (`880 Hz`, `K >= 8`) + `EXPOSURE_NULL` warning banner, occluded equal-mass `AMBIGUOUS` conservation, plus native Chrome webcam/Web Audio Worker acknowledgment checks and 40 mocked audio/`currentTime`/`getOutputTimestamp`/`rVFC` `captureTime` clock-skew lifecycle scenarios (`CLS = 0.000000`).
+- **Steps 1-2b:** Boot (`0 HEAP ALLOC / 0 IMPORTS`, `448 PAGES / 28.00 MB`), `320x180` SD <-> `640x360` HD live resolution switch, `16`-slot Split-PiP Roster activation, click-to-pin target lock, and zero layout shift on pin/unpin/mode toggles.
+- **Steps 3a-3c:** Real H.264 MP4 calibration (`juggling_ballistic.mp4` exact `+1f` step + paused Auto-`g`, `roundabout_occlusion.mp4` Hermite bridges, `harmonic_metronome_phase.mp4` `~0.80 Hz` lock, `galileo_pendulum_peg.mp4` pivot lock, `carom_billiards_impulses.mp4` strikes, `ASSUMED` vs `SURVEYED` provenance, and `Esc` atomic cancel).
+- **Steps 4-4c:** `56`-column CSV and `v1.5.0` JSON export validation, extended HD showcases (`model_rockets`, `rocket_vtvl`, `cologne_motorway`, `rally_pan`), and Model Rocket synthetic scenario.
+- **Steps 5-6d:** Live Tier-3 FFmpeg fMP4 MSE streaming across a synthetic hard camera cut (`sim_live_cut_demo`), `12`-disc swarm + Multi-Minute Custody Timeline, Physics ODE tab, Lab Modes B/C, dense `vortex_1200` + `starling_1000` swarm HUD inspection, Hero-16 toggle (`H`), `16:9` fullscreen (`F`), and keyboard shortcut isolation.
+- **Step 7:** Relay security and resource hardening (zero leaked file descriptors, multi-hop DNS rebinding / RFC1918 SSRF blocks returning `403`, HTTP `429` process cap checks, zero-horizon singular homography guard, and bounded `<= 3` MSE reconnect retries).
+- **Step 8:** v3.5.0 Unified Instrument boot, split-wipe drag + keyboard arrow handling, local file drag-and-drop, and static-host (`?static=1`) gating (`CLS = 0.000000`).
+- **Step 9:** Wave-1 `256x128` BOS plume (`READY`), Native `1:1` ROI crop/orientation (`8x4` `D4` matrix), `bos_handheld_failure.mp4` tripod-motion warning, and `2x2` covariance/decoy checks (`CLS = 0.000000`).
+- **Steps 10 & 10e:** Wave-2 `64x36` Mesh Hodge (`vortex_1200`), RS + Welch (`880 Hz`, `K >= 8`) + `EXPOSURE_NULL` warning banner, occluded equal-mass `AMBIGUOUS` conservation, plus native Chrome webcam/WebAudio checks and `40` mocked audio-video clock-skew lifecycle scenarios (`CLS = 0.000000`).
+- **Step 11:** v3.2.0 interactive demos (`depth_parallax_dolly`, `depth_foe_approach`, `hodge_cylinder_circulation`, `rs_vibrometry_247hz`, and `fovea_720p_micro_detail` `1280x720` Fovea/PTZ, `CLS = 0.000000`).
+- **Step 12:** v3.3.0 Pocket Wind Tunnel (`wind_lifting_cylinder_cp`), kHz Kirchhoff Elastography (`elasto_hidden_crack_panel`), and `1,200 Hz` Lock-In Acoustic BOS (`acoustic_bos_standing_wave`, `CLS = 0.000000`).
+- **Step 13:** v3.4.0 lazy-worker Physics Integrity Audit A/B tab (Slot A Real Ref `PASS`, Slot B Stutter `FAIL`, clickable severity timeline, `CLS = 0.000000`).
+- **Step 14:** v3.5.0 Scientific Instrument FSM zero-shift sweep (`rawCLS = 0.000000`), `180/180` BOS scratch mutex parity checks, atomic handoff + 1-level Undo, Dense Wind (`mode = 3`, `FIELD_ONLY`), and `Settings Only` recipe application.
 
 ## Kernel record-and-replay traces (`CSTRACE v1`)
 
@@ -282,7 +302,7 @@ Per instance, the hook keeps a full snapshot of linear memory taken after the pr
 
 The table lives in `REGION_SPECS` in [scripts/trace_lib.mjs](../scripts/trace_lib.mjs). Each entry names the getter export and the Rust backing field. The byte length comes from that field's declared array type in `src/*.rs`, evaluated from the Rust `const` items (and `size_of::<IngestSlotMeta>() == 96` for `ring_meta`). Element type and direction come from the getter's Rust return type: `*const` is `out`, `*mut` is `both`, and `in` marks the staging buffers `ingest_rgba`, `audio_staging`, `hodge_inject` and `conservation_input`. Building the table fails if a pointer-returning export in `src/lib.rs` has no entry. At startup each region's pointer is checked for alignment and for lying inside memory, above the shadow stack.
 
-There are 47 regions: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_ring_slot_ptr(k)`), the two moving aliases `ingest_rgba` and `display_rgba` (host writes can be addressed through them, but they are not digested separately), and 33 fixed regions: `eca_res`, `pip_rgba`, `all_pip_rgba`, `slot_meta`, `laplacian`, `fiedler`, `telemetry`, `micro_tracks`, `continuum_field`, `rigid_bodies`, `swarm_telemetry`, `modal_field`, `ring_meta`, `row_luma`, `wave1_telemetry`, `bos_telemetry`, `bos_planes`, `bos_valid`, `bos_rgba`, `micro_cov`, `micro_residual`, `micro_loom`, `micro_quality`, `hero_candidates`, `wave2_telemetry`, `audio_staging`, `vibro_telemetry`, `vibro_planes`, `hodge_telemetry`, `hodge_planes`, `hodge_inject`, `conservation_telemetry` and `conservation_input`. Each digested call covers 45 regions, 12,715,152 bytes. The full table, with getter, argument, element type, length and flags, is embedded in every trace header, so a replayer never parses Rust.
+There are `60` regions in `v3.5.0`: `ring_slot[0..12)` (the 12 RGBA ring slots, `chronos_get_ring_slot_ptr(k)`), four alias regions (`ingest_rgba`, `display_rgba`, `elasto_planes`, `elasto_valid`; host writes may address them, and they are not digested separately), and `44` fixed regions covering core tracking, Wave-1/Wave-2 metrology, `160x160` Fovea (`fovea_rgba[0]`, `fovea_request`), Zero-ML Depth (`depth_telemetry`, `depth_field`, `depth_tracks`, `depth_track_flags`, `depth_hero`, `depth_ingest`), Pocket Wind Tunnel (`wind_telemetry`, `wind_planes`), and kHz Elastography (`elasto_telemetry`). Each digested call hashes `56` regions (`13,849,904 B` unique digested bytes). The full table, with getter, argument, element type, length and flags, is embedded in every trace header, so a replayer never parses Rust.
 
 ### Canonical set (measured)
 
@@ -422,16 +442,18 @@ swarm_telemetry: 7 of 64 f32 elements differ
 
 Exactly four 32-bit words are exempt from the comparison. Each describes the build, not the computation. The mechanism is masking on both sides: the recorder zeroes these words in a copy of the region before hashing, records the list in every trace (`meta.digestMask`), and every replayer does the same. The driver refuses a trace whose mask differs from its own list (`native/replay/allowlist.rs`, mirrored by `PLATFORM_WORDS` in `scripts/trace_lib.mjs`), so a trace cannot widen the exemption. Masking was chosen over having the driver substitute the wasm's values: the trace does not carry those values, and two of them change during a session (`0` before `chronos_init`, the size after it, `0` again after `RESET`). Substitution would mean recording them per call and inventing expected values on the native side. With masking, both sides compute the same function of memory. The cost is that a replay against the wasm no longer checks these four words either, which is acceptable for build constants.
 
-| Word | wasm32 value | native (aarch64) value | Why it differs |
+| Word | wasm32 value (`v3.5.0`) | native (`aarch64`, `v3.5.0`) | Why it differs |
 | :--- | ---: | ---: | :--- |
-| `telemetry[20]` | `23300224.0` | `23306512.0` | `size_of::<Arena>() as f32`: the arena holds `usize` fields (for example `LanczosScratch::act_idx: [usize; 32]`), so its size depends on pointer width. |
-| `wave1_telemetry[1]` | `23300224` | `23306512` | `size_of::<Arena>() as u32`, as above. |
-| `wave1_telemetry[12]` | `23359440` | `0` | `linked_static_end_bytes()`: the wasm linker's `__heap_base`. A native build has no linear memory. |
-| `wave2_telemetry[1]` | `23300224` | `23306512` | `size_of::<Arena>() as u32`, as above. |
+| `telemetry[20]` | `29080704.0` | `29086992.0` | `size_of::<Arena>() as f32`: the arena holds `usize` fields (for example `LanczosScratch::act_idx: [usize; 32]`), so its size depends on pointer width. |
+| `wave1_telemetry[1]` | `29080704` | `29086992` | `size_of::<Arena>() as u32`, as above. |
+| `wave1_telemetry[12]` | `29168704` | `0` | `linked_static_end_bytes()`: the wasm linker's `__heap_base`. A native build has no linear memory. |
+| `wave2_telemetry[1]` | `29080704` | `29086992` | `size_of::<Arena>() as u32`, as above. |
 
-That is 16 bytes exempt per digest-checked call, out of 12,715,152 bytes hashed (0.000126%): 4 of 6,272 bytes of `telemetry`, 8 of 768 of `wave1_telemetry`, 4 of 256 of `wave2_telemetry`, and none of the other 42 regions. These were the only differences on the first native replay (the masked words, diffed with `trace_region_diff.mjs`). No other word differs anywhere in the canonical set.
+That is `16` bytes exempt per digest-checked call out of `14,669,104` bytes hashed (`0.000109%`): `4` of `6,272` bytes of `telemetry`, `8` of `768` of `wave1_telemetry`, `4` of `256` of `wave2_telemetry`, and none of the other digested regions. No other word differs anywhere across all `8` Gate N scenarios or the canonical trace set.
 
 ### Native parity results (measured)
+
+**v3.5.0.** Fresh Gate N parity recording on `v3.5.0` (`web/chronos_spectral.wasm` sha256 `8621e912...`) across all `8` scenarios (`hero_sd`, `hodge`, `conservation`, `swarm`, `depth`, `wind`, `elasto`, `dense_audit`): `19` traces (`140.0 MB`), `3,674` calls, `150,248` region digests, **0 mismatches** on native Apple Silicon NEON (`checked` profile: overflow checks and debug assertions on, `1.8 s` replay), with single-byte host-write corruption detected at call `#97` (`ring_slot[9]`). CI runs the same Gate N suite on Linux x86-64 SSE, macOS arm64 NEON, and `simd-force-scalar` on both platforms.
 
 **v3.1.1.** The v3.1.1 canonical set (`canon-v13`, recorded from the v3.1.1 wasm) replays in full with Gate N's settings on the NEON backend (28.8 s) and on the scalar reference (80.5 s): 29 pass, 0 portable prefix, 0 fail, with the same calls, digest-checked calls and region digests as the table below. The SSE backend (an `x86_64-apple-darwin` build, `+ssse3,+sse4.1`, run under Rosetta 2) replays the v3.1.0 set (`canon-v12`) with the same result: 29 pass. So do NEON and the scalar reference in the `release` profile, before every commit of the release.
 
@@ -481,11 +503,11 @@ v3.1.0 writes all four, and the candidate loop next to the pair scan (bound `f_h
 [scripts/gate_native_parity.mjs](../scripts/gate_native_parity.mjs) needs no pre-recorded traces and makes no platform assumptions:
 
 1. Builds `chronos_replay` for the host with the `checked` profile and `-D warnings`. The flag goes in through `cargo --config "target.'cfg(all())'.rustflags = [...]"`, and `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS` are removed from the build's environment. Until this was fixed the gate set `RUSTFLAGS=-D warnings`, which replaces the `target.*.rustflags` of `.cargo/config.toml`. On x86_64 Linux (the CI job) that dropped `+ssse3,+sse4.1`, so Gate N there replayed on `simd::scalar` instead of `simd::sse`. `cargo check -v --target x86_64-unknown-linux-gnu` shows the rustc command line with `target-feature=+ssse3,+sse4.1` when `RUSTFLAGS` is unset and without it when `RUSTFLAGS='-D warnings'`.
-2. Records, from `web/chronos_spectral.wasm` and in parallel, four existing harnesses under the hook into `target/native-parity/` (removed after a pass; `--keep` keeps it). The scenarios are `calibrate_mp4.mjs --clip=juggling_ballistic` (real-MP4 sparse hero tracking at SD, with a pooled-instance `RESET`), `gate_i3_hodge.mjs`, `gate_i5b_conservation.mjs` and `benchmark_1000.mjs --only=Q1` capped at 24 MiB. Measured: 5 traces, 3,088 calls, 104.0 MB, 3.1 s. Each scenario must reach a minimum call count, and none may contain a `U` record.
-3. Replays them with `--require-full --wasm-sha256=<web wasm>`: 3,088 calls, 102,375 region digests, 0 mismatches required (2.4 s). The driver's banner names the SIMD backend it runs, and the gate fails unless that is the one the host and features must select: `neon` on aarch64, `sse` on x86_64, and `scalar` with `simd-force-scalar` or on any other host.
+2. Records, from `web/chronos_spectral.wasm` and in parallel, eight existing harnesses under the hook into `target/native-parity/` (removed after a pass; `--keep` keeps it). The scenarios are `hero_sd` (`calibrate_mp4.mjs --clip=juggling_ballistic`), `hodge` (`gate_i3_hodge.mjs`), `conservation` (`gate_i5b_conservation.mjs`), `swarm` (`benchmark_1000.mjs --only=Q1` capped at `24 MiB`), `depth` (`gate_i7_depth.mjs --parity-lite`), `wind` (`gate_i9_wind_tunnel.mjs --parity-lite`), `elasto` (`gate_i8_elastography.mjs --parity-lite`), and `dense_audit` (`gate_i10_physics_audit.mjs --parity-lite`). Measured on `v3.5.0`: `19` traces, `3,674` calls, `140.0 MB`, `3.5 s`. Each scenario must reach a minimum call count, and none may contain a `U` record.
+3. Replays them with `--require-full --wasm-sha256=<web wasm>`: `3,674` calls, `150,248` region digests, `0` mismatches required (`1.8 s`). The driver's banner names the SIMD backend it runs, and the gate fails unless that is the one the host and features must select: `neon` on aarch64, `sse` on x86_64, and `scalar` with `simd-force-scalar` or on any other host.
 4. Negative control: one byte of a host write in the Hodge trace flipped (`trace_tool.mjs mutate-write`). The driver must fail at or after the call that write precedes (measured: call `#97`, region `ring_slot[9]`).
 
-The swarm scenario is there because it is the one that catches a subtle scalar-backend bug: `f32x4.nearest` rounding ties away from zero passes Hodge, conservation and SD hero tracking, and is caught at swarm call `#148`. The gate takes 121 s on Apple Silicon, almost all of it the native build (115 s; a cached build takes under a second). `--features=...` passes cargo features (`--features=simd-force-scalar` replays on the scalar reference; CI runs it on Linux x86_64 and macOS arm64). `--scenarios=<ids>` runs a subset, which must include `hodge` (the negative control). The `hero_sd` scenario depends on `ffmpeg`, like `gate_i1_cov_residual.mjs`.
+The swarm scenario is there because it is the one that catches a subtle scalar-backend bug: `f32x4.nearest` rounding ties away from zero passes Hodge, conservation and SD hero tracking, and is caught at swarm call `#148`. `--features=...` passes cargo features (`--features=simd-force-scalar` replays on the scalar reference; CI runs it on Linux x86_64 and macOS arm64). `--scenarios=<ids>` runs a subset, which must include `hodge` (the negative control). The `hero_sd` and `elasto` scenarios depend on `ffmpeg`.
 
 ## Continuous integration
 
@@ -494,9 +516,9 @@ The swarm scenario is there because it is the one that catches a subtle scalar-b
 | Job | Runner | Runs | Proves |
 | :--- | :--- | :--- | :--- |
 | `verify-wasm-simd128-and-e2e` | `ubuntu-latest` (x86_64) | `./build.sh --e2e` with `CHRONOS_VERIFY_COMMITTED_WASM=1` | The full pipeline against the committed Wasm; Gates S and N natively on the SSE backend. |
-| `native-macos-arm64` | `macos-latest` (Apple Silicon; the job fails if `uname -m` is not `arm64`) | `./build.sh --native-check` with `CHRONOS_VERIFY_COMMITTED_WASM=1`, then the scalar commands under [Native backends only](#native-backends-only---native-check) | NEON on real hardware: conformance against the scalar reference and whole-kernel parity with the Wasm (Hodge, conservation, swarm; no `ffmpeg` on the runner). The scalar reference at kernel level on aarch64. The Wasm builds byte-identically on macOS too. |
-| `native-scalar-linux-x86_64` | `ubuntu-latest` | Both native test suites and Gate N with `simd-force-scalar`, all four scenarios | The scalar reference at kernel level on x86_64, real-MP4 tracking included. |
-| `miri-scalar` ([miri.yml](../.github/workflows/miri.yml)) | `ubuntu-latest` | Sharded `cargo miri test` over the SIMD layer and `native/tests/miri_*.rs` / `kernel_ticks.rs` (see [Miri](#miri)) | No undefined behaviour Miri can detect in that scope. Separate non-blocking workflow (`continue-on-error: true`). |
+| `native-macos-arm64` | `macos-latest` (Apple Silicon; the job fails if `uname -m` is not `arm64`) | `./build.sh --native-check` with `CHRONOS_VERIFY_COMMITTED_WASM=1`, then the scalar commands under [Native backends only](#native-backends-only---native-check) | NEON on real hardware: conformance against the scalar reference, C ABI v4 + Python `chronos-audit` SDK (`Gate I10n`), whole-kernel parity with the Wasm (`hodge`, `conservation`, `swarm`, `depth`, `wind`, `dense_audit`), and `Gate UI`. The scalar reference at kernel level on aarch64. The Wasm builds byte-identically on macOS too. |
+| `native-scalar-linux-x86_64` | `ubuntu-latest` | Both native test suites and Gate N with `simd-force-scalar`, all eight scenarios | The scalar reference at kernel level on x86_64, real-MP4 tracking and elastography included. |
+| `miri-scalar` ([miri.yml](../.github/workflows/miri.yml)) | `ubuntu-latest` | 6-shard `cargo miri test` matrix (`simd-layer`, `kernel-ticks`, `depth-abi`, `wind-tunnel`, `elastography`, `audit`) | No undefined behaviour Miri can detect under Stacked Borrows in those six suites. Separate non-blocking workflow (`continue-on-error: true`). |
 
 A scalar backend that diverges fails both scalar jobs. The conformance suite compares it with NEON or SSE and with `std` math, and Gate N compares the whole kernel with the Wasm call by call. Measured with a deliberately broken scalar `f32x4_nearest` (ties away from zero) and `simd-force-scalar` on aarch64, the scalar step fails three ways. `cargo test` fails `neon_backend_matches_scalar_reference` and `floor_and_nearest_match_std` (on x86_64, `sse_backend_matches_scalar_reference` takes the place of the NEON test). Gate N fails at swarm call `#148` (`chronos_post_tick`, 4 of 45 region digests differ), while Hodge and conservation still pass.
 

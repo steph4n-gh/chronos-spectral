@@ -1,4 +1,4 @@
-"""Zero-dependency Python ctypes wrapper for the native multi-instance CHRONOS-SPECTRAL engine (v3.4.0, ABI 4).
+"""Zero-dependency Python ctypes wrapper for the native multi-instance CHRONOS-SPECTRAL engine (v3.5.0, ABI 4).
 
 Supports:
 - Zero-copy writable RGBA8 ring-buffer views (`ingest_buffer()` + `step_in_place()`)
@@ -553,7 +553,7 @@ class ChronosEngine:
     @property
     def version_string(self) -> str:
         raw = self._lib.chronos_version_string()
-        return raw.decode("utf-8") if raw else "3.4.0"
+        return raw.decode("utf-8") if raw else "3.5.0"
 
     def reset(self) -> None:
         """Reset engine in place to a state bit-identical to a fresh `ChronosEngine()`."""

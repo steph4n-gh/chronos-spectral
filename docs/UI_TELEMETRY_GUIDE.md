@@ -1,373 +1,246 @@
 # CHRONOS-SPECTRAL UI and telemetry guide
 
-This reference documents every UI panel, `OffscreenCanvas` visualization, dynamic KPI state transition, calibration rule, WebAudio synthesizer voice, and exported telemetry field in the CHRONOS-SPECTRAL Command Deck and Showcase ([web/index.html](../web/index.html), [web/worker.js](../web/worker.js), [src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs), [src/soa_tracks.rs](../src/soa_tracks.rs), [src/continuum_physics.rs](../src/continuum_physics.rs), [src/bos.rs](../src/bos.rs), [src/hodge.rs](../src/hodge.rs), [src/vibrometry.rs](../src/vibrometry.rs), and [docs/ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)).
+This reference documents every instrument region, `OffscreenCanvas` scope, finite-state control rule, shared scratch bus handoff, calibration mode, audit matrix, WebAudio voice, and exported C-ABI memory buffer in the CHRONOS-SPECTRAL v3.5.0 Optical Physics Instrument ([web/index.html](../web/index.html), [web/ui/](../web/ui/main.js), [web/styles/](../web/styles/layout.css), [web/worker.js](../web/worker.js), and `src/*.rs`).
 
-Each entry documents:
-1. **What it is:** Exact UI label, DOM `#id` or CSS/canvas component, and source file.
-2. **What it measures or controls:** Mathematical quantity, units, gating threshold, and linear-memory telemetry slot (`telemetry[0..1567]`, `slot_meta[0..127]`, or `swarm_telem[0..63]`).
-3. **Why it matters:** What physical behavior, tracking limit, or tuning signal it exposes.
+Each section lists:
+1. **Exact DOM `#id` or module path.**
+2. **Mathematical quantity, gating condition, or C-ABI buffer slot.**
+3. **Why the indicator or control matters during measurement.**
 
 ---
 
-## Deck architecture and core concepts
+## Instrument architecture and core concepts
 
-![Full 3-column Command Deck layout during active HD model rocket tracking](./assets/panels/01_deck_overview.png)
+![Full v3.5.0 CHRONOS-SPECTRAL Optical Physics Instrument tracking solid-motor model rockets](./assets/panels/01_deck_overview.png)
 
 ```mermaid
 flowchart TB
-  WASM["Rust Wasm SIMD128 Kernel (src/lib.rs, physics_id.rs, soa_tracks.rs, continuum_physics.rs, bos.rs, hodge.rs, vibrometry.rs)\n448 Pages / 28.00 MB Static Arena\nrgba_ring[0..11] + wave1_telem[0..191] + wave2_telem[0..63] + telemetry[0..1567] + swarm_telem[0..63]"] --> WORKER["Web Worker Isolate (web/worker.js)\nLanczos Fiedler + DLT Homography + 18,000x56 Recorder"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| HUD["Region 2A: #hudCanvas (960x540) + WebGL2 Field Layer"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| PIP["Region 2B: #pipCanvas (412x234)"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| ROSTERCANVAS["Region 2C: 16x .slot-pip-canvas (276x148)"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint, 2 Hz)"| PERSIST["Region 3-Top: #persistenceCanvas (420x204)"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| HILBERT["Region 3A: #hilbertCanvas (420x210)"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| SPECTRAL["Region 3B: #spectralCanvas (420x210)"]
-  WORKER -->|"OffscreenCanvas (Direct Worker Paint, 15 Hz)"| PHYS["Region 3D: #physicsPhaseCanvas (420x210)"]
-  WORKER -->|"postMessage telemetry / cal_state / audio"| DOM["Main Thread DOM (web/index.html)"]
-  DOM --> HEADER["Region 1: Header Telemetry Pills"]
-  DOM --> KPIS["Region 2B + 3-Top + 3C + 3D + 3E: KPIs + Physics ID + Continuum (1-4 Hz)"]
-  DOM --> ROSTERDOM["Region 2C: Target Roster Cards S1..S16 (#rosterScrollWell)"]
-  DOM --> CONTROLS["Region 4: Showcases + 6 Control Panels"]
-  CONTROLS --> MODAL["Region 5: #liveStreamDialog + #hiddenVideoSource"]
+  WASM["Rust Wasm32 SIMD128 Kernel (101 exports, 448 pages = 28.00 MiB)\nrgba_ring[0..11] + 64x36 Continuum/Hodge/Vibro/Depth/Wind + 256x128 BOS Bus"] --> WORKER["Primary Web Worker (web/worker.js)\nWebCodecs Fast-Pass + DLT Homography + 18,000x56 Recorder"]
+  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| HUD["Center Stage: #hudCanvas (960x540) + WebGL2 Field Layer"]
+  WORKER -->|"OffscreenCanvas (Direct Worker Paint)"| ROSTER["Right Roster: 16x #slotPip0..15 (276x148)"]
+  WORKER -->|"OffscreenCanvas (Active Bay Mask)"| BAYCANVAS["Scope Bay: #pipCanvas, #persistenceCanvas, #hilbertCanvas, #spectralCanvas, #physicsPhaseCanvas"]
+  WORKER -->|"postMessage telemetry / config_ack / audio"| UI["ES Module Instrument UI (web/ui/)\nfsm.js + constraints.js + registry.js + recipes/registry.js"]
+  AUDITW["Lazy Isolated Audit Worker (spawned on first Audit A/B run)"] -->|"8-axis chronos-audit/1"| AUDITUI["Scope Bay Audit A/B (#physicsAuditCard + #auditTimelineCanvas)"]
+  UI --> RAIL["Region 1: 36px Status Rail (header.bench-rail)"]
+  UI --> RACK["Region 2: Left 4-Tab Rack (Engines | Acquire | Calibrate | Record)"]
+  UI --> STAGE["Region 3: Center Optical Stage + 6-Tool Strip + 16 Field Overlays"]
+  UI --> BAY["Region 5: Bottom 5-Meter Scope Bay (Track | Phase | Physics ODE | Field & Diag | Audit A/B)"]
 ```
 
-Two architectural principles govern almost every indicator on the deck:
+Three design choices govern the entire interface:
 
-1. **Non-causal delayed presentation (`VIEW [t - K]` vs `NOW [t]`):** Incoming frames land in `Arena.rgba_ring[frame_idx % 12]` (`t NOW`), while the HUD displays delayed slot `(frame_idx + 12 - eff_k) % 12` (`t - K`, default `K = 8`). Holding `K` future frames lets Dual Projected-FISTA smooth trajectories across `12` frames, lets backward `rgba_ring` re-tracking fill missing detections, lets Hermite splines bridge bounded opaque occlusions, and feeds the symmetric `15`-tap Hamming Hilbert filter when `K >= 7`.
-2. **Primary focus selection (`AUTO` vs `PINNED`):** Up to `16` Hero targets (`S1..S16`) are tracked simultaneously in Wasm. `resolvePrimarySlot()` ([web/worker.js](../web/worker.js)) selects one primary target for the enlarged Split PiP, `#mortonReadout`, `#hilbertCanvas`, and the focus Kinematic Matrix cards. You can keep mode-aware `AUTO` selection or pin any `Tn` by clicking near it on `#hudCanvas`, clicking its card header button (`.roster-pin-btn`), or stepping through `#btnFocusCycle`.
+1. **Zero-CLS stacked tab layout (`CLS = 0.000000`):** Both the Left 4-Tab Rack and Bottom 5-Meter Scope Bay keep all pages stacked inside fixed dimensions using CSS visibility and `inert`. Switching tabs, opening drawers, pinning targets, or running audits never shifts surrounding panels. The worker receives `scopeVisibilityMask` (`track: 0x09`, `phase: 0x0a`, `physics: 0x0c`, `field: 0x08`, `audit: 0x08`) so hidden secondary canvases consume zero draw work while the 16-channel roster stays live.
+2. **Verified finite-state machine & atomic repair (`web/ui/core/{fsm,constraints}.js`):** Five physics organs share the kernel's `256x128` BOS scratch arena (`P1` Depth Stereo, `P2` Thermal BOS, `P3` Wind Tunnel, `P4` Acoustic BOS, `P5` Surface Elastography). `planIntent()` resolves prerequisites and conflicting scratch claims atomically in one click, and `btnUndoConfig` reverses the previous atomic handoff. `scripts/verify_ui_fsm.mjs` exhaustively checks all `300` scratch tuples, all `30` directed owner handoffs, all `194,400` state combinations, and all `53` recipes.
+3. **Non-causal delayed presentation (`VIEW [t - K]` vs `NOW [t]`):** Incoming frames enter `Arena.rgba_ring[frame_idx % 12]`, while `#hudCanvas` renders delayed slot `(frame_idx + 12 - eff_k) % 12` (default `K = 8`). Holding `K` future frames unlocks 2-pass IRL1 Dual Projected-FISTA smoothing, backward `rgba_ring` re-tracking, bounded cubic Hermite bridges, and the centered `15`-tap FIR Hilbert filter (`K >= 7`).
 
 ---
 
-## Region 1: Top system telemetry header
+## Region 1: Top 36px status rail (`header.bench-rail`)
 
-![Top command bar showing SIMD128 badge, zero-import check, 448-page arena size, kernel latency, FPS, and camera lock state](./assets/panels/02_header_telemetry.png)
+![Top 36px instrument status rail with Presets drawer trigger, visibility policy, annunciators, Undo, and Record button](./assets/panels/02_header_telemetry.png)
 
-Source: `header.deck-header` ([web/index.html](../web/index.html)).
+Source: `header.bench-rail` ([web/index.html](../web/index.html)), [web/ui/views/bench-shell.js](../web/ui/views/bench-shell.js).
 
-| Element (`#id` / Badge) | UI Label / Example | What it measures | Why it matters |
+| Element (`#id`) | Example readout / control | What it measures or controls | Why it matters |
 | :--- | :--- | :--- | :--- |
-| `.brand-badge` | `WASM32 + SIMD128` | Static target architecture indicator. | Confirms the compute kernel executes packed `v128` SIMD instructions in `wasm32`. |
-| `#pillKernel` | `◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS` | Wasm instantiation status (`ready`, `init_error`, worker `error`). | Verifies the Rust module loaded with zero host imports and zero heap allocator calls; surfaces failures immediately. |
-| `#pillArena` | `ARENA: 448 PAGES / 28.00 MB` | Fixed `WebAssembly.Memory` capacity (`telemetry[20]` = `sizeof(Arena) = 23,300,224 B <= 24,117,248 B`, `dualStaticEnd = 23,359,440 B <= 24,248,320 B`, and `byteLength / 65536 = 448`). | Verifies static memory discipline across `SD` (`320x180`) and `HD` (`640x360`) resolution toggles with zero `memory.grow` leaks. |
-| `#pillPerf` | `◆ KERNEL: 0.700 ms` | 120-frame rolling median tick latency (`wasmMedianMs`, [web/worker.js](../web/worker.js)) covering `chronos_pre_tick`, Lanczos Fiedler, and `chronos_post_tick`. | Flags `▲` warn above per-frame compute budgets (`0.35 ms` SD / `1.00 ms` HD testbench; `0.75 ms` SD / `2.20 ms` HD real video). |
-| `#pillFps` | `FPS: 25` | Smoothed ingest frame rate (`sourceFps` EMA over incoming `dtSec`, or `60` on testbench). | Confirms `requestVideoFrameCallback` delivers unique decoded frames at native cadence rather than duplicate RAF polls. |
-| `#pillStreamHealth` | `◆ CAM LOCKED · LAG 320ms · DROP 0` | Live camera state (`telemetry[1257]`: `0` locked, `1` PTZ pan `telemetry[1258]`, `2` scene cut), buffered lookahead lag `telemetry[1256]` (`disp_lag_ms`), and JS `pumpDroppedFrames` (hidden in `testbench`). | Separates true object motion from panning cameras (`▲ PTZ PAN`) or cuts (`▲ CUT RESET`) and alerts on worker backpressure drops. |
+| `#btnOpenPresets` | `Presets [P]` | Opens `#presetsDrawer` with all `53` declarative physics recipes across `7` domains. | Loads built-in demos with either **Load** (source + settings) or **Settings Only** (applies recipe settings to your own video). |
+| `#btnVisibilityPolicy` | `View: All` / `View: Applicable` | Switches `visibility_policy` between `ALL_CONSTRAINED` and `APPLICABLE_ONLY`. | Focuses the rack on controls applicable to the active source while never hiding any selected or active organ. |
+| `#hudSourceLabel` | `SOURCE: SAMPLE MP4 (...)` | Active optical input source (`IDLE BENCH`, local file, built-in clip, webcam, live MSE, or signal generator). | Confirms active ingest source and clip provenance. |
+| `#calBadge` | `PX UNITS` / `SURVEYED RULER` | Active metric calibration state and provenance (`PX`, `ASSUMED`, `SURVEYED`, `AUTO-g LOCKED`). | Flags whether velocity and length readouts are pixel units, assumed preset scales, or surveyed SI units. |
+| `#pillPerf` | `KERNEL: 0.700 ms` | `120`-frame rolling median Wasm tick latency (`chronos_pre_tick`, Lanczos Fiedler, `chronos_post_tick`). | Separates kernel compute cost from browser video decode and canvas presentation. |
+| `#pillFps` | `FPS: 25` | Smoothed ingest frame rate EMA from unique `requestVideoFrameCallback` / WebCodecs frames. | Verifies native cadence without duplicate RAF polling. |
+| `#pillKernel` | `◆ KERNEL: 0 HEAP ALLOC / 0 IMPORTS` | Wasm instantiation status and static zero-import check. | Surfaces boot or worker errors immediately. |
+| `#pillArena` | `ARENA: 448 PAGES / 28.00 MB` | Fixed `WebAssembly.Memory` size (`telemetry[20] = 29,080,704 B`, `448` pages). | Confirms zero `memory.grow` leaks across SD/HD switches and organ changes. |
+| `#pillStreamHealth` | `◆ CAM LOCKED · LAG 320ms · DROP 0` | Camera motion state (`telemetry[1257]`: `0` locked, `1` pan, `2` cut), buffered delay `disp_lag_ms`, and worker frame drops. | Distinguishes target motion from camera pans or scene cuts and reports backpressure drops. |
+| `#btnUndoConfig` | `Undo` | One-level undo for the last atomic organ handoff or prerequisite repair. | Lets you test competing scratch owners without losing prior configuration. |
+| `#btnRailRec` | `● Rec` / `■ 240f` | Starts or stops the `18,000 x 56` zero-GC telemetry ring recorder (`R` key). | Quick access to session capture from any rack tab. |
+| `#btnShortcuts` | `?` | Opens `#shortcutsDialog` listing all `16` keyboard shortcuts. | Reference for single-key tools (`1..6`), transport (`Space`, `,`, `.`), and overlays (`H`, `F`, `P`, `O`, `R`, `]`, `Esc`). |
 
 ---
 
-## Region 2: Left column (HUD, Split PiP, Primary KPIs, and Target Roster)
+## Region 2: Left 4-tab instrument rack (`aside.bench-rack`)
 
-### Region 2A: Delayed Wavefield HUD (`#hudPanel`, `#hudCanvas`)
+Four tabs (`#rackTabEngines`, `#rackTabAcquire`, `#rackTabCalibrate`, `#rackTabRecord`) organize all instrument parameters without vertical scrolling bloat.
+
+### Tab 2A: Engines (`#rackPageEngines`)
+
+![Left rack Engines tab showing 5-slot BOS scratch priority bus, lab mode, lookahead K, continuum substrate, and optical physics organs](./assets/panels/13_showcases_input_and_modes.png)
+
+- **Shared BOS Scratch Priority Bus (`#bosBusStrip`, `#bosBusOwnerLabel`):** Displays live ownership of the `256x128` solver scratch across `#busSlotStereo` (`P1 STEREO`), `#busSlotBos` (`P2 THERMAL`), `#busSlotWind` (`P3 WIND`), `#busSlotAbos` (`P4 A-BOS`), and `#busSlotElasto` (`P5 ELASTO`). Clicking any slot performs an atomic one-click handoff via `takeBosScratch()`, retiring the prior owner and cleaning orphaned overlays.
+- **Kinematic Lab Mode & Lookahead (`#labBadge`, `.lab-btn`, `#btnLabStimulus`, `#sliderK`, `#valK`, `#kUnlockStrip`):**
+  - Selects `A · Apex` (ballistic gravity priors, Hermite bridges, frozen apex crosshairs), `B · Phase` (Hilbert quadrature, Kasa pivot, stimulus onset latency), or `C · Strike` (`4`-quadrant CAD deflection protractors + WebAudio impact synth).
+  - `#sliderK` (`0..11`, default `8`) sets `lookahead_k`; `#kUnlockStrip` indicates when `K >= 7` unlocks Hilbert quadrature, strobe prediction, and Hermite bridges.
+- **Continuum Substrate (`#rowSwarm`, `#rowHodge`, `#rowMetrology`):**
+  - `#swarmModeSelect` (`0` Off, `1` Auto `>= 64` peaks, `2` Forced Active up to `3,072` micro-tracks).
+  - `#hodgeModeSelect` (`0` Off, `1` 2f Staggered, `2` 4f/Every-frame `64x36` Hodge `2`-complex; auto-enables Swarm when needed).
+  - `#metrologyModeSelect` (`0` Off, `1` Track `2x2` covariance + LOO residual, `2` Full + Auto-Hero promotion with pinhole looming rejection).
+- **Optical Physics Organs (`#rowDepth`, `#rowBos`, `#rowWind`, `#rowRs`, `#rowElasto`):**
+  - `#depthModeSelect` (`0` Off, `1` Mono Parallax/FoE/TTC, `2` Stereo SDK `P1`, `3` External SDK, `4` Auto-Fused `P1`).
+  - `#bosModeSelect` (`0` Off, `1` Static Ref tripod `P2`, `2` Adaptive Ref `P2`).
+  - `#windModeSelect` (`0` Off, `1` 2f Sparse Loads `P3`, `2` 4f/Every-frame Loads `P3`, `3` Dense Audit `READY_FIELD_ONLY` `P3`).
+  - `#rsVibroModeSelect` (`0` Off, `1` Calibrated RS, `2` RS + Welch Audio `K >= 8`), paired with `#inpRsDtRowUs`, `#inpRsExposureUs`, `#selRsScanDir`, and the Live Acoustic Sound Probe (`#probeExciterPreset`, `#btnProbeExciter`).
+  - `#elastoModeSelect` (`0` Off, `1` kHz RS + Audio Lock-In `P5`, `2` kHz RS Video-Only `P5`, `3` Surface Wave Elastography `P5`, `4` Lock-In Acoustic BOS `P4`).
+
+### Tab 2B: Acquire (`#rackPageAcquire`)
+
+- **Wavefield Resolution (`#inputResMeta`, `#btnResSd`, `#btnResHd`):** Live switches between `320x180` SD (`32x32` PiP) and `640x360` HD (`64x64` PiP) inside the fixed `448`-page arena with zero allocations.
+- **Optical Signal Source (`#btnOpenVideoFile` / `#mp4Input` `[O]`, `#btnSrcWebcam`, `#btnSrcLiveStream`, `#btnSrcTestbench`, `#sampleVideoSelect`):** Opens local MP4/WebM files (`0` bytes uploaded), live webcams, 3-tier live streams, the internal pixel-isolated Signal Generator (`10` synthetic scenarios), or any of the `41` built-in MP4 clips organized into `7` `<optgroup>` groups.
+- **Native `1:1` Sensor ROI & Virtual PTZ (`#roiGeomMeta`, `#chkNativeRoi`, `#chkAutoTrackRoi`, `#rangeRoiX0`, `#rangeRoiY0`, `#btnResetRoiCrop`):** Crops `1:1` native pixels without implicit downscaling and enables smooth focus-target ROI slewing (`INGEST_FLAG_ROI_SLEW`).
+
+### Tab 2C: Calibrate (`#rackPageCalibrate`)
+
+![Left rack Calibrate tab with metric dimensions form and expanded Surveyed Normalized Coordinates disclosure](./assets/panels/14_calibration_hyperparams_recorder.png)
+
+- **Calibration Actions (`#calToolbar`, `#btnCalAutoG`, `#btnCalPreset`, `#btnCalClear`, `#calStatusLive`):** Arms multi-arc gravity scale (`Auto-g`: `px/m = g_hat / 9.80665` across `>= 2` arcs), applies clip-declared illustrative `ASSUMED` presets, or clears back to `PX UNITS`.
+- **Dimensions & Surveyed Coordinates (`#calScaleForm`, `#calRulerM`, `#calPlaneW`, `#calPlaneH`, `#calKeyboardDisclosure`, `#calCoordForm`):** Validates scale inputs (`0.05..500 m`) and lets keyboard users enter exact `[0.00..1.00]` normalized endpoints or `TL -> TR -> BR -> BL` plane corners committed as `SURVEYED` scale that persists across `SD <-> HD` switches. Pressing `Esc` cancels any armed draft without erasing committed calibration.
+
+### Tab 2D: Record & Display Tuning (`#rackPageRecord`)
+
+![Left rack Record tab showing session recorder exports, viewport overlay toggles, WebAudio synth, and variational hyperparameters](./assets/panels/10_variational_kinematic_matrix.png)
+
+- **Session Recorder (`#recStatusLabel`, `#btnRecToggle`, `#btnRecClear`, `#btnExportCsv`, `#btnExportJson`, `#btnExportRecipe`):** Pre-allocated `18,000 x 56` `Float64Array` ring buffer (`5` minutes at `60 Hz`, `0` GC allocations). Calibration changes increment `cal_segment_id` and append snapshots to `meta.calibrationSegments` (`schemaVersion: "1.5.0"`). **Recipe JSON** exports the active engine, overlay, and calibration configuration as a reusable recipe object.
+- **Viewport Overlays & Audio (`#chkHeroTargets` `[H]`, `#chkKalman`, `#chkAllOverlays`, `#chkEcaOverlay`, `#chkCovEllipses`, `#btnAudioToggle`, `#btnResetArena`):** Controls Hero-16 reticles, causal `2x2` Kalman baseline boxes, peripheral callouts, live `[Frame t]` ECA residuals, `95%` `2x2` covariance ellipses (`sqrt(chi^2_2(0.95)) = 2.4477`), and WebAudio Mode B/C synthesis (`netLeadSec = leadSec - msgDelaySec - outLatency`).
+- **Variational Hyperparameters (`#sliderEca`, `#sliderLambda`, `#sliderGain`):** Live tuning for `eca_adapt_rate` (`0.005..0.150`), Dual-FISTA L1 penalty `fista_lambda` (`0.10..5.00`), and PiP temporal contrast gain `eulerian_gain` (`5..60x`).
+
+---
+
+## Region 3: Center optical viewport stage (`#hudPanel`)
 
 <table>
   <tr>
     <td width="50%" align="center">
-      <img src="./assets/panels/03_hud_starling_swarm.png" alt="Starling murmuration swarm with Hero 16 reticles hidden and Eulerian velocity field active" width="100%" /><br />
-      <strong>Starling Murmuration (<code>HERO 16: HIDDEN</code> + Velocity <code>|v|</code> Field)</strong>
+      <img src="./assets/panels/03_hud_starling_swarm.png" alt="Starling murmuration swarm with Hero 16 hidden and 64x36 Velocity field active" width="100%" /><br />
+      <strong>Starling Murmuration (<code>Hero 16: OFF</code> + <code>64x36</code> Velocity <code>|v|</code>)</strong>
     </td>
     <td width="50%" align="center">
-      <img src="./assets/panels/04_hud_model_rockets.png" alt="Solid-motor model rocket flight with Hero 16 spline, Hermite bridge, and flight protractor" width="100%" /><br />
-      <strong>Model Rocket Trajectory (<code>Hero 16: ON</code> + Hermite Bridge + Protractor)</strong>
+      <img src="./assets/panels/04_hud_model_rockets.png" alt="Model rocket flight with Hero 16 FISTA spline, Hermite bridge, and flight protractor" width="100%" /><br />
+      <strong>Model Rocket Flight (<code>Hero 16: ON</code> + FISTA Spline &amp; Protractor)</strong>
     </td>
   </tr>
 </table>
 
-Source: `#hudPanel` (inside `#hudDockSlot`), `#hudSourceLabel`, `#btnHudHeroToggle`, `#btnHudFullscreen` ([web/index.html](../web/index.html)), and canvas renderers in [web/worker.js](../web/worker.js).
+Source: `#hudPanel`, `#hudCanvas` (`960x540` `OffscreenCanvas` + WebGL2 instanced compositor), [web/worker.js](../web/worker.js).
 
-- **`DeckUiFsm` State Machine (`transitionDeckState`, `renderDeckState`, `window.__chronosUiState`):** A pure finite-state reducer in [web/index.html](../web/index.html) coordinates all deck state across five orthogonal fields (`source`: `'IDLE' | 'TESTBENCH' | 'VIDEO' | 'WEBCAM'`, `engine`: `'SWARM_OFF' | 'AUTO_STANDBY' | 'SWARM_ACTIVE'`, `overlays`: `{ showHeroTargets, showAllOverlays, showEcaOverlay, showKalman, fieldOverlayMode }`, `pointerTool`: `'INSPECT_TARGET' | 'CAL_RULER_P1' | 'CAL_RULER_P2' | 'CAL_QUAD_PT1' | 'CAL_QUAD_PT2' | 'CAL_QUAD_PT3' | 'CAL_QUAD_PT4' | 'CROP_ROI'`, and `viewport`: `'DOCKED' | 'FULLSCREEN'`), freezing each transitioned snapshot onto `window.__chronosUiState`.
-- **Quick Header Controls (`#btnHudHeroToggle`, `#btnHudFullscreen`) and Keyboard Shortcuts (`H`, `F`, `Esc`):**
-  - `#btnHudHeroToggle` stays fixed-width (`CLS = 0.000000`) and stays synchronized 1-to-1 with `#chkHeroTargets` and `H` (ignored when focus sits inside inputs/selects or while `#liveStreamDialog` is open). Toggling off suppresses Hero-16 drawing (reticles, trails, Hermite bridges, frozen apex locks, protractors, Kalman boxes) while keeping Wasm tracking, `#pipCanvas`, and Swarm overlays active; when Swarm is inactive (`engine !== 'SWARM_ACTIVE'`), `[data-hidden-solo="true"]` highlights the button in amber.
-  - `#btnHudFullscreen` (`F` key) expands `#hudPanel` via native Fullscreen API with a zero-letterbox `.hud-maximized` CSS fallback when blocked, locking `#hudCanvas` to exact `16:9` aspect geometry (`inline-size: min(100%, calc((100dvh - 54px) * 16 / 9))`). Pressing `F` again or `Escape` restores `DOCKED` mode cleanly and cancels any armed calibration draft in the same keypress.
-
-`#hudSourceLabel` prints the active source banner (`BLIND PIXEL PILLAR TESTBENCH`, `SAMPLE MP4 (...)`, `LIVE WEBCAM`, or `LIVE fMP4 MSE`). `#hudCanvas` is a borderless `16:9` `960x540` `OffscreenCanvas` using monotonic `calSyncSeq` fencing to drop racing pointer clicks.
-
-#### HUD layers in draw order
-
-1. **Delayed RGBA Base Frame (`[t - K]`):** Nearest-neighbor blit of `Arena.rgba_ring[dispSlot]` scaled `3.0x` (`320x180` SD) or `1.5x` (`640x360` HD).
-2. **Live ECA Motion-Residual Heatmap (`[Frame t]`):** Enabled by `#chkEcaOverlay`. Maps normalized Rank-2 Extensive Cancellation Algorithm foreground residual `ecaResView[i] > 0.025` to translucent cyan, visually exposing the `K`-frame lookahead offset between ingest time `t` and displayed overlays at `t - K`.
-3. **Testbench Blind Occluder Zones (`OCCLUDER P1`, `OCCLUDER P2`):** Dashed steel-blue outlines marking 100% opaque zero-visibility (`w_k = 0`) pillars in synthetic occlusion runs.
-4. **Calibration Geometry and Armed Click Guides:** Dashed gold 2-point ruler (`X.XX m`), solid cyan 4-point homography quad (`TL`, `TR`, `BR`, `BL`) with dashed `4x4` inverse-mapped `H^-1` iso-metric grid, and top-center armed click banners (`ESC PRESERVES PRIOR`).
-5. **Mode C Quadrant Voice Grid, Shockwaves, and Scatter Wedges (`labMode === 2`):** Four audio-zone boundaries (`Q0..Q3`), expanding double impact shockwaves, CAD incident-vs-outgoing deflection protractors rectified via homography Jacobian `J_H`, and `24`-frame two-body contact scatter wedges (`telemetry[1250..1255]`).
-6. **Per-Target Hero Trajectories (`m = 0..15`):**
-   - `44`-frame tapered comet trail (`trailX/Y`).
-   - Kasa virtual pendulum/metronome pivot bullseye (`◎ PIVOT` or top-edge `▲ VIRT PIVOT`) + plumb line + green tether + swing wedge (`theta`, radius `R`).
-   - Past Dual-FISTA ribbon (`[t - 11 .. t - K]`) and future lookahead ribbon (`[t - K .. t NOW]`), turning bright gold (`HERMITE-BRIDGE`) across occluded spans alongside a dashed red `20x20` causal coasting ghost square.
-   - Tangent velocity vector and horizontal `0 deg` flight protractor (`OUT-OF-PLANE` in amber when projective depth `w < 0.14`).
-   - Kinematic `2x2` Kalman baseline (`KAL-Tn` coral-red `26x26` box) proving where causal constant-velocity filtering drifts or swaps IDs.
-   - Mode A frozen parabolic apex crosshair (`APEX XXms` -> post-crest `APEX Delta=X.Xpx`).
-   - Corner-bracket reticles and staggered callout pills (`Tn [FOCUS|PINNED|HERMITE-BRIDGE|LOCK|COAST] v2:XX F+|F-` + `0xXXXXXXXX` signature).
-7. **Mode B Present-Phase Strobe Border (`labMode === 1`):** Full-canvas flash and bottom banner (`+pi/2 QUADRATURE LEAD` or `-pi/2 QUADRATURE LAG`) driven by `telemetry[14]` (`strobe_fired`) and forward-predicted phase `telemetry[27]` (`pred_phase_now`).
-8. **HUD Corner Telemetry Strips:** Top-left `VIEW [t-K] WxH | ECA XX.XdB (XX%bg) | IDSW:N | KAL:M`, top-center pan/cut alert, top-right `FOCUS`, bottom-left multi-arc gravity consensus badge, and bottom-right calibration provenance badge (`ASSUMED` vs `SURVEYED`).
-9. **WebGL2 Instanced Field Layer Compositor and Click-to-Inspect:** When swarm tracking (`swarmActive`) or field overlay mode (`1..4`) is active, a dedicated `OffscreenCanvas` WebGL2 instanced renderer (with batched 2D Canvas fallback) draws from a `12`-slot frame-aligned ring synchronized to `dispSlot` (`t - effK`) in `< 0.50 ms`:
-   - `40x22` `RGBA8` continuum texture (`gl.LINEAR` for Velocity/Vorticity/FTLE; unblended `gl.NEAREST` for `-9.0`-sentinel Modal phase) with top-left numeric legend bounds (`px/s` or `s^-1`).
-   - Up to `1,536` instanced velocity stems and signed-distance diamond lock pips (cyan = confirmed free tracks, amber = tentative/coasting, warm orange = `SE(2)` rigid-body members), plus Andrew's monotone-chain convex hulls and `B<id> · omega` labels (`<= 32` rigid components).
-   - Clicking `#hudCanvas` in `INSPECT_TARGET` mode dispatches `{ type: 'inspect_point', inspectSeq, x, y, normX, normY }`, calls `chronos_inspect_field_point(x, y)` (matching the nearest confirmed micro-track strictly `< 24.0 * q` px and pinning its Hero slot), highlights a diamond reticle, and populates `#swarmInspectReadout`.
-
-### Region 2B: Split `1x` Raw / `25x` Eulerian Audit and Primary KPIs
-
-![Split 1x Raw vs 25x Eulerian picture-in-picture magnifying rocket stage dynamics above six primary KPI cards](./assets/panels/05_split_pip_and_primary_kpis.png)
-
-Source: [web/index.html](../web/index.html), PiP renderer `renderEulerianPip` ([web/worker.js](../web/worker.js)).
-
-- **`#mortonReadout` (`BINARY-PREFIX SIG: 0x2C84EAAA (v_2 = 10)`):** Displays the primary focus track's 32-bit Haar-Morton + opponent-color signature (`telemetry[base + 12..13]`) and last-match 2-adic ultrametric depth `v_2(A, B) = clz(sig_A XOR sig_B)` (`0..32`, `telemetry[base + 14]`).
-- **`#pipCanvas` (`412x234`):** Left `192x192` square upscales `1x RAW [t - K]` (`32x32` SD or `64x64` HD border-clamped centered on `disp_fista`); right `192x192` square shows `25x TEMPORAL Delta` (`chronos_get_pip_rgba_ptr()`), magnifying sub-pixel surface vibration, stage roll, or rotor flicker in the stabilized frame.
-
-#### Primary 6 KPI cards
-
-| Label `#id` | Value `#id` | Mode / Condition | What it measures | Why it matters |
-| :--- | :--- | :--- | :--- | :--- |
-| `#lblPadicSwaps` | `#kpiPadicSwaps` | `testbench` -> `Oracle ID Swaps` | `oraclePadicSwaps`: 1-to-1 ground-truth ID swap count on blind testbench crossings. | Proves true identity preservation across total occlusions without ground-truth hints. |
-| `#lblPadicSwaps` | `#kpiPadicSwaps` | real video -> `2-Adic Fiedler` | `telemetry[5]` (`padic_id_swaps`). | Tracks assignment stability on unlabelled camera feeds. |
-| (static `Kalman Swaps`) | `#kpiKalmanSwaps` | All modes | `telemetry[6]` (`kalman_id_swaps`): identity swaps by causal `2x2` Kalman baseline. | Direct A/B count showing how many swaps non-causal spectral assignment avoided. |
-| `#lblClutterDb` | `#kpiClutterDb` | After `12`-frame warmup (`telemetry[22] > 0.5`) | `ECA Clutter (XX%)` (`clutter_eval_ratio`); value `telemetry[4]` (`clutter_db`) in dB (`WARMING` initially). | Measures background/exposure cancellation (`> 64 dB` synthetic, `36-46 dB` H.264 video). |
-| `#lblWasmMs` | `#kpiWasmMs` | All modes | Label = 120-frame mean tick time; value = rolling median (`ms`). | Separates steady SIMD128 kernel compute cost from isolated browser jitter. |
-| (static `Tracked Patches`) | `#kpiTargets` | All modes | `telemetry[3]`: confirmed Hero active count out of `16` (`N / 16`). | Verifies Hero pool occupancy and thresholding balance. |
-| `#lblCollisions` | `#kpiCollisions` | `testbench` -> `Pillar Collisions` | `inPillarCollisions`: cumulative blind occluder crossings. | Quantifies crossing stress during synthetic tests. |
-| `#lblCollisions` | `#kpiCollisions` | real video, Mode A/B -> `Hermite Bridges` | `totalBridgedEvents` (`Xf`): occluded frames reconstructed via Hermite splines. | Proves non-causal gap repair across signposts and overpasses. |
-| `#lblCollisions` | `#kpiCollisions` | real video, Mode C -> `L1 Impact Strikes` | `totalStrikeEvents`: L1 acceleration impulse events detected in Mode C. | Counts physical bank cushions and multi-body impacts. |
+- **Row 1 (6-Tool Radio Strip + Field Overlay Selector + Quick Toggles):**
+  - Pointer tools: `#toolInspect` (`1`, click to pin/inspect track or field), `#toolSeedBox` (`2`, drag box to seed target via `chronos_seed_target`), `#btnCalRuler` (`3`, 2-point ruler), `#btnCalQuad` (`4`, 4-point homography), `#btnToolCropRoi` (`5`, drag zoom crop ROI), `#toolWipe` (`6`, raw vs spectral split-wipe).
+  - `#fieldOverlayModeSelect` (`0..15`):
+    - `0` Baseline + Micro-Tracks / Rigid Hulls
+    - `1..4` `64x36` Continuum: Velocity `|v|`, Vorticity Curl, FTLE Coherent Ridges, Modal Vibration Phase (`gl.NEAREST`)
+    - `5..7` `256x128` Thermal BOS: Refraction `|eps|`, Neumann Potential `Phi`, Curl Diagnostic
+    - `8..10` `64x36` Sparse Hodge: Exact `|grad phi|`, Coexact `|curl* psi|`, Harmonic `|h|`
+    - `11` `64x36` Rolling-Shutter Amplitude / Welch Coherence `gamma^2`
+    - `12` `64x36` Zero-ML Depth / Parallax / Stereo / FoE & TTC
+    - `13` `64x36` Pocket Wind Tunnel `C_p` + Lift/Drag (or Dense Audit Field)
+    - `14` `64x36` Surface Elastography Wave Speed `c(x, y)` + Poynting Power Flow
+    - `15` `256x128` Lock-In Acoustic BOS `|Phi|`
+  - `#btnHudHeroToggle` (`H`) hides Hero-16 clutter on dense fields without pausing tracking; `#btnHudFullscreen` (`F`) expands to native fullscreen or `16:9` `.hud-maximized` fallback.
+- **Row 2 (Contextual Tool Options Bar):** `#toolOptionsHint`, `#showcaseWipeSlider` (`0..100%` raw vs spectral), `#showcaseWipeReadout`, and `#activeRecipeBadge`.
+- **Row 3 (Optical Canvas Stage):** Pure `#000` `16:9` `#hudCanvas`, interactive `#hudWipeHandle` divider, and zero-CLS `#welcomeOverlay` idle drop card (drag-and-drop any MP4/WebM directly onto the viewport, or click quick-start inputs/presets).
+- **Row 4 (Fixed 36px Source Transport Slot):** Swaps cleanly between `#videoTransportBar` (`Pause/Play` `[Space]`, `-1f` `[,]`, `+1f` `[.]`, `Replay`, `#videoScrubSlider`, `#vidTimeLabel`, `#btnFastPass` Worker WebCodecs fast-pass), `#liveStreamBar` (`#liveCropSelect`, `Switch Feed`, `Stop`), `#benchScenarioField` (`10` Signal Generator scenarios), and `#idleTransportRow`.
+- **Row 5 (Acquisition Status & Proof Strip):** `#acquisitionStatusBanner` (`info|ok|warn|danger` for PTS locks, tripod disturbances, exposure nulls, and refusals) plus inline live readouts (`#scValKernel`, `#scValTracks`, `#scValPhysics`, `#scValInspect`).
 
 ---
 
-### Region 2C: Target Roster (`S1` through `S16`)
+## Region 4: Right 16-channel compact live target roster (`aside.bench-roster`)
 
-![Two-column scrollable Target Roster showing active split PiP thumbnails, LOCKED/COAST badges, speeds, headings, and v2 depths](./assets/panels/06_target_roster_16slot.png)
+![Right 16-channel compact live target roster showing active split PiP thumbnails, lock badges, speeds, and headings](./assets/panels/06_target_roster_16slot.png)
 
-Source: `#rosterPanelTitle`, `#rosterSummaryMeta`, `#rosterScrollWell`, `#rosterGrid` ([web/index.html](../web/index.html)), `updateSlotRosterUi`, `renderAllSlotPips` ([web/worker.js](../web/worker.js)).
+Source: `aside.bench-roster`, `#rosterScrollWell`, `#rosterGrid`, `#slotPip0`..`#slotPip15` (`276x148` worker-transferred `OffscreenCanvas`es), `#btnFocusCycle` (`]`), `#mortonReadout`.
 
-- **Header Chips (`#rosterSummaryMeta`):** `#rosterReacqVal` (`RE-ACQ N`: cumulative Dormant Re-ID recoveries via the `32`-slot, `1,200`-frame archive) and `#rosterHoldChip` / `#rosterHoldVal` (`HOLD N`: cards frozen cleanly during the `48`-frame `~1.5 s` or `180`-frame `3.0 s` pinned post-loss latch).
-- **Scrollable `16`-Card Well (`#rosterScrollWell`):** Houses cards `#rosterCard0`..`#rosterCard15` and split canvases `#slotPip0`..`#slotPip15` (`276x148`) inside a fixed `472 px`-max-height scroll container (`CLS = 0`).
-- **State Badges (`.roster-state-badge`):** `IDLE`, `LOCKED`, `FOCUS`, `PINNED` (or `PIN·BRI` / `PIN·COA`), `COAST`, `BRIDGED`, and `HOLD`. Clicking `.roster-pin-btn` toggles focus pin (`aria-pressed`).
-- **Four Throttled Card Stats (`~4.5 Hz`):**
-  1. `.rs-lbl-spd` / `.rs-val-spd`: EMA speed (`m/s`, `px/s`, or `OUT-PLANE`); promotes to `SPD · HZ` whenever per-slot `slot_meta[m*8 + 4] >= 0.35 Hz`.
-  2. `.rs-lbl-ang` / `.rs-val-ang`: Switches between `HDG · omega` (free heading/turn rate) and `SWG · R` (swing angle and tether radius on Kasa pivot locks).
-  3. `LOCK AGE` (`.rs-val-age`): Custody seconds, appending `(Cf)` coasting frames during occlusion.
-  4. `v_2 · RE-ACQ` (`.rs-val-id`): Last 2-adic match depth `v_2:XX` and dormant re-acquisition count.
+- Displays all `16` Hero slots (`S1..S16`) with live split `1x` Raw vs `25x` temporal-contrast thumbnails, state badges (`IDLE`, `LOCKED`, `FOCUS`, `PINNED`, `COAST`, `BRIDGED`, `HOLD`), dormant archive re-acquisition counter (`#rosterReacqVal`), hold counter (`#rosterHoldVal`), and per-slot speed/heading/age/`v_2` stats.
+- Clicking any `.roster-pin-btn` pins focus onto that `Tn` ID (`aria-pressed`), locking the Track PiP, `#mortonReadout`, Hilbert scope, and Physics ODE bay onto that target.
 
 ---
 
-## Region 3: Middle column (Session Continuity, Scopes, Variational Matrix, Physics ID, and Continuum Swarm)
+## Region 5: Bottom 5-meter scope bay (`section.bench-bay`)
 
-Middle and right `.deck-column.isolated-region` columns apply CSS `content-visibility: auto; contain-intrinsic-size: auto 300px auto 800px;` with fallback `contain: layout style paint` so off-screen layout and paint remain isolated without layout shifts.
+Five tabs (`#bayTabTrack`, `#bayTabPhase`, `#bayTabPhysics`, `#bayTabField`, `#bayTabAudit`) display live inline meters (`#bayMeterTrack` .. `#bayMeterAudit`) even when inactive.
 
-### Region 3-Top: Session Persistence and Custody (`#persistencePanel`)
+### Bay Tab 5A: Track (`#bayPageTrack`)
 
-![Session Persistence panel displaying 1 Hz continuity KPIs, concurrency bar chart, and Top-10 target custody swimlanes](./assets/panels/07_session_persistence.png)
+![Scope Bay Track tab showing 1x Raw vs 25x Eulerian PiP, 12 primary and kinematic KPIs, and Multi-Minute Custody Timeline](./assets/panels/05_split_pip_and_primary_kpis.png)
 
-Source: `#persistencePanel`, `#persistSummaryMeta`, `updatePersistenceDomUi` ([web/index.html](../web/index.html)), and `renderPersistenceScope` ([web/worker.js](../web/worker.js)).
+- **`#pipCanvas` (`412x234`):** Stabilized focus patch (`32x32` SD or `64x64` HD) next to its `25x` temporal contrast delta (`chronos_get_pip_rgba_ptr()`).
+- **12 Primary & Kinematic KPIs:** `#kpiPadicSwaps` (Oracle or 2-Adic Fiedler swaps), `#kpiKalmanSwaps` (causal `2x2` Kalman baseline swaps), `#kpiClutterDb` (`telemetry[4]`, ECA background attenuation dB), `#kpiWasmMs` (median tick ms), `#kpiTargets` (`active / 16`), `#kpiCollisions` (pillar collisions, Hermite bridges, or Mode C L1 strikes), `#kpiKinAngle` (flight heading or pendulum swing angle), `#kpiKinSpeed` (provenance-tagged `m/s`, `px/s`, or `OUT OF PLANE`), `#kpiKinDeflect` (angular rate, tether radius, or strike deflection), `#kpiKinRestGrav` (`v+/v-`, multi-arc `g_hat`, or calibration badge), `#kpiPersistSpan`/`#kpiPersistActivePeak`, and `#kpiPersistUnique`/`#kpiPersistRelocks`.
+- **Multi-Minute Custody Timeline (`#persistencePanel`, `#persistenceCanvas` `420x204`):**
 
-DOM KPIs refresh at a calm `1 Hz` (`1000 ms`, waking immediately on peak increments or session reset), while `#persistenceCanvas` (`420x204`) repaints at `2 Hz`.
+![Multi-Minute Custody Timeline showing active concurrency history and top-10 target swimlanes](./assets/panels/07_session_persistence.png)
 
-- **`#persistSummaryMeta` (`DORMANT ARCHIVE: N / 32`):** Live occupancy of Wasm's `32`-slot, `1,200`-frame (`40 s` @ `30 fps`) `DormantTrack` vault (`telemetry[1272]`).
-- **6 Continuity KPI Cards:** `#kpiPersistSpan` (`Session Span` `MM:SS`), `#kpiPersistActivePeak` (`Active / Peak`), `#kpiPersistUnique` (`Unique IDs` cumulative), `#kpiPersistRelocks` (`Same-ID Re-Locks` combining archive re-ID + coast re-acquisition), `#kpiPersistLongest` (`Longest Custody` `Tn (Xs)` / `MM:SS`), and `#kpiPersistSustained` (`Locks >= 10s / 60s`).
-- **`#persistenceCanvas`:** Upper band charts `0..16` simultaneous locked targets over `240` auto-compacting chronological bins; lower band draws `TOP-10 TARGET CUSTODY SWIMLANES` (`128` tracks, `24` segments each) distinguishing solid locked custody from dashed gap-bridged re-locks.
+Charts `0..16` simultaneous locks across `240` auto-compacting bins above Top-10 target custody swimlanes distinguishing continuous locks from dashed gap-bridged re-locks (`#persistSummaryMeta` reports `DormantTrack` archive occupancy `N / 32`).
 
-### Region 3A: Hilbert Quadrature Scope (`#hilbertMeta`, `#hilbertCanvas`)
+### Bay Tab 5B: Phase (`#bayPagePhase`)
 
-![Hilbert Quadrature Scope locked onto 0.76 Hz metronome arm showing circular polar phase orbit and 90-degree quadrature waves](./assets/panels/08_hilbert_quadrature_scope.png)
+![Scope Bay Phase tab locked onto 0.80 Hz metronome showing Hilbert quadrature orbit, Lanczos Fiedler timeline, and Phase Strobe Cue controls](./assets/panels/08_hilbert_quadrature_scope.png)
 
-Source: [web/index.html](../web/index.html), `renderHilbertScope` ([web/worker.js](../web/worker.js)).
+- **Discrete Hilbert Phase (`#hilbertMeta`, `#hilbertCanvas` `420x210`):** Auto-ranging polar phase orbit `(R(t-K), H{R}(t-K))` paired with `128`-frame `90 deg` quadrature waveforms. Gates cleanly to `HILBERT GATED (K<7)` below `K = 7` and `APERIODIC MOTION` on non-periodic targets.
+- **Lanczos Spectral & FISTA (`#spectralMeta`, `#spectralCanvas` `420x210`):**
 
-- **`#hilbertMeta`:** Reports `HILBERT GATED (K<7)` when lookahead `< 7` (the centered 15-tap FIR filter requires `7` future frames), `phi = XX deg | f = X.XX Hz | COH XX%` on verified periodic targets, `phi = XX deg | APERIODIC MOTION` on non-periodic trajectories (zero false frequency hallucination on ballistic or highway clips), or `STENCIL WARMING / HOLD` prior to `15` samples.
-- **`#hilbertCanvas` (`420x210`):** Left polar plot auto-ranges across `4` discrete radii (`+-1.5`, `+-4`, `+-12`, `+-28 px * resScale`) to plot `(R(t-K), H{R}(t-K))` in green with white phase marker and dashed trigger ray rotated by `phaseOffsetRad`. Right `128`-frame strip plots `R(t-K)` in cyan, `H{R}(t-K)` (exact `90 deg` quadrature) in magenta, and vertical amber strobe trigger ticks, breaking strokes cleanly on focus target ID changes.
+![Lanczos Fiedler eigenvector partition bars, lambda2 sparkline, and 12-slot non-causal sliding timeline](./assets/panels/09_lanczos_fiedler_timeline.png)
 
-### Region 3B: Lanczos Fiedler and Timeline Scope (`#spectralMeta`, `#spectralCanvas`)
+Displays Fiedler partition signs `v_2[m]` (`F+` vs `F-`), `128`-frame $\lambda_2$ sparkline, and the `12`-cell non-causal `rgba_ring` timeline (`VIEW [t-K]`, `+LK` future frames, `OCC` gaps, and `BRG` Hermite bridges).
+- **Phase KPIs & Strobe Cue:** `#kpiTremorHz`, `#kpiTremorPhi`, `#kpiApexMs`, `#kpiSaccadeMs`, `.phase-btn` (`-pi/2 Lag`, `+pi/2 Lead`, `0 deg Peak`, `pi Trough`), `#chkStrobe`, and `#fistaGapMeta` (convex duality gap $P(X) - D(u)$).
 
-![Lanczos Fiedler partition bars, lambda2 connectivity sparkline, and 12-slot non-causal sliding timeline](./assets/panels/09_lanczos_fiedler_timeline.png)
+### Bay Tab 5C: Physics ODE (`#bayPagePhysics`)
 
-Source: [web/index.html](../web/index.html), `renderSpectralAndRingScope` ([web/worker.js](../web/worker.js)).
+![Scope Bay Physics ODE tab on Galileo pendulum showing 15 Hz phase portrait, discovered symbolic ODE plate, and 13 physics KPIs](./assets/panels/11_physics_id_and_phase_portrait.png)
 
-- **`#spectralMeta` (`lambda2 = X.XXXX | Delta lambda = X.XXX`):** Live algebraic connectivity `telemetry[7]` and spectral gap `telemetry[24]` solved by 31-step Shifted Lanczos orthogonalized iteration (`solveShiftedLanczosFiedler`, [web/worker.js](../web/worker.js)) over the `32x32` Track-Peak Laplacian.
-- **`#spectralCanvas` (`420x210`):** Upper-left bars display Fiedler eigenvector signs `v_2[m]` per slot (`F+` cyan vs `F-` crimson); upper-right gold sparkline plots `128`-frame `lambda2(t)` history; lower `12`-cell `NON-CAUSAL TIMELINE` (`t-11` -> `VIEW [t-K]` -> `NOW [t]`) labels exact physical `rgba_ring` slots (`s0..s11`) and cell states (`VIEW`, `NOW`, `+LK` future frames, `OCC` occluded edge, and `BRG` pinned Hermite bridge).
+- **`#physicsPhaseCanvas` (`420x210`, `15 Hz`):** Phase-space trajectory and mechanical energy / angular momentum conservation traces.
+- **Symbolic ODE Plate (`#physicsOdeEq`, `#physRegimeBadge`, `#physJumpBadge`):** Weak-form STRidge/AICc governing ODE over `HIST_RING_LEN = 64` frames, regime (`0 Inertial_CV` .. `8 Curved_CTRV`), and priority-latched constraint jump (`COLLISION > PEG_JUMP > CANOPY > BURNOUT`).
+- **13 Physics ID KPIs:** `#kpiPhysicsR2`, `#kpiPhysicsConf`, `#kpiImmWeights`, `#kpiPhysicsBeta` (quadratic drag), `#kpiPhysicsThrust`, `#kpiPhysicsDamping` ($\zeta, Q$), `#kpiPhysicsEllipticT` (exact `f64` AGM elliptic period), `#kpiKuramotoSync` ($R_{\text{sync}}$), `#kpiLyapunovMax` (4D Rosenstein $\lambda_{\max}$), `#kpiTaubinDelta`/`#kpiTaubinKappa`, `#kpiFistaKnots`, `#kpiTwoBodyMassE` ($m_2/m_1, e_n$), and `#kpiTwoBodyMomRes`/`#kpiPhysicsConserv`.
 
-### Region 3C: Variational and Kinematic Matrix (`#fistaGapMeta` and 8 KPI Cards)
+### Bay Tab 5D: Field & Diag (`#bayPageField`)
 
-![Variational and Kinematic Matrix showing Dual FISTA duality gap and eight context-switching kinematic cards](./assets/panels/10_variational_kinematic_matrix.png)
+![Scope Bay Field and Diag tab on murmuration_1200 showing swarm counts, rigid SE(2) bodies, vorticity, FTLE, and expanded 19-card expert solver drawer](./assets/panels/12_continuum_swarm_panel.png)
 
-Source: [web/index.html](../web/index.html).
+- **Continuum Field Summary (`#continuumSummaryMeta`):** `#kpiSwarmConfirmed` (observed vs coasting), `#kpiSwarmPeak`/`#kpiSwarmUnique`, `#kpiLatencySplit` (Kernel P50 vs partial pipeline estimate), `#kpiRigidBodies` (`SE(2)` count and top $\omega$), `#kpiContinuumVort` (max/RMS vorticity), `#kpiContinuumFtle` (max ridge and cell count), `#kpiModalField` (dominant frequency and $R_2$), and `#swarmInspectReadout` (populated by clicking `#hudCanvas` in Inspect mode via `chronos_inspect_field_point`).
+- **Collapsed Expert Solver Drawer (`#expertDiagnosticsDrawer`):** Expands `19` diagnostic readouts across all physics organs: `#diagBosState`, `#diagWindTunnel`, `#diagElastography`, `#diagRsWelch`, `#diagHodge2Complex`, `#diagOcclConservation`, `#diagMetrologyCov`, `#diagRoiGeom`, `#diagWave1Ingest`, `#diagWave1Stamps`, `#diagWave2Stamps`, `#diagValidityMask`, `#diagAuctionSteps`, `#diagRawResiduals`, `#diagFtleWindow`, `#diagSparseGraph`, `#diagKuramotoCom`, `#diagFieldBackend`, and `#diagMeanStrain`.
 
-- **`#fistaGapMeta` (`DUAL GAP: X.XXX`):** Displays `telemetry[25]` (`fista_duality_gap`), the convex primal-dual optimality gap $P(X) - D(u) \ge 0$ from `solve_noncausal_fista_irl1_target` ([src/lib.rs](../src/lib.rs)). Pass 1 runs `6` proximal dual steps and short-circuits when $\min_j w^{\text{IRL1}}_j > 0.48$; Pass 2 IRL1 reweights sharp impulse knots so billiard collisions, peg stops, and rocket burnouts stay crisp.
+### Bay Tab 5E: Audit A/B (`#bayPageAudit`)
 
-#### 8-card dynamic state-transition matrix
+![Scope Bay Audit A/B tab comparing Slot A Reference PASS against Slot B Stutter FAIL across the 8-axis matrix and dual severity timeline](./assets/panels/16_audit_ab_bench.png)
 
-| Card `#id` (Label / Value) | Condition | Rendered Label | Rendered Value and Meaning |
-| :--- | :--- | :--- | :--- |
-| `(static)` / `#kpiTremorHz` | `K < 7` / `freqValid` / `phaseValid` / idle | `Oscillation Freq` | `GATED (K<7)`, `X.XX Hz`, `APERIODIC`, or `HOLD`. |
-| `(static)` / `#kpiTremorPhi` | `K < 7` / `phaseValid` / idle | `Delayed Phase phi(t-K)` | `GATED`, `XX deg` (`telemetry[11]`), or `HOLD`. |
-| `#lblApexKpi` / `#kpiApexMs` | `apexMs > 1` / scored Mode A / idle | `Ballistic T-Apex` / `Last Apex Euclid Delta` | Live `XX ms` countdown to crest, `X.X px` post-crest Euclidean error, or `STEADY`. |
-| `#lblReflexKpi` / `#kpiSaccadeMs` | Armed / onset / settled / idle | `Stimulus Armed` / `Onset` / `Settle` | `AWAITING`, `XX.X ms` step latency (`telemetry[19]`), `telemetry[28]`, or `READY`. |
-| `#lblKinAngle` / `#kpiKinAngle` | `pivotValid` / free / idle | `Pendulum Swing theta` / `Flight Heading theta` | Signed vertical plumb deflection, $J_H$-rectified ground angle, or `-- deg`. |
-| `#lblKinSpeed` / `#kpiKinSpeed` | `metricValid < -0.5` / cal / px | `Perspective Guard` / `Surveyed` / `Assumed Speed` / `Tangential Speed` | `OUT OF PLANE`, `X.XX m/s` (provenance-tagged), or `XX px/s`. |
-| `#lblKinDeflect` / `#kpiKinDeflect` | Mode C strike / pivot / free | `Deflect Delta theta / Scatter` / `Tether Radius R` / `Angular Rate omega` | Rebound + scatter wedge (`deg`), radius (`m` or `px`), or turn rate (`deg/s`). |
-| `#lblKinRestGrav` / `#kpiKinRestGrav` | Mode C / Multi-arc `g_hat` / 1-arc / px | `Speed Ratio v+/v-` / `Gravity g_hat (N arcs)` / `Metric Calibration` | Restitution ratio, `XXX px/s^2`, provisional gravity, or active calibration badge. |
+Source: [web/ui/views/audit-view.js](../web/ui/views/audit-view.js), `#physicsAuditCard`.
 
-### Region 3D: In-Situ Physics ID and Conservation (`#physicsIdPanel`, `4 Hz` DOM + `15 Hz` Canvas)
-
-![In-Situ Physics ID panel showing discovered pendulum ODE, R2 = 0.882, elliptic period, Taubin curvature, and 15 Hz phase portrait](./assets/panels/11_physics_id_and_phase_portrait.png)
-
-Source: `#physicsIdPanel`, `updatePhysicsIdDomUi` ([web/index.html](../web/index.html)), `15 Hz` `OffscreenCanvas` portrait ([web/worker.js](../web/worker.js)), and [src/physics_id.rs](../src/physics_id.rs).
-
-DOM text updates at `4 Hz` (`250 ms`), snapping immediately on regime, jump-event, or collision updates, while `#physicsPhaseCanvas` (`420x210`) paints at `15 Hz`.
-
-- **Regime Badge (`#physRegimeBadge`, `telemetry[b + 4..5]`):** `0 Inertial_CV`, `1 Ballistic`, `2 Ballistic_AeroDrag`, `3 Powered_Boost`, `4 Parachute_Terminal`, `5 Pendulum_Harmonic`, `6 Micro_Tremor`, `7 Impulsive_Collisional`, `8 Curved_CTRV`.
-- **Constraint-Jump Badge (`#physJumpBadge`, `telemetry[b + 15]`, priority `4 > 1 > 3 > 2`):** `0 NONE`, `1 PEG JUMP` (3-frame hold), `2 BURNOUT`, `3 CANOPY`, `4 COLLISION`.
-- **Symbolic ODE Box (`#physicsOdeEq`):** Displays the AICc-selected weak-form governing ODE discovered over `HIST_RING_LEN = 64` frames in SI (`m`, `s`, `m/s^2`, `m^-1`) or pixel units.
-
-#### Complete 15-card Physics ID matrix
-
-| Card `#id` | Telemetry Source | Displayed Units and Physical Meaning |
-| :--- | :--- | :--- |
-| `#kpiPhysicsR2` | `telemetry[b + 6]` | Weak-form STRidge equation fit `ode_r2` (`[0, 1]`). |
-| `#kpiPhysicsConf` | `telemetry[b + 5]`, `[b + 4]` | Classification confidence (`0%..100%`) and active regime `(Rk)`. |
-| `#kpiImmWeights` | `telemetry[b + 0..2]` | Collapsed 4-mode IMM weights `w_cv / w_bal / w_turn_osc` (`sum = 1.0`). |
-| `#kpiPhysicsBeta` | `telemetry[b + 7]` | Quadratic aerodynamic drag coefficient `aero_drag_beta` (`m^-1` or `px^-1`). |
-| `#kpiPhysicsThrust` | `telemetry[b + 8]` | Net longitudinal boost acceleration `thrust_accel` (`m/s^2` or `px/s^2`). |
-| `#kpiPhysicsDamping` | `telemetry[b + 10..11]` | Log-peak decrement damping ratio `zeta` and quality factor `Q` (`INF` near `999`). |
-| `#kpiPhysicsEllipticT` | `telemetry[b + 9]` | Exact nonlinear pendulum period via `f64` AGM elliptic integral `K(sin^2(theta0/2))`. |
-| `#kpiKuramotoSync` | `telemetry[1536]`, `[1538]` | Ensemble Kuramoto order parameter `R_sync / N` over `N >= 2` periodic oscillators. |
-| `#kpiLyapunovMax` | `telemetry[1547]` | Staggered (`1:8`) `4D` delay-coordinate Rosenstein maximal Lyapunov divergence (`s^-1`). |
-| `#kpiTaubinDelta` | `telemetry[1548]` | Euclidean center separation comparing `f64` `3x3` Jacobi Taubin vs Kasa circle fits. |
-| `#kpiTaubinKappa` | `telemetry[1549]` | Taubin trajectory curvature `kappa` (`m^-1` or `px^-1`). |
-| `#kpiFistaKnots` | `telemetry[b + 3]` | Count of localized high-impulse acceleration knots (`0..=10`) flagged for Pass 2 sharpening. |
-| `#kpiTwoBodyMassE` | `telemetry[1541]`, `[b + 14]` | Causal blur-excluded mass ratio `m2 / m1` (`[0.05, 20.0]`) and normal restitution `e_n`. |
-| `#kpiTwoBodyMomRes` | `telemetry[1542..1543]` | Normalized two-body momentum residual paired with kinetic energy retention `%`. |
-| `#kpiPhysicsConserv` | `telemetry[b + 12..13]` | Specific mechanical energy and signed specific angular momentum (`L_z`). |
-
-### Region 3E: Continuum and Swarm Field (`#continuumFieldPanel`, `4 Hz` DOM + Progressive Disclosure)
-
-![Continuum and Swarm Field panel showing 1,210 confirmed swarm tracks, latency separation, SE(2) rigid bodies, vorticity curl, FTLE ridge, click-to-inspect readout, and expanded expert diagnostics](./assets/panels/12_continuum_swarm_panel.png)
-
-Source: `#continuumFieldPanel` ([web/index.html](../web/index.html)), [src/soa_tracks.rs](../src/soa_tracks.rs), and [src/continuum_physics.rs](../src/continuum_physics.rs). Keeps `#expertDiagnosticsDrawer` collapsed by default (`CLS = 0.000000`).
-
-#### Controls and heading (`#continuumFieldPanel`)
-
-| Element `#id` | Role / Event | Behavior and State Rules |
-| :--- | :--- | :--- |
-| `#continuumPanelHeading` | Section `<h2>` title | Labels panel (`Continuum & Swarm Field`). |
-| `#continuumSummaryMeta` | Status pill (`aria-live="off"`) | Transitions across `SWARM: OFF · HERO 16`, `SWARM: AUTO STANDBY`, `SWARM: FORCED WAIT`, and `SWARM: ACTIVE · WEBGL2` (or `CANVAS2D`). |
-| `#swarmModeSelect` | `<select>` (`set_swarm_mode`) | `0` = Off (default), `1` = Auto-Density (Coarse Gate), `2` = Forced Active (`1,000+` targets). |
-| `#fieldOverlayModeSelect` | `<select>` (`set_field_overlay_mode`) | Switches HUD Field Layer: `0` Micro-Tracks + Rigid Hulls, `1` Velocity `|v|` (`40x22`), `2` Vorticity Curl, `3` FTLE Ridges, `4` Modal Phase (`[-pi, pi]`), `5` BOS Refraction `|eps|` (`128x64`), `6` BOS Neumann Potential `Phi`, `7` BOS Curl Diagnostic, `8` Hodge Exact `|grad phi|` (`40x22`), `9` Hodge Coexact `|curl* psi|` (`40x22`), `10` Hodge Harmonic `|h|` (`40x22`), `11` RS Welch Coherence `gamma^2` (`40x22`). |
-| `#bosModeSelect` | `<select>` (`set_bos_config`) | Static-tripod Background-Oriented Schlieren mode: `0` Off, `1` Mode 1 Static Ref (freeze at `16f`), `2` Mode 2 Clear-Only Slow Ref maintenance (`alpha = 1/4096`). |
-| `#metrologyModeSelect` | `<select>` (`set_metrology_config`) | `2x2` track covariance calibration + LOO flow residual mode: `0` Off, `1` Lossless `2x2` Cov + LOO Bench, `2` H.264 `2x2` Cov + Auto-Hero Promotion (`3`-chord pinhole looming rejection). |
-| `#hodgeModeSelect` | `<select>` (`set_hodge_config`) | `40x22` discrete Hodge `2`-complex mode: `0` Off, `1` Mode 1 Staggered `2f`, `2` Mode 2 Every Frame. |
-| `#rsVibroModeSelect`, `#inpRsDtRowUs`, `#inpRsExposureUs`, `#selRsScanDir` | `<select>` + `<input>` (`set_rs_calib`, `set_roi`) | Rolling-shutter vibrometry mode (`0` Off, `1` Calibrated RS Only, `2` RS + Welch Audio `K >= 8`), row readout time `dt_row` (`us`), exposure `T_e` (`us`), and sensor scan axis (`-1` Unset, `0..3` `D4`-mapped axis). |
-| `#chkCovEllipses` | `<input type="checkbox">` (`set_metrology_config`) | Overlays delayed `95%` confidence `2x2` position covariance contours (`sqrt(chi^2_2(0.95)) = 2.4477`) in cyan (`micro`) or amber (`Hero candidate/bound`). |
-| `#swarmInspectReadout` | Single-line readout | Fixed height readout populated on `#hudCanvas` click (`INSP uT<tid> · B<id> · (x, y) · spd · FTLE`). |
-
-#### Primary swarm, latency split, and continuum KPIs (`4 Hz` `setTextIfChanged`)
-
-| Card `#id` | Snapshot Field | Displayed Units and Physical Meaning |
-| :--- | :--- | :--- |
-| `#kpiSwarmConfirmed` | `confirmedCount` / `coastingCount` | Observed confirmed micro-tracks (`state === 1`) vs coasting tracks (`never blended`). |
-| `#kpiSwarmPeak` | `peakSimultaneous` | Session high-water mark of simultaneous confirmed micro-tracks (`1,000+` proof). |
-| `#kpiSwarmUnique` | `uniqueTracks` | Cumulative distinct micro-track IDs assigned in the session. |
-| `#kpiLatencySplit` | `kernelComputeMedianMs` / `partialPipelineLatencyMs` | Separates Wasm **Kernel Compute Median (`ms`)** from **Partial Pipeline Latency Estimate (`ms`)** (`lookaheadWindowMs + kernel_ms + snapshotCopyMs + fieldRenderMs`, excluding capture/decode/present). |
-| `#kpiRigidBodies` | `rigidBodyCount`, `topRigidOmegaRadS` | Active `SE(2)` rigid-motion components + signed angular velocity (`rad/s`), gated by validity bit `2`. |
-| `#kpiContinuumVort` | `maxVorticityS1`, `rmsVorticityS1` | Peak and RMS Eulerian vorticity curl (`dv/dx - du/dy`, `s^-1`); prefixes `RAW` if validity bit `0` is clear. |
-| `#kpiContinuumFtle` | `maxFtleS1`, `ftleCells` | Largest FTLE coherent ridge (`s^-1`) and conditioned cell count (or `WARM <N>t` while bank fills). |
-| `#kpiModalField` | `modalDomFreqHz`, `modalR2` | Virtual accelerometer dominant frequency (`Hz`) and anti-phase nematic order `R_2 = |mean(exp(2i * phi))|`. |
-
-#### Collapsed Expert Diagnostics Drawer (`#expertDiagnosticsDrawer`)
-
-Expands via `#expertDiagnosticsSummary` to expose `17` solver, Wave-1, and Wave-2 diagnostic counters:
-- Swarm & continuum counters (`8`): `#diagAuctionSteps` (`Q12` Bertsekas epsilon-Auction step count and reacquisition counter), `#diagRawResiduals` (unclamped `8x8` Huber IC-LK residual and top `SE(2)` fit `RMSE`), `#diagValidityMask` (`0x00..0x1F` with `G F R M K` subsystem initials), `#diagFtleWindow` (mature FTLE tracks and cells), `#diagSparseGraph` (`k`-NN edge count and fine peak count `<= 2,048`), `#diagKuramotoCom` (swarm heading order `R` and velocity dispersion), `#diagFieldBackend` (`WEBGL2` vs `CANVAS2D` and frame render ms), and `#diagMeanStrain` (mean smoothed `k`-NN edge strain rate `s^-1`).
-- Wave-1 acquisition, ROI, BOS, and metrology counters (`5`): `#diagWave1Ingest` (`continuityEpoch`, `sourceEpoch:sourceSeq`, gap flags, and verified commits), `#diagWave1Stamps` (`6`-character `V`/`H`/`-` product stamp strip for `[micro, grad, ftle, modalField, heroPhysics, bos]` plus committed `row_luma_means` row count), `#diagRoiGeom` (`1:1 NATIVE (x0,y0 wxh)` vs `FIT wxh->wxh`), `#diagBosState` (`OFF`, `WARMING n/16`, `READY · valid/8192 · PCG iters · trueRelRes`, or `DISTURBED · reasonFlags`), and `#diagMetrologyCov` (`usableCovCount usable · loomRejectedCount loom · promotedCandidates cand`).
-- Wave-2 RS vibrometry, Hodge `2`-complex, and occluded conservation counters (`4`): `#diagWave2Stamps` (`3`-character `V`/`H`/`-` stamp strip `[vibro, hodge, conservation]` plus `continuityEpoch`), `#diagRsWelch` (`OFF`, `UNCALIB`, `WARMING`, `DISTURBED`, or `READY · K · freqHz · g2`), `#diagHodge2Complex` (`OFF`, `STANDBY`, `UNCONV`, or `READY · ex/co/ha% · b1`), and `#diagOcclConservation` (`NONE` or `STATUS · hypotheses`).
+- **Lazy isolated Wasm worker:** Spawns on the first audit run (`0` idle memory or CPU overhead). Jobs serialize cleanly via a FIFO queue so running Slot A and Slot B concurrently never aborts either slot.
+- **Dual Slots & Actions:** Slot A (`#auditSlotA`, `#auditGradeA`, `#btnAuditChooseA`) and Slot B (`#auditSlotB`, `#auditGradeB`, `#btnAuditChooseB`) accept dropped/chosen local MP4/WebM/MOV files, one-click built-in controls (`#btnAuditSampleRef`, `#btnAuditSampleStutter`, `#btnAuditCurrent` to audit the currently loaded HUD clip into Slot A), `#btnAuditLiveToggle` (live HUD telemetry mirror), and `#btnAuditExportJson` (`chronos-audit/1` JSON export).
+- **2x8 Axis Matrix (`#auditPillGrid`) & Dual Severity Timeline (`#auditTimelineCanvas`):** Compares Slot A and Slot B side by side across all `8` physical axes (`TRAJ`, `COLL`, `DEPTH`, `DIV`, `N-S`, `BG`, `CAD`, `AV`) with per-axis `PASS` / `WARN` / `FAIL` / `NA` pills, per-frame violation bars clickable to seek the video, and `#auditDeltaLine` reporting `Delta Integrity (B - A)` and anti-gaming `reward_milli`.
 
 ---
 
-## Region 4: Right column (Featured Showcases and 6 Control Panels)
+## Region 6: Top-layer drawers and modals
 
-### Featured Showcases, Input Source, and Lab Modes
+<table>
+  <tr>
+    <td width="50%" align="center">
+      <img src="./assets/panels/17_presets_drawer.png" alt="53-recipe Bench Presets drawer with search filter, domain groups, Load and Settings Only buttons" width="100%" /><br />
+      <strong>53-Recipe Presets Drawer (<code>#presetsDrawer</code>, <code>[P]</code>)</strong>
+    </td>
+    <td width="50%" align="center">
+      <img src="./assets/panels/15_live_stream_modal.png" alt="3-Tier Continuous Live Stream modal with browser tab capture, FFmpeg MSE relay, and CORS probe" width="100%" /><br />
+      <strong>3-Tier Live Stream Ingestion Modal (<code>#liveStreamDialog</code>)</strong>
+    </td>
+  </tr>
+</table>
 
-![Right column upper panels: 1-Click HD Featured Showcases, Panel 1 Optical Input Source with MP4 Frame Transport, and Panel 2 Kinematic Lab Mode](./assets/panels/13_showcases_input_and_modes.png)
-
-#### Featured Showcases (1-Click HD)
-
-Each button (`aria-pressed`) atomically stops prior streams, enables `640x360 HD`, configures the matching Lab Mode and swarm setting, and applies illustrative calibration presets:
-- `data-showcase="model_rockets"` (`./samples/model_rocket_full_flights.mp4`, `25 fps`, Mode A, `15.00 m` assumed vertical ruler).
-- `data-showcase="rocket_vtvl"` (`./samples/rocket_vtvl_full_flight.mp4`, `30 fps`, Mode A, `10.00 m` assumed pad-to-hover ruler).
-- `data-showcase="live_i80"` (Tier 3 FFmpeg fMP4 MSE relay to `caltrans_d4_i80_ashby`, failing over to the first online Caltrans camera).
-- `data-showcase="cologne_motorway"` (`./samples/cologne_motorway_occlusion.mp4`, `30 fps`, Mode A, `28.0 m x 48.0 m` assumed deck homography).
-- `data-showcase="rally_pan"` (`./samples/rally_ego_pan_tracking.mp4`, `30 fps`, Mode A, uncalibrated pan proof).
-- `data-showcase="chaos_pendulum"` (`./samples/chaotic_magnetic_pendulum.mp4`, `25 fps`, Mode A, `0.35 m` assumed ruler).
-- `data-showcase="coupled_metronomes"` (`./samples/coupled_metronomes_sync.mp4`, `30 fps`, Mode B, `0.45 m` assumed span).
-- `data-showcase="newtons_cradle"` (`./samples/newtons_cradle_impulses.mp4`, `30 fps`, Mode C, `0.18 m` assumed cradle span, WebAudio synth auto-enabled).
-- `data-showcase="starling_1000"` (`./samples/starling_murmuration_1000.mp4`, `30 fps`, HD `resMode = 1`, `swarmMode = 2`, `fieldOverlayMode = 1`).
-- `#btnHeroBosPlume` (`data-hero-scene="bos_plume"`, `./samples/bos_thermal_plume.mp4`, `25 fps`, HD `resMode = 1`, `swarmMode = 2`, `bosMode = 1`, `bosGauge = [4, 4, 18, 60]`, `fieldOverlayMode = 5`, `native1to1 = true`, `metrologyMode = 2`, `showCovEllipses = true`, `28%` Split-Wipe). Paired with fixed-height zero-CLS `#acquisitionStatusBanner` (`role="status"`, `data-severity="info|ok|warn|danger"`) displaying steady PTS status, gaps, `1:1` ROI fallback, or BOS tripod disturbance/failure warnings (`TRIPOD FAILURE / DISTURBED`).
-- `data-showcase="vortex_1200"` (blind synthetic `vortex_swarm_1200` Lamb-Oseen dipole in HD `resMode = 1`, `swarmMode = 2`, `fieldOverlayMode = 2`).
-
-#### Panel 1: Optical Input Source
-
-| Control (`#id`) | Label / Behavior | Why it matters |
-| :--- | :--- | :--- |
-| `#inputResMeta` & `#btnResSd` / `#btnResHd` | `320x180 SD (32^2)` / `640x360 HD (64^2)` calling `chronos_set_resolution(0 or 1)`. | Trades `4x` pixel throughput against `2x` spatial acuity and `64x64` HD PiPs inside the fixed `28.00 MB` (`448`-page) arena. |
-| `#roiGeomMeta`, `#chkNativeRoi`, `#rangeRoiX0`, `#rangeRoiY0` | Enables Native `1:1` Sensor ROI cropping (`crop_x0`, `crop_y0`, zero implicit rescaling when `src >= engine`) with fixed-width `#valRoiX0` / `#valRoiY0` readouts (`CLS = 0.000000`). | Preserves exact sub-pixel optical modulation and integer `(x, y)` coordinates across HD sources or SD cropped inspection windows. |
-| `#btnSrcTestbench` | Switches to pixel-isolated `stepAndRenderBlindPillarScene` (`getImageData` only). | Provides zero-noise ground-truth physics scenarios and 1-to-1 oracle swap checks. |
-| `#btnSrcWebcam` | Live camera feed via deduplicated `requestVideoFrameCallback` (`640x360` @ `60 fps` ideal). | Exercises live exposure shifts and real sensor noise. |
-| `#btnSrcLiveStream` | Opens `<dialog id="liveStreamDialog">` (Region 5). | Connects browser tab, direct CORS, or FFmpeg MSE live streams. |
-| `#mp4Input` | Client-side local `video/*` loader via `URL.createObjectURL`. | Tests arbitrary local footage inside the sandboxed browser worker. |
-| `#sampleVideoSelect` | `18` built-in MP4s across `4` `<optgroup>` groups (`Extended HD Showcases`, `Calibration Benchmarks`, `High-Density Continuum Swarms`, and `Wave-1 BOS & Failure Validation`). | Instant one-click evaluation on compressed H.264 rocketry, traffic, chaos pendulum, metronome, collision, murmuration, thermal plume BOS, handheld failure, and perspective decoy footage (provenance documented in [ACQUISITION_AND_FAILURE_MODES.md](./ACQUISITION_AND_FAILURE_MODES.md)). |
-| `#benchScenarioSelect` | `10` synthetic testbench scenarios (`pillar_crossing`, `multi_target_swarm`, `vortex_swarm_1200`, `murmuration_1200`, `modal_beam_1152`, `short_gap_bridge`, `ballistic_cascade`, `model_rocket_flight`, `harmonic_tremor`, `percussion_ricochet`). | Isolates specific physical regimes and `1,000+` target stress cases cleanly. |
-| `#liveStreamBar` & `#liveCropSelect` | Visible during live streaming; sets normalized crop ROI (`100%`, `85%`, `70%`) and displays `F#N · LAG · DISCONT`. | Trims player watermarks and timestamp banners so ECA only processes motion. |
-| `#videoTransportBar` | Visible in `video` mode (`#vidTimeLabel`, `#btnVidPlayPause`, `#btnVidStepBack`, `#btnVidStepFwd`, `#btnVidReplay`). | Steps deterministically by exact `+-1 / activeVideoFps` while paused (`-1f` resets tracker cleanly). |
-| `#btnAudioToggle`, `#btnFocusCycle`, `#btnResetArena` | Enables WebAudioMode B chirp (`528/264 Hz`) / Mode C 4-zone latency-compensated percussion (`netLeadSec = leadSec - msgDelaySec - outLatency`), cycles pinned `Tn`, or resets arena state. | Synchronizes audible onset with the exact delayed `t - K` visual frame. |
-
-#### Panel 2: Kinematic Lab Mode
-
-Selects `.lab-btn` mode indicator `#labBadge` (`A · Apex` ballistic/Hermite, `B · Phase` Hilbert/Kasa/onset stimulus, `C · Strike` 4-quadrant CAD deflection + WebAudio synth) and triggers synthetic step perturbations or Mode B stimulus timing via `#btnLabStimulus`.
+- **Bench Presets & Physics Recipes (`#presetsDrawer`, `[P]`):** Lists all `53` declarative recipes across `7` domains (`Trajectories, Bridges & Impacts`, `Continuum Swarms`, `Schlieren BOS, Depth & Fovea`, `Pocket Wind Tunnel & Fluid Mechanics`, `kHz Elastography, RS Vibrometry & Acoustic BOS`, `Live Camera & Streams`, and `Internal Signal Generator`) with live search filtering (`#presetsSearchInput`). Every recipe supports **Load** (loads clip + settings) and **Settings Only** (applies its engine/overlay/calibration configuration to your currently loaded video).
+- **3-Tier Continuous Live Stream Modal (`#liveStreamDialog`):**
+  - **Tier 1 (`#btnStartTier1Capture`):** Browser tab or window capture via `getDisplayMedia` (`ZERO CORS`).
+  - **Tier 3 (`#tier3PresetSelect`, `#tier3CustomHlsUrl`, `#btnStartTier3Mse`, `#btnRefreshTier3Presets`):** Local same-origin [scripts/dev_server.mjs](../scripts/dev_server.mjs) `/api/live-stream` FFmpeg fMP4 MSE relay (`5` Caltrans highway feeds, `3` deterministic offline cut-stress relays, and SSRF-hardened custom URLs; hidden on static hosts like GitHub Pages).
+  - **Tier 2 (`#tier2StreamUrl`, `#btnStartTier2Url`, `#btnFallbackTier2ToTier3`):** Direct `crossOrigin="anonymous"` URL with mandatory `1x1` readback probe and one-click Tier 3 relay fallback when CORS headers are absent.
 
 ---
 
-### Calibration, Strobe, Kernel Hyperparameters, and Session Recorder
-
-![Right column lower panels: Metric Calibration, Phase Strobe Offset, Kernel Hyperparameters with Advanced Tuning open, and Session Recorder](./assets/panels/14_calibration_hyperparams_recorder.png)
-
-#### Panel 3: Metric Calibration
-
-- **`#calPanelHeading` and `#calBadge`:** Displays active provenance (`PX UNITS`, `SURVEYED RULER`, `ASSUMED RULER`, `SURVEYED 4-PT H`, `ASSUMED 4-PT H`, `AUTO-g 1/2 ARC`, `AUTO-g LOCKED`).
-- **`#calToolbar` (`role="toolbar"`):** Arms `#btnCalRuler` (`2-Pt Ruler`), `#btnCalQuad` (`4-Pt Plane` DLT homography `TL -> TR -> BR -> BL`), `#btnCalAutoG` (`px/m = g_hat / 9.80665` across `>= 2` arcs), `#btnCalPreset` (explicitly marked `ASSUMED`), or `#btnCalClear`. Pressing `Escape` cancels an armed draft without erasing committed scale.
-- **`#calScaleForm` and `#calKeyboardDisclosure`:** Validates scale dimensions in `0.05..500 m` and lets keyboard users enter exact `[0.00..1.00]` normalized coordinates via `#calCoordForm` (`#btnCommitCoords` commits `SURVEYED` provenance that survives `SD <-> HD` switches).
-
-#### Panel 4: Phase Strobe Offset
-
-Selects `phase_offset_rad` (`-pi/2 Lag Cue`, `+pi/2 Lead Cue`, `0 deg Peak Cue`, `pi Trough Cue`). Because Wasm forward-predicts $\hat{\phi}(t + \tau_{\text{audio}}) = \phi(t - K) + 2\pi f \cdot (K\Delta t + \tau_{\text{audio}})$, cues land at exact target phases relative to present physical motion.
-
-#### Panel 5: Kernel Hyperparameters
-
-| Control (`#id`) | Readout & Range | Controls & Impact |
-| :--- | :--- | :--- |
-| `#sliderK` | `#valK` (`0..11`, default `8`) | `lookahead_k`: buffered future frames. `0` minimizes latency; `7..11` unlocks 15-tap Hilbert quadrature, backward ring gap recovery, and Hermite occlusion bridges. |
-| `#chkHeroTargets` | Toggle (`checked`) | Synchronized 1-to-1 with `#btnHudHeroToggle` and `H`; hides Hero-16 HUD clutter on dense swarms without pausing Wasm tracking or `#pipCanvas`. |
-| `#chkKalman`, `#chkAllOverlays`, `#chkEcaOverlay`, `#chkStrobe` | Checkboxes | Toggle coral Kalman baseline boxes, full per-slot callouts, `[Frame t]` ECA overlay, and Mode B visual/audio strobe triggers. |
-| `#sliderEca`, `#sliderLambda`, `#sliderGain` (in disclosure) | `0.005..0.150`, `0.10..5.00`, `5..60x` | Tune background adaptation rate (`eca_adapt_rate`), Dual-FISTA `L1` penalty (`fista_lambda`), and PiP temporal contrast amplification (`eulerian_gain`). |
-
-#### Panel 6: Session Recorder
-
-Pre-allocated `18,000 x 56` `Float64Array` ring buffer (`5` minutes at `60 Hz`, `0` GC allocations). Calibration changes increment `cal_segment_id` and append snapshots to `meta.calibrationSegments` (`schemaVersion: "1.5.0"`), exporting CSV or JSON via `#btnExportCsv` and `#btnExportJson`.
+## Session Recorder 56-column export schema (`schemaVersion: "1.5.0"`)
 
 | Group | Columns (`REC_COLUMNS[0..55]`) | Meaning |
 | :--- | :--- | :--- |
 | Frame & Config | `frame_idx`, `elapsed_sec`, `frame_w`, `frame_h`, `lookahead_k`, `lab_mode` | Frame counter, accumulated `dt`, spatial size, `K`, mode `0/1/2`. |
 | Kernel & Clutter | `wasm_tick_ms`, `active_targets`, `clutter_db`, `clutter_eval_ratio` | Compute duration, confirmed count, ECA dB, static ratio. |
-| Assignment & Spectral | `padic_swaps`, `oracle_swaps`, `kalman_swaps`, `in_pillar_collisions`, `fiedler_lambda2`, `spectral_gap`, `fista_duality_gap` | Swaps (blank/`null` oracle when unavailable), testbench crossings, Lanczos `lambda2`, eigengap, FISTA dual gap. |
+| Assignment & Spectral | `padic_swaps`, `oracle_swaps`, `kalman_swaps`, `in_pillar_collisions`, `fiedler_lambda2`, `spectral_gap`, `fista_duality_gap` | Swaps, testbench crossings, Lanczos `lambda2`, eigengap, FISTA dual gap. |
 | Primary Trajectory | `primary_track_id`, `primary_sig_u32`, `primary_padic_val`, `disp_raw_x/y`, `disp_fista_x/y`, `disp_kalman_x/y`, `disp_vis`, `disp_bridged` | Active primary ID, unsigned signature, `v_2`, raw/FISTA/Kalman coords at `t - K`, visibility, Hermite bridge flag. |
 | Hilbert & Events | `tremor_r`, `tremor_h`, `tremor_phase_deg`, `tremor_freq_hz`, `tremor_amp`, `phase_valid`, `strobe_fired`, `perc_mask`, `apex_ms`, `saccade_latency_ms` | Quadrature state, phase, frequency, amplitude, gate, strobe, percussion zone, T-apex ms, stimulus onset ms. |
 | Physical Kinematics & Provenance | `heading_deg`, `speed_phys`, `ang_vel_deg_s`, `pend_swing_deg`, `strike_deflect_deg`, `strike_speed_ratio`, `metric_x_m`, `metric_y_m`, `cal_segment_id`, `metric_valid` | Calibrated/$J_H$-rectified motion vectors, world coords (`m`), calibration segment, and metric validity (`1`/`0`/`-1`). |
 | In-Situ Physics ID (`48..55`) | `phys_regime`, `phys_regime_conf`, `ode_r2`, `aero_drag_beta`, `thrust_accel`, `damping_zeta`, `kuramoto_order_r`, `lyapunov_div_rate` | Primary regime (`0..8`), confidence, weak-form ODE fit `R^2`, drag, thrust, damping, Kuramoto `R_sync`, Lyapunov `lambda_max`. |
-
-JSON export appends `meta.chronos1000` with live swarm counts, raw continuum field peaks, modal frequency and `R_2`, `validityMask`, `diagnosticsValid`, `delayFrames`, `causalFrameIdx` / `displayedFrameIdx` / `renderedDelayFrames`, `inspectStatus`, separate latency breakdown fields, active compositor backend, and validity-gated `rigidBodies[]`.
-
----
-
-## Region 5: 3-Tier Continuous Live Stream Modal (`#liveStreamDialog`)
-
-![3-Tier Continuous Live Stream Suite modal showing Tier 1 tab capture, Tier 3 FFmpeg fMP4 MSE relay with probed Caltrans online cameras, and Tier 2 direct CORS probe](./assets/panels/15_live_stream_modal.png)
-
-Source: `#liveStreamDialog` ([web/index.html](../web/index.html)), hidden `<video id="hiddenVideoSource">`.
-
-- **Tier 1 (`#btnStartTier1Capture`):** Browser tab or window capture via `navigator.mediaDevices.getDisplayMedia` (`ZERO CORS · UNIVERSAL`); pair with `#liveCropSelect` to isolate target motion cleanly.
-- **Tier 3 (`#tier3PresetSelect`, `#tier3CustomHlsUrl`, `#btnStartTier3Mse`, `#btnRefreshTier3Presets`):** Connects via same-origin [scripts/dev_server.mjs](../scripts/dev_server.mjs) `/api/live-stream` FFmpeg fragmented-MP4 relay into HTML5 `MediaSource` (`avcC` dynamic codec probing, trailing `SourceBuffer` eviction past `12 s`, bounded `<= 3` reconnect retries). Features `5` Caltrans District 4 public highway HLS feeds, `3` deterministic offline test relays, and custom URL input guarded against loopback/RFC1918 DNS rebinding SSRF.
-- **Tier 2 (`#tier2StreamUrl`, `#btnStartTier2Url`, `#btnFallbackTier2ToTier3`):** Loads direct WebM/MP4/HLS URLs with `crossOrigin="anonymous"` and a mandatory `1x1` pixel readback probe, surfacing one-click Tier 3 FFmpeg relay fallback whenever an upstream server withholds CORS headers.
 
 ---
 
@@ -375,43 +248,43 @@ Source: `#liveStreamDialog` ([web/index.html](../web/index.html)), hidden `<vide
 
 Zero-copy `Float32Array` exports populated in `chronos_post_tick` ([src/lib.rs](../src/lib.rs), [src/physics_id.rs](../src/physics_id.rs)):
 
-| Index Range | Sub-fields and Units | Deck Consumer |
+| Index Range | Sub-fields and Units | Consumer |
 | :--- | :--- | :--- |
-| `telemetry[0..31]` | `[0]` `frame_idx`, `[1]` `eff_k`, `[2]` `slot_disp`, `[3]` `active_targets`, `[4]` `clutter_db`, `[5]` `padic_id_swaps`, `[6]` `kalman_id_swaps`, `[7]` `fiedler_lambda2`, `[8]` `primary_idx`, `[9..13]` `tremor_r/h/phase/amp/freq`, `[14..18]` `strobe/perc`, `[19]` `saccade_ms`, `[20]` `sizeof(Arena)`, `[21]` `num_peaks`, `[22..25]` `clutter_valid/eval_ratio/spectral_gap/fista_gap`, `[26..31]` `phase_valid/pred_phase/settle_ms/armed/w/h`. | Header pills, Primary KPIs, Hilbert & Spectral Scopes, Strobe/Audio cues. |
-| `telemetry[32..927]` | `16 x 56` per-target blocks (`base = 32 + m*56`): `[0..11]` active, `track_id`, `disp_fista`, `disp_raw`, `kalman_disp`, current `pos`, `disp_vis`, `bridged`, `[12..14]` `sig_hi/lo/padic_val`, `[15..19]` `apex_x/y/frames/l1_mag/fiedler_vec`, `[20..55]` `fista_x/y[0..11]`, `ring_vis[0..11]`. | `#hudCanvas` reticles/splines/apex, `#mortonReadout`, `#spectralCanvas` bars & timeline. |
-| `telemetry[928..991]` | `16 x 4` candidate peak list (`x, y, energy, sig_hi`). | Worker diagnostics & assignment debug. |
-| `telemetry[992..1119]` | `16 x 8` strike & coherence block (`strike_fired`, `zone`, `lead`, `vel`, `strike_x/y`, `coherence`, `pca_angle`). | Mode C shockwaves, WebAudio triggers, `#hilbertMeta`. |
-| `telemetry[1120..1247]` | `16 x 8` kinematics block (`heading_deg`, `speed_px_s`, `ang_vel_deg_s`, `deflect`, `restitution`, `in_deg`, Kasa `pivot_x/y`). | Flight/CAD protractors, Kasa pivots, Kinematic Matrix, Roster cards. |
-| `telemetry[1248..1263]` | Scene globals (`scene_gravity`, `grav_conf`, `2-body scatter`, `disp_lag_ms`, `cam_motion_state`, `cam_pan_speed`, `grav_arcs`, `freq_valid`, `last_strike`, `discont_count`). | `#pillStreamHealth`, Auto-`g`, Gravity/Scatter badges. |
-| `telemetry[1264..1279]` | Session persistence (`unique_tracks`, `coast_reacq`, `dormant_reid`, `peak_confirmed`, `longest_frames/tid`, `sustained_10s/60s`, `dormant_active`, `last_reid_gap`). | `#persistencePanel` KPIs and swimlanes. |
-| `telemetry[1280..1535]` | `16 x 16` per-target Physics ID (`b = 1280 + m*16`): IMM weights (`0..2`), `fista_sharp_knots`, `phys_regime`, `conf`, `ode_r2`, `aero_drag_beta`, `thrust_accel`, `elliptic_period_s`, `damping_zeta`, `Q`, `specific_energy`, `specific_ang_mom`, `restitution_e`, `constraint_jump_code`. | `#physicsIdPanel` badges, ODE readout, conservation KPIs, `#physicsPhaseCanvas`. |
-| `telemetry[1536..1567]` | Ensemble Physics ID: `kuramoto_r/psi/N`, `ensemble_kinetic/mech`, `last_pair_mass_ratio/mom_resid/retention`, `pair_tid_a/b/frame`, `lyapunov_div_rate`, `taubin_delta_px`, `taubin_curvature_inv_px`, reserved tail (`1550..1567 = 0.0`). | `#kpiKuramotoSync`, `#kpiLyapunovMax`, `#kpiTaubin*`, `#kpiTwoBody*`. |
-| `slot_meta[0..127]` | `16 x 8` per-slot roster metadata (`age`, `coasting`, `vis_eca_ema`, `reacq_count`, `freq_hz`, `amp`, `fista_gap`, `max_excursion`). | `.roster-card` stats & `#rosterReacqVal`. |
+| `telemetry[0..31]` | `[0]` `frame_idx`, `[1]` `eff_k`, `[2]` `slot_disp`, `[3]` `active_targets`, `[4]` `clutter_db`, `[5]` `padic_id_swaps`, `[6]` `kalman_id_swaps`, `[7]` `fiedler_lambda2`, `[8]` `primary_idx`, `[9..13]` `tremor_r/h/phase/amp/freq`, `[14..18]` `strobe/perc`, `[19]` `saccade_ms`, `[20]` `sizeof(Arena)` (`29,080,704`), `[21]` `num_peaks`, `[22..25]` `clutter_valid/eval_ratio/spectral_gap/fista_gap`, `[26..31]` `phase_valid/pred_phase/settle_ms/armed/w/h`. | Status rail, Track KPIs, Phase scopes, Strobe/Audio cues. |
+| `telemetry[32..927]` | `16 x 56` per-target blocks (`base = 32 + m*56`): `[0..11]` active, `track_id`, `disp_fista`, `disp_raw`, `kalman_disp`, current `pos`, `disp_vis`, `bridged`, `[12..14]` `sig_hi/lo/padic_val`, `[15..19]` `apex_x/y/frames/l1_mag/fiedler_vec`, `[20..55]` `fista_x/y[0..11]`, `ring_vis[0..11]`. | `#hudCanvas`, `#mortonReadout`, `#spectralCanvas`. |
+| `telemetry[928..991]` | `16 x 4` candidate peak list (`x, y, energy, sig_hi`). | Assignment diagnostics. |
+| `telemetry[992..1119]` | `16 x 8` strike & coherence block (`strike_fired`, `zone`, `lead`, `vel`, `strike_x/y`, `coherence`, `pca_angle`). | Mode C shockwaves, WebAudio, `#hilbertMeta`. |
+| `telemetry[1120..1247]` | `16 x 8` kinematics block (`heading_deg`, `speed_px_s`, `ang_vel_deg_s`, `deflect`, `restitution`, `in_deg`, Kasa `pivot_x/y`). | Flight/CAD protractors, Kasa pivots, Roster cards. |
+| `telemetry[1248..1263]` | Scene globals (`scene_gravity`, `grav_conf`, `2-body scatter`, `disp_lag_ms`, `cam_motion_state`, `cam_pan_speed`, `grav_arcs`, `freq_valid`, `last_strike`, `discont_count`). | `#pillStreamHealth`, Auto-`g`, Gravity badges. |
+| `telemetry[1264..1279]` | Session persistence (`unique_tracks`, `coast_reacq`, `dormant_reid`, `peak_confirmed`, `longest_frames/tid`, `sustained_10s/60s`, `dormant_active`, `last_reid_gap`). | Custody timeline KPIs and swimlanes. |
+| `telemetry[1280..1535]` | `16 x 16` per-target Physics ID (`b = 1280 + m*16`): IMM weights (`0..2`), `fista_sharp_knots`, `phys_regime`, `conf`, `ode_r2`, `aero_drag_beta`, `thrust_accel`, `elliptic_period_s`, `damping_zeta`, `Q`, `specific_energy`, `specific_ang_mom`, `restitution_e`, `constraint_jump_code`. | Physics ODE tab and `#physicsPhaseCanvas`. |
+| `telemetry[1536..1567]` | Ensemble Physics ID: `kuramoto_r/psi/N`, `ensemble_kinetic/mech`, `last_pair_mass_ratio/mom_resid/retention`, `pair_tid_a/b/frame`, `lyapunov_div_rate`, `taubin_delta_px`, `taubin_curvature_inv_px`, reserved tail (`1550..1567 = 0.0`). | Physics ODE ensemble KPIs. |
+| `slot_meta[0..127]` | `16 x 8` per-slot roster metadata (`age`, `coasting`, `vis_eca_ema`, `reacq_count`, `freq_hz`, `amp`, `fista_gap`, `max_excursion`). | `.roster-card` stats. |
 
-## Appendix B: Micro-Swarm, Continuum Field, and Rigid-Motion ABI
+## Appendix B: ABI-v2 Micro-Swarm (`3,072`) and Continuum (`64x36`) buffers
 
-When swarm and continuum exports are present in fixed Wasm memory (`448` pages), [web/worker.js](../web/worker.js) binds zero-GC `Float32Array` views directly over:
+1. **`chronos_get_micro_tracks_ptr()` (`[f32; 3072 * 8]`):** Per micro-slot stride-`8` causal state: `[0] track_id`, `[1..2] pos_x/y`, `[3..4] vel_x/y`, `[5] state` (`0=inactive`, `1=confirmed`, `2=tentative/coasting`), `[6] body_id` (`0..32`), `[7] ftle_val` (`s^-1`).
+2. **`chronos_get_continuum_field_ptr()` (`[f32; 2304 * 6]`):** `64x36` Eulerian field: `[0..1] u/v_px_s`, `[2] vorticity_s1`, `[3] divergence_s1`, `[4] ftle_s1`, `[5] valid_weight`.
+3. **`chronos_get_modal_field_ptr()` (`[f32; 2304]`):** `64x36` circular mean vibration phase (`[-pi, pi]` rad, `-9.0` sentinel when unpopulated, rendered with `gl.NEAREST`).
+4. **`chronos_get_rigid_bodies_ptr()` (`[f32; 32 * 8]`):** `SE(2)` rigid components: `[0] body_id`, `[1] member_count`, `[2..3] cx/cy`, `[4..5] vx/vy`, `[6] unwrapped omega_rad_s`, `[7] se2_rmse_px`.
+5. **`chronos_get_swarm_telemetry_ptr()` (`[f32; 64]`):** `0..15` SoA counts, `16..41` continuum & validity fields (`diagnostic_validity_mask` `bit0..bit4`), `42..63` reserved `0.0`.
+6. **Control & Inspection:** `chronos_set_swarm_mode(mode)`, `chronos_get_swarm_mode()`, `chronos_seed_target(x, y, w, h) -> u32`, `chronos_inspect_field_point(x, y) -> u32`, `chronos_inspect_micro_track(track_id) -> u32`.
 
-1. **`chronos_get_micro_tracks_ptr()` (`[f32; 1536 * 8]`):** Per micro-slot stride-`8` causal state on ingested frame `f`: `[0] track_id`, `[1..2] pos_x/y`, `[3..4] vel_x/y`, `[5] state` (`0=inactive`, `1=confirmed observed`, `2=tentative/coasting`), `[6] body_id` (`0..32`), `[7] ftle_val` (`s^-1`).
-2. **`chronos_get_continuum_field_ptr()` (`[f32; 880 * 6]`):** Normalized `40x22` Eulerian field covering every SD/HD pixel row: `[0..1] u/v_px_s`, `[2] vorticity_s1`, `[3] divergence_s1`, `[4] ftle_s1` (`0.0` when `swarm_active == 0`, `-999.0` sentinel if invalid, finite otherwise), `[5] valid_weight` (`> 0.0` iff Eulerian gradient conditioned).
-3. **`chronos_get_modal_field_ptr()` (`[f32; 880]`):** Circular mean vibration phase (`0.0` on standby; `[-pi, pi]` rad when populated, `-9.0` sentinel when unpopulated, rendered via `gl.NEAREST`).
-4. **`chronos_get_rigid_bodies_ptr()` (`[f32; 32 * 8]`):** Multi-frame `SE(2)` rigid-motion component descriptors: `[0] body_id`, `[1] member_count`, `[2..3] cx/cy`, `[4..5] vx/vy`, `[6] unwrapped omega_rad_s`, `[7] se2_rmse_px`.
-5. **`chronos_get_swarm_telemetry_ptr()` (`[f32; 64]`):** `0..15` SoA counts (`swarm_mode`, `swarm_active`, `peak_count`, `active_count`, `confirmed_count`, `peak_simultaneous_confirmed`, `unique_tracks`, `coasting_count`, `auction_steps`, `reacq_events`, `mean_ic_lk_res`, `inspected_micro_tid`, `inspected_body_id`, `births`, `tentative_count`, `ambiguous_count`); `16..41` continuum & validity fields (`diagnostic_validity_mask` `bit0..bit4`, `valid_field_cells`, `max/rms vorticity`, `rms div`, `max_ftle`, `ftle_cells`, `rigid_body_count`, `top_rigid_omega/members/rmse/theta`, `modal_dom_freq/coherence/sensors/r2`, `kuramoto_r/psi`, `com_x/y/vx/vy`, `vel_dispersion`, `mean_knn_strain`, `knn_edge_count`, `ftle_mature_tracks` `[39]`, `modal_r2_antiphase` `[41]`); `42..63` reserved `0.0`.
-6. **Runtime Control & Exact-ID Inspection:** `chronos_set_swarm_mode(mode)`, `chronos_get_swarm_mode()`, `chronos_inspect_field_point(x, y) -> u32`, and `chronos_inspect_micro_track(track_id) -> u32` (direct micro-ID to Hero promotion bridge).
+## Appendix C: Wave-1 Ingest, Fovea, `2x2` Metrology, and `256x128` BOS ABI
 
-## Appendix C: Wave-1 Ingest (`I0`/`I4`), `2x2` Metrology (`I1`), and BOS (`I5`) ABI
+1. **100% Frame Ring Ingest & Fovea (`src/lib.rs`):** `chronos_set_ingest_meta(...) -> u32`, `chronos_get_ring_meta_ptr()` (`[u32; 12 * 24]`), `chronos_get_row_luma_ptr()` (`[f32; 12 * 360]`), `chronos_get_wave1_telemetry_ptr()` (`[u32; 192]`: ABI header `0..15`, product stamps `[micro, grad, ftle, modal_field, hero_physics, bos]` at `16..63`, Hero slot stamps `64..191`), plus `160x160` Fovea tile exports (`chronos_get_fovea_rgba_ptr(0)`, `chronos_get_fovea_request_ptr()`, `chronos_commit_fovea_tile(...)`).
+2. **`2x2` Track Covariance & Auto-Hero (`src/soa_tracks.rs`):** `chronos_set_micro_metrology_mode(0|1|2) -> u32`, `chronos_get_micro_cov_ptr()` (`[f32; 3 * 3072]`), `chronos_get_micro_residual_ptr()` (`[f32; 3 * 3072]`), `chronos_get_micro_loom_ptr()` (`[f32; 3072]`), `chronos_get_micro_quality_ptr()` (`[u32; 3072]`), and `chronos_get_hero_candidates_ptr()` (`[u32; 4 + 16 * 8]`).
+3. **`256x128` Controlled-Tripod BOS (`src/bos.rs`):** `chronos_set_bos_mode(0|1|2) -> u32`, `chronos_reset_bos_ref()`, `chronos_set_bos_gauge_roi(x0, y0, x1, y1) -> u32`, `chronos_set_bos_overlay_kind(0|1|2) -> u32`, `chronos_get_bos_telemetry_ptr()` (`[u32; 32]`), `chronos_get_bos_planes_ptr()` (`[f32; 6 * 32768]` `[eps_x, eps_y, phi, var_x, var_y, curl]`), `chronos_get_bos_valid_ptr()` (`[u8; 32768]`), `chronos_get_bos_rgba_ptr()` (`[u8; 4 * 32768]`), and `chronos_bos_solve_manufactured_test(case_id, a, b) -> u32`.
+4. **Test hook (`src/lib.rs`, non-host):** `chronos_test_hook_set_frame_counters(frame_idx, ring_cursor_lo, ring_cursor_hi)` positions frame counters near `u32::MAX` for wraparound tests.
 
-Fixed `448`-page (`29,360,128 B`) linear memory reserves `Arena <= 24,117,248 B` and static end `<= 24,248,320 B`, exposing host read-only typed views over:
+## Appendix D: Wave-2 (`64x36` Vibrometry, `64x36` Hodge, Conservation) & v3.2 to v3.4 Organ ABI
 
-1. **100% Frame Ring Ingest & Stamps (`src/lib.rs`):** `chronos_set_ingest_meta(...) -> u32` stages `source_epoch`, `source_seq`, 64-bit `t_src_us_lo/hi`, `age_ms`, `flags`, Native ROI geometry `(src_w/h, crop_x0/y0/w/h, orientation 0..7, scan_dir 0..3 | 0xffffffff, dst_x/y/w/h)`, `gap_mask`, and `native_1to1`; `chronos_get_ring_meta_ptr()` (`[u32; 12 * 24]`), `chronos_get_row_luma_ptr()` (`[f32; 12 * 360]`, unconditionally committed every tick prior to downstream skips via SIMD128 reduction), and `chronos_get_wave1_telemetry_ptr()` (`[u32; 192]`: ABI header `0..15` with ratified `wave1_telem[7]` bits `0=micro_metrology_mode!=0` and `1=bos_mode!=0` and `wave1_telem[13]=split_phase` (`1` while split tick is open between `chronos_pre_tick` and `chronos_post_tick`, `0` after `post_tick` or `reset_tracks`), product stamps `[micro, grad, ftle, modal_field, hero_physics, bos]` at `16..63`, and Hero slot stamps `64..191`).
-2. **Track Covariance, LOO Flow Residual & Auto-Hero Metrology (`src/soa_tracks.rs`, `src/continuum_physics.rs`):** `chronos_set_micro_metrology_mode(0|1|2) -> u32`, planar `chronos_get_micro_cov_ptr()` (`[f32; 3 * 1536]` `[cxx, cxy, cyy]`), planar `chronos_get_micro_residual_ptr()` (`[f32; 3 * 1536]` `[rx, ry, d2_bench]`), `chronos_get_micro_loom_ptr()` (`[f32; 1536]` `d2_nonloom`), `chronos_get_micro_quality_ptr()` (`[u32; 1536]` bitmask), and `chronos_get_hero_candidates_ptr()` (`[u32; 4 + 16 * 8]` `[num_cands, promo_epoch, active_auto_hero_cnt, 0]` + candidates).
-3. **Controlled Tripod BOS & Neumann Poisson (`src/bos.rs`):** `chronos_set_bos_mode(0|1|2) -> u32`, `chronos_reset_bos_ref()`, `chronos_set_bos_gauge_roi(x0, y0, x1, y1) -> u32`, `chronos_set_bos_overlay_kind(0|1|2) -> u32`, `chronos_get_bos_telemetry_ptr()` (`[u32; 32]`), `chronos_get_bos_planes_ptr()` (`[f32; 6 * 8192]` `[eps_x, eps_y, phi, var_x, var_y, curl]`), `chronos_get_bos_valid_ptr()` (`[u8; 8192]`), `chronos_get_bos_rgba_ptr()` (`[u8; 4 * 8192]`), and `chronos_bos_solve_manufactured_test(case_id, a, b) -> u32`.
-4. **Test hook (`src/lib.rs`), not part of the host API:** `chronos_test_hook_set_frame_counters(frame_idx, ring_cursor_lo, ring_cursor_hi)` sets the engine frame counter (`u32`, wraps after `u32::MAX`) and the monotonic `u64` ingest ring cursor (`ring_cursor_hi << 32 | ring_cursor_lo`) and nothing else, so test harnesses can reach the frame-index wrap without `2^32` frames (`scripts/gate_i5_bos.mjs`, `scripts/gate_i0_i4_ingest.mjs`). Ring contents, history and track state are left as they are. The deck and worker never call it.
+Shared product stamps live at `chronos_get_wave2_telemetry_ptr()` (`[u32; 64]`: `[0]=1` ABI version, `[1]=sizeof(Arena)`, `[2]=enabled_bits`, `[3]=continuity_epoch`, `16..23` vibrometry, `24..31` Hodge, `32..39` conservation, `40..47` depth, `48..55` wind tunnel, `56..63` elastography):
 
-## Appendix D: Wave-2 Vibrometry (`I2`), Mesh Hodge (`I3`), and Occluded Conservation (`I5b`) ABI
-
-Wave-2 exports extend the fixed-memory zero-import ABI with shared product stamps at `chronos_get_wave2_telemetry_ptr()` (`[u32; 64]`: `[0]=1` ABI version, `[1]=sizeof(Arena)`, `[2]=enabled_bits`, `[3]=continuity_epoch`, `16..23`=vibrometry stamp, `24..31`=Hodge stamp, `32..39`=conservation stamp):
-
-1. **Rolling-Shutter Vibrometry & Welch Audio (`src/vibrometry.rs`):** `chronos_set_rs_calib(mode, dt_row_us, exposure_us, audio_rate_hz, max_skew_us) -> u32`, `chronos_get_audio_staging_ptr()` (`[f32; 4096]`), `chronos_push_audio_block(num_samples, t_end_us_lo, t_end_us_hi, sample_rate_hz, est_skew_us) -> u32`, `chronos_get_vibro_telemetry_ptr()` (`[u32; 32]`: state `0..4`, mode `0..2`, reason bitmask bits `0..10`, Welch `K`, valid cells, float bit patterns `5..17` for `dom_freq_hz`, `max_coh`, `gamma2_crit`, `sinc_h`, `k1_trap_coh`, `clock_skew_us`, `dom_phase_rad`, `dom_amp_px`, `df_hz`, calib params, plus sample/frame/band/coupled counts `18..21`), and `chronos_get_vibro_planes_ptr()` (`[f32; 2704]`: `amp_map`, `coherence_map`, `phase_map`, `max_coh_spectrum[64]`).
-2. **`40x22` Mesh Hodge `2`-Complex (`src/hodge.rs`):** `chronos_set_hodge_mode(0|1|2) -> u32`, `chronos_get_hodge_telemetry_ptr()` (`[u32; 32]`: state `0=OFF/1=STANDBY/2=READY/3=UNCONV`, mode, converged, `(V,E,F)`, components, `beta_1`, internal voids, open ports, wake hypotheses, energy/orthogonality/CG/circulation/wake float bit patterns `11..28` with `voidCx, voidCy` at `23..24` and `wakeX0, wakeY0, wakeX1, wakeY1` / `wakeBbox` at `25..28`, PCG iteration counts `29..30`), `chronos_get_hodge_planes_ptr()` (`[f32; 6160]` = 7 `40x22` planes `[exact_u, exact_v, coexact_u, coexact_v, harm_u, harm_v, phi]`), `chronos_get_hodge_inject_ptr()` (`[f32; 2640]`), and `chronos_hodge_solve_injected(grid_dx, grid_dy) -> u32`.
-3. **Occluded Pair Conservation (`src/physics_id.rs`):** `chronos_get_conservation_telemetry_ptr()` (`[f32; 32]`: numeric floats for `status`, `ambiguity_mask` (`H0_KEEP=1, H0_SWAP=2, H1_KEEP=4, H1_SWAP=8`), `admissible_count`, `j_net_mag`, `j_env_max`, momentum/angular-momentum residuals, kinetic ratio, per-branch `chi2[0..3]`, contact `tau`, restitution `e`, `tid_a/b`, `dt`, `event_frame`, impulse residuals `18..21`, `gravity_y`, `mass_ratio`), `chronos_get_conservation_input_ptr()` (`[f32; 32]`), and `chronos_eval_occluded_pair() -> u32`.
+1. **`64x36` Rolling-Shutter Vibrometry (`src/vibrometry.rs`):** `chronos_set_rs_calib(...)`, `chronos_get_audio_staging_ptr()` (`[f32; 4096]`), `chronos_push_audio_block(...)`, `chronos_get_vibro_telemetry_ptr()` (`[u32; 32]`), and `chronos_get_vibro_planes_ptr()` (`[f32; 7040]` = `3 * 2304` maps `[amp, coh, phase]` + `128`-bin spectrum).
+2. **`64x36` Mesh Hodge `2`-Complex (`src/hodge.rs`):** `chronos_set_hodge_mode(0|1|2)`, `chronos_get_hodge_telemetry_ptr()` (`[u32; 32]`), `chronos_get_hodge_planes_ptr()` (`[f32; 16128]` = `7 * 2304` planes `[exact_u/v, coexact_u/v, harm_u/v, phi]`), `chronos_get_hodge_inject_ptr()` (`[f32; 6912]`), and `chronos_hodge_solve_injected(grid_dx, grid_dy)`.
+3. **Occluded Pair Conservation (`src/physics_id.rs`):** `chronos_get_conservation_telemetry_ptr()` (`[f32; 32]`), `chronos_get_conservation_input_ptr()` (`[f32; 32]`), and `chronos_eval_occluded_pair()`.
+4. **Zero-ML Depth, FoE/TTC, Stereo & External Depth (`src/depth.rs`):** `chronos_set_depth_mode(0..4)`, `chronos_get_depth_mode()`, `chronos_set_depth_calib(f_px, speed_m_s, baseline_m, max_disp_px, stereo_sign)`, `chronos_depth_capture_stereo_left()`, `chronos_set_depth_external_meta(w, h, f_px, provenance, seq)`, `chronos_get_depth_telemetry_ptr()` (`[u32; 32]`), `chronos_get_depth_field_ptr()` (`[f32; 2304 * 2]`), `chronos_get_depth_tracks_ptr()` (`[f32; 3072 * 2]`), `chronos_get_depth_track_flags_ptr()` (`[u8; 3072]`), `chronos_get_depth_hero_ptr()` (`[f32; 16 * 4]`), and `chronos_get_depth_ingest_ptr()` (`[f32; 8192]`).
+5. **Pocket Wind Tunnel (`src/wind_tunnel.rs`):** `chronos_set_wind_mode(0..3)`, `chronos_set_wind_fluid_density(rho_kg_m3)`, `chronos_get_wind_telemetry_ptr()` (`[u32; 32]`), `chronos_get_wind_planes_ptr()` (`[f32; 6912]` = `3 * 2304` planes `[Cp, ns_resid, vort_budget]`), and `chronos_wind_solve_injected(...)`.
+6. **kHz Elastography & Lock-In Acoustic BOS (`src/elastography.rs`):** `chronos_set_elasto_mode(0..4)`, `chronos_set_elasto_lock_freqs(count, f0, f1, f2, f3)`, `chronos_get_elasto_telemetry_ptr()` (`[u32; 32]`), `chronos_get_elasto_planes_ptr()` (aliases `bos.planes`), and `chronos_get_elasto_valid_ptr()` (aliases `bos.valid_mask`).
+7. **Native Multi-Instance C ABI v4 & `chronos-audit/1` ([native/include/chronos.h](../native/include/chronos.h), [native/python/chronos_audit.py](../native/python/chronos_audit.py)):** Exposes `ChronosEngine*`, `chronos_abi_version() == 4`, `chronos_version_string()` (`"3.5.0"`), `chronos_engine_field_view(eng, 0..=24)`, `chronos_engine_ingest_rgba_strided`, `chronos_engine_push_audio`, and the `chronos_engine_audit_{begin,end,finalize,summary,spans}` lifecycle (`ChronosAuditSummary` = `416 B`, `ChronosAuditSpan` = `64 B`).

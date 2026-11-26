@@ -1,6 +1,6 @@
 # Sample Video Attribution
 
-The fourteen real-camera demonstration and calibration clips and three semi-synthetic physical metrology and decoy compositions (`640x360` progressive H.264, `yuv420p`, `+faststart`, `g=15`) in `web/samples/` use open-licensed Wikimedia Commons and NASA/Astrobotic media documented below:
+The 41 sample MP4 clips in `web/samples/` (`640x360` progressive H.264, `yuv420p`, `+faststart`, `g=15`, plus `1280x720` `fovea_720p_micro_detail.mp4`) consist of 27 open-licensed real-camera recordings, 6 semi-synthetic physical metrology compositions built over CC0 and Public Domain real-camera textures, and 8 deterministic in-repo physical simulations documented below:
 
 ## High-density continuum swarm clips (1,000+ targets)
 

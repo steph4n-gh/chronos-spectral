@@ -1,5 +1,5 @@
 /*
- * CHRONOS-SPECTRAL Multi-Instance Native C ABI (v3.4.0, ABI 4)
+ * CHRONOS-SPECTRAL Multi-Instance Native C ABI (v3.5.0, ABI 4)
  * Apache-2.0 License
  */
 #ifndef CHRONOS_SPECTRAL_H
