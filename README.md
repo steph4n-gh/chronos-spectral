@@ -127,7 +127,7 @@ cargo build --release --manifest-path native/capi/Cargo.toml --target host-tuple
 cargo build --release --manifest-path native/Cargo.toml --target host-tuple --bin chronos --features hires-720p
 
 # Audit any local MP4 or compare two clips across 8 physical laws (zero ML weights)
-python3 native/python/chronos_audit.py audit web/samples/juggling_ballistic.mp4 --profile standard
+python3 native/python/chronos_audit.py scan web/samples/juggling_ballistic.mp4 --profile standard
 python3 native/python/chronos_audit.py compare web/samples/wind_lifting_cylinder_cp.mp4 web/samples/real_karman_mri_cylinder.mp4 --profile dense_fluid
 ```
 

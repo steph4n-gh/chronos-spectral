@@ -480,7 +480,7 @@ async function main() {
         sessionId,
         `(() => {
           window.__chronosUi.applyIntent({ kind: 'SET_HODGE', mode: 2 });
-          window.__chronosUi.applyIntent({ kind: 'SET_OVERLAY', field: 9 });
+          window.__chronosUi.applyIntent({ kind: 'SET_FIELD', field: 9 });
           return true;
         })()`
       );
